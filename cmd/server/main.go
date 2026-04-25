@@ -23,6 +23,7 @@ import (
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
+	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 )
 
@@ -91,10 +92,16 @@ func main() {
 		log.Fatalf("invalid configuration: %v", err)
 	}
 
-	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
+	database, err := db.New(cfg.DBPath,
+		&db.User{}, &db.Session{}, &db.OAuthSettings{},
+		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{},
+		ippool.Model(),
+	)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
+
+	authSvc := service.NewAuthService(database)
 
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
@@ -132,6 +139,27 @@ func main() {
 	}
 	migCancel()
 
+	reconciler := ippool.NewReconciler(pool, pveClient,
+		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
+		ippool.WithCacheTTL(time.Duration(cfg.VerifyCacheTTLSeconds)*time.Second),
+		ippool.WithMissThreshold(cfg.VacateMissThreshold),
+	)
+
+	// Startup reconcile: bounded so a temporarily unreachable Proxmox doesn't
+	// block boot. Failure is logged, not fatal.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	if rep, err := reconciler.Reconcile(startupCtx); err != nil {
+		log.Printf("startup reconcile failed (continuing): %v", err)
+	} else {
+		log.Printf("startup reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
+			len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+	}
+	cancelStartup()
+
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+	defer cancelBg()
+	go runReconcileLoop(bgCtx, reconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
 	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
@@ -140,6 +168,7 @@ func main() {
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
 	})
+	provSvc.SetIPVerifier(reconciler)
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
@@ -158,13 +187,15 @@ func main() {
 	syncCancel()
 
 	router := api.NewRouter(api.Deps{
-		Provision: provSvc,
-		Bootstrap: bootstrapSvc,
-		Keys:      keysSvc,
-		Pool:      pool,
-		Proxmox:   pveClient,
-		Config:    cfg,
-		Restart:   restartSelf,
+		Auth:       authSvc,
+		Provision:  provSvc,
+		Bootstrap:  bootstrapSvc,
+		Keys:       keysSvc,
+		Pool:       pool,
+		Reconciler: reconciler,
+		Proxmox:    pveClient,
+		Config:     cfg,
+		Restart:    restartSelf,
 	})
 
 	mux := http.NewServeMux()
@@ -268,6 +299,36 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// runReconcileLoop runs reconciler.Reconcile every interval until ctx is
+// cancelled. Errors are logged at the call site so transient Proxmox issues
+// don't fall on the floor; this never panics nor returns.
+func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interval time.Duration) {
+	if interval <= 0 {
+		log.Printf("reconcile loop disabled (interval=%v)", interval)
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, interval)
+			rep, err := reconciler.Reconcile(runCtx)
+			cancel()
+			if err != nil {
+				log.Printf("background reconcile error: %v", err)
+				continue
+			}
+			if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
+				log.Printf("background reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
+					len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+			}
+		}
+	}
 }
 
 // restartSelf replaces the current process image with a fresh start via exec.

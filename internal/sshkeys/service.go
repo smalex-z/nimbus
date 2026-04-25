@@ -24,9 +24,11 @@ import (
 	"nimbus/internal/secrets"
 )
 
-// nameRE constrains key names to a hostname-style identifier so they're safe
-// to use as file names ("ssh -i ~/.ssh/{name}") and as part of URLs.
-var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
+// nameRE constrains key names to a filesystem-safe identifier so they're safe
+// to use as file names ("ssh -i ~/.ssh/{name}") and as part of URLs. We allow
+// '_' and '.' in the middle so common SSH key filenames (id_rsa, id_ed25519,
+// id_rsa.pub, my.laptop) round-trip without renaming.
+var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$`)
 
 // Source values for SSHKey.Source.
 const (
@@ -70,7 +72,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*db.SSHKey, er
 	if !nameRE.MatchString(req.Name) {
 		return nil, &internalerrors.ValidationError{
 			Field:   "name",
-			Message: "must match [a-z0-9](-[a-z0-9])* and be 1-63 chars",
+			Message: "lowercase letters, digits, '.', '_', or '-'; must start and end with a letter or digit; 1-64 chars",
 		}
 	}
 	if req.Generate && req.PublicKey != "" {

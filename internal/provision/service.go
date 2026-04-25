@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -29,6 +30,32 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
 )
+
+// maxVerifyAttempts caps how many times we'll re-reserve when the verifier
+// reports a candidate IP as already claimed (or fails to look it up). Three
+// attempts is enough — losing three races on three different IPs implies
+// state skew worth surfacing as an error rather than spinning indefinitely.
+const maxVerifyAttempts = 3
+
+// IPVerifier checks whether an IP is unclaimed across the Proxmox cluster.
+// Defined here in the consumer package per the "accept interfaces" idiom; in
+// production this is satisfied by *ippool.Reconciler.
+type IPVerifier interface {
+	// VerifyFree returns (true, nil, nil) when no VM in the cluster claims the
+	// supplied IP, (false, &vmid, nil) when one does, and (false, nil, err) on
+	// transient lookup error (treat as unsafe).
+	VerifyFree(ctx context.Context, ip string) (bool, *int, error)
+}
+
+// noopVerifier always reports IPs as free. Used when no IPVerifier has been
+// installed on the Service — preserves single-instance behavior so existing
+// tests of the provisioning logic still work, and so the service degrades to
+// pre-reconciliation behavior if the operator disables it.
+type noopVerifier struct{}
+
+func (noopVerifier) VerifyFree(_ context.Context, _ string) (bool, *int, error) {
+	return true, nil, nil
+}
 
 // ProxmoxClient is the small subset of *proxmox.Client the orchestrator needs.
 // Defined here (in the consumer) per the "accept interfaces" idiom — keeps the
@@ -77,19 +104,23 @@ type Config struct {
 
 // Service runs the orchestrated provision flow.
 type Service struct {
-	px     ProxmoxClient
-	pool   *ippool.Pool
-	db     *gorm.DB
-	cipher *secrets.Cipher // encrypts SSH private keys at rest
-	keys   *sshkeys.Service
-	cfg    Config
+	px       ProxmoxClient
+	pool     *ippool.Pool
+	verifier IPVerifier
+	db       *gorm.DB
+	cipher   *secrets.Cipher // encrypts SSH private keys at rest
+	keys     *sshkeys.Service
+	cfg      Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
 }
 
-// New constructs a Service.
+// New constructs a Service. The verifier defaults to a noop that always
+// reports IPs as free; production wiring should call SetIPVerifier with a
+// real *ippool.Reconciler so concurrent provisions across multiple Nimbus
+// instances catch each other's reservations before the clone step.
 func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, keys *sshkeys.Service, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
 		cfg.IPReadyTimeout = 120 * time.Second
@@ -97,7 +128,24 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
-	return &Service{px: px, pool: pool, db: database, cipher: cipher, keys: keys, cfg: cfg}
+	return &Service{
+		px:       px,
+		pool:     pool,
+		verifier: noopVerifier{},
+		db:       database,
+		cipher:   cipher,
+		keys:     keys,
+		cfg:      cfg,
+	}
+}
+
+// SetIPVerifier installs (or replaces) the IP verifier used after each Reserve
+// to confirm the candidate IP is not held by a VM elsewhere on the cluster.
+// Passing nil is a no-op so callers can wire optional dependencies safely.
+func (s *Service) SetIPVerifier(v IPVerifier) {
+	if v != nil {
+		s.verifier = v
+	}
 }
 
 // Provision executes the 9-step flow from design doc §5.2.
@@ -141,8 +189,20 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		}
 	}()
 
+	// Step 1b: verify the picked IP is not already held by a VM elsewhere on
+	// the cluster (catches the cross-instance race where two Nimbus instances
+	// each picked the same lowest-free IP from their independent SQLite caches).
+	// On race-loss, releases the local reservation and tries the next free IP,
+	// up to maxVerifyAttempts.
+	ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
+	if err != nil {
+		return nil, err
+	}
+
 	// Step 2: gather cluster snapshot and score, restricted to nodes that
-	// have a template for the requested OS.
+	// have a template for the requested OS. The per-node templateVMID lookup
+	// uses the node_templates table (filled in by bootstrap) so we don't have
+	// to fan out a TemplateExists call per node.
 	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate)
 	if err != nil {
 		return nil, err
@@ -321,6 +381,64 @@ func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
 		return nil, fmt.Errorf("get vm %d: %w", id, err)
 	}
 	return &vm, nil
+}
+
+// verifyAndRetryReserve runs the verify-after-Reserve loop. Given an initial
+// IP that the caller has already reserved, it verifies the IP is not held by
+// another VM on the cluster; on race-loss it leapfrogs to the next free IP
+// (Reserve → Release in that order, so Pool.Reserve doesn't hand back the
+// same lowest-free IP that we just released) and retries — up to
+// maxVerifyAttempts.
+//
+// On success returns the (possibly different) IP the caller should proceed
+// with; the IP is left reserved.
+//
+// On failure releases the most recently held IP and returns an error along
+// with that IP — the caller's deferred Release on the same variable is then
+// an idempotent no-op against an already-free row.
+func (s *Service) verifyAndRetryReserve(ctx context.Context, initialIP, hostname string) (string, error) {
+	ip := initialIP
+	for attempt := 1; ; attempt++ {
+		free, holder, vErr := s.verifier.VerifyFree(ctx, ip)
+		if vErr == nil && free {
+			return ip, nil
+		}
+		if vErr != nil {
+			log.Printf("verify ip %s failed: %v (attempt %d/%d)", ip, vErr, attempt, maxVerifyAttempts)
+		} else {
+			heldBy := -1
+			if holder != nil {
+				heldBy = *holder
+			}
+			log.Printf("ip %s already claimed by vmid=%d on cluster (attempt %d/%d)",
+				ip, heldBy, attempt, maxVerifyAttempts)
+		}
+
+		if attempt >= maxVerifyAttempts {
+			_ = s.pool.Release(ctx, ip)
+			return ip, &internalerrors.ConflictError{
+				Message: fmt.Sprintf("could not secure free IP after %d verification attempts", maxVerifyAttempts),
+			}
+		}
+
+		// Leapfrog: keep the contested reservation in place while we Reserve a
+		// different free IP, then release the contested one. Without this, the
+		// Pool's "first free IP" selection would just hand back the same IP we
+		// released a moment ago.
+		next, err := s.pool.Reserve(ctx, hostname)
+		if err != nil {
+			_ = s.pool.Release(ctx, ip)
+			if errors.Is(err, ippool.ErrPoolExhausted) {
+				return ip, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
+			}
+			return ip, fmt.Errorf("reserve ip retry: %w", err)
+		}
+		if err := s.pool.Release(ctx, ip); err != nil {
+			_ = s.pool.Release(ctx, next)
+			return next, fmt.Errorf("release contested ip %s: %w", ip, err)
+		}
+		ip = next
+	}
 }
 
 // resolveSSHKey returns the SSHKey row to use for this VM and, if a fresh

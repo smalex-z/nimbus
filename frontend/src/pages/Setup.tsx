@@ -8,11 +8,12 @@ import {
   testProxmoxConnection,
   saveSetupConfig,
   discoverProxmox,
+  createAdminAccount,
   type SaveConfigRequest,
   type DiscoverResult,
 } from '@/api/client'
 
-type Step = 'proxmox' | 'network' | 'review' | 'restarting'
+type Step = 'proxmox' | 'network' | 'admin' | 'review' | 'restarting'
 
 interface ProxmoxFields {
   host: string
@@ -27,6 +28,12 @@ interface NetworkFields {
   nameserver: string
   searchDomain: string
   port: string
+}
+
+interface AdminFields {
+  name: string
+  email: string
+  password: string
 }
 
 export default function Setup() {
@@ -44,6 +51,7 @@ export default function Setup() {
     searchDomain: '',
     port: '',
   })
+  const [admin, setAdmin] = useState<AdminFields>({ name: '', email: '', password: '' })
   const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
   const [discovering, setDiscovering] = useState(true)
   const [hostAutofilled, setHostAutofilled] = useState(false)
@@ -81,6 +89,10 @@ export default function Setup() {
     setProxmox((p) => ({ ...p, [key]: value }))
     setTestOk(null)
     setTestError(null)
+  }
+
+  const updateAdmin = (key: keyof AdminFields, value: string) => {
+    setAdmin((a) => ({ ...a, [key]: value }))
   }
 
   const handleTest = async () => {
@@ -125,11 +137,16 @@ export default function Setup() {
   }
 
   if (step === 'restarting') {
-    return <RestartingView />
+    return <RestartingView admin={admin} />
   }
 
-  const steps: Step[] = ['proxmox', 'network', 'review']
-  const stepIndex = steps.indexOf(step)
+  const wizardSteps = [
+    { key: 'proxmox' as const, label: 'Proxmox' },
+    { key: 'network' as const, label: 'Network' },
+    { key: 'admin' as const, label: 'Admin account' },
+    { key: 'review' as const, label: 'Review' },
+  ]
+  const stepIndex = wizardSteps.findIndex((s) => s.key === step)
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -158,8 +175,8 @@ export default function Setup() {
       <main className="flex-1 max-w-[720px] mx-auto w-full px-8 py-12 animate-fadeIn">
         {/* Step indicator */}
         <div className="flex items-center gap-3 mb-10 flex-wrap">
-          {(['proxmox', 'network', 'review'] as const).map((s, i) => (
-            <div key={s} className="flex items-center gap-3">
+          {wizardSteps.map((s, i) => (
+            <div key={s.key} className="flex items-center gap-3">
               <div
                 className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium transition-colors ${
                   i < stepIndex
@@ -172,11 +189,11 @@ export default function Setup() {
                 {i < stepIndex ? '✓' : i + 1}
               </div>
               <span
-                className={`text-sm font-medium capitalize ${
+                className={`text-sm font-medium ${
                   i === stepIndex ? 'text-ink' : 'text-ink-3'
                 }`}
               >
-                {s === 'proxmox' ? 'Proxmox' : s === 'network' ? 'Network' : 'Review'}
+                {s.label}
               </span>
               <div className="w-8 h-px bg-line-2" />
             </div>
@@ -185,7 +202,7 @@ export default function Setup() {
           {/* Future steps — visible but locked */}
           <div className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              4
+              5
             </div>
             <span className="text-sm font-medium text-ink-3">Gopher</span>
             <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
@@ -195,7 +212,7 @@ export default function Setup() {
           <div className="w-8 h-px bg-line-2" />
           <div className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              5
+              6
             </div>
             <span className="text-sm font-medium text-ink-3">Templates</span>
           </div>
@@ -225,6 +242,14 @@ export default function Setup() {
             }}
             gatewayAutofilled={gatewayAutofilled}
             onBack={() => setStep('proxmox')}
+            onNext={() => setStep('admin')}
+          />
+        )}
+        {step === 'admin' && (
+          <AdminStep
+            fields={admin}
+            onChange={updateAdmin}
+            onBack={() => setStep('network')}
             onNext={() => setStep('review')}
           />
         )}
@@ -232,7 +257,8 @@ export default function Setup() {
           <ReviewStep
             proxmox={proxmox}
             network={network}
-            onBack={() => setStep('network')}
+            admin={admin}
+            onBack={() => setStep('admin')}
             onSave={handleSave}
             saving={saving}
             saveError={saveError}
@@ -265,7 +291,7 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, dis
 
   return (
     <div>
-      <div className="eyebrow">Step 1 of 3</div>
+      <div className="eyebrow">Step 1 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Connect to Proxmox</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-6">
         Nimbus needs an API token to talk to your Proxmox cluster. Enter the URL of any
@@ -288,7 +314,6 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, dis
           }}
           hint="Any node in your cluster — include https:// and port 8006. Self-signed TLS certs are accepted."
         />
-        {/* Detected endpoints — subtle inline suggestion */}
         {discovering ? (
           <div className="flex items-center gap-1.5 text-[11px] text-ink-3 -mt-2">
             <span className="w-1 h-1 rounded-full bg-ink-3 animate-pulse inline-block" />
@@ -482,7 +507,7 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
   const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
   return (
     <div>
-      <div className="eyebrow">Step 2 of 3</div>
+      <div className="eyebrow">Step 2 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Network</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-8">
         Nimbus allocates a static IP from this pool for every VM it provisions. Pick a
@@ -572,6 +597,79 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
           ← Back
         </Button>
         <Button onClick={onNext} disabled={!canNext}>
+          Next: Admin account →
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Step 3: Admin account ────────────────────────────────────────────────────
+
+interface AdminStepProps {
+  fields: AdminFields
+  onChange: (key: keyof AdminFields, value: string) => void
+  onBack: () => void
+  onNext: () => void
+}
+
+function AdminStep({ fields, onChange, onBack, onNext }: AdminStepProps) {
+  const [confirmPassword, setConfirmPassword] = useState('')
+
+  const passwordTooShort = fields.password.length > 0 && fields.password.length < 8
+  const passwordMismatch = confirmPassword.length > 0 && confirmPassword !== fields.password
+  const canNext =
+    fields.name.trim() !== '' &&
+    fields.email.trim() !== '' &&
+    fields.password.length >= 8 &&
+    fields.password === confirmPassword
+
+  return (
+    <div>
+      <div className="eyebrow">Step 3 of 4</div>
+      <h2 className="text-3xl mt-1 mb-2">Admin account</h2>
+      <p className="text-base text-ink-2 leading-relaxed mb-6">
+        Create the root admin account for this Nimbus instance. You can add more users after
+        setup is complete.
+      </p>
+
+      <Card className="p-8 flex flex-col gap-5">
+        <Input
+          label="Name"
+          placeholder="Your name"
+          value={fields.name}
+          onChange={(e) => onChange('name', e.target.value)}
+        />
+        <Input
+          label="Email"
+          type="email"
+          placeholder="admin@example.com"
+          value={fields.email}
+          onChange={(e) => onChange('email', e.target.value)}
+        />
+        <Input
+          label="Password"
+          type="password"
+          placeholder="At least 8 characters"
+          value={fields.password}
+          onChange={(e) => onChange('password', e.target.value)}
+          error={passwordTooShort ? 'Password must be at least 8 characters.' : undefined}
+        />
+        <Input
+          label="Confirm password"
+          type="password"
+          placeholder="Re-enter your password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          error={passwordMismatch ? 'Passwords do not match.' : undefined}
+        />
+      </Card>
+
+      <div className="flex justify-between mt-6">
+        <Button variant="ghost" onClick={onBack}>
+          ← Back
+        </Button>
+        <Button onClick={onNext} disabled={!canNext}>
           Next: Review →
         </Button>
       </div>
@@ -579,24 +677,26 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
   )
 }
 
-// ── Step 3: Review ───────────────────────────────────────────────────────────
+// ── Step 4: Review ───────────────────────────────────────────────────────────
 
 interface ReviewStepProps {
   proxmox: ProxmoxFields
   network: NetworkFields
+  admin: AdminFields
   onBack: () => void
   onSave: () => void
   saving: boolean
   saveError: string | null
 }
 
-function ReviewStep({ proxmox, network, onBack, onSave, saving, saveError }: ReviewStepProps) {
+function ReviewStep({ proxmox, network, admin, onBack, onSave, saving, saveError }: ReviewStepProps) {
   return (
     <div>
-      <div className="eyebrow">Step 3 of 3</div>
+      <div className="eyebrow">Step 4 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Review & save</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-8">
-        Nimbus will write these values to the config file and restart.
+        Nimbus will write these values to the config file, restart, and create your admin
+        account.
       </p>
 
       <Card className="p-8">
@@ -611,6 +711,11 @@ function ReviewStep({ proxmox, network, onBack, onSave, saving, saveError }: Rev
         <ReviewRow label="Nameserver" value={network.nameserver || '1.1.1.1 8.8.8.8'} />
         <ReviewRow label="Search domain" value={network.searchDomain || 'local'} />
         <ReviewRow label="Port" value={network.port || '8080'} />
+
+        <SectionLabel className="mt-6">Admin account</SectionLabel>
+        <ReviewRow label="Name" value={admin.name} />
+        <ReviewRow label="Email" value={admin.email} />
+        <ReviewRow label="Password" value={'•'.repeat(12)} />
       </Card>
 
       {saveError && (
@@ -650,7 +755,7 @@ function ReviewRow({ label, value }: { label: string; value: string }) {
 
 // ── Restarting ───────────────────────────────────────────────────────────────
 
-function RestartingView() {
+function RestartingView({ admin }: { admin: AdminFields }) {
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
@@ -659,6 +764,17 @@ function RestartingView() {
         try {
           const status = await getSetupStatus()
           if (status.configured) {
+            if (status.needs_admin_setup) {
+              try {
+                await createAdminAccount({
+                  name: admin.name,
+                  email: admin.email,
+                  password: admin.password,
+                })
+              } catch {
+                // Ignore — e.g. 409 if admin was already created on a retry
+              }
+            }
             window.location.replace('/')
             return
           }
@@ -671,7 +787,7 @@ function RestartingView() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [admin])
 
   return (
     <div className="min-h-screen flex flex-col">

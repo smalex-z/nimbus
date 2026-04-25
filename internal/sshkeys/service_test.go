@@ -136,11 +136,25 @@ func TestCreate_InvalidName_Rejected(t *testing.T) {
 	t.Parallel()
 	svc, _ := newTestService(t)
 
-	for _, name := range []string{"", "Name With Spaces", "UPPER", "with_underscore", "trailing-"} {
+	for _, name := range []string{"", "Name With Spaces", "UPPER", "trailing-", "trailing_", ".leading-dot", "_leading-underscore", "has/slash"} {
 		_, err := svc.Create(context.Background(), sshkeys.CreateRequest{Name: name, Generate: true})
 		var ve *internalerrors.ValidationError
 		if !errors.As(err, &ve) {
 			t.Errorf("name %q: expected ValidationError, got %v", name, err)
+		}
+	}
+}
+
+// Common SSH key filenames must round-trip without renaming, since users
+// often want their stored key to match the on-disk filename they imported.
+func TestCreate_CommonSSHFilenames_Accepted(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	for _, name := range []string{"id_rsa", "id_ed25519", "id_rsa.pub", "my.laptop", "prod-server", "a"} {
+		_, err := svc.Create(context.Background(), sshkeys.CreateRequest{Name: name, Generate: true})
+		if err != nil {
+			t.Errorf("name %q: expected accept, got %v", name, err)
 		}
 	}
 }
