@@ -187,15 +187,22 @@ func (s *AuthService) GetOAuthSettings() (*db.OAuthSettings, error) {
 	return &settings, err
 }
 
-// SaveOAuthSettings persists OAuth provider credentials. If a secret field is
-// empty the existing value is preserved so the UI doesn't need to re-send it.
+// SaveOAuthSettings persists OAuth provider credentials. Any field left empty
+// keeps its existing value, so the UI can update one provider without touching
+// the other.
 func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
 	existing, err := s.GetOAuthSettings()
 	if err != nil {
 		return err
 	}
+	if next.GitHubClientID == "" {
+		next.GitHubClientID = existing.GitHubClientID
+	}
 	if next.GitHubClientSecret == "" {
 		next.GitHubClientSecret = existing.GitHubClientSecret
+	}
+	if next.GoogleClientID == "" {
+		next.GoogleClientID = existing.GoogleClientID
 	}
 	if next.GoogleClientSecret == "" {
 		next.GoogleClientSecret = existing.GoogleClientSecret
