@@ -18,11 +18,12 @@ import (
 // Deps bundles the dependencies the router needs. A struct beats a long
 // positional argument list and lets cmd/server compose at construction time.
 type Deps struct {
-	Provision *provision.Service
-	Pool      *ippool.Pool
-	Proxmox   *proxmox.Client
-	Config    *config.Config
-	Restart   func()
+	Provision  *provision.Service
+	Pool       *ippool.Pool
+	Reconciler *ippool.Reconciler
+	Proxmox    *proxmox.Client
+	Config     *config.Config
+	Restart    func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -38,7 +39,7 @@ func NewRouter(d Deps) http.Handler {
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
 	nodes := handlers.NewNodes(d.Proxmox)
-	ips := handlers.NewIPs(d.Pool)
+	ips := handlers.NewIPs(d.Pool, d.Reconciler)
 	setup := handlers.NewSetup(d.Config, d.Restart)
 
 	r.Route("/api", func(r chi.Router) {
@@ -47,6 +48,11 @@ func NewRouter(d Deps) http.Handler {
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
+
+		// Reconcile can run a few seconds on a busy cluster (per-node walks)
+		// — give it a longer timeout than other read endpoints.
+		r.With(middleware.Timeout(60*time.Second)).
+			Post("/ips/reconcile", ips.Reconcile)
 
 		// VM provisioning is long-running — bump the timeout on this route only.
 		// Keep other routes at the default short timeout.
