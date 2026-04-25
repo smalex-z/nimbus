@@ -7,9 +7,6 @@ linters:
     - errcheck
     - staticcheck
     - ineffassign
-  settings:
-    gofmt:
-      simplify: true
 
 run:
   timeout: 5m
