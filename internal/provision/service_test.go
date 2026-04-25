@@ -312,6 +312,169 @@ func TestProvision_UnknownOSTemplate(t *testing.T) {
 	}
 }
 
+// fakeVerifier is a tiny stand-in for ippool.Reconciler. The verify field
+// drives behavior per-call; calls counts how many times VerifyFree was invoked.
+type fakeVerifier struct {
+	verify func(ctx context.Context, ip string) (bool, *int, error)
+	calls  atomic.Int32
+}
+
+func (f *fakeVerifier) VerifyFree(ctx context.Context, ip string) (bool, *int, error) {
+	f.calls.Add(1)
+	return f.verify(ctx, ip)
+}
+
+// TestProvision_VerifyHappyPath confirms a successful single-attempt verify
+// does not allocate a different IP than Reserve picked.
+func TestProvision_VerifyHappyPath(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t, happyFakePVE(t))
+	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
+		return true, nil, nil
+	}}
+	svc.SetIPVerifier(v)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "ok-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if res.IP != "10.0.0.1" {
+		t.Errorf("IP = %s, want 10.0.0.1 (first free)", res.IP)
+	}
+	if got := v.calls.Load(); got != 1 {
+		t.Errorf("verifier called %d times, want 1", got)
+	}
+}
+
+// TestProvision_VerifyRaceLost_RetriesNextIP exercises the cross-instance race
+// scenario: the verifier rejects the first IP (claims it's held by another
+// VM), accepts the second. Provision should release the first, reserve the
+// second, and complete successfully.
+func TestProvision_VerifyRaceLost_RetriesNextIP(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// The leapfrog will land on 10.0.0.2; have the agent report that.
+	fake.getAgentIfaces = func(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
+		return []proxmox.NetworkInterface{
+			{Name: "ens18", IPAddresses: []proxmox.IPAddress{{IPAddress: "10.0.0.2", IPAddressType: "ipv4"}}},
+		}, nil
+	}
+	svc, pool := newTestService(t, fake)
+
+	// First call returns "held"; subsequent calls return "free".
+	heldVMID := 999
+	v := &fakeVerifier{}
+	v.verify = func(_ context.Context, ip string) (bool, *int, error) {
+		if ip == "10.0.0.1" {
+			return false, &heldVMID, nil
+		}
+		return true, nil, nil
+	}
+	svc.SetIPVerifier(v)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "race-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if res.IP != "10.0.0.2" {
+		t.Errorf("IP = %s, want 10.0.0.2 (second free after race-loss)", res.IP)
+	}
+	if got := v.calls.Load(); got != 2 {
+		t.Errorf("verifier called %d times, want 2 (one rejection, one success)", got)
+	}
+
+	// 10.0.0.1 must have been released back to free, since we lost the race.
+	rows, _ := pool.List(context.Background())
+	for _, r := range rows {
+		if r.IP == "10.0.0.1" && r.Status != ippool.StatusFree {
+			t.Errorf("10.0.0.1 status = %s after race-loss, want free", r.Status)
+		}
+		if r.IP == "10.0.0.2" && r.Status != ippool.StatusAllocated {
+			t.Errorf("10.0.0.2 status = %s, want allocated", r.Status)
+		}
+	}
+}
+
+// TestProvision_VerifyExhaustsRetries asserts that after maxVerifyAttempts
+// rejections, Provision returns a ConflictError and the last IP is released.
+func TestProvision_VerifyExhaustsRetries(t *testing.T) {
+	t.Parallel()
+	svc, pool := newTestService(t, happyFakePVE(t))
+
+	heldVMID := 888
+	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
+		return false, &heldVMID, nil
+	}}
+	svc.SetIPVerifier(v)
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "doomed-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	var conflict *internalerrors.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ConflictError, got %T: %v", err, err)
+	}
+
+	// All IPs we touched must be free again — three attempts means we
+	// reserved three different IPs; all must be released.
+	rows, _ := pool.List(context.Background())
+	for _, r := range rows {
+		if r.Status != ippool.StatusFree {
+			t.Errorf("IP %s status = %s after exhausted retries, want all free", r.IP, r.Status)
+		}
+	}
+}
+
+// TestProvision_VerifyErrorTreatedAsUnsafe exercises the path where the
+// verifier returns an error: the IP must be released and re-reserved (treated
+// as if the verify had said "held").
+func TestProvision_VerifyErrorTreatedAsUnsafe(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getAgentIfaces = func(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
+		return []proxmox.NetworkInterface{
+			{Name: "ens18", IPAddresses: []proxmox.IPAddress{{IPAddress: "10.0.0.2", IPAddressType: "ipv4"}}},
+		}, nil
+	}
+	svc, _ := newTestService(t, fake)
+
+	var firstCall atomic.Bool
+	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
+		if !firstCall.Swap(true) {
+			return false, nil, errors.New("proxmox unreachable")
+		}
+		return true, nil, nil
+	}}
+	svc.SetIPVerifier(v)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "transient-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	// Should have advanced to 10.0.0.2 since the first verify "failed unsafe".
+	if res.IP != "10.0.0.2" {
+		t.Errorf("IP = %s, want 10.0.0.2 after transient verify error", res.IP)
+	}
+}
+
 func TestResultString_RedactsPrivateKey(t *testing.T) {
 	t.Parallel()
 	r := &provision.Result{

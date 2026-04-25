@@ -21,12 +21,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// listClusterIPsConcurrency caps the number of in-flight per-node walks during
+// ListClusterIPs. Eight is a balance between throughput on small clusters and
+// not stampeding the Proxmox API on a cluster with many nodes.
+const listClusterIPsConcurrency = 8
 
 // Client is a Proxmox API client bound to one cluster endpoint and one token.
 // Safe for concurrent use.
@@ -149,23 +156,35 @@ func (c *Client) ListVMs(ctx context.Context, node string) ([]VMStatus, error) {
 // fields so leave it as a generic map.
 type vmConfig map[string]any
 
-// TemplateExists reports whether the template VMID exists on the node AND has
-// a cloud-init drive attached. Without the cloud-init drive, SetCloudInit
-// silently succeeds but the cloud-init config never reaches the booted VM —
-// see design-doc gotcha #4.
-func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (bool, error) {
+// GetVMConfig fetches the raw config map for one VM. Callers receive ErrNotFound
+// when the VM is missing — including Proxmox's odd "500 with body 'does not
+// exist'" response, which is normalized here so callers don't have to repeat
+// the check.
+func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[string]any, error) {
 	var cfg vmConfig
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
 	err := c.do(ctx, http.MethodGet, path, nil, &cfg)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return false, nil
+			return nil, ErrNotFound
 		}
-		// Proxmox quirk: GET /nodes/{node}/qemu/{vmid}/config returns
-		// HTTP 500 (not 404) when the VMID doesn't exist on that node.
-		// The body contains "does not exist". Treat as not-present.
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get vm config %s/%d: %w", node, vmid, err)
+	}
+	return cfg, nil
+}
+
+// TemplateExists reports whether the template VMID exists on the node AND has
+// a cloud-init drive attached. Without the cloud-init drive, SetCloudInit
+// silently succeeds but the cloud-init config never reaches the booted VM —
+// see design-doc gotcha #4.
+func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (bool, error) {
+	cfg, err := c.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
 			return false, nil
 		}
 		return false, err
@@ -336,4 +355,134 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 		return v.Version + "-" + v.Release, nil
 	}
 	return v.Version, nil
+}
+
+// ParseIPConfig0 extracts the bare IP from a Proxmox cloud-init ipconfig0 value.
+// The format is a comma-separated list of key=value pairs; we want the value of
+// the `ip=` key, with any CIDR suffix stripped.
+//
+//	"ip=192.168.0.142/24,gw=192.168.0.1"  → "192.168.0.142", true
+//	"ip=10.0.0.5"                          → "10.0.0.5",     true
+//	"ip=dhcp,gw=auto"                      → "",             false  (skip dynamic)
+//	"" or malformed                        → "",             false
+//
+// Both IPv4 and IPv6 are accepted. DHCP / "auto" / non-IP values are skipped so
+// reconciliation does not pretend they claim a specific static IP.
+func ParseIPConfig0(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	for _, part := range strings.Split(s, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		if strings.TrimSpace(kv[0]) != "ip" {
+			continue
+		}
+		v := strings.TrimSpace(kv[1])
+		if v == "" || v == "dhcp" || v == "auto" {
+			return "", false
+		}
+		if slash := strings.Index(v, "/"); slash >= 0 {
+			v = v[:slash]
+		}
+		if net.ParseIP(v) == nil {
+			return "", false
+		}
+		return v, true
+	}
+	return "", false
+}
+
+// ListClusterIPs walks every online node, lists each node's QEMU VMs (templates
+// excluded), reads each VM's config, and returns one ClusterIP per VM that has
+// a parseable static ipconfig0 value.
+//
+// Per-node walks run concurrently up to listClusterIPsConcurrency. A failure on
+// one node does not abort the whole walk — partial results are returned alongside
+// a joined error so the caller can decide whether to use them. A failure to
+// list nodes IS fatal because there is no partial truth without that list.
+//
+// VMs that vanish mid-walk (a destroy raced our config GET) are silently
+// skipped; they cannot be claiming an IP if they no longer exist.
+func (c *Client) ListClusterIPs(ctx context.Context) ([]ClusterIP, error) {
+	nodes, err := c.GetNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+
+	var (
+		mu   sync.Mutex
+		out  []ClusterIP
+		errs []error
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, listClusterIPsConcurrency)
+	)
+
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		nodeName := n.Name
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ips, err := c.collectNodeIPs(ctx, nodeName)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("node %s: %w", nodeName, err))
+			}
+			out = append(out, ips...)
+		}()
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return out, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+// collectNodeIPs lists VMs on a single node and parses each one's ipconfig0.
+// Returns whatever it managed to collect alongside any non-fatal errors so that
+// a single bad VMID config doesn't drop the whole node.
+func (c *Client) collectNodeIPs(ctx context.Context, node string) ([]ClusterIP, error) {
+	vms, err := c.ListVMs(ctx, node)
+	if err != nil {
+		return nil, fmt.Errorf("list vms: %w", err)
+	}
+	out := make([]ClusterIP, 0, len(vms))
+	for _, vm := range vms {
+		if vm.Template != 0 {
+			continue
+		}
+		cfg, err := c.GetVMConfig(ctx, node, vm.VMID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return out, fmt.Errorf("get config vmid=%d: %w", vm.VMID, err)
+		}
+		raw, _ := cfg["ipconfig0"].(string)
+		if raw == "" {
+			continue
+		}
+		ip, ok := ParseIPConfig0(raw)
+		if !ok {
+			continue
+		}
+		out = append(out, ClusterIP{
+			IP:        ip,
+			VMID:      vm.VMID,
+			Node:      node,
+			Hostname:  vm.Name,
+			Source:    "ipconfig0",
+			RawConfig: raw,
+		})
+	}
+	return out, nil
 }
