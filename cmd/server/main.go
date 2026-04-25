@@ -94,6 +94,27 @@ func main() {
 
 	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 30*time.Second)
 
+	reconciler := ippool.NewReconciler(pool, pveClient,
+		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
+		ippool.WithCacheTTL(time.Duration(cfg.VerifyCacheTTLSeconds)*time.Second),
+		ippool.WithMissThreshold(cfg.VacateMissThreshold),
+	)
+
+	// Startup reconcile: bounded so a temporarily unreachable Proxmox doesn't
+	// block boot. Failure is logged, not fatal.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	if rep, err := reconciler.Reconcile(startupCtx); err != nil {
+		log.Printf("startup reconcile failed (continuing): %v", err)
+	} else {
+		log.Printf("startup reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
+			len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+	}
+	cancelStartup()
+
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+	defer cancelBg()
+	go runReconcileLoop(bgCtx, reconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
 	provSvc := provision.New(pveClient, pool, database.DB, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
@@ -101,14 +122,16 @@ func main() {
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 	})
+	provSvc.SetIPVerifier(reconciler)
 
 	router := api.NewRouter(api.Deps{
-		Auth:      authSvc,
-		Provision: provSvc,
-		Pool:      pool,
-		Proxmox:   pveClient,
-		Config:    cfg,
-		Restart:   restartSelf,
+		Auth:       authSvc,
+		Provision:  provSvc,
+		Pool:       pool,
+		Reconciler: reconciler,
+		Proxmox:    pveClient,
+		Config:     cfg,
+		Restart:    restartSelf,
 	})
 
 	mux := http.NewServeMux()
@@ -124,6 +147,36 @@ func main() {
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
+	}
+}
+
+// runReconcileLoop runs reconciler.Reconcile every interval until ctx is
+// cancelled. Errors are logged at the call site so transient Proxmox issues
+// don't fall on the floor; this never panics nor returns.
+func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interval time.Duration) {
+	if interval <= 0 {
+		log.Printf("reconcile loop disabled (interval=%v)", interval)
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, interval)
+			rep, err := reconciler.Reconcile(runCtx)
+			cancel()
+			if err != nil {
+				log.Printf("background reconcile error: %v", err)
+				continue
+			}
+			if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
+				log.Printf("background reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
+					len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+			}
+		}
 	}
 }
 

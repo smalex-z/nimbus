@@ -26,6 +26,10 @@ var ErrPoolExhausted = errors.New("ip pool exhausted")
 // ErrInvalidRange is returned when start/end are malformed or end < start.
 var ErrInvalidRange = errors.New("invalid ip range")
 
+// ErrNotFound is returned by GetByIP when no row exists for the requested IP.
+// Aliased to gorm.ErrRecordNotFound so callers can errors.Is against either.
+var ErrNotFound = gorm.ErrRecordNotFound
+
 // Pool wraps a GORM DB and exposes the four allocation operations the
 // provisioner needs.
 type Pool struct {
@@ -173,6 +177,123 @@ func (p *Pool) List(ctx context.Context) ([]IPAllocation, error) {
 		return nil, fmt.Errorf("list allocations: %w", err)
 	}
 	return out, nil
+}
+
+// GetByIP returns the allocation row for one IP. Returns ErrNotFound when the
+// IP is not part of the configured pool range (i.e. no row exists at all —
+// "free" is still a row).
+func (p *Pool) GetByIP(ctx context.Context, ip string) (*IPAllocation, error) {
+	var row IPAllocation
+	if err := p.db.WithContext(ctx).
+		Where("ip = ?", ip).
+		First(&row).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// AdoptAllocation upserts a row to status=allocated bound to the given
+// VMID/hostname, regardless of prior state. Used by the reconciler when
+// Proxmox shows an IP claimed by a VM that the local DB does not yet know
+// about (e.g. another Nimbus instance allocated it). Distinct from
+// MarkAllocated, which requires a prior reservation.
+//
+// Resets MissedCycles to 0 and stamps last_seen_at with now. Source is set
+// to "adopted" so we can tell apart locally-created vs cross-instance rows.
+//
+// Returns an error if the row does not exist (i.e. the IP is outside the
+// configured pool range) — adopting an out-of-range IP is a configuration
+// drift signal, not a normal case.
+func (p *Pool) AdoptAllocation(ctx context.Context, ip string, vmid int, hostname string) error {
+	now := time.Now().UTC()
+	hn := hostname
+	res := p.db.WithContext(ctx).
+		Model(&IPAllocation{}).
+		Where("ip = ?", ip).
+		Updates(map[string]any{
+			"status":        StatusAllocated,
+			"vmid":          &vmid,
+			"hostname":      &hn,
+			"allocated_at":  &now,
+			"last_seen_at":  &now,
+			"source":        SourceAdopted,
+			"missed_cycles": 0,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("adopt %s: %w", ip, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("adopt %s: %w", ip, ErrNotFound)
+	}
+	return nil
+}
+
+// TouchSeen records that we just saw this IP in Proxmox. Resets missed_cycles
+// to 0 and updates last_seen_at. Used by the reconciler on the no-op branch of
+// the truth table (DB and Proxmox already agree) so the row's freshness is
+// kept current for stale detection.
+func (p *Pool) TouchSeen(ctx context.Context, ip string) error {
+	now := time.Now().UTC()
+	res := p.db.WithContext(ctx).
+		Model(&IPAllocation{}).
+		Where("ip = ?", ip).
+		Updates(map[string]any{
+			"last_seen_at":  &now,
+			"missed_cycles": 0,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("touch %s: %w", ip, res.Error)
+	}
+	return nil
+}
+
+// IncrementMissedCycles bumps the missed_cycles counter for one IP. Used by
+// the reconciler when a row is allocated locally but the VM is no longer
+// observed in Proxmox. Returns the post-increment value so the caller can
+// decide whether to vacate.
+func (p *Pool) IncrementMissedCycles(ctx context.Context, ip string) (int, error) {
+	var post int
+	err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.
+			Model(&IPAllocation{}).
+			Where("ip = ?", ip).
+			UpdateColumn("missed_cycles", gorm.Expr("missed_cycles + 1")).Error; err != nil {
+			return err
+		}
+		var row IPAllocation
+		if err := tx.Where("ip = ?", ip).First(&row).Error; err != nil {
+			return err
+		}
+		post = row.MissedCycles
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("increment missed_cycles for %s: %w", ip, err)
+	}
+	return post, nil
+}
+
+// ReleaseStaleReservations frees every row where status=reserved and
+// reserved_at is older than cutoff. Returns the IPs that were freed for
+// telemetry/logging. A nil slice and nil error means nothing was stale.
+func (p *Pool) ReleaseStaleReservations(ctx context.Context, cutoff time.Time) ([]string, error) {
+	var stale []IPAllocation
+	if err := p.db.WithContext(ctx).
+		Where("status = ? AND reserved_at IS NOT NULL AND reserved_at < ?", StatusReserved, cutoff).
+		Find(&stale).Error; err != nil {
+		return nil, fmt.Errorf("find stale reservations: %w", err)
+	}
+	if len(stale) == 0 {
+		return nil, nil
+	}
+	freed := make([]string, 0, len(stale))
+	for _, row := range stale {
+		if err := p.Release(ctx, row.IP); err != nil {
+			return freed, fmt.Errorf("release stale %s: %w", row.IP, err)
+		}
+		freed = append(freed, row.IP)
+	}
+	return freed, nil
 }
 
 // incrementIP increments an IPv4 address in-place.
