@@ -58,6 +58,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/", vms.List)
 			r.Post("/", vms.Create)
 			r.Get("/{id}", vms.Get)
+			r.Get("/{id}/private-key", vms.GetPrivateKey)
 		})
 
 		// Admin operations: template bootstrap. This can take 10-20 minutes

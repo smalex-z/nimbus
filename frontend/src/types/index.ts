@@ -46,6 +46,7 @@ export interface ProvisionRequest {
   tier: TierName
   os_template: OSTemplate
   ssh_pubkey?: string
+  ssh_privkey?: string
   generate_key?: boolean
 }
 

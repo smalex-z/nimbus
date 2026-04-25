@@ -9,6 +9,7 @@ type Request struct {
 	Tier        string
 	OSTemplate  string
 	SSHPubKey   string
+	SSHPrivKey  string // optional: BYO callers may stash the private half in Nimbus's vault
 	GenerateKey bool
 	OwnerID     *uint // nil in Phase 1 (no auth)
 }

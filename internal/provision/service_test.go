@@ -14,6 +14,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
 )
 
 // fakePVE is a hand-rolled mock of provision.ProxmoxClient. Each method has
@@ -124,7 +125,12 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		vmid++
 	}
 
-	svc := provision.New(fake, pool, database.DB, provision.Config{
+	cipher, err := secrets.New(make([]byte, secrets.KeyLen))
+	if err != nil {
+		t.Fatalf("secrets.New: %v", err)
+	}
+
+	svc := provision.New(fake, pool, database.DB, cipher, provision.Config{
 		TemplateBaseVMID: 9000,
 		GatewayIP:        "10.0.0.1",
 		Nameserver:       "1.1.1.1",
@@ -415,6 +421,140 @@ func TestProvision_UnknownOSTemplate(t *testing.T) {
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError, got %v", err)
+	}
+}
+
+func TestProvision_GenerateKey_StoresAndRetrievesFromVault(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:    "vault-vm",
+		Tier:        "small",
+		OSTemplate:  "ubuntu-24.04",
+		GenerateKey: true,
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	// The persisted row should hold the encrypted blob, not the plaintext.
+	var row db.VM
+	if err := database.First(&row, "vmid = ?", res.VMID).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if len(row.SSHPrivKeyCT) == 0 || len(row.SSHPrivKeyNonce) == 0 {
+		t.Fatal("expected encrypted private key + nonce on row")
+	}
+	if strings.Contains(string(row.SSHPrivKeyCT), "BEGIN OPENSSH PRIVATE KEY") {
+		t.Fatal("private key was stored as plaintext")
+	}
+
+	// GetPrivateKey decrypts and returns the same value the user got at
+	// provision time.
+	keyName, priv, err := svc.GetPrivateKey(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetPrivateKey: %v", err)
+	}
+	if keyName != "nimbus-vault-vm" {
+		t.Errorf("KeyName = %q, want nimbus-vault-vm", keyName)
+	}
+	if priv != res.SSHPrivateKey {
+		t.Errorf("vault returned different private key than the API response")
+	}
+}
+
+func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "byo-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA you@laptop",
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var row db.VM
+	if err := database.First(&row, "hostname = ?", "byo-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(row.SSHPrivKeyCT) != 0 || len(row.SSHPrivKeyNonce) != 0 {
+		t.Fatal("BYO without privkey should not produce a vault entry")
+	}
+	if row.KeyName != "" {
+		t.Errorf("KeyName = %q, want empty for BYO without privkey", row.KeyName)
+	}
+
+	_, _, err := svc.GetPrivateKey(context.Background(), row.ID)
+	var nf *internalerrors.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("expected NotFound from GetPrivateKey, got %v", err)
+	}
+}
+
+func TestProvision_BYO_MismatchedKeypair_Rejected(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+
+	// Generate one keypair, then keep the private half from a *different*
+	// keypair so the two don't match.
+	pubA, _, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, privB, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Provision(context.Background(), provision.Request{
+		Hostname:   "mismatch-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  pubA,
+		SSHPrivKey: privB,
+	})
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError on mismatched keypair, got %v", err)
+	}
+	if ve.Field != "ssh_privkey" {
+		t.Errorf("ValidationError.Field = %q, want ssh_privkey", ve.Field)
+	}
+}
+
+func TestProvision_BYO_MatchingKeypair_StoredInVault(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "byo-vault-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  pub,
+		SSHPrivKey: priv,
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var row db.VM
+	if err := database.First(&row, "hostname = ?", "byo-vault-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := svc.GetPrivateKey(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetPrivateKey: %v", err)
+	}
+	if got != "nimbus-byo-vault-vm" {
+		t.Errorf("KeyName = %q, want nimbus-byo-vault-vm", got)
 	}
 }
 

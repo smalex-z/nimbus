@@ -22,6 +22,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
 )
 
 //go:embed all:frontend/dist
@@ -99,13 +100,25 @@ func main() {
 		log.Fatalf("failed to seed IP pool: %v", err)
 	}
 
+	// Bootstrap the master encryption key for the SSH key vault. On first run
+	// this generates a 32-byte AES-256 key and persists it next to the rest of
+	// Nimbus's env config; on subsequent runs the existing key is reused.
+	encKey, err := secrets.LoadOrCreateKey(config.EnvFilePath())
+	if err != nil {
+		log.Fatalf("failed to load/create encryption key: %v", err)
+	}
+	cipher, err := secrets.New(encKey)
+	if err != nil {
+		log.Fatalf("failed to init secrets cipher: %v", err)
+	}
+
 	// Long timeout: the bootstrap path makes calls that wait on Proxmox tasks
 	// (image downloads) which can run for several minutes. The HTTP server
 	// route timeout is the real upper bound; this just controls per-request
 	// transport timeout for individual API calls.
 	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 5*time.Minute)
 
-	provSvc := provision.New(pveClient, pool, database.DB, provision.Config{
+	provSvc := provision.New(pveClient, pool, database.DB, cipher, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
 		GatewayIP:        cfg.GatewayIP,

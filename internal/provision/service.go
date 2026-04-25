@@ -26,6 +26,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
 )
 
 // ProxmoxClient is the small subset of *proxmox.Client the orchestrator needs.
@@ -70,10 +71,11 @@ type Config struct {
 
 // Service runs the orchestrated provision flow.
 type Service struct {
-	px   ProxmoxClient
-	pool *ippool.Pool
-	db   *gorm.DB
-	cfg  Config
+	px     ProxmoxClient
+	pool   *ippool.Pool
+	db     *gorm.DB
+	cipher *secrets.Cipher // encrypts SSH private keys at rest
+	cfg    Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
@@ -81,14 +83,14 @@ type Service struct {
 }
 
 // New constructs a Service.
-func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cfg Config) *Service {
+func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
 		cfg.IPReadyTimeout = 120 * time.Second
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
-	return &Service{px: px, pool: pool, db: database, cfg: cfg}
+	return &Service{px: px, pool: pool, db: database, cipher: cipher, cfg: cfg}
 }
 
 // Provision executes the 9-step flow from design doc §5.2.
@@ -112,7 +114,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Only generated keys get a stored name — BYO keys are managed by the user.
+	// Anything we have a private key for gets a vault entry — that includes
+	// generated keys (always) and BYO when the user opted to deposit theirs.
 	var keyName string
 	if sshPrivateKey != "" {
 		keyName = "nimbus-" + req.Hostname
@@ -230,18 +233,35 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	}
 	released = true // success path — do NOT run the deferred release
 
+	// Encrypt the private key for at-rest storage. Failure here is a hard
+	// error — silently dropping it would mean the user can't recover the key
+	// later despite our promise to store it. If the user only supplied a
+	// public key (no vault deposit), there's nothing to encrypt.
+	var (
+		privCT, privNonce []byte
+	)
+	if sshPrivateKey != "" {
+		privCT, privNonce, err = s.cipher.Encrypt([]byte(sshPrivateKey))
+		if err != nil {
+			return nil, fmt.Errorf("encrypt ssh private key: %w", err)
+		}
+	}
+
 	vm := &db.VM{
-		VMID:       newVMID,
-		Hostname:   req.Hostname,
-		IP:         ip,
-		Node:       target,
-		Tier:       req.Tier,
-		OSTemplate: req.OSTemplate,
-		Username:   username,
-		Status:     "running",
-		OwnerID:    req.OwnerID,
-		KeyName:    keyName,
-		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
+		VMID:            newVMID,
+		Hostname:        req.Hostname,
+		IP:              ip,
+		Node:            target,
+		Tier:            req.Tier,
+		OSTemplate:      req.OSTemplate,
+		Username:        username,
+		Status:          "running",
+		OwnerID:         req.OwnerID,
+		KeyName:         keyName,
+		SSHPubKey:       sshPubKey,
+		SSHPrivKeyCT:    privCT,
+		SSHPrivKeyNonce: privNonce,
+		ErrorMsg:        warning, // doubles as a soft-warning record on the persisted row
 	}
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
@@ -276,6 +296,31 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 	return vms, nil
 }
 
+// GetPrivateKey returns the decrypted private key for a VM, if one was
+// deposited in the vault at provision time. Returns NotFound when no key was
+// stored (e.g. BYO without a private key, or a VM provisioned before the
+// vault feature was added).
+func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateKey string, err error) {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return "", "", fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if len(vm.SSHPrivKeyCT) == 0 || len(vm.SSHPrivKeyNonce) == 0 {
+		return "", "", &internalerrors.NotFoundError{
+			Resource: "private_key",
+			ID:       fmt.Sprintf("vm:%d", id),
+		}
+	}
+	pt, err := s.cipher.Decrypt(vm.SSHPrivKeyCT, vm.SSHPrivKeyNonce)
+	if err != nil {
+		return "", "", fmt.Errorf("decrypt private key for vm %d: %w", id, err)
+	}
+	return vm.KeyName, string(pt), nil
+}
+
 // Get returns a single VM by row ID.
 func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
 	var vm db.VM
@@ -288,8 +333,12 @@ func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
 	return &vm, nil
 }
 
-// resolveSSHKey returns (publicKey, privateKey, error). privateKey is
-// non-empty only when the user asked us to generate one.
+// resolveSSHKey returns (publicKey, privateKey, error).
+//
+// Cases:
+//   - generate_key=true → mint a new keypair, return both halves.
+//   - BYO with pubkey only → return pubkey, empty private key (no vault entry).
+//   - BYO with pubkey + privkey → verify they match, return both for vault storage.
 func (s *Service) resolveSSHKey(req Request) (string, string, error) {
 	if req.GenerateKey {
 		pub, priv, err := GenerateEd25519()
@@ -304,7 +353,15 @@ func (s *Service) resolveSSHKey(req Request) (string, string, error) {
 			Message: "ssh_pubkey or generate_key must be provided",
 		}
 	}
-	return req.SSHPubKey, "", nil
+	if req.SSHPrivKey != "" {
+		if err := VerifyKeyPair(req.SSHPubKey, req.SSHPrivKey); err != nil {
+			return "", "", &internalerrors.ValidationError{
+				Field:   "ssh_privkey",
+				Message: "private key does not match the supplied public key: " + err.Error(),
+			}
+		}
+	}
+	return req.SSHPubKey, req.SSHPrivKey, nil
 }
 
 // pickNode collects live cluster telemetry, intersects it with the set of
