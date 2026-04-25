@@ -160,39 +160,49 @@ type discoverResult struct {
 }
 
 // Discover handles GET /api/setup/discover.
-// On a Proxmox hypervisor it reads corosync.conf for authoritative cluster
-// member IPs. On other hosts it scans all local subnets for port 8006.
+// It uses two complementary sources and merges the results:
+//   - corosync.conf (authoritative cluster membership, present on PVE nodes)
+//   - TCP port scan of all local subnets (works from any machine)
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	result := discoverResult{Endpoints: []string{}}
 
 	if _, err := os.Stat("/etc/pve"); err == nil {
 		result.IsHypervisor = true
 		result.SuggestedGateway = defaultGateway()
+	}
 
-		// Use corosync.conf as the authoritative cluster member list —
-		// network scanning is unreliable between Proxmox nodes (iptables).
-		for _, ip := range corosyncNodeIPs() {
-			url := "https://" + ip + ":8006"
-			if !containsStr(result.Endpoints, url) {
-				result.Endpoints = append(result.Endpoints, url)
-			}
-		}
-
-		// Single-node (not yet clustered): fall back to local interface IPs.
-		if len(result.Endpoints) == 0 {
-			for _, ip := range localIPv4s() {
+	// Source 1: corosync cluster membership (instant, authoritative on PVE nodes).
+	// When on a hypervisor, lead with localhost (IP-independent, survives network changes),
+	// then list only remote cluster nodes (skip this machine's own IPs).
+	clusterIPs := corosyncNodeIPs()
+	if result.IsHypervisor {
+		// Always put localhost first on hypervisors
+		result.Endpoints = append(result.Endpoints, "https://localhost:8006")
+		
+		// Add remote cluster nodes, skipping local IPs
+		if len(clusterIPs) > 0 {
+			localIPs := localIPv4s()
+			for _, ip := range clusterIPs {
+				if containsStr(localIPs, ip) {
+					continue // skip—localhost already covers this machine
+				}
 				url := "https://" + ip + ":8006"
 				if !containsStr(result.Endpoints, url) {
 					result.Endpoints = append(result.Endpoints, url)
 				}
 			}
 		}
-
-		response.Success(w, result)
-		return
+	} else {
+		// On non-hypervisor, add cluster nodes as-is
+		for _, ip := range clusterIPs {
+			url := "https://" + ip + ":8006"
+			if !containsStr(result.Endpoints, url) {
+				result.Endpoints = append(result.Endpoints, url)
+			}
+		}
 	}
 
-	// Not a hypervisor — scan all local subnets for anything with 8006 open.
+	// Source 2: subnet scan — supplements corosync and works from any host.
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 

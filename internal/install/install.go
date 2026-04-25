@@ -94,10 +94,15 @@ func createDirs() error {
 }
 
 func createUser() error {
-	if exec.Command("id", serviceUser).Run() == nil {
-		return nil // already exists
+	if exec.Command("id", serviceUser).Run() != nil {
+		if err := exec.Command("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", dataDir, serviceUser).Run(); err != nil {
+			return err
+		}
 	}
-	return exec.Command("useradd", "-r", "-s", "/usr/sbin/nologin", "-d", dataDir, serviceUser).Run()
+	// www-data group owns /etc/pve (Proxmox cluster filesystem) — membership
+	// lets Nimbus read corosync.conf for cluster node discovery.
+	_ = exec.Command("usermod", "-a", "-G", "www-data", serviceUser).Run()
+	return nil
 }
 
 func installBinary() error {
