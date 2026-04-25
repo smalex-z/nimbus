@@ -36,12 +36,14 @@ func NewRouter(d Deps) http.Handler {
 	vms := handlers.NewVMs(d.Provision)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
+	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
+		r.Get("/cluster/vms", cluster.ListVMs)
 
 		// VM provisioning is long-running — bump the timeout on this route only.
 		// Keep other routes at the default short timeout.

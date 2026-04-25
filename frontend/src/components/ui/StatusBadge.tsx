@@ -1,7 +1,7 @@
-import type { VMStatus } from '@/types'
+import type { ClusterVMStatus, VMStatus } from '@/types'
 
 type NodeStatus = 'online' | 'offline' | 'unknown'
-type Status = VMStatus | NodeStatus
+type Status = VMStatus | NodeStatus | ClusterVMStatus
 
 const statusConfig: Record<Status, { text: string; dot: string; label: string }> = {
   running: { text: 'text-good', dot: 'bg-good', label: 'RUNNING' },
@@ -9,6 +9,8 @@ const statusConfig: Record<Status, { text: string; dot: string; label: string }>
   failed: { text: 'text-bad', dot: 'bg-bad', label: 'FAILED' },
   offline: { text: 'text-bad', dot: 'bg-bad', label: 'OFFLINE' },
   provisioning: { text: 'text-warn', dot: 'bg-warn', label: 'PROVISIONING' },
+  paused: { text: 'text-warn', dot: 'bg-warn', label: 'PAUSED' },
+  stopped: { text: 'text-ink-3', dot: 'bg-ink-3', label: 'STOPPED' },
   unknown: { text: 'text-ink-3', dot: 'bg-ink-3', label: 'UNKNOWN' },
 }
 

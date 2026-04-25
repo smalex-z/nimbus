@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listIPs, listNodes, listVMs } from '@/api/client'
+import { listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
 import { formatBytes } from '@/lib/format'
-import type { IPAllocation, NodeView, TierName, VM, VMStatus } from '@/types'
+import type { ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName } from '@/types'
 
 interface AdminData {
   nodes: NodeView[]
-  vms: VM[]
+  vms: ClusterVM[]
   ips: IPAllocation[]
   loading: boolean
   error: string | null
@@ -18,7 +18,7 @@ interface AdminData {
 
 function useAdminData(): AdminData {
   const [nodes, setNodes] = useState<NodeView[]>([])
-  const [vms, setVMs] = useState<VM[]>([])
+  const [vms, setVMs] = useState<ClusterVM[]>([])
   const [ips, setIPs] = useState<IPAllocation[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -26,7 +26,7 @@ function useAdminData(): AdminData {
   useEffect(() => {
     let cancelled = false
     const fetch = () => {
-      Promise.all([listNodes(), listVMs(), listIPs()])
+      Promise.all([listNodes(), listClusterVMs(), listIPs()])
         .then(([n, v, i]) => {
           if (!cancelled) {
             setNodes(n)
@@ -55,7 +55,7 @@ function useAdminData(): AdminData {
 
 interface FilterState {
   node: string | null
-  status: VMStatus | null
+  status: ClusterVMStatus | null
   tier: TierName | null
 }
 
@@ -65,13 +65,6 @@ export default function Admin() {
   const { nodes, vms, ips, loading, error } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
-  const vmsByNode = useMemo<Record<string, number>>(() => {
-    const counts: Record<string, number> = {}
-    for (const vm of vms) {
-      if (vm.status !== 'failed') counts[vm.node] = (counts[vm.node] ?? 0) + 1
-    }
-    return counts
-  }, [vms])
 
   const filteredVMs = useMemo(() => {
     return vms.filter((vm) => {
@@ -86,13 +79,14 @@ export default function Admin() {
     const onlineNodes = nodes.filter((n) => n.status === 'online')
     const sumMemUsed = onlineNodes.reduce((a, n) => a + n.mem_used, 0)
     const sumMemTotal = onlineNodes.reduce((a, n) => a + n.mem_total, 0)
+    const clusterVMsRunning = onlineNodes.reduce((a, n) => a + n.vm_count, 0)
+    const clusterVMsTotal = onlineNodes.reduce((a, n) => a + n.vm_count_total, 0)
     const allocatedIPs = ips.filter((i) => i.status === 'allocated').length
     return {
       nodesOnline: onlineNodes.length,
       nodesTotal: nodes.length,
-      vmsRunning: vms.filter((v) => v.status === 'running').length,
-      vmsProvisioning: vms.filter((v) => v.status === 'provisioning').length,
-      vmsFailed: vms.filter((v) => v.status === 'failed').length,
+      clusterVMsRunning,
+      clusterVMsTotal,
       allocatedIPs,
       totalIPs: ips.length,
       sumMemUsed,
@@ -102,9 +96,9 @@ export default function Admin() {
 
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
-    const found = [...new Set(vms.map((v) => v.tier))] as TierName[]
+    const found = new Set(vms.map((v) => v.tier).filter((t): t is TierName => Boolean(t)))
     const order: TierName[] = ['small', 'medium', 'large', 'xl']
-    return order.filter((t) => found.includes(t))
+    return order.filter((t) => found.has(t))
   }, [vms])
 
   const hasFilters = Object.values(filters).some(Boolean)
@@ -137,7 +131,6 @@ export default function Admin() {
           </div>
           <NodeCardGrid
             nodes={nodes}
-            vmsByNode={vmsByNode}
             activeNode={filters.node}
             onNodeClick={setNodeFilter}
           />
@@ -165,9 +158,8 @@ export default function Admin() {
 interface StatsShape {
   nodesOnline: number
   nodesTotal: number
-  vmsRunning: number
-  vmsProvisioning: number
-  vmsFailed: number
+  clusterVMsRunning: number
+  clusterVMsTotal: number
   allocatedIPs: number
   totalIPs: number
   sumMemUsed: number
@@ -186,12 +178,8 @@ function SummaryStats({ stats }: { stats: StatsShape }) {
       />
       <StatCard
         label="VMs"
-        primary={`${stats.vmsRunning} running`}
-        secondary={
-          stats.vmsProvisioning > 0 || stats.vmsFailed > 0
-            ? `${stats.vmsProvisioning} provisioning · ${stats.vmsFailed} failed`
-            : `${stats.vmsRunning + stats.vmsProvisioning + stats.vmsFailed} total`
-        }
+        primary={`${stats.clusterVMsRunning} running`}
+        secondary={`${stats.clusterVMsTotal} total on cluster`}
       />
       <StatCard
         label="IP pool"
@@ -224,12 +212,10 @@ function StatCard({ label, primary, secondary }: { label: string; primary: strin
 
 function NodeCardGrid({
   nodes,
-  vmsByNode,
   activeNode,
   onNodeClick,
 }: {
   nodes: NodeView[]
-  vmsByNode: Record<string, number>
   activeNode: string | null
   onNodeClick: (name: string | null) => void
 }) {
@@ -239,7 +225,6 @@ function NodeCardGrid({
         <NodeCard
           key={n.name}
           node={n}
-          vmCount={vmsByNode[n.name] ?? 0}
           active={activeNode === n.name}
           onClick={() => onNodeClick(n.name)}
         />
@@ -250,12 +235,10 @@ function NodeCardGrid({
 
 function NodeCard({
   node: n,
-  vmCount,
   active,
   onClick,
 }: {
   node: NodeView
-  vmCount: number
   active: boolean
   onClick: () => void
 }) {
@@ -275,7 +258,7 @@ function NodeCard({
               {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
             </div>
             <div className="font-mono text-[11px] text-ink-3 mt-0.5">
-              {vmCount} VM{vmCount !== 1 ? 's' : ''}
+              {n.vm_count} VM{n.vm_count !== 1 ? 's' : ''}
               {active && <span className="text-ink ml-2">· filtered</span>}
             </div>
           </div>
@@ -304,8 +287,8 @@ function VMTable({
   hasFilters,
   onClearFilters,
 }: {
-  vms: VM[]
-  allVMs: VM[]
+  vms: ClusterVM[]
+  allVMs: ClusterVM[]
   allNodes: string[]
   allTiers: TierName[]
   filters: FilterState
@@ -320,7 +303,7 @@ function VMTable({
     return (
       <Card className="py-16 text-center">
         <div className="eyebrow">No machines</div>
-        <p className="text-sm text-ink-2 mt-2">No VMs have been provisioned yet.</p>
+        <p className="text-sm text-ink-2 mt-2">No VMs are running on the cluster.</p>
       </Card>
     )
   }
@@ -341,12 +324,12 @@ function VMTable({
         <select
           className={selectClass}
           value={filters.status ?? ''}
-          onChange={(e) => onFilterChange({ status: (e.target.value as VMStatus) || null })}
+          onChange={(e) => onFilterChange({ status: (e.target.value as ClusterVMStatus) || null })}
         >
           <option value="">All statuses</option>
           <option value="running">Running</option>
-          <option value="provisioning">Provisioning</option>
-          <option value="failed">Failed</option>
+          <option value="stopped">Stopped</option>
+          <option value="paused">Paused</option>
         </select>
         <select
           className={selectClass}
@@ -378,7 +361,7 @@ function VMTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line">
-                {['Hostname', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Created', 'SSH'].map((col) => (
+                {['Name', 'VMID', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH'].map((col) => (
                   <th
                     key={col}
                     className="text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap"
@@ -389,35 +372,50 @@ function VMTable({
               </tr>
             </thead>
             <tbody>
-              {vms.map((vm) => (
-                <tr key={vm.ID} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
-                  <td className="px-4 py-3 font-display font-medium whitespace-nowrap">{vm.hostname}</td>
-                  <td className="px-4 py-3">
-                    <button
-                      className="font-mono text-xs text-ink-2 hover:text-ink hover:underline"
-                      onClick={() => onFilterChange({ node: vm.node })}
-                    >
-                      {vm.node}
-                    </button>
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.ip}</td>
-                  <td className="px-4 py-3">
-                    <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider">
-                      {vm.tier}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.os_template}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    <StatusBadge status={vm.status} />
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-ink-3 whitespace-nowrap">
-                    {new Date(vm.CreatedAt).toLocaleDateString()}
-                  </td>
-                  <td className="px-4 py-3">
-                    <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
-                  </td>
-                </tr>
-              ))}
+              {vms.map((vm) => {
+                const displayName = vm.hostname || vm.name
+                const dash = <span className="text-ink-3">—</span>
+                return (
+                  <tr key={`${vm.node}-${vm.vmid}`} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
+                    <td className="px-4 py-3 font-display font-medium whitespace-nowrap">{displayName}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.vmid}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        className="font-mono text-xs text-ink-2 hover:text-ink hover:underline"
+                        onClick={() => onFilterChange({ node: vm.node })}
+                      >
+                        {vm.node}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
+                      {vm.ip || dash}
+                    </td>
+                    <td className="px-4 py-3">
+                      {vm.tier ? (
+                        <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider">
+                          {vm.tier}
+                        </span>
+                      ) : dash}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
+                      {vm.os_template || dash}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <StatusBadge status={vm.status} />
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className={`font-mono text-[11px] uppercase tracking-wider ${vm.nimbus_managed ? 'text-good' : 'text-ink-3'}`}>
+                        {vm.nimbus_managed ? 'NIMBUS' : 'EXTERNAL'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {vm.nimbus_managed && vm.username && vm.ip ? (
+                        <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
+                      ) : dash}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </Card>
