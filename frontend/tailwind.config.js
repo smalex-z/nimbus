@@ -4,27 +4,60 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: {
-          DEFAULT: '#14121C',
-          body: '#44424F',
-          mute: '#76747F',
-        },
-        nimbus: {
-          ok: '#1F7A4D',
-          warn: '#A85A0A',
-          err: '#B83A3A',
-        },
+        // Blob palette
+        c1: '#F8AF82',
+        c2: '#F496B4',
+        c3: '#D2AAF0',
+        c4: '#F8B496',
+        // Text
+        ink: '#14121C',
+        'ink-2': '#44424F',
+        'ink-3': '#76747F',
+        // Status
+        good: '#1F7A4D',
+        warn: '#A85A0A',
+        bad: '#B83A3A',
+        // Borders
+        line: 'rgba(20, 18, 28, 0.07)',
+        'line-2': 'rgba(20, 18, 28, 0.13)',
       },
       fontFamily: {
-        display: ['Fraunces', 'Georgia', 'serif'],
-        sans: ['Geist', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-        mono: ['Geist Mono', 'SF Mono', 'Menlo', 'Consolas', 'monospace'],
+        display: ['Fraunces', 'serif'],
+        sans: ['Geist', 'system-ui', 'sans-serif'],
+        mono: ['"Geist Mono"', 'ui-monospace', 'monospace'],
       },
       borderRadius: {
-        card: '18px',
+        DEFAULT: '10px',
+        lg: '16px',
       },
       boxShadow: {
-        card: '0 1px 0 rgba(20,18,28,0.02), 0 30px 60px -30px rgba(20,18,28,0.12)',
+        glass:
+          '0 1px 0 rgba(255,255,255,0.9) inset, 0 0 0 1px rgba(20,18,28,0.04), 0 12px 40px -12px rgba(20,18,28,0.10), 0 2px 6px -2px rgba(20,18,28,0.04)',
+        'btn-primary': '0 8px 20px -8px rgba(20,18,28,0.5)',
+      },
+      keyframes: {
+        drift: {
+          '0%, 100%': { transform: 'translate(0,0) scale(1)' },
+          '33%': { transform: 'translate(40px,-30px) scale(1.05)' },
+          '66%': { transform: 'translate(-30px,40px) scale(0.97)' },
+        },
+        fadeIn: {
+          from: { opacity: '0', transform: 'translateY(8px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
+        blink: {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0.3' },
+        },
+        spin: {
+          to: { transform: 'rotate(360deg)' },
+        },
+      },
+      animation: {
+        drift: 'drift 22s ease-in-out infinite',
+        fadeIn: 'fadeIn 0.4s ease',
+        blink: 'blink 1.2s ease-in-out infinite',
+        spin: 'spin 0.8s linear infinite',
       },
     },
   },

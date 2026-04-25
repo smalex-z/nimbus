@@ -44,8 +44,9 @@ func main() {
 	}
 
 	svc := service.NewExampleService(database)
+	authSvc := service.NewAuthService(database)
 
-	router := api.NewRouter(svc)
+	router := api.NewRouter(svc, authSvc)
 
 	distFS, err := fs.Sub(frontendFS, "frontend/dist")
 	if err != nil {

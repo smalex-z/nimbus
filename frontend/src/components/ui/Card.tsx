@@ -3,26 +3,27 @@ import { ReactNode } from 'react'
 interface CardProps {
   title?: string
   children: ReactNode
+  strong?: boolean
   className?: string
 }
 
-export default function Card({ title, children, className = '' }: CardProps) {
+export default function Card({ title, children, strong = false, className = '' }: CardProps) {
+  const glassClass = strong ? 'glass glass-strong' : 'glass'
   return (
-    <div className={`n-card ${className}`}>
+    <div className={`${glassClass} ${className}`}>
       {title && (
         <div
           style={{
-            padding: '16px 24px',
-            borderBottom: '1px solid var(--hairline)',
+            padding: '14px 24px',
+            borderBottom: '1px solid rgba(20, 18, 28, 0.07)',
           }}
         >
           <h3
             style={{
               margin: 0,
-              fontSize: 14,
+              fontSize: 13,
               fontWeight: 600,
               color: 'var(--ink)',
-              fontFamily: 'var(--font-sans)',
               letterSpacing: '-0.005em',
             }}
           >

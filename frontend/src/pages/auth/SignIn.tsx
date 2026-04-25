@@ -1,23 +1,19 @@
 import { Link } from 'react-router-dom'
-import { NimbusBlobs, NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
+import { NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
 
 export default function SignIn() {
   return (
     <div
       style={{
         minHeight: '100vh',
-        background: 'linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bot) 100%)',
-        position: 'relative',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: '24px 16px',
       }}
     >
-      <NimbusBlobs />
-
       <div
-        className="n-card"
+        className="glass"
         style={{
           width: '100%',
           maxWidth: 480,

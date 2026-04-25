@@ -38,7 +38,7 @@
 body {
   font-family: var(--font-sans);
   color: var(--ink-body);
-  background: var(--bg-top);
+  background: transparent;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -337,6 +337,70 @@ body {
   font-size: 12px;
   color: var(--err);
   font-family: var(--font-sans);
+}
+
+/* ── Glass surface ───────────────────────────────────────── */
+.glass {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border-radius: 16px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 0 0 1px rgba(20, 18, 28, 0.04),
+    0 12px 40px -12px rgba(20, 18, 28, 0.10),
+    0 2px 6px -2px rgba(20, 18, 28, 0.04);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+/* ── Brand mark ──────────────────────────────────────────── */
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(248, 175, 130, 0.9) 0%, transparent 60%),
+    radial-gradient(circle at 70% 60%, rgba(244, 150, 180, 0.8) 0%, transparent 50%),
+    radial-gradient(circle at 40% 80%, rgba(210, 170, 240, 0.7) 0%, transparent 55%),
+    #fff;
+  flex-shrink: 0;
+}
+
+/* ── Eyebrow label ───────────────────────────────────────── */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* ── Background blobs ────────────────────────────────────── */
+.blobs {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: linear-gradient(180deg, #fcfbfa 0%, #f8f7f5 100%);
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(110px);
+}
+
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.18;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 200px 200px;
+  pointer-events: none;
 }
 
 /* ── Animations ──────────────────────────────────────────── */

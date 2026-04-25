@@ -1,6 +1,5 @@
 import { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { NimbusBrand } from './nimbus'
 
 interface LayoutProps {
   children: ReactNode
@@ -15,20 +14,13 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        background: 'linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bot) 100%)',
-      }}
-    >
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <nav
         style={{
           background: 'rgba(252, 251, 250, 0.85)',
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
-          borderBottom: '1px solid var(--hairline)',
+          borderBottom: '1px solid rgba(20, 18, 28, 0.07)',
           position: 'sticky',
           top: 0,
           zIndex: 50,
@@ -45,8 +37,19 @@ export default function Layout({ children }: LayoutProps) {
             justifyContent: 'space-between',
           }}
         >
-          <Link to="/" style={{ textDecoration: 'none' }}>
-            <NimbusBrand size="sm" />
+          <Link to="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div className="brand-mark" />
+            <span
+              style={{
+                fontFamily: 'var(--font-display)',
+                fontSize: 17,
+                fontWeight: 400,
+                color: 'var(--ink)',
+                letterSpacing: '-0.02em',
+              }}
+            >
+              Nimbus
+            </span>
           </Link>
           <div style={{ display: 'flex', gap: 2 }}>
             {NAV_ITEMS.map((item) => {
@@ -60,7 +63,6 @@ export default function Layout({ children }: LayoutProps) {
                     borderRadius: 8,
                     fontSize: 13,
                     fontWeight: 500,
-                    fontFamily: 'var(--font-sans)',
                     textDecoration: 'none',
                     transition: 'background 0.15s, color 0.15s',
                     background: active ? 'rgba(20,18,28,0.06)' : 'transparent',
@@ -89,7 +91,7 @@ export default function Layout({ children }: LayoutProps) {
 
       <footer
         style={{
-          borderTop: '1px solid var(--hairline)',
+          borderTop: '1px solid rgba(20, 18, 28, 0.07)',
           padding: '14px 24px',
           textAlign: 'center',
           fontSize: 11,

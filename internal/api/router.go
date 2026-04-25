@@ -11,7 +11,7 @@ import (
 )
 
 // NewRouter builds and returns the application router.
-func NewRouter(svc *service.ExampleService) http.Handler {
+func NewRouter(svc *service.ExampleService, authSvc *service.AuthService) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -22,6 +22,9 @@ func NewRouter(svc *service.ExampleService) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", handlers.Health)
+
+		auth := handlers.NewAuth(authSvc)
+		r.Post("/auth/register", auth.Register)
 
 		example := handlers.NewExample(svc)
 		r.Get("/users", example.ListUsers)

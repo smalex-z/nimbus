@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go run *)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"other@example.com\",\"password\":\"short\"}')",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"other@example.com\",\"password\":\"short\"}')",
+      "Bash(kill %1)",
+      "Bash(rm -f /tmp/nimbus-test.db)"
+    ]
+  }
+}

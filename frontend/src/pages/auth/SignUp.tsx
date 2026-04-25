@@ -1,23 +1,53 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { NimbusBlobs, NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
+import api from '@/api/client'
+import { NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
 
 export default function SignUp() {
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [done, setDone] = useState(false)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+
+    if (password !== confirm) {
+      setError('Passwords do not match')
+      return
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters')
+      return
+    }
+
+    try {
+      setLoading(true)
+      await api.post('/auth/register', { name, email, password })
+      setDone(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div
       style={{
         minHeight: '100vh',
-        background: 'linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bot) 100%)',
-        position: 'relative',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: '24px 16px',
       }}
     >
-      <NimbusBlobs />
-
       <div
-        className="n-card"
+        className="glass"
         style={{
           width: '100%',
           maxWidth: 480,
@@ -61,100 +91,144 @@ export default function SignUp() {
             Create an account to start provisioning VMs.
           </p>
 
-          {/* OAuth providers */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-            <button className="n-provider" type="button">
-              <GithubIcon size={18} />
-              <span style={{ flex: 1 }}>Continue with GitHub</span>
-              <ArrowRightIcon size={14} />
-            </button>
-            <button className="n-provider" type="button">
-              <GoogleIcon size={18} />
-              <span style={{ flex: 1 }}>Continue with Google</span>
-              <ArrowRightIcon size={14} />
-            </button>
-          </div>
-
-          <div className="n-divider" style={{ marginBottom: 20 }}>
-            or
-          </div>
-
-          {/* Sign-up form */}
-          <form style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div className="n-field">
-              <label className="n-label" htmlFor="signup-name">
-                Full name
-              </label>
-              <input
-                id="signup-name"
-                className="n-input"
-                type="text"
-                placeholder="Alex Zheng"
-                autoComplete="name"
-              />
-            </div>
-
-            <div className="n-field">
-              <label className="n-label" htmlFor="signup-email">
-                Email
-              </label>
-              <input
-                id="signup-email"
-                className="n-input"
-                type="email"
-                placeholder="you@example.com"
-                autoComplete="email"
-              />
-            </div>
-
-            <div className="n-field">
-              <label className="n-label" htmlFor="signup-password">
-                Password
-              </label>
-              <input
-                id="signup-password"
-                className="n-input"
-                type="password"
-                placeholder="••••••••"
-                autoComplete="new-password"
-              />
-            </div>
-
-            <div className="n-field">
-              <label className="n-label" htmlFor="signup-confirm">
-                Confirm password
-              </label>
-              <input
-                id="signup-confirm"
-                className="n-input"
-                type="password"
-                placeholder="••••••••"
-                autoComplete="new-password"
-              />
-            </div>
-
-            <button
-              className="n-btn n-btn-primary n-btn-block"
-              type="submit"
-              style={{ marginTop: 4 }}
+          {done ? (
+            <div
+              style={{
+                padding: '20px',
+                borderRadius: 12,
+                background: 'rgba(31, 122, 77, 0.06)',
+                border: '1px solid rgba(31, 122, 77, 0.18)',
+                textAlign: 'center',
+              }}
             >
-              Create account
-            </button>
-          </form>
+              <p style={{ margin: '0 0 4px', fontSize: 15, fontWeight: 600, color: 'var(--ok)' }}>
+                Account created!
+              </p>
+              <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--ink-body)' }}>
+                You can now sign in with your credentials.
+              </p>
+              <Link to="/login" className="n-btn n-btn-primary" style={{ display: 'inline-flex', gap: 6, textDecoration: 'none' }}>
+                Go to sign in
+              </Link>
+            </div>
+          ) : (
+            <>
+              {/* OAuth providers */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+                <button className="n-provider" type="button">
+                  <GithubIcon size={18} />
+                  <span style={{ flex: 1 }}>Continue with GitHub</span>
+                  <ArrowRightIcon size={14} />
+                </button>
+                <button className="n-provider" type="button">
+                  <GoogleIcon size={18} />
+                  <span style={{ flex: 1 }}>Continue with Google</span>
+                  <ArrowRightIcon size={14} />
+                </button>
+              </div>
 
-          <p
-            style={{
-              marginTop: 20,
-              textAlign: 'center',
-              fontSize: 13,
-              color: 'var(--ink-mute)',
-            }}
-          >
-            Already have an account?{' '}
-            <Link to="/login" className="n-link" style={{ fontWeight: 500 }}>
-              Sign in
-            </Link>
-          </p>
+              <div className="n-divider" style={{ marginBottom: 20 }}>
+                or
+              </div>
+
+              {error && (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    padding: '10px 14px',
+                    borderRadius: 8,
+                    background: 'rgba(184,58,58,0.06)',
+                    border: '1px solid rgba(184,58,58,0.18)',
+                    fontSize: 13,
+                    color: 'var(--err)',
+                  }}
+                >
+                  {error}
+                </div>
+              )}
+
+              <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div className="n-field">
+                  <label className="n-label" htmlFor="signup-name">Full name</label>
+                  <input
+                    id="signup-name"
+                    className="n-input"
+                    type="text"
+                    placeholder="Alex Zheng"
+                    autoComplete="name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="n-field">
+                  <label className="n-label" htmlFor="signup-email">Email</label>
+                  <input
+                    id="signup-email"
+                    className="n-input"
+                    type="email"
+                    placeholder="you@example.com"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="n-field">
+                  <label className="n-label" htmlFor="signup-password">Password</label>
+                  <input
+                    id="signup-password"
+                    className="n-input"
+                    type="password"
+                    placeholder="min. 8 characters"
+                    autoComplete="new-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="n-field">
+                  <label className="n-label" htmlFor="signup-confirm">Confirm password</label>
+                  <input
+                    id="signup-confirm"
+                    className="n-input"
+                    type="password"
+                    placeholder="••••••••"
+                    autoComplete="new-password"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <button
+                  className="n-btn n-btn-primary n-btn-block"
+                  type="submit"
+                  disabled={loading}
+                  style={{ marginTop: 4 }}
+                >
+                  {loading ? 'Creating account…' : 'Create account'}
+                </button>
+              </form>
+
+              <p
+                style={{
+                  marginTop: 20,
+                  textAlign: 'center',
+                  fontSize: 13,
+                  color: 'var(--ink-mute)',
+                }}
+              >
+                Already have an account?{' '}
+                <Link to="/login" className="n-link" style={{ fontWeight: 500 }}>
+                  Sign in
+                </Link>
+              </p>
+            </>
+          )}
         </div>
 
         <NimbusFooter
