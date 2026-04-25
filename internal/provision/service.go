@@ -27,6 +27,7 @@ import (
 	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
+	"nimbus/internal/sshkeys"
 )
 
 // ProxmoxClient is the small subset of *proxmox.Client the orchestrator needs.
@@ -75,6 +76,7 @@ type Service struct {
 	pool   *ippool.Pool
 	db     *gorm.DB
 	cipher *secrets.Cipher // encrypts SSH private keys at rest
+	keys   *sshkeys.Service
 	cfg    Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
@@ -83,14 +85,14 @@ type Service struct {
 }
 
 // New constructs a Service.
-func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, cfg Config) *Service {
+func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, keys *sshkeys.Service, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
 		cfg.IPReadyTimeout = 120 * time.Second
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
-	return &Service{px: px, pool: pool, db: database, cipher: cipher, cfg: cfg}
+	return &Service{px: px, pool: pool, db: database, cipher: cipher, keys: keys, cfg: cfg}
 }
 
 // Provision executes the 9-step flow from design doc §5.2.
@@ -109,17 +111,15 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, &internalerrors.ValidationError{Field: "os_template", Message: fmt.Sprintf("unknown os_template %q", req.OSTemplate)}
 	}
 
-	// Resolve SSH key.
-	sshPubKey, sshPrivateKey, err := s.resolveSSHKey(req)
+	// Resolve SSH key. The service may either reuse an existing vault entry
+	// or create a new one (generate / BYO / default-fallback).
+	sshKey, sshPrivateKey, err := s.resolveSSHKey(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	// Anything we have a private key for gets a vault entry — that includes
-	// generated keys (always) and BYO when the user opted to deposit theirs.
-	var keyName string
-	if sshPrivateKey != "" {
-		keyName = "nimbus-" + req.Hostname
-	}
+	keyID := sshKey.ID
+	keyName := sshKey.Name
+	sshPubKey := sshKey.PublicKey
 
 	// Step 1: reserve IP. defer release on any later failure.
 	ip, err := s.pool.Reserve(ctx, req.Hostname)
@@ -233,35 +233,22 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	}
 	released = true // success path — do NOT run the deferred release
 
-	// Encrypt the private key for at-rest storage. Failure here is a hard
-	// error — silently dropping it would mean the user can't recover the key
-	// later despite our promise to store it. If the user only supplied a
-	// public key (no vault deposit), there's nothing to encrypt.
-	var (
-		privCT, privNonce []byte
-	)
-	if sshPrivateKey != "" {
-		privCT, privNonce, err = s.cipher.Encrypt([]byte(sshPrivateKey))
-		if err != nil {
-			return nil, fmt.Errorf("encrypt ssh private key: %w", err)
-		}
-	}
-
+	// The encrypted private key (if any) lives on the ssh_keys row referenced
+	// by SSHKeyID — not on the VM itself anymore.
 	vm := &db.VM{
-		VMID:            newVMID,
-		Hostname:        req.Hostname,
-		IP:              ip,
-		Node:            target,
-		Tier:            req.Tier,
-		OSTemplate:      req.OSTemplate,
-		Username:        username,
-		Status:          "running",
-		OwnerID:         req.OwnerID,
-		KeyName:         keyName,
-		SSHPubKey:       sshPubKey,
-		SSHPrivKeyCT:    privCT,
-		SSHPrivKeyNonce: privNonce,
-		ErrorMsg:        warning, // doubles as a soft-warning record on the persisted row
+		VMID:       newVMID,
+		Hostname:   req.Hostname,
+		IP:         ip,
+		Node:       target,
+		Tier:       req.Tier,
+		OSTemplate: req.OSTemplate,
+		Username:   username,
+		Status:     "running",
+		OwnerID:    req.OwnerID,
+		SSHKeyID:   &keyID,
+		KeyName:    keyName,
+		SSHPubKey:  sshPubKey,
+		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
@@ -296,10 +283,11 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 	return vms, nil
 }
 
-// GetPrivateKey returns the decrypted private key for a VM, if one was
-// deposited in the vault at provision time. Returns NotFound when no key was
-// stored (e.g. BYO without a private key, or a VM provisioned before the
-// vault feature was added).
+// GetPrivateKey returns the decrypted private key for a VM, if one is
+// available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound
+// when the VM has no linked key, or the linked key has no vaulted private
+// half (e.g. user imported a public-only key, or deleted the key after
+// provision).
 func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateKey string, err error) {
 	var vm db.VM
 	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
@@ -308,17 +296,13 @@ func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateK
 		}
 		return "", "", fmt.Errorf("get vm %d: %w", id, err)
 	}
-	if len(vm.SSHPrivKeyCT) == 0 || len(vm.SSHPrivKeyNonce) == 0 {
+	if vm.SSHKeyID == nil {
 		return "", "", &internalerrors.NotFoundError{
 			Resource: "private_key",
 			ID:       fmt.Sprintf("vm:%d", id),
 		}
 	}
-	pt, err := s.cipher.Decrypt(vm.SSHPrivKeyCT, vm.SSHPrivKeyNonce)
-	if err != nil {
-		return "", "", fmt.Errorf("decrypt private key for vm %d: %w", id, err)
-	}
-	return vm.KeyName, string(pt), nil
+	return s.keys.GetPrivateKey(ctx, *vm.SSHKeyID)
 }
 
 // Get returns a single VM by row ID.
@@ -333,35 +317,68 @@ func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
 	return &vm, nil
 }
 
-// resolveSSHKey returns (publicKey, privateKey, error).
+// resolveSSHKey returns the SSHKey row to use for this VM and, if a fresh
+// private key was generated as part of this provision, the plaintext private
+// half so it can be returned to the user once.
 //
 // Cases:
-//   - generate_key=true → mint a new keypair, return both halves.
-//   - BYO with pubkey only → return pubkey, empty private key (no vault entry).
-//   - BYO with pubkey + privkey → verify they match, return both for vault storage.
-func (s *Service) resolveSSHKey(req Request) (string, string, error) {
-	if req.GenerateKey {
-		pub, priv, err := GenerateEd25519()
+//   - SSHKeyID set        → load the named row from the vault.
+//   - GenerateKey=true    → mint a new keypair, persist as a new vault row.
+//   - SSHPubKey set       → import (with optional PrivKey vaulted) as a new vault row.
+//   - none of the above   → use the owner's default key, if any.
+func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, string, error) {
+	switch {
+	case req.SSHKeyID != nil:
+		row, err := s.keys.Get(ctx, *req.SSHKeyID)
 		if err != nil {
-			return "", "", fmt.Errorf("generate ssh key: %w", err)
+			return nil, "", err
 		}
-		return pub, priv, nil
-	}
-	if req.SSHPubKey == "" {
-		return "", "", &internalerrors.ValidationError{
-			Field:   "ssh_pubkey",
-			Message: "ssh_pubkey or generate_key must be provided",
+		return row, "", nil
+
+	case req.GenerateKey:
+		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+			Name:     "nimbus-" + req.Hostname,
+			Generate: true,
+			OwnerID:  req.OwnerID,
+		})
+		if err != nil {
+			return nil, "", err
 		}
-	}
-	if req.SSHPrivKey != "" {
-		if err := VerifyKeyPair(req.SSHPubKey, req.SSHPrivKey); err != nil {
-			return "", "", &internalerrors.ValidationError{
-				Field:   "ssh_privkey",
-				Message: "private key does not match the supplied public key: " + err.Error(),
+		// Pull the plaintext back out so the API response can show it once.
+		_, priv, err := s.keys.GetPrivateKey(ctx, row.ID)
+		if err != nil {
+			return nil, "", fmt.Errorf("retrieve generated key: %w", err)
+		}
+		return row, priv, nil
+
+	case req.SSHPubKey != "":
+		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+			Name:       "nimbus-" + req.Hostname,
+			PublicKey:  req.SSHPubKey,
+			PrivateKey: req.SSHPrivKey,
+			OwnerID:    req.OwnerID,
+		})
+		if err != nil {
+			// Remap field names so errors reference the JSON keys the VMs API
+			// exposes, not the keys-service internal field names.
+			return nil, "", remapKeyFields(err)
+		}
+		return row, "", nil
+
+	default:
+		row, err := s.keys.GetDefault(ctx, req.OwnerID)
+		if err != nil {
+			var nf *internalerrors.NotFoundError
+			if errors.As(err, &nf) {
+				return nil, "", &internalerrors.ValidationError{
+					Field:   "ssh",
+					Message: "no SSH key supplied and no default key is set — pick a key, paste one, or generate one",
+				}
 			}
+			return nil, "", err
 		}
+		return row, "", nil
 	}
-	return req.SSHPubKey, req.SSHPrivKey, nil
 }
 
 // pickNode collects live cluster telemetry, intersects it with the set of
@@ -460,6 +477,24 @@ func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node str
 		OwnerID:    req.OwnerID,
 		ErrorMsg:   cause.Error(),
 	}).Error
+}
+
+// remapKeyFields rewrites a ValidationError's Field from the keys-service
+// payload names ("public_key", "private_key") to the VM-API names
+// ("ssh_pubkey", "ssh_privkey"), so error messages reference the JSON field
+// the user actually sent. Non-validation errors are passed through unchanged.
+func remapKeyFields(err error) error {
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		return err
+	}
+	switch ve.Field {
+	case "public_key":
+		ve.Field = "ssh_pubkey"
+	case "private_key":
+		ve.Field = "ssh_privkey"
+	}
+	return ve
 }
 
 // formatResult is the body of (*Result).String — kept separate to satisfy the

@@ -14,6 +14,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/sshkeys"
 )
 
 // Deps bundles the dependencies the router needs. A struct beats a long
@@ -21,6 +22,7 @@ import (
 type Deps struct {
 	Provision *provision.Service
 	Bootstrap *bootstrap.Service
+	Keys      *sshkeys.Service
 	Pool      *ippool.Pool
 	Proxmox   *proxmox.Client
 	Config    *config.Config
@@ -39,6 +41,7 @@ func NewRouter(d Deps) http.Handler {
 
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
+	keys := handlers.NewKeys(d.Keys)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
 	admin := handlers.NewAdmin(d.Bootstrap)
@@ -59,6 +62,15 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/", vms.Create)
 			r.Get("/{id}", vms.Get)
 			r.Get("/{id}/private-key", vms.GetPrivateKey)
+		})
+
+		r.Route("/keys", func(r chi.Router) {
+			r.Get("/", keys.List)
+			r.Post("/", keys.Create)
+			r.Get("/{id}", keys.Get)
+			r.Delete("/{id}", keys.Delete)
+			r.Get("/{id}/private-key", keys.PrivateKey)
+			r.Post("/{id}/default", keys.SetDefault)
 		})
 
 		// Admin operations: template bootstrap. This can take 10-20 minutes

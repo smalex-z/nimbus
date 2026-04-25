@@ -22,15 +22,55 @@ type VM struct {
 	Username   string `gorm:"column:username"                         json:"username"`
 	Status     string `gorm:"column:status;index;not null"            json:"status"`
 	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
-	KeyName    string `gorm:"column:key_name"                         json:"key_name,omitempty"`
+	// SSHKeyID points to the row in the ssh_keys table that owns the SSH
+	// material for this VM. nullable: set NULL when the key is deleted, so the
+	// VM record outlives its key. Replaces the legacy per-VM KeyName/CT/Nonce
+	// columns going forward.
+	SSHKeyID *uint `gorm:"column:ssh_key_id;index"                       json:"ssh_key_id,omitempty"`
+	// KeyName is denormalized for convenient list rendering — clients still
+	// want "ssh -i ~/.ssh/{key_name}" without joining to ssh_keys. Set to the
+	// linked key's Name at provision time.
+	KeyName string `gorm:"column:key_name"                                 json:"key_name,omitempty"`
 	// Public half of the SSH key, stored as the raw "ssh-<algo> <base64> <comment>" line.
 	SSHPubKey string `gorm:"column:ssh_pubkey"                       json:"ssh_pubkey,omitempty"`
-	// Encrypted private half. Empty when the user opted out of key-vault storage
-	// (BYO without supplying a private key). Encryption is AES-256-GCM with the
-	// nonce stored alongside; the master key lives outside the DB (env var).
+	// Legacy encrypted private-key columns. New rows do NOT populate these —
+	// they live in the ssh_keys table now. Kept on the model so the startup
+	// migration can read them, then NULL them out. Will be dropped in a
+	// follow-up once the migration has run on all environments.
 	SSHPrivKeyCT    []byte `gorm:"column:ssh_privkey_ct"                json:"-"`
 	SSHPrivKeyNonce []byte `gorm:"column:ssh_privkey_nonce"             json:"-"`
 	ErrorMsg        string `gorm:"column:error_msg"                     json:"error_msg,omitempty"`
+}
+
+// SSHKey is a first-class user-managed SSH key.
+//
+// Public key is always stored. The private half is optional: when populated,
+// it's AES-256-GCM ciphertext with the nonce alongside (encryption key lives
+// in env config, not the DB). Source records the key's provenance:
+//   - "imported": the user pasted/uploaded a public key (and optionally the private half).
+//   - "generated": Nimbus minted the keypair on the user's behalf.
+//   - "vm-auto": legacy per-VM vault entry migrated into this table on startup.
+//
+// IsDefault is mutually exclusive within an OwnerID — the service is
+// responsible for clearing the previous default when a new one is set.
+type SSHKey struct {
+	gorm.Model
+	Name        string `gorm:"column:name;uniqueIndex;not null"        json:"name"`
+	Label       string `gorm:"column:label"                            json:"label,omitempty"`
+	PublicKey   string `gorm:"column:public_key;not null"              json:"public_key"`
+	Fingerprint string `gorm:"column:fingerprint;index"                json:"fingerprint,omitempty"`
+	// Encrypted private half. Zero-length when the key was imported public-only.
+	PrivKeyCT    []byte `gorm:"column:priv_key_ct"                     json:"-"`
+	PrivKeyNonce []byte `gorm:"column:priv_key_nonce"                  json:"-"`
+	IsDefault    bool   `gorm:"column:is_default;index"                json:"is_default"`
+	OwnerID      *uint  `gorm:"column:owner_id;index"                  json:"owner_id,omitempty"`
+	Source       string `gorm:"column:source"                          json:"source,omitempty"`
+}
+
+// HasPrivateKey reports whether this key has a vaulted private half. Used by
+// list/detail responses to drive the "Download" affordance.
+func (k *SSHKey) HasPrivateKey() bool {
+	return len(k.PrivKeyCT) > 0 && len(k.PrivKeyNonce) > 0
 }
 
 // NodeTemplate maps an (OS, node) pair to the Proxmox VMID where that node's
