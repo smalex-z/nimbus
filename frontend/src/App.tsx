@@ -1,6 +1,7 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import Background from '@/components/Background'
 import Layout from '@/components/Layout'
+import RequireAuth from '@/components/RequireAuth'
 import Dashboard from '@/pages/Dashboard'
 import Settings from '@/pages/Settings'
 import SignIn from '@/pages/auth/SignIn'
@@ -15,16 +16,18 @@ export default function App() {
         <Route path="/login" element={<SignIn />} />
         <Route path="/signup" element={<SignUp />} />
 
-        {/* App pages — with nav */}
+        {/* App pages — auth-gated, with nav */}
         <Route
           path="/*"
           element={
-            <Layout>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/settings" element={<Settings />} />
-              </Routes>
-            </Layout>
+            <RequireAuth>
+              <Layout>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/settings" element={<Settings />} />
+                </Routes>
+              </Layout>
+            </RequireAuth>
           }
         />
       </Routes>
