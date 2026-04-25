@@ -1,0 +1,427 @@
+import { useEffect, useMemo, useState } from 'react'
+import { listIPs, listNodes, listVMs } from '@/api/client'
+import Button from '@/components/ui/Button'
+import Card from '@/components/ui/Card'
+import CopyButton from '@/components/ui/CopyButton'
+import StatusBadge from '@/components/ui/StatusBadge'
+import UsageBar from '@/components/ui/UsageBar'
+import { formatBytes } from '@/lib/format'
+import type { IPAllocation, NodeView, TierName, VM, VMStatus } from '@/types'
+
+interface AdminData {
+  nodes: NodeView[]
+  vms: VM[]
+  ips: IPAllocation[]
+  loading: boolean
+  error: string | null
+}
+
+function useAdminData(): AdminData {
+  const [nodes, setNodes] = useState<NodeView[]>([])
+  const [vms, setVMs] = useState<VM[]>([])
+  const [ips, setIPs] = useState<IPAllocation[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetch = () => {
+      Promise.all([listNodes(), listVMs(), listIPs()])
+        .then(([n, v, i]) => {
+          if (!cancelled) {
+            setNodes(n)
+            setVMs(v)
+            setIPs(i)
+            setError(null)
+          }
+        })
+        .catch((e: unknown) => {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }
+    fetch()
+    const id = setInterval(fetch, 15_000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
+
+  return { nodes, vms, ips, loading, error }
+}
+
+interface FilterState {
+  node: string | null
+  status: VMStatus | null
+  tier: TierName | null
+}
+
+const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
+
+export default function Admin() {
+  const { nodes, vms, ips, loading, error } = useAdminData()
+  const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
+
+  const vmsByNode = useMemo<Record<string, number>>(() => {
+    const counts: Record<string, number> = {}
+    for (const vm of vms) {
+      if (vm.status !== 'failed') counts[vm.node] = (counts[vm.node] ?? 0) + 1
+    }
+    return counts
+  }, [vms])
+
+  const filteredVMs = useMemo(() => {
+    return vms.filter((vm) => {
+      if (filters.node && vm.node !== filters.node) return false
+      if (filters.status && vm.status !== filters.status) return false
+      if (filters.tier && vm.tier !== filters.tier) return false
+      return true
+    })
+  }, [vms, filters])
+
+  const stats = useMemo(() => {
+    const onlineNodes = nodes.filter((n) => n.status === 'online')
+    const sumMemUsed = onlineNodes.reduce((a, n) => a + n.mem_used, 0)
+    const sumMemTotal = onlineNodes.reduce((a, n) => a + n.mem_total, 0)
+    const allocatedIPs = ips.filter((i) => i.status === 'allocated').length
+    return {
+      nodesOnline: onlineNodes.length,
+      nodesTotal: nodes.length,
+      vmsRunning: vms.filter((v) => v.status === 'running').length,
+      vmsProvisioning: vms.filter((v) => v.status === 'provisioning').length,
+      vmsFailed: vms.filter((v) => v.status === 'failed').length,
+      allocatedIPs,
+      totalIPs: ips.length,
+      sumMemUsed,
+      sumMemTotal,
+    }
+  }, [nodes, vms, ips])
+
+  const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
+  const allTiers = useMemo<TierName[]>(() => {
+    const found = [...new Set(vms.map((v) => v.tier))] as TierName[]
+    const order: TierName[] = ['small', 'medium', 'large', 'xl']
+    return order.filter((t) => found.includes(t))
+  }, [vms])
+
+  const hasFilters = Object.values(filters).some(Boolean)
+  const clearFilters = () => setFilters(EMPTY_FILTERS)
+
+  const setNodeFilter = (node: string | null) =>
+    setFilters((f) => ({ ...f, node: f.node === node ? null : node }))
+
+  return (
+    <div>
+      <div className="mb-8">
+        <div className="eyebrow">Cluster admin</div>
+        <h2 className="text-3xl">Dashboard</h2>
+        <p className="text-base text-ink-2 mt-2">
+          Live overview of nodes and VMs across the cluster. Refreshes every 15 seconds.
+        </p>
+      </div>
+
+      {loading && <p className="mt-8 text-ink-3 font-mono text-sm">Loading…</p>}
+      {error && (
+        <Card className="mt-8 p-6 text-bad text-sm">Failed to load: {error}</Card>
+      )}
+
+      {!loading && (
+        <>
+          <SummaryStats stats={stats} />
+
+          <div className="mt-8 mb-2">
+            <div className="eyebrow">Nodes</div>
+          </div>
+          <NodeCardGrid
+            nodes={nodes}
+            vmsByNode={vmsByNode}
+            activeNode={filters.node}
+            onNodeClick={setNodeFilter}
+          />
+
+          <div className="mt-10 mb-2">
+            <div className="eyebrow">{filteredVMs.length} machine{filteredVMs.length === 1 ? '' : 's'}</div>
+            <h3 className="text-xl">Virtual machines</h3>
+          </div>
+          <VMTable
+            vms={filteredVMs}
+            allVMs={vms}
+            allNodes={allNodes}
+            allTiers={allTiers}
+            filters={filters}
+            onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
+            hasFilters={hasFilters}
+            onClearFilters={clearFilters}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+interface StatsShape {
+  nodesOnline: number
+  nodesTotal: number
+  vmsRunning: number
+  vmsProvisioning: number
+  vmsFailed: number
+  allocatedIPs: number
+  totalIPs: number
+  sumMemUsed: number
+  sumMemTotal: number
+}
+
+function SummaryStats({ stats }: { stats: StatsShape }) {
+  const memPct = stats.sumMemTotal > 0 ? (stats.sumMemUsed / stats.sumMemTotal) * 100 : 0
+
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <StatCard
+        label="Nodes"
+        primary={`${stats.nodesOnline} online`}
+        secondary={`${stats.nodesTotal} total`}
+      />
+      <StatCard
+        label="VMs"
+        primary={`${stats.vmsRunning} running`}
+        secondary={
+          stats.vmsProvisioning > 0 || stats.vmsFailed > 0
+            ? `${stats.vmsProvisioning} provisioning · ${stats.vmsFailed} failed`
+            : `${stats.vmsRunning + stats.vmsProvisioning + stats.vmsFailed} total`
+        }
+      />
+      <StatCard
+        label="IP pool"
+        primary={`${stats.allocatedIPs} allocated`}
+        secondary={`${stats.totalIPs - stats.allocatedIPs} free of ${stats.totalIPs}`}
+      />
+      <Card className="p-5">
+        <div className="eyebrow mb-3">Cluster memory</div>
+        <div className="font-display text-lg font-medium">
+          {formatBytes(stats.sumMemUsed)}
+          <span className="text-ink-3 text-sm font-normal"> / {formatBytes(stats.sumMemTotal)}</span>
+        </div>
+        <div className="mt-3">
+          <UsageBar label="" pct={memPct} hint={`${memPct.toFixed(0)}%`} />
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function StatCard({ label, primary, secondary }: { label: string; primary: string; secondary: string }) {
+  return (
+    <Card className="p-5">
+      <div className="eyebrow mb-2">{label}</div>
+      <div className="font-display text-lg font-medium">{primary}</div>
+      <div className="font-mono text-[11px] text-ink-3 mt-1">{secondary}</div>
+    </Card>
+  )
+}
+
+function NodeCardGrid({
+  nodes,
+  vmsByNode,
+  activeNode,
+  onNodeClick,
+}: {
+  nodes: NodeView[]
+  vmsByNode: Record<string, number>
+  activeNode: string | null
+  onNodeClick: (name: string | null) => void
+}) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      {nodes.map((n) => (
+        <NodeCard
+          key={n.name}
+          node={n}
+          vmCount={vmsByNode[n.name] ?? 0}
+          active={activeNode === n.name}
+          onClick={() => onNodeClick(n.name)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function NodeCard({
+  node: n,
+  vmCount,
+  active,
+  onClick,
+}: {
+  node: NodeView
+  vmCount: number
+  active: boolean
+  onClick: () => void
+}) {
+  const memPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
+  const cpuPct = n.cpu * 100
+
+  return (
+    <button
+      onClick={onClick}
+      className={`text-left w-full transition-all ${active ? 'ring-2 ring-ink/20 rounded-[14px]' : ''}`}
+    >
+      <Card className="p-6 hover:bg-[rgba(27,23,38,0.03)] transition-colors">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <div className="font-display text-lg font-medium">{n.name}</div>
+            <div className="font-mono text-[11px] text-ink-3 mt-1">
+              {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
+            </div>
+            <div className="font-mono text-[11px] text-ink-3 mt-0.5">
+              {vmCount} VM{vmCount !== 1 ? 's' : ''}
+              {active && <span className="text-ink ml-2">· filtered</span>}
+            </div>
+          </div>
+          <StatusBadge status={n.status} />
+        </div>
+        <div className="mt-5 grid grid-cols-2 gap-5">
+          <UsageBar
+            label="Memory"
+            pct={memPct}
+            hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
+          />
+          <UsageBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(1)}%`} />
+        </div>
+      </Card>
+    </button>
+  )
+}
+
+function VMTable({
+  vms,
+  allVMs,
+  allNodes,
+  allTiers,
+  filters,
+  onFilterChange,
+  hasFilters,
+  onClearFilters,
+}: {
+  vms: VM[]
+  allVMs: VM[]
+  allNodes: string[]
+  allTiers: TierName[]
+  filters: FilterState
+  onFilterChange: (patch: Partial<FilterState>) => void
+  hasFilters: boolean
+  onClearFilters: () => void
+}) {
+  const selectClass =
+    'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
+
+  if (allVMs.length === 0) {
+    return (
+      <Card className="py-16 text-center">
+        <div className="eyebrow">No machines</div>
+        <p className="text-sm text-ink-2 mt-2">No VMs have been provisioned yet.</p>
+      </Card>
+    )
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4 items-center">
+        <select
+          className={selectClass}
+          value={filters.node ?? ''}
+          onChange={(e) => onFilterChange({ node: e.target.value || null })}
+        >
+          <option value="">All nodes</option>
+          {allNodes.map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+        <select
+          className={selectClass}
+          value={filters.status ?? ''}
+          onChange={(e) => onFilterChange({ status: (e.target.value as VMStatus) || null })}
+        >
+          <option value="">All statuses</option>
+          <option value="running">Running</option>
+          <option value="provisioning">Provisioning</option>
+          <option value="failed">Failed</option>
+        </select>
+        <select
+          className={selectClass}
+          value={filters.tier ?? ''}
+          onChange={(e) => onFilterChange({ tier: (e.target.value as TierName) || null })}
+        >
+          <option value="">All tiers</option>
+          {allTiers.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        {hasFilters && (
+          <Button variant="ghost" size="small" onClick={onClearFilters}>
+            Clear filters
+          </Button>
+        )}
+      </div>
+
+      {vms.length === 0 ? (
+        <Card className="py-16 text-center">
+          <div className="eyebrow">No results</div>
+          <p className="text-sm text-ink-2 mt-2">No VMs match the current filters.</p>
+          <Button variant="ghost" size="small" className="mt-4" onClick={onClearFilters}>
+            Clear filters
+          </Button>
+        </Card>
+      ) : (
+        <Card className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-line">
+                {['Hostname', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Created', 'SSH'].map((col) => (
+                  <th
+                    key={col}
+                    className="text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {vms.map((vm) => (
+                <tr key={vm.ID} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
+                  <td className="px-4 py-3 font-display font-medium whitespace-nowrap">{vm.hostname}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      className="font-mono text-xs text-ink-2 hover:text-ink hover:underline"
+                      onClick={() => onFilterChange({ node: vm.node })}
+                    >
+                      {vm.node}
+                    </button>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.ip}</td>
+                  <td className="px-4 py-3">
+                    <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider">
+                      {vm.tier}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.os_template}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <StatusBadge status={vm.status} />
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-ink-3 whitespace-nowrap">
+                    {new Date(vm.CreatedAt).toLocaleDateString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+    </div>
+  )
+}

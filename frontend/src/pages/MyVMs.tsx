@@ -4,6 +4,7 @@ import { listVMs } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
+import StatusBadge from '@/components/ui/StatusBadge'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
@@ -72,9 +73,6 @@ export default function MyVMs() {
 
 function VMRow({ vm }: { vm: VM }) {
   const sshCommand = `ssh ${vm.username}@${vm.ip}`
-  const isRunning = vm.status === 'running'
-  const statusClass = isRunning ? 'text-good' : vm.status === 'failed' ? 'text-bad' : 'text-warn'
-  const statusLabel = vm.status.toUpperCase()
 
   return (
     <Card className="p-5">
@@ -88,16 +86,7 @@ function VMRow({ vm }: { vm: VM }) {
         <span className="font-mono text-[11px] px-2.5 py-1 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider justify-self-start sm:justify-self-auto">
           {vm.tier}
         </span>
-        <span
-          className={`inline-flex items-center gap-1.5 font-mono text-xs ${statusClass}`}
-        >
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              isRunning ? 'bg-good' : vm.status === 'failed' ? 'bg-bad' : 'bg-warn'
-            }`}
-          />
-          {statusLabel}
-        </span>
+        <StatusBadge status={vm.status} />
         <CopyButton value={sshCommand} label="COPY SSH" />
       </div>
     </Card>

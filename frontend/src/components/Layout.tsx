@@ -10,6 +10,7 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'Provision', path: '/' },
   { label: 'My machines', path: '/vms' },
   { label: 'Nodes', path: '/nodes' },
+  { label: 'Admin', path: '/admin' },
 ]
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
