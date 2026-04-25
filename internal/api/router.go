@@ -63,8 +63,8 @@ func NewRouter(d Deps) http.Handler {
 		// Admin operations: template bootstrap. This can take 10-20 minutes
 		// when downloading all 4 OSes across all online nodes — give it room.
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.Timeout(30 * time.Minute))
-			r.Post("/bootstrap-templates", admin.BootstrapTemplates)
+			r.Get("/bootstrap-status", admin.BootstrapStatus)
+			r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", admin.BootstrapTemplates)
 		})
 	})
 

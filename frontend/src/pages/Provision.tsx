@@ -1,5 +1,10 @@
-import { useMemo, useState } from 'react'
-import { provisionVM } from '@/api/client'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  provisionVM,
+  getBootstrapStatus,
+  bootstrapTemplates,
+  type BootstrapResult,
+} from '@/api/client'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -41,6 +46,41 @@ export default function Provision() {
   const [form, setForm] = useState<FormState>(DEFAULT_FORM)
   const [result, setResult] = useState<ProvisionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const [bootstrapped, setBootstrapped] = useState<boolean | null>(null)
+  const [bootstrapRunning, setBootstrapRunning] = useState(false)
+  const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null)
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null)
+  const [bootstrapElapsed, setBootstrapElapsed] = useState(0)
+
+  useEffect(() => {
+    getBootstrapStatus()
+      .then((s) => setBootstrapped(s.bootstrapped))
+      .catch(() => setBootstrapped(false))
+  }, [])
+
+  useEffect(() => {
+    if (!bootstrapRunning) return
+    const t = setInterval(() => setBootstrapElapsed((e) => e + 1), 1000)
+    return () => clearInterval(t)
+  }, [bootstrapRunning])
+
+  const runBootstrap = async () => {
+    setBootstrapRunning(true)
+    setBootstrapError(null)
+    setBootstrapResult(null)
+    setBootstrapElapsed(0)
+    try {
+      const res = await bootstrapTemplates()
+      setBootstrapResult(res)
+      const status = await getBootstrapStatus()
+      setBootstrapped(status.bootstrapped)
+    } catch (err) {
+      setBootstrapError(err instanceof Error ? err.message : 'bootstrap failed')
+    } finally {
+      setBootstrapRunning(false)
+    }
+  }
 
   const selectedTier = TIERS[form.tier]
 
@@ -103,38 +143,163 @@ export default function Provision() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 mt-8">
-        <Card className="p-9">
-          <FormBody form={form} updateForm={updateForm} />
-        </Card>
+      {bootstrapped === null && (
+        <div className="mt-12 grid place-items-center">
+          <div className="w-4 h-4 border-[1.5px] border-ink-3 border-t-ink rounded-full animate-spin" />
+        </div>
+      )}
 
-        <Card className="p-7 self-start lg:sticky lg:top-[100px]">
-          <Summary
-            form={form}
-            tierLabel={`${selectedTier.cpu} / ${selectedTier.memMB / 1024} GB`}
-            diskLabel={`${selectedTier.diskGB} GB`}
-          />
-          <Button
-            type="button"
-            onClick={submit}
-            disabled={!canSubmit}
-            className="w-full mt-6"
-          >
-            Provision machine →
-          </Button>
-          <p className="text-xs text-ink-3 text-center mt-3 leading-relaxed">
-            Typically completes in 30–60 seconds.
-          </p>
-          {form.tier === 'xl' && (
-            <p className="text-xs text-warn text-center mt-2">
-              XL tier requires admin approval — not yet enabled.
+      {bootstrapped === false && (
+        <BootstrapGate
+          running={bootstrapRunning}
+          result={bootstrapResult}
+          error={bootstrapError}
+          elapsed={bootstrapElapsed}
+          onStart={runBootstrap}
+        />
+      )}
+
+      {bootstrapped === true && (
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 mt-8">
+          <Card className="p-9">
+            <FormBody form={form} updateForm={updateForm} />
+          </Card>
+
+          <Card className="p-7 self-start lg:sticky lg:top-[100px]">
+            <Summary
+              form={form}
+              tierLabel={`${selectedTier.cpu} / ${selectedTier.memMB / 1024} GB`}
+              diskLabel={`${selectedTier.diskGB} GB`}
+            />
+            <Button
+              type="button"
+              onClick={submit}
+              disabled={!canSubmit}
+              className="w-full mt-6"
+            >
+              Provision machine →
+            </Button>
+            <p className="text-xs text-ink-3 text-center mt-3 leading-relaxed">
+              Typically completes in 30–60 seconds.
             </p>
-          )}
-        </Card>
-      </div>
+            {form.tier === 'xl' && (
+              <p className="text-xs text-warn text-center mt-2">
+                XL tier requires admin approval — not yet enabled.
+              </p>
+            )}
+          </Card>
+        </div>
+      )}
     </div>
   )
 }
+
+// ── Bootstrap gate ────────────────────────────────────────────────────────────
+
+interface BootstrapGateProps {
+  running: boolean
+  result: BootstrapResult | null
+  error: string | null
+  elapsed: number
+  onStart: () => void
+}
+
+const OS_TEMPLATES = [
+  { os: 'Ubuntu 24.04 LTS', vmid: 9000 },
+  { os: 'Ubuntu 22.04 LTS', vmid: 9001 },
+  { os: 'Debian 12', vmid: 9002 },
+  { os: 'Debian 11', vmid: 9003 },
+]
+
+function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGateProps) {
+  const fmt = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`)
+
+  if (running) {
+    return (
+      <div className="mt-8 grid place-items-center min-h-[320px]">
+        <Card className="w-full max-w-[540px] p-12 text-center">
+          <div className="brand-mark brand-mark-lg mx-auto animate-pulse" />
+          <div className="eyebrow mt-7">One-time setup</div>
+          <h3 className="text-2xl mt-1">Downloading templates…</h3>
+          <p className="text-base text-ink-2 mt-3 leading-relaxed">
+            Fetching cloud images across all cluster nodes. Don't close this tab.
+          </p>
+          <div className="mt-5 font-mono text-3xl text-ink tabular-nums">{fmt(elapsed)}</div>
+        </Card>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-8">
+      <Card className="p-9">
+        <div className="eyebrow">Setup required</div>
+        <h3 className="text-2xl mt-1 mb-3">OS templates aren't set up yet</h3>
+        <p className="text-base text-ink-2 leading-relaxed mb-7">
+          Nimbus provisions VMs by cloning cloud-image templates on your Proxmox nodes.
+          This one-time download (~2 GB per OS) runs in parallel across all cluster nodes
+          and takes 10–20 minutes on a typical home lab. Once done, VM provisioning is
+          instant.
+        </p>
+
+        <div className="grid grid-cols-2 gap-2 mb-7">
+          {OS_TEMPLATES.map(({ os, vmid }) => (
+            <div
+              key={vmid}
+              className="flex items-center justify-between px-3.5 py-2.5 rounded-[8px] bg-[rgba(27,23,38,0.03)] border border-line-2 text-[13px]"
+            >
+              <span className="text-ink">{os}</span>
+              <span className="font-mono text-xs text-ink-3">VMID {vmid}</span>
+            </div>
+          ))}
+        </div>
+
+        {error && (
+          <div className="mb-5 p-3.5 rounded-[10px] bg-[rgba(184,58,58,0.06)] border border-[rgba(184,58,58,0.2)] text-bad text-sm">
+            {error}
+          </div>
+        )}
+
+        {result && result.failed.length > 0 && (
+          <div className="mb-5">
+            <div className="text-[11px] font-mono uppercase tracking-widest text-bad mb-2">
+              Failed ({result.failed.length})
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {result.failed.map((item, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between px-3.5 py-2.5 rounded-[8px] bg-[rgba(184,58,58,0.04)] border border-[rgba(184,58,58,0.12)] text-[13px]"
+                >
+                  <span className="text-ink">
+                    {item.os} on {item.node}
+                  </span>
+                  {item.error && (
+                    <span
+                      className="text-bad text-xs max-w-[260px] truncate"
+                      title={item.error}
+                    >
+                      {item.error}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-ink-3">Estimated: 10–20 min · idempotent, safe to retry</p>
+          <Button onClick={onStart}>
+            {result ? 'Retry →' : 'Set up templates →'}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ── Form ──────────────────────────────────────────────────────────────────────
 
 interface FormBodyProps {
   form: FormState

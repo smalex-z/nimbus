@@ -198,9 +198,6 @@ export default function Setup() {
               5
             </div>
             <span className="text-sm font-medium text-ink-3">Templates</span>
-            <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
-              soon
-            </span>
           </div>
         </div>
 
@@ -692,3 +689,4 @@ function RestartingView() {
     </div>
   )
 }
+
