@@ -30,9 +30,27 @@ Future phases (see `nimbus-design-v03.docx` for full design):
 
 ## Quick start
 
-### Install on a Proxmox host (recommended)
+### Install from a release (recommended)
 
-The wizard auto-detects when run on a PVE host and defaults to `https://localhost:8006`:
+One-liner for any Linux host (Proxmox node or external VM). Downloads the latest
+release binary to `/usr/local/bin/nimbus` and verifies its SHA256:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smalex-z/nimbus/main/scripts/quickinstall.sh | bash
+
+# While only pre-releases (alphas/betas) exist, add --prerelease:
+curl -fsSL https://raw.githubusercontent.com/smalex-z/nimbus/main/scripts/quickinstall.sh | bash -s -- --prerelease
+
+# Then run the wizard (prompts for Proxmox token, IP pool, gateway):
+sudo nimbus install
+```
+
+Supported: Linux amd64, Linux arm64.
+
+### Install on a Proxmox host (from source)
+
+For unreleased changes or development builds. The wizard auto-detects when run
+on a PVE host and defaults to `https://localhost:8006`:
 
 ```bash
 # 1. Build the binary (cross-compile for the host arch)
@@ -55,6 +73,12 @@ Same wizard, just answer the `PROXMOX_HOST` prompt with a cluster node IP:
 git clone https://github.com/smalex-z/nimbus.git
 cd nimbus
 
+# Install Go (per go.mod), Node 20, golangci-lint, plus jq/curl.
+# Supports apt, dnf, pacman, and Homebrew. Idempotent — skips what's already there.
+./scripts/install-deps.sh
+# Or: ./scripts/install-deps.sh --check     to see what's missing without installing
+#     ./scripts/install-deps.sh --dev-only  to skip jq/curl (the wizard prereqs)
+
 # Create .env (copy from .env.example, fill in token + cluster info)
 cp .env.example .env
 $EDITOR .env
@@ -64,7 +88,7 @@ make dev
 # Backend API:          http://localhost:8080
 ```
 
-> Requirements: Go 1.22+, Node.js 18+
+> Requirements: Go 1.22+, Node.js 18+ (the install script provisions newer versions matching `go.mod` and CI).
 
 ## Creating a Proxmox API token
 
@@ -149,7 +173,7 @@ nimbus/
 │   ├── db/                     # GORM models
 │   ├── config/                 # Env-based configuration with .env loader
 │   └── errors/                 # Typed error sentinels
-├── scripts/                    # build.sh, dev.sh, install.sh, reinstall.sh
+├── scripts/                    # build.sh, dev.sh, install.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 └── .github/workflows/          # test.yml, lint.yml, build.yml, release.yml
 ```
 
