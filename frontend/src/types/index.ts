@@ -5,6 +5,7 @@ export interface User {
   deletedAt: string | null
   name: string
   email: string
+  is_admin: boolean
 }
 
 export interface ApiError {

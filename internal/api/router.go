@@ -34,16 +34,17 @@ func NewRouter(svc *service.ExampleService, authSvc *service.AuthService, github
 		r.Get("/auth/google", auth.GoogleStart)
 		r.Get("/auth/google/callback", auth.GoogleCallback)
 
+		// Public admin status — needed by frontend before login
+		admin := handlers.NewAdmin(authSvc)
+		r.Get("/admin/status", admin.Status)
+
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {
 			r.Use(requireAuth(authSvc))
 
 			r.Get("/me", auth.Me)
-
-			example := handlers.NewExample(svc)
-			r.Get("/users", example.ListUsers)
-			r.Post("/users", example.CreateUser)
-			r.Delete("/users/{id}", example.DeleteUser)
+			r.Get("/users", auth.ListUsers)
+			r.Post("/admin/claim", admin.Claim)
 		})
 	})
 

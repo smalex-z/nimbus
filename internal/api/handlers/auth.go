@@ -138,6 +138,22 @@ func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, ctxutil.User(r.Context()))
 }
 
+// ListUsers handles GET /api/users.
+// Admins receive every account; non-admins receive only their own.
+func (a *Auth) ListUsers(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user.IsAdmin {
+		users, err := a.auth.ListAllUsers()
+		if err != nil {
+			response.InternalError(w, "Failed to list users")
+			return
+		}
+		response.Success(w, users)
+		return
+	}
+	response.Success(w, []*service.UserView{user})
+}
+
 // Logout handles POST /api/auth/logout.
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {

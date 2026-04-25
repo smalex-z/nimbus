@@ -12,6 +12,7 @@ type User struct {
 	Name         string `gorm:"not null" json:"name"`
 	Email        string `gorm:"uniqueIndex;not null" json:"email"`
 	PasswordHash string `gorm:"default:''" json:"-"`
+	IsAdmin      bool   `gorm:"default:false" json:"is_admin"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.

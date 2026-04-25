@@ -97,9 +97,28 @@ export default function Layout({ children }: LayoutProps) {
                   color: 'var(--ink-mute)',
                   fontFamily: 'var(--font-mono)',
                   letterSpacing: '-0.01em',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
                 }}
               >
                 {user.name}
+                {user.is_admin && (
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: '0.05em',
+                    textTransform: 'uppercase',
+                    fontFamily: 'var(--font-sans)',
+                    color: '#9a5c2e',
+                    background: 'rgba(248,175,130,0.15)',
+                    border: '1px solid rgba(248,175,130,0.4)',
+                    padding: '1px 6px',
+                    borderRadius: 4,
+                  }}>
+                    admin
+                  </span>
+                )}
               </span>
             )}
 

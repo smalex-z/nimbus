@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	ErrEmailTaken         = errors.New("email already registered")
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrSessionNotFound    = errors.New("session not found or expired")
+	ErrEmailTaken          = errors.New("email already registered")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrSessionNotFound     = errors.New("session not found or expired")
+	ErrAdminAlreadyClaimed = errors.New("admin already claimed")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -40,9 +41,14 @@ type RegisterParams struct {
 
 // UserView is the safe, serialisable projection of a User (no password hash).
 type UserView struct {
-	ID    uint   `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	ID      uint   `json:"id"`
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	IsAdmin bool   `json:"is_admin"`
+}
+
+func userToView(u *db.User) *UserView {
+	return &UserView{ID: u.ID, Name: u.Name, Email: u.Email, IsAdmin: u.IsAdmin}
 }
 
 // Register creates a new user account with a bcrypt-hashed password.
@@ -73,7 +79,7 @@ func (s *AuthService) Register(p RegisterParams) (*UserView, error) {
 		return nil, err
 	}
 
-	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+	return userToView(user), nil
 }
 
 // Login verifies credentials and returns a new session ID.
@@ -98,7 +104,7 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 		return "", nil, err
 	}
 
-	return sessionID, &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+	return sessionID, userToView(&user), nil
 }
 
 // UpsertOAuthUser finds a user by email or creates one if none exists.
@@ -118,7 +124,7 @@ func (s *AuthService) UpsertOAuthUser(name, email string) (*UserView, error) {
 		return nil, err
 	}
 
-	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+	return userToView(&user), nil
 }
 
 // CreateSession creates a new session for the given user ID and returns the session ID.
@@ -156,7 +162,7 @@ func (s *AuthService) GetUserBySessionID(sessionID string) (*UserView, error) {
 		return nil, err
 	}
 
-	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+	return userToView(&user), nil
 }
 
 // Logout deletes the session record.
@@ -170,4 +176,37 @@ func generateSessionID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// IsAdminClaimed returns true if at least one admin account exists.
+func (s *AuthService) IsAdminClaimed() (bool, error) {
+	var count int64
+	err := s.db.Model(&db.User{}).Where("is_admin = ?", true).Count(&count).Error
+	return count > 0, err
+}
+
+// ClaimAdmin promotes the given user to admin. Returns ErrAdminAlreadyClaimed
+// if any admin already exists.
+func (s *AuthService) ClaimAdmin(userID uint) error {
+	claimed, err := s.IsAdminClaimed()
+	if err != nil {
+		return err
+	}
+	if claimed {
+		return ErrAdminAlreadyClaimed
+	}
+	return s.db.Model(&db.User{}).Where("id = ?", userID).Update("is_admin", true).Error
+}
+
+// ListAllUsers returns a view of every registered account.
+func (s *AuthService) ListAllUsers() ([]*UserView, error) {
+	var users []db.User
+	if err := s.db.Find(&users).Error; err != nil {
+		return nil, err
+	}
+	views := make([]*UserView, len(users))
+	for i := range users {
+		views[i] = userToView(&users[i])
+	}
+	return views, nil
 }

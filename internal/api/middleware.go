@@ -101,6 +101,19 @@ func requireAuth(authSvc *service.AuthService) func(http.Handler) http.Handler {
 	}
 }
 
+// requireAdmin responds 403 if the authenticated user is not an admin.
+// Must be used after requireAuth.
+func requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := ctxutil.User(r.Context())
+		if user == nil || !user.IsAdmin {
+			response.Error(w, http.StatusForbidden, "Admin access required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func rateLimiter(rps float64, burst int) func(http.Handler) http.Handler {
 	limiter := rate.NewLimiter(rate.Limit(rps), burst)
 	return func(next http.Handler) http.Handler {
