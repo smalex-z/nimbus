@@ -60,6 +60,19 @@ type NetworkInterface struct {
 	IPAddresses []IPAddress `json:"ip-addresses"`
 }
 
+// ClusterIP is one observed static IP claim parsed from a VM's cloud-init
+// ipconfig0 setting. The reconciliation layer treats the union of all
+// ClusterIPs (across every node in the cluster) as the source of truth for
+// what IPs are actually in use, in contrast with the per-instance pool DB.
+type ClusterIP struct {
+	IP        string // bare "192.168.0.142", no /N suffix
+	VMID      int
+	Node      string
+	Hostname  string // VM's `name` field; empty if unset on the VM
+	Source    string // "ipconfig0" today; reserved for future "agent" reads
+	RawConfig string // verbatim ipconfig0 value — retained for debugging
+}
+
 // taskStatus is what /nodes/{node}/tasks/{upid}/status returns.
 type taskStatus struct {
 	Status     string `json:"status"`     // "running" / "stopped"

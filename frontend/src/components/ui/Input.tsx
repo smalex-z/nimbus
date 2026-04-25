@@ -2,6 +2,7 @@ import { InputHTMLAttributes, ReactNode, forwardRef } from 'react'
 
 interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   label?: string
+  labelAddon?: ReactNode
   hint?: string
   error?: string
   prefix?: ReactNode
@@ -12,13 +13,14 @@ const baseInput =
   'w-full px-3.5 py-3 rounded-[10px] bg-white/85 font-sans text-sm text-ink border border-line-2 transition-all duration-150 outline-none focus:border-ink focus:bg-white placeholder:text-ink-3 disabled:opacity-60'
 
 const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ label, hint, error, prefix, suffix, className = '', ...props }, ref) => {
+  ({ label, labelAddon, hint, error, prefix, suffix, className = '', ...props }, ref) => {
     const fieldId = props.id ?? props.name
     return (
       <div className="flex flex-col gap-2">
         {label && (
-          <label htmlFor={fieldId} className="text-[13px] font-medium text-ink">
+          <label htmlFor={fieldId} className="text-[13px] font-medium text-ink flex items-center gap-2">
             {label}
+            {labelAddon}
           </label>
         )}
         {prefix || suffix ? (
