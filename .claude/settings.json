@@ -23,7 +23,11 @@
       "Bash(curl -s http://localhost:8099/api/users)",
       "Bash(curl -s -c /tmp/nc.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
       "Bash(curl -s -b /tmp/nc.txt http://localhost:8099/api/users)",
-      "Bash(rm -f /tmp/nimbus-s4.db /tmp/nc.txt)"
+      "Bash(rm -f /tmp/nimbus-s4.db /tmp/nc.txt)",
+      "Bash(git add *)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Nathan Zhang\",\"email\":\"nml707805@gmail.com\",\"password\":\"password123\"}')",
+      "Bash(jq)",
+      "Bash(curl -s http://localhost:8080/api/setup/status)"
     ],
     "additionalDirectories": [
       "/tmp"

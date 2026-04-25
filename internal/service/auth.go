@@ -178,6 +178,13 @@ func generateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// HasAnyUsers returns true if at least one user account exists.
+func (s *AuthService) HasAnyUsers() (bool, error) {
+	var count int64
+	err := s.db.Model(&db.User{}).Count(&count).Error
+	return count > 0, err
+}
+
 // IsAdminClaimed returns true if at least one admin account exists.
 func (s *AuthService) IsAdminClaimed() (bool, error) {
 	var count int64

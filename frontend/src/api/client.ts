@@ -93,6 +93,7 @@ export async function discoverProxmox(): Promise<DiscoverResult> {
 
 export interface SetupStatus {
   configured: boolean
+  needs_admin_setup: boolean
 }
 
 export interface TestConnRequest {

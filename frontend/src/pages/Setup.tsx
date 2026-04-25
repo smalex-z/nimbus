@@ -12,7 +12,7 @@ import {
   type DiscoverResult,
 } from '@/api/client'
 
-type Step = 'proxmox' | 'network' | 'review' | 'restarting'
+type Step = 'proxmox' | 'network' | 'review' | 'restarting' | 'admin'
 
 interface ProxmoxFields {
   host: string
@@ -29,8 +29,12 @@ interface NetworkFields {
   port: string
 }
 
-export default function Setup() {
-  const [step, setStep] = useState<Step>('proxmox')
+interface SetupProps {
+  initialStep?: Step
+}
+
+export default function Setup({ initialStep = 'proxmox' }: SetupProps) {
+  const [step, setStep] = useState<Step>(initialStep)
   const [proxmox, setProxmox] = useState<ProxmoxFields>({
     host: '',
     tokenId: 'root@pam!nimbus',
@@ -55,6 +59,10 @@ export default function Setup() {
   const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (initialStep !== 'proxmox') {
+      setDiscovering(false)
+      return
+    }
     discoverProxmox()
       .then((d) => {
         setDiscovery(d)
@@ -75,7 +83,7 @@ export default function Setup() {
       })
       .catch(() => setDiscovery({ is_hypervisor: false, endpoints: [] }))
       .finally(() => setDiscovering(false))
-  }, [])
+  }, [initialStep])
 
   const updateProxmox = (key: keyof ProxmoxFields, value: string) => {
     setProxmox((p) => ({ ...p, [key]: value }))
@@ -128,8 +136,13 @@ export default function Setup() {
     return <RestartingView />
   }
 
-  const steps: Step[] = ['proxmox', 'network', 'review']
-  const stepIndex = steps.indexOf(step)
+  const wizardSteps = [
+    { key: 'proxmox' as const, label: 'Proxmox' },
+    { key: 'network' as const, label: 'Network' },
+    { key: 'review' as const, label: 'Review' },
+    { key: 'admin' as const, label: 'Admin account' },
+  ]
+  const stepIndex = wizardSteps.findIndex((s) => s.key === step)
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -158,8 +171,8 @@ export default function Setup() {
       <main className="flex-1 max-w-[720px] mx-auto w-full px-8 py-12 animate-fadeIn">
         {/* Step indicator */}
         <div className="flex items-center gap-3 mb-10 flex-wrap">
-          {(['proxmox', 'network', 'review'] as const).map((s, i) => (
-            <div key={s} className="flex items-center gap-3">
+          {wizardSteps.map((s, i) => (
+            <div key={s.key} className="flex items-center gap-3">
               <div
                 className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium transition-colors ${
                   i < stepIndex
@@ -172,11 +185,11 @@ export default function Setup() {
                 {i < stepIndex ? '✓' : i + 1}
               </div>
               <span
-                className={`text-sm font-medium capitalize ${
+                className={`text-sm font-medium ${
                   i === stepIndex ? 'text-ink' : 'text-ink-3'
                 }`}
               >
-                {s === 'proxmox' ? 'Proxmox' : s === 'network' ? 'Network' : 'Review'}
+                {s.label}
               </span>
               <div className="w-8 h-px bg-line-2" />
             </div>
@@ -185,7 +198,7 @@ export default function Setup() {
           {/* Future steps — visible but locked */}
           <div className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              4
+              5
             </div>
             <span className="text-sm font-medium text-ink-3">Gopher</span>
             <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
@@ -195,7 +208,7 @@ export default function Setup() {
           <div className="w-8 h-px bg-line-2" />
           <div className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              5
+              6
             </div>
             <span className="text-sm font-medium text-ink-3">Templates</span>
             <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
@@ -241,6 +254,7 @@ export default function Setup() {
             saveError={saveError}
           />
         )}
+        {step === 'admin' && <AdminStep />}
       </main>
     </div>
   )
@@ -268,7 +282,7 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, dis
 
   return (
     <div>
-      <div className="eyebrow">Step 1 of 3</div>
+      <div className="eyebrow">Step 1 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Connect to Proxmox</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-6">
         Nimbus needs an API token to talk to your Proxmox cluster. Enter the URL of any
@@ -485,7 +499,7 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
   const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
   return (
     <div>
-      <div className="eyebrow">Step 2 of 3</div>
+      <div className="eyebrow">Step 2 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Network</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-8">
         Nimbus allocates a static IP from this pool for every VM it provisions. Pick a
@@ -596,7 +610,7 @@ interface ReviewStepProps {
 function ReviewStep({ proxmox, network, onBack, onSave, saving, saveError }: ReviewStepProps) {
   return (
     <div>
-      <div className="eyebrow">Step 3 of 3</div>
+      <div className="eyebrow">Step 3 of 4</div>
       <h2 className="text-3xl mt-1 mb-2">Review & save</h2>
       <p className="text-base text-ink-2 leading-relaxed mb-8">
         Nimbus will write these values to the config file and restart.
@@ -647,6 +661,23 @@ function ReviewRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between py-2.5 border-b border-dashed border-line text-[13px] last:border-b-0">
       <span className="text-ink-3">{label}</span>
       <span className="font-mono text-ink text-xs">{value}</span>
+    </div>
+  )
+}
+
+// ── Step 4: Admin account ────────────────────────────────────────────────────
+
+function AdminStep() {
+  return (
+    <div>
+      <div className="eyebrow">Step 4 of 4</div>
+      <h2 className="text-3xl mt-1 mb-2">Create admin account</h2>
+      <p className="text-base text-ink-2 leading-relaxed mb-6">
+        Set up the root admin account for this Nimbus instance.
+      </p>
+      <Card className="p-8 flex flex-col gap-5">
+        <p className="text-sm text-ink-3">Account creation form coming in next step.</p>
+      </Card>
     </div>
   )
 }
