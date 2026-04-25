@@ -46,6 +46,7 @@ func NewRouter(d Deps) http.Handler {
 	keys := handlers.NewKeys(d.Keys)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
+	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
@@ -58,6 +59,8 @@ func NewRouter(d Deps) http.Handler {
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
+		r.Get("/cluster/vms", cluster.ListVMs)
+		r.Get("/cluster/stats", cluster.Stats)
 
 		// Reconcile can run a few seconds on a busy cluster (per-node walks)
 		// — give it a longer timeout than other read endpoints.
