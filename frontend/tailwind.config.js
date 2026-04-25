@@ -4,7 +4,6 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Mockup palette — peach / pink / lavender
         c1: '#F8AF82',
         c2: '#F496B4',
         c3: '#D2AAF0',
@@ -38,6 +37,10 @@ export default {
           '33%': { transform: 'translate(40px,-30px) scale(1.05)' },
           '66%': { transform: 'translate(-30px,40px) scale(0.97)' },
         },
+        fadeIn: {
+          from: { opacity: '0', transform: 'translateY(8px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
         pulse: {
           '0%, 100%': {
             transform: 'scale(1)',
@@ -54,16 +57,16 @@ export default {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '0.3' },
         },
-        fadeIn: {
-          from: { opacity: '0', transform: 'translateY(8px)' },
-          to: { opacity: '1', transform: 'translateY(0)' },
+        spin: {
+          to: { transform: 'rotate(360deg)' },
         },
       },
       animation: {
         drift: 'drift 22s ease-in-out infinite',
+        fadeIn: 'fadeIn 0.4s ease',
         pulse: 'pulse 2.4s ease-in-out infinite',
         blink: 'blink 1.2s ease-in-out infinite',
-        fadeIn: 'fadeIn 0.4s ease',
+        spin: 'spin 0.8s linear infinite',
       },
     },
   },
