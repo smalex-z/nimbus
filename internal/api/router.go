@@ -57,42 +57,6 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/setup/status", setup.Status)
 		r.Post("/setup/admin", setup.CreateAdmin)
 
-		r.Get("/nodes", nodes.List)
-		r.Get("/ips", ips.List)
-		r.Get("/cluster/vms", cluster.ListVMs)
-		r.Get("/cluster/stats", cluster.Stats)
-
-		// Reconcile can run a few seconds on a busy cluster (per-node walks)
-		// — give it a longer timeout than other read endpoints.
-		r.With(middleware.Timeout(60*time.Second)).
-			Post("/ips/reconcile", ips.Reconcile)
-
-		// VM provisioning — long-running, gets its own timeout.
-		r.Route("/vms", func(r chi.Router) {
-			r.Use(middleware.Timeout(180 * time.Second))
-			r.Get("/", vms.List)
-			r.Post("/", vms.Create)
-			r.Get("/{id}", vms.Get)
-			r.Get("/{id}/private-key", vms.GetPrivateKey)
-		})
-
-		r.Route("/keys", func(r chi.Router) {
-			r.Get("/", keys.List)
-			r.Post("/", keys.Create)
-			r.Get("/{id}", keys.Get)
-			r.Delete("/{id}", keys.Delete)
-			r.Get("/{id}/private-key", keys.PrivateKey)
-			r.Post("/{id}/private-key", keys.AttachPrivateKey)
-			r.Post("/{id}/default", keys.SetDefault)
-		})
-
-		// Admin operations: template bootstrap. This can take 10-20 minutes
-		// when downloading all 4 OSes across all online nodes — give it room.
-		r.Route("/admin", func(r chi.Router) {
-			r.Get("/bootstrap-status", bs.BootstrapStatus)
-			r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
-		})
-
 		// Auth routes (public)
 		r.Post("/auth/register", auth.Register)
 		r.Post("/auth/login", auth.Login)
@@ -110,11 +74,55 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
 
+			// Access-code endpoints — must be reachable WITHOUT being verified,
+			// so the unverified user can submit their code from the Verify page.
+			r.Get("/access-code/status", auth.VerifyStatus)
+			r.Post("/access-code/verify", auth.VerifyAccessCode)
+
 			// Admin-only routes
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin)
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
+				r.Get("/settings/access-code", settings.GetAccessCode)
+				r.Post("/settings/access-code/regenerate", settings.RegenerateAccessCode)
+			})
+
+			// Resource routes — non-admins must be verified against the
+			// current access code version. Admins always pass.
+			r.Group(func(r chi.Router) {
+				r.Use(requireVerified(d.Auth))
+
+				r.Get("/nodes", nodes.List)
+				r.Get("/ips", ips.List)
+				r.Get("/cluster/vms", cluster.ListVMs)
+				r.Get("/cluster/stats", cluster.Stats)
+
+				r.With(middleware.Timeout(60*time.Second)).
+					Post("/ips/reconcile", ips.Reconcile)
+
+				r.Route("/vms", func(r chi.Router) {
+					r.Use(middleware.Timeout(180 * time.Second))
+					r.Get("/", vms.List)
+					r.Post("/", vms.Create)
+					r.Get("/{id}", vms.Get)
+					r.Get("/{id}/private-key", vms.GetPrivateKey)
+				})
+
+				r.Route("/keys", func(r chi.Router) {
+					r.Get("/", keys.List)
+					r.Post("/", keys.Create)
+					r.Get("/{id}", keys.Get)
+					r.Delete("/{id}", keys.Delete)
+					r.Get("/{id}/private-key", keys.PrivateKey)
+					r.Post("/{id}/private-key", keys.AttachPrivateKey)
+					r.Post("/{id}/default", keys.SetDefault)
+				})
+
+				r.Route("/admin", func(r chi.Router) {
+					r.Get("/bootstrap-status", bs.BootstrapStatus)
+					r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
+				})
 			})
 		})
 	})

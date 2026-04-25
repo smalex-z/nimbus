@@ -65,3 +65,37 @@ func (s *Settings) SaveOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Success(w, map[string]string{"message": "OAuth settings saved"})
 }
+
+type accessCodeView struct {
+	AccessCode string `json:"access_code"`
+	Version    int    `json:"version"`
+}
+
+// GetAccessCode handles GET /api/settings/access-code (admin only).
+// Returns the raw 8-digit code so the admin UI can reveal it on demand.
+func (s *Settings) GetAccessCode(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load access code")
+		return
+	}
+	response.Success(w, accessCodeView{
+		AccessCode: settings.AccessCode,
+		Version:    settings.AccessCodeVersion,
+	})
+}
+
+// RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
+// Issues a fresh code and bumps the version, invalidating every non-admin
+// user's prior verification.
+func (s *Settings) RegenerateAccessCode(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.RegenerateAccessCode()
+	if err != nil {
+		response.InternalError(w, "failed to regenerate access code")
+		return
+	}
+	response.Success(w, accessCodeView{
+		AccessCode: settings.AccessCode,
+		Version:    settings.AccessCodeVersion,
+	})
+}

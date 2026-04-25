@@ -194,6 +194,52 @@ func (a *Auth) ListUsers(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, []*service.UserView{user})
 }
 
+// VerifyStatus handles GET /api/access-code/status — returns whether the
+// authenticated user is verified against the current access code version.
+func (a *Auth) VerifyStatus(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	verified, err := a.auth.IsUserVerified(user.ID)
+	if err != nil {
+		response.InternalError(w, "failed to check verification")
+		return
+	}
+	response.Success(w, map[string]bool{"verified": verified})
+}
+
+type verifyAccessCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// VerifyAccessCode handles POST /api/access-code/verify — checks the supplied
+// code against the current access code and, on success, marks the user as
+// verified.
+func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var req verifyAccessCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	err := a.auth.VerifyAccessCode(user.ID, req.Code)
+	if errors.Is(err, service.ErrInvalidAccessCode) {
+		response.Error(w, http.StatusUnauthorized, "Invalid access code")
+		return
+	}
+	if err != nil {
+		response.InternalError(w, "failed to verify access code")
+		return
+	}
+	response.Success(w, map[string]bool{"verified": true})
+}
+
 // Logout handles POST /api/auth/logout.
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
