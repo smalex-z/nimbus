@@ -23,6 +23,7 @@ import (
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
+	"nimbus/internal/sshkeys"
 )
 
 //go:embed all:frontend/dist
@@ -90,7 +91,7 @@ func main() {
 		log.Fatalf("invalid configuration: %v", err)
 	}
 
-	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{})
+	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
@@ -118,7 +119,20 @@ func main() {
 	// transport timeout for individual API calls.
 	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 5*time.Minute)
 
-	provSvc := provision.New(pveClient, pool, database.DB, cipher, provision.Config{
+	keysSvc := sshkeys.New(database.DB, cipher)
+
+	// Migrate any pre-existing per-VM vault entries into the ssh_keys table.
+	// Idempotent — VMs that already have ssh_key_id set are skipped. Failures
+	// are logged but don't abort startup.
+	migCtx, migCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if n, err := sshkeys.MigrateLegacyVMKeys(migCtx, database.DB); err != nil {
+		log.Printf("warning: ssh-key migration failed: %v", err)
+	} else if n > 0 {
+		log.Printf("migrated %d legacy per-VM vault entries into ssh_keys", n)
+	}
+	migCancel()
+
+	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
 		GatewayIP:        cfg.GatewayIP,
@@ -145,6 +159,7 @@ func main() {
 	router := api.NewRouter(api.Deps{
 		Provision: provSvc,
 		Bootstrap: bootstrapSvc,
+		Keys:      keysSvc,
 		Pool:      pool,
 		Proxmox:   pveClient,
 		Config:    cfg,
@@ -193,7 +208,7 @@ func runBootstrap(args []string) error {
 	}
 
 	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 5*time.Minute)
-	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{})
+	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

@@ -2,13 +2,21 @@ package provision
 
 // Request is a validated provisioning request submitted to the Service.
 //
-// Exactly one of SSHPubKey or GenerateKey must be set. The handler enforces
-// this; the service trusts the input.
+// SSH key resolution accepts (in priority order):
+//
+//  1. SSHKeyID — pick an existing row from the ssh_keys vault.
+//  2. GenerateKey — mint a new keypair and persist it as a fresh ssh_keys row.
+//  3. SSHPubKey (+ optional SSHPrivKey) — BYO; persisted as a new ssh_keys row.
+//  4. None of the above — use the owner's default key, if one is set.
+//
+// The service is the place this gets resolved (the handler validates only
+// shape, not key-store state).
 type Request struct {
 	Hostname    string
 	Tier        string
 	OSTemplate  string
-	SSHPubKey   string
+	SSHKeyID    *uint  // optional: use an existing vault entry
+	SSHPubKey   string // BYO
 	SSHPrivKey  string // optional: BYO callers may stash the private half in Nimbus's vault
 	GenerateKey bool
 	OwnerID     *uint // nil in Phase 1 (no auth)

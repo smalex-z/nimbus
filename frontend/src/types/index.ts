@@ -45,9 +45,40 @@ export interface ProvisionRequest {
   hostname: string
   tier: TierName
   os_template: OSTemplate
+  ssh_key_id?: number
   ssh_pubkey?: string
   ssh_privkey?: string
   generate_key?: boolean
+}
+
+export interface SSHKey {
+  id: number
+  name: string
+  label?: string
+  public_key: string
+  fingerprint?: string
+  is_default: boolean
+  owner_id?: number | null
+  source?: 'imported' | 'generated' | 'vm-auto' | string
+  has_private_key: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateKeyRequest {
+  name: string
+  label?: string
+  public_key?: string
+  private_key?: string
+  generate?: boolean
+  set_default?: boolean
+}
+
+// CreateKeyResponse extends the stored row with `private_key` populated when
+// the server just generated the keypair — the only time it crosses the wire
+// outside of an explicit download.
+export interface CreateKeyResponse extends SSHKey {
+  private_key?: string
 }
 
 export interface ProvisionResult {

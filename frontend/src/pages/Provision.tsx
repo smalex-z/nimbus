@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   provisionVM,
   getBootstrapStatus,
   bootstrapTemplates,
+  listKeys,
   type BootstrapResult,
 } from '@/api/client'
 import Card from '@/components/ui/Card'
@@ -16,12 +18,13 @@ import {
   OS_OPTIONS,
   type OSTemplate,
   type ProvisionResult,
+  type SSHKey,
   TIERS,
   type TierName,
 } from '@/types'
 
 type ViewState = 'form' | 'loading' | 'result' | 'error'
-type KeyMode = 'byo' | 'gen'
+type KeyMode = 'saved' | 'byo' | 'gen'
 
 const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
@@ -30,6 +33,7 @@ interface FormState {
   tier: TierName
   os: OSTemplate
   keyMode: KeyMode
+  savedKeyId: number | null
   pubKey: string
   privKey: string
 }
@@ -39,6 +43,7 @@ const DEFAULT_FORM: FormState = {
   tier: 'medium',
   os: 'ubuntu-24.04',
   keyMode: 'gen',
+  savedKeyId: null,
   pubKey: '',
   privKey: '',
 }
@@ -55,10 +60,32 @@ export default function Provision() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapElapsed, setBootstrapElapsed] = useState(0)
 
+  // Saved-key inventory. We default the picker to the user's chosen default
+  // key when the page loads with at least one saved key.
+  const [savedKeys, setSavedKeys] = useState<SSHKey[]>([])
+
   useEffect(() => {
     getBootstrapStatus()
       .then((s) => setBootstrapped(s.bootstrapped))
       .catch(() => setBootstrapped(false))
+  }, [])
+
+  useEffect(() => {
+    listKeys()
+      .then((rows) => {
+        setSavedKeys(rows)
+        const defaultKey = rows.find((k) => k.is_default) ?? rows[0]
+        if (defaultKey) {
+          setForm((prev) =>
+            prev.savedKeyId === null
+              ? { ...prev, keyMode: 'saved', savedKeyId: defaultKey.id }
+              : prev,
+          )
+        }
+      })
+      .catch(() => {
+        // Non-fatal — the form still works with BYO/Generate.
+      })
   }, [])
 
   useEffect(() => {
@@ -90,6 +117,7 @@ export default function Provision() {
     if (!form.hostname || form.hostname.length === 0) return false
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
+    if (form.keyMode === 'saved' && form.savedKeyId === null) return false
     return true
   }, [form])
 
@@ -112,6 +140,10 @@ export default function Provision() {
         hostname: form.hostname,
         tier: form.tier,
         os_template: form.os,
+        ssh_key_id:
+          form.keyMode === 'saved' && form.savedKeyId !== null
+            ? form.savedKeyId
+            : undefined,
         ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
         ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
         generate_key: form.keyMode === 'gen' ? true : undefined,
@@ -166,12 +198,13 @@ export default function Provision() {
       {bootstrapped === true && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 mt-8">
           <Card className="p-9">
-            <FormBody form={form} updateForm={updateForm} />
+            <FormBody form={form} updateForm={updateForm} savedKeys={savedKeys} />
           </Card>
 
           <Card className="p-7 self-start lg:sticky lg:top-[100px]">
             <Summary
               form={form}
+              savedKeys={savedKeys}
               tierLabel={`${selectedTier.cpu} / ${selectedTier.memMB / 1024} GB`}
               diskLabel={`${selectedTier.diskGB} GB`}
             />
@@ -308,9 +341,10 @@ function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGa
 interface FormBodyProps {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
+  savedKeys: SSHKey[]
 }
 
-function FormBody({ form, updateForm }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -364,9 +398,21 @@ function FormBody({ form, updateForm }: FormBodyProps) {
       <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">SSH key</label>
         <div className="grid gap-2">
+          {savedKeys.length > 0 && (
+            <RadioCard
+              title="Use a saved key"
+              description={
+                savedKeys.find((k) => k.is_default)
+                  ? "Your default key is selected. You can pick a different one."
+                  : "Pick from the keys you've already added."
+              }
+              selected={form.keyMode === 'saved'}
+              onClick={() => updateForm('keyMode', 'saved')}
+            />
+          )}
           <RadioCard
             title="Generate one for me"
-            description="We'll mint an Ed25519 keypair and show you the private key once."
+            description="We'll mint an Ed25519 keypair, vault it, and show the private key once."
             selected={form.keyMode === 'gen'}
             onClick={() => updateForm('keyMode', 'gen')}
           />
@@ -377,6 +423,26 @@ function FormBody({ form, updateForm }: FormBodyProps) {
             onClick={() => updateForm('keyMode', 'byo')}
           />
         </div>
+        {form.keyMode === 'saved' && savedKeys.length > 0 && (
+          <div className="mt-3 flex flex-col gap-2">
+            <select
+              value={form.savedKeyId ?? ''}
+              onChange={(e) => updateForm('savedKeyId', Number(e.target.value))}
+              className="w-full px-3.5 py-3 rounded-[10px] bg-white/85 font-sans text-sm text-ink border border-line-2 outline-none focus:border-ink focus:bg-white"
+            >
+              {savedKeys.map((k) => (
+                <option key={k.id} value={k.id}>
+                  {k.name}
+                  {k.is_default ? ' · default' : ''}
+                  {k.label ? ` — ${k.label}` : ''}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-ink-3">
+              Manage saved keys on the <Link to="/keys" className="underline">Keys page</Link>.
+            </p>
+          </div>
+        )}
         {form.keyMode === 'byo' && (
           <div className="mt-4 flex flex-col gap-5">
             <div className="flex flex-col gap-2">
@@ -502,11 +568,20 @@ function KeyFileUpload({ accept, buttonLabel, maxBytes, sizeError, onLoad }: Key
 
 interface SummaryProps {
   form: FormState
+  savedKeys: SSHKey[]
   tierLabel: string
   diskLabel: string
 }
 
-function Summary({ form, tierLabel, diskLabel }: SummaryProps) {
+function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
+  const sshLabel = (() => {
+    if (form.keyMode === 'gen') return 'generate (vaulted)'
+    if (form.keyMode === 'saved') {
+      const k = savedKeys.find((s) => s.id === form.savedKeyId)
+      return k ? k.name : '—'
+    }
+    return form.privKey.trim() ? 'your key (vaulted)' : 'your key'
+  })()
   return (
     <>
       <h3 className="text-xl font-semibold">Summary</h3>
@@ -516,16 +591,7 @@ function Summary({ form, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="Tier" value={form.tier} />
         <SummaryRow label="vCPU / RAM" value={tierLabel} />
         <SummaryRow label="Disk" value={diskLabel} />
-        <SummaryRow
-          label="SSH"
-          value={
-            form.keyMode === 'gen'
-              ? 'generate (vaulted)'
-              : form.privKey.trim()
-                ? 'your key (vaulted)'
-                : 'your key'
-          }
-        />
+        <SummaryRow label="SSH" value={sshLabel} />
       </div>
     </>
   )

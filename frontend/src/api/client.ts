@@ -1,10 +1,13 @@
 import axios, { AxiosInstance } from 'axios'
 import type {
+  CreateKeyRequest,
+  CreateKeyResponse,
   HealthResponse,
   IPAllocation,
   NodeView,
   ProvisionRequest,
   ProvisionResult,
+  SSHKey,
   VM,
 } from '@/types'
 
@@ -88,6 +91,29 @@ export interface VMPrivateKey {
 export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   const { data } = await api.get<VMPrivateKey>(`/vms/${id}/private-key`)
   return data
+}
+
+export async function listKeys(): Promise<SSHKey[]> {
+  const { data } = await api.get<SSHKey[]>('/keys')
+  return data
+}
+
+export async function createKey(req: CreateKeyRequest): Promise<CreateKeyResponse> {
+  const { data } = await api.post<CreateKeyResponse>('/keys', req)
+  return data
+}
+
+export async function getKeyPrivate(id: number): Promise<VMPrivateKey> {
+  const { data } = await api.get<VMPrivateKey>(`/keys/${id}/private-key`)
+  return data
+}
+
+export async function setDefaultKey(id: number): Promise<void> {
+  await api.post(`/keys/${id}/default`, {})
+}
+
+export async function deleteKey(id: number): Promise<void> {
+  await api.delete(`/keys/${id}`)
 }
 
 export interface DiscoverResult {
