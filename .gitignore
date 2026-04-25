@@ -1,0 +1,36 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+homestack
+homestack-linux-*
+homestack-darwin-*
+homestack-windows-*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Embedded dist (built output goes here; ignore compiled assets but keep placeholder)
+cmd/server/frontend/dist/assets/
+cmd/server/frontend/dist/*.js
+cmd/server/frontend/dist/*.css
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
