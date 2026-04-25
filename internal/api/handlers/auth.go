@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
 	"nimbus/internal/service"
 )
 
@@ -106,24 +107,9 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 // Me handles GET /api/me.
+// The user is guaranteed to be present by the requireAuth middleware.
 func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		response.Error(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
-
-	user, err := a.auth.GetUserBySessionID(cookie.Value)
-	if errors.Is(err, service.ErrSessionNotFound) {
-		response.Error(w, http.StatusUnauthorized, "Session expired")
-		return
-	}
-	if err != nil {
-		response.InternalError(w, "Failed to get user")
-		return
-	}
-
-	response.Success(w, user)
+	response.Success(w, ctxutil.User(r.Context()))
 }
 
 // Logout handles POST /api/auth/logout.

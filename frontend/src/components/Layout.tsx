@@ -1,6 +1,7 @@
 import { ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import api from '@/api/client'
+import { useAuth } from '@/context/AuthContext'
 
 interface LayoutProps {
   children: ReactNode
@@ -14,6 +15,7 @@ const NAV_ITEMS = [
 export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const navigate = useNavigate()
+  const { user } = useAuth()
 
   const handleSignOut = async () => {
     try {
@@ -86,6 +88,20 @@ export default function Layout({ children }: LayoutProps) {
             })}
 
             <div style={{ width: 1, height: 16, background: 'rgba(20,18,28,0.1)', margin: '0 6px' }} />
+
+            {user && (
+              <span
+                style={{
+                  padding: '6px 10px',
+                  fontSize: 13,
+                  color: 'var(--ink-mute)',
+                  fontFamily: 'var(--font-mono)',
+                  letterSpacing: '-0.01em',
+                }}
+              >
+                {user.name}
+              </span>
+            )}
 
             <button
               onClick={handleSignOut}

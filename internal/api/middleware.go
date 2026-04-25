@@ -9,6 +9,10 @@ import (
 	"runtime/debug"
 	"time"
 
+	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
+	"nimbus/internal/service"
+
 	"golang.org/x/time/rate"
 )
 
@@ -73,6 +77,28 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requireAuth validates the session cookie and attaches the UserView to the
+// request context. Responds 401 if the cookie is missing or the session is expired.
+func requireAuth(authSvc *service.AuthService) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie("nimbus_sid")
+			if err != nil {
+				response.Error(w, http.StatusUnauthorized, "Not authenticated")
+				return
+			}
+
+			user, err := authSvc.GetUserBySessionID(cookie.Value)
+			if err != nil {
+				response.Error(w, http.StatusUnauthorized, "Session expired")
+				return
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctxutil.WithUser(r.Context(), user)))
+		})
+	}
 }
 
 func rateLimiter(rps float64, burst int) func(http.Handler) http.Handler {

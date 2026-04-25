@@ -19,7 +19,14 @@
       "Bash(curl -s -c /tmp/nc.txt -b /tmp/nc.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
       "Bash(curl -s -b /tmp/nc.txt http://localhost:8099/api/me)",
       "Bash(curl -s -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"badpass\"}')",
-      "Bash(curl -s -c /tmp/nc.txt -b /tmp/nc.txt -X POST http://localhost:8099/api/auth/logout)"
+      "Bash(curl -s -c /tmp/nc.txt -b /tmp/nc.txt -X POST http://localhost:8099/api/auth/logout)",
+      "Bash(curl -s http://localhost:8099/api/users)",
+      "Bash(curl -s -c /tmp/nc.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -b /tmp/nc.txt http://localhost:8099/api/users)",
+      "Bash(rm -f /tmp/nimbus-s4.db /tmp/nc.txt)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }

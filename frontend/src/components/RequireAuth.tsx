@@ -1,18 +1,18 @@
-import { useEffect, useState, ReactNode } from 'react'
+import { useEffect, ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api from '@/api/client'
+import { useAuth } from '@/context/AuthContext'
 
 export default function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth()
   const navigate = useNavigate()
-  const [checking, setChecking] = useState(true)
 
   useEffect(() => {
-    api.get('/me')
-      .then(() => setChecking(false))
-      .catch(() => navigate('/login', { replace: true }))
-  }, [navigate])
+    if (!loading && !user) {
+      navigate('/login', { replace: true })
+    }
+  }, [user, loading, navigate])
 
-  if (checking) return null
+  if (loading || !user) return null
 
   return <>{children}</>
 }

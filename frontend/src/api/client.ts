@@ -20,7 +20,13 @@ api.interceptors.response.use(
     return response
   },
   (error) => {
-    if (error.response?.status === 401 && !error.config?.url?.includes('/auth/')) {
+    // Let RequireAuth handle /me 401s; auto-redirect everything else.
+    const url: string = error.config?.url ?? ''
+    if (
+      error.response?.status === 401 &&
+      !url.includes('/auth/') &&
+      !url.includes('/me')
+    ) {
       window.location.href = '/login'
     }
     const message =
