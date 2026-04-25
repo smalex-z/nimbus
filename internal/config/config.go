@@ -34,6 +34,14 @@ type Config struct {
 	Nameserver   string
 	SearchDomain string
 
+	// Cross-instance IP reconciliation. Defaults are tuned for the typical
+	// "two operators sharing one Proxmox cluster" deployment; raise the
+	// vacate threshold if your cluster has long-running migrations.
+	ReconcileIntervalSeconds int // background reconcile cadence — default 60
+	ReservationTTLSeconds    int // stale-reservation cutoff       — default 600 (10m)
+	VerifyCacheTTLSeconds    int // ListClusterIPs cache reuse     — default 5
+	VacateMissThreshold      int // consecutive missing cycles before auto-vacate — default 3
+
 	// OAuth
 	AppURL             string
 	GitHubClientID     string
@@ -69,13 +77,19 @@ func Load() (*Config, error) {
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
-		AppURL:                  getEnv("APP_URL", "http://localhost:5173"),
-		GitHubClientID:          os.Getenv("GITHUB_CLIENT_ID"),
-		GitHubClientSecret:      os.Getenv("GITHUB_CLIENT_SECRET"),
-		GoogleClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GopherAPIURL:            os.Getenv("GOPHER_API_URL"),
-		GopherAPIKey:            os.Getenv("GOPHER_API_KEY"),
+
+		ReconcileIntervalSeconds: getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),
+		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
+		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
+		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
+
+		AppURL:             getEnv("APP_URL", "http://localhost:5173"),
+		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GopherAPIURL:       os.Getenv("GOPHER_API_URL"),
+		GopherAPIKey:       os.Getenv("GOPHER_API_KEY"),
 	}
 
 	return cfg, nil
