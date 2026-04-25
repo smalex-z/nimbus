@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"homestack/internal/api/response"
-	"homestack/internal/service"
+	"nimbus/internal/api/response"
+	"nimbus/internal/service"
 
 	"github.com/go-chi/chi/v5"
 )

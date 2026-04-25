@@ -2,13 +2,13 @@
 # Production installation script — installs Homestack as a systemd service.
 set -e
 
-APP_NAME="homestack"
+APP_NAME="nimbus"
 INSTALL_DIR="/opt/$APP_NAME"
 SERVICE_USER="$APP_NAME"
 DATA_DIR="/var/lib/$APP_NAME"
 
-if [ ! -f "./homestack" ]; then
-    echo "Error: './homestack' binary not found. Run './scripts/build.sh' first."
+if [ ! -f "./nimbus" ]; then
+    echo "Error: './nimbus' binary not found. Run './scripts/build.sh' first."
     exit 1
 fi
 
@@ -21,24 +21,24 @@ sudo useradd -r -s /bin/false "$SERVICE_USER" 2>/dev/null || true
 sudo mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 # Copy binary
-sudo cp homestack "$INSTALL_DIR/"
-sudo chmod 755 "$INSTALL_DIR/homestack"
+sudo cp nimbus "$INSTALL_DIR/"
+sudo chmod 755 "$INSTALL_DIR/nimbus"
 
 # Create systemd service unit
 sudo tee /etc/systemd/system/"$APP_NAME".service > /dev/null <<EOF
 [Unit]
 Description=$APP_NAME
-Documentation=https://github.com/smalex-z/homestack
+Documentation=https://github.com/smalex-z/nimbus
 After=network.target
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$DATA_DIR
-ExecStart=$INSTALL_DIR/homestack
+ExecStart=$INSTALL_DIR/nimbus
 Restart=always
 RestartSec=5
-Environment=DB_PATH=$DATA_DIR/homestack.db
+Environment=DB_PATH=$DATA_DIR/nimbus.db
 
 [Install]
 WantedBy=multi-user.target

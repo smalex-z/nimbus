@@ -35,11 +35,11 @@ jobs:
         working-directory: frontend
 
       - name: Build Go binary
-        run: go build -o homestack ./cmd/server/...
+        run: go build -o nimbus ./cmd/server/...
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: homestack-binary
-          path: homestack
+          name: nimbus-binary
+          path: nimbus
           retention-days: 7

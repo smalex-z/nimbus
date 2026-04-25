@@ -15,7 +15,7 @@ npm run build
 echo "→ Building Go binary..."
 cd "$ROOT"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
-CGO_ENABLED=0 go build -ldflags "-s -w -X homestack/internal/build.Version=${VERSION}" -o homestack ./cmd/server/...
+CGO_ENABLED=0 go build -ldflags "-s -w -X nimbus/internal/build.Version=${VERSION}" -o nimbus ./cmd/server/...
 
-echo "✅ Build complete: $ROOT/homestack"
-echo "   Run with: ./homestack [--port 8080] [--db ./homestack.db]"
+echo "✅ Build complete: $ROOT/nimbus"
+echo "   Run with: ./nimbus [--port 8080] [--db ./nimbus.db]"

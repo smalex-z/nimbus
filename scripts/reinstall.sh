@@ -3,7 +3,7 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="homestack"
+APP_NAME="nimbus"
 INSTALL_DIR="/opt/$APP_NAME"
 
 echo "Rebuilding $APP_NAME..."

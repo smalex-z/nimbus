@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"homestack/internal/api/handlers"
-	"homestack/internal/service"
+	"nimbus/internal/api/handlers"
+	"nimbus/internal/service"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"

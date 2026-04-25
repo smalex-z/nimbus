@@ -8,25 +8,25 @@ import (
 	"net/http"
 	"os"
 
-	"homestack/internal/api"
-	"homestack/internal/build"
-	"homestack/internal/config"
-	"homestack/internal/db"
-	"homestack/internal/service"
+	"nimbus/internal/api"
+	"nimbus/internal/build"
+	"nimbus/internal/config"
+	"nimbus/internal/db"
+	"nimbus/internal/service"
 )
 
 //go:embed all:frontend/dist
 var frontendFS embed.FS
 
 func main() {
-	flags := flag.NewFlagSet("homestack", flag.ExitOnError)
+	flags := flag.NewFlagSet("nimbus", flag.ExitOnError)
 	port := flags.String("port", "", "server port (overrides PORT env var)")
 	dbPath := flags.String("db", "", "database path (overrides DB_PATH env var)")
 	version := flags.Bool("version", false, "print version and exit")
 	_ = flags.Parse(os.Args[1:])
 
 	if *version {
-		log.Printf("homestack %s", build.Version)
+		log.Printf("nimbus %s", build.Version)
 		return
 	}
 
@@ -56,7 +56,7 @@ func main() {
 	mux.Handle("/api/", router)
 	mux.Handle("/", spaHandler(http.FS(distFS)))
 
-	log.Printf("homestack %s starting on :%s", build.Version, cfg.Port)
+	log.Printf("nimbus %s starting on :%s", build.Version, cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

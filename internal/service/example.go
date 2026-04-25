@@ -1,7 +1,7 @@
 package service
 
 import (
-	"homestack/internal/db"
+	"nimbus/internal/db"
 )
 
 // ExampleService provides business logic for the example resource.

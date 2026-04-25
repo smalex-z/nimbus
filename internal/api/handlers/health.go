@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"homestack/internal/api/response"
+	"nimbus/internal/api/response"
 )
 
 type healthResponse struct {

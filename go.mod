@@ -1,4 +1,4 @@
-module homestack
+module nimbus
 
 go 1.22
 
