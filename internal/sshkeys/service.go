@@ -221,6 +221,43 @@ func (s *Service) Delete(ctx context.Context, id uint) error {
 	})
 }
 
+// AttachPrivateKey vaults a private half on a public-only key. Rejects when a
+// private half already exists or the keypair doesn't match — the user must
+// delete and re-add to replace.
+func (s *Service) AttachPrivateKey(ctx context.Context, id uint, privateKey string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row db.SSHKey
+		if err := tx.First(&row, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return &internalerrors.NotFoundError{Resource: "ssh_key", ID: fmt.Sprintf("%d", id)}
+			}
+			return fmt.Errorf("get ssh key %d: %w", id, err)
+		}
+		if row.HasPrivateKey() {
+			return &internalerrors.ConflictError{
+				Message: "this key already has a private half stored — delete and re-add to replace",
+			}
+		}
+		if err := VerifyKeyPair(row.PublicKey, privateKey); err != nil {
+			return &internalerrors.ValidationError{
+				Field:   "private_key",
+				Message: "private key does not match the stored public key: " + err.Error(),
+			}
+		}
+		ct, nonce, err := s.cipher.Encrypt([]byte(privateKey))
+		if err != nil {
+			return fmt.Errorf("encrypt private key: %w", err)
+		}
+		if err := tx.Model(&db.SSHKey{}).Where("id = ?", id).Updates(map[string]any{
+			"priv_key_ct":    ct,
+			"priv_key_nonce": nonce,
+		}).Error; err != nil {
+			return fmt.Errorf("update ssh key %d: %w", id, err)
+		}
+		return nil
+	})
+}
+
 // SetDefault marks the named key as default for its owner, atomically clearing
 // any prior default.
 func (s *Service) SetDefault(ctx context.Context, id uint) error {

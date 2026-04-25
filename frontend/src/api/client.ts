@@ -122,6 +122,10 @@ export async function setDefaultKey(id: number): Promise<void> {
   await api.post(`/keys/${id}/default`, {})
 }
 
+export async function attachPrivateKey(id: number, privateKey: string): Promise<void> {
+  await api.post(`/keys/${id}/private-key`, { private_key: privateKey })
+}
+
 export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }
