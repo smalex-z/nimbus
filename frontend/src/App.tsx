@@ -4,8 +4,9 @@ import Background from '@/components/Background'
 import Layout from '@/components/Layout'
 import RequireAuth from '@/components/RequireAuth'
 import RequireAdminClaim from '@/components/RequireAdminClaim'
-import Dashboard from '@/pages/Dashboard'
-import Settings from '@/pages/Settings'
+import Provision from '@/pages/Provision'
+import MyVMs from '@/pages/MyVMs'
+import Nodes from '@/pages/Nodes'
 import Claim from '@/pages/admin/Claim'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
@@ -28,18 +29,19 @@ export default function App() {
             element={
               <RequireAuth>
                 <Routes>
-                  {/* First-run admin claim page — inside auth, outside admin-claim gate */}
+                  {/* First-run admin claim — inside auth, outside admin-claim gate */}
                   <Route path="/claim" element={<Claim />} />
 
-                  {/* Normal app — only accessible once admin is claimed */}
+                  {/* Main app — only accessible once admin is claimed */}
                   <Route
                     path="/*"
                     element={
                       <RequireAdminClaim>
                         <Layout>
                           <Routes>
-                            <Route path="/" element={<Dashboard />} />
-                            <Route path="/settings" element={<Settings />} />
+                            <Route path="/" element={<Provision />} />
+                            <Route path="/vms" element={<MyVMs />} />
+                            <Route path="/nodes" element={<Nodes />} />
                           </Routes>
                         </Layout>
                       </RequireAdminClaim>

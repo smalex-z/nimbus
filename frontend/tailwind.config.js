@@ -4,20 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Blob palette
         c1: '#F8AF82',
         c2: '#F496B4',
         c3: '#D2AAF0',
         c4: '#F8B496',
-        // Text
         ink: '#14121C',
         'ink-2': '#44424F',
         'ink-3': '#76747F',
-        // Status
         good: '#1F7A4D',
         warn: '#A85A0A',
         bad: '#B83A3A',
-        // Borders
         line: 'rgba(20, 18, 28, 0.07)',
         'line-2': 'rgba(20, 18, 28, 0.13)',
       },
@@ -45,6 +41,18 @@ export default {
           from: { opacity: '0', transform: 'translateY(8px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
+        pulse: {
+          '0%, 100%': {
+            transform: 'scale(1)',
+            boxShadow:
+              '0 0 0 0 rgba(244, 150, 180, 0.4), inset 0 1px 2px rgba(255,255,255,0.8)',
+          },
+          '50%': {
+            transform: 'scale(1.06)',
+            boxShadow:
+              '0 0 0 18px rgba(244, 150, 180, 0), inset 0 1px 2px rgba(255,255,255,0.8)',
+          },
+        },
         blink: {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '0.3' },
@@ -56,6 +64,7 @@ export default {
       animation: {
         drift: 'drift 22s ease-in-out infinite',
         fadeIn: 'fadeIn 0.4s ease',
+        pulse: 'pulse 2.4s ease-in-out infinite',
         blink: 'blink 1.2s ease-in-out infinite',
         spin: 'spin 0.8s linear infinite',
       },

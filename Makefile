@@ -18,4 +18,4 @@ lint:
 	cd frontend && npm run lint
 
 clean:
-	rm -rf cmd/server/frontend/dist homestack homestack-*
+	rm -rf cmd/server/frontend/dist nimbus nimbus-*

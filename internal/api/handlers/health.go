@@ -1,21 +1,50 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/build"
+	"nimbus/internal/proxmox"
 )
 
-type healthResponse struct {
-	Status    string `json:"status"`
-	Timestamp string `json:"timestamp"`
+// Health reports liveness plus the Proxmox cluster reachability check. Used
+// by the install wizard's post-install probe and by the UI's status indicator.
+type Health struct {
+	px *proxmox.Client
 }
 
-// Health handles GET /api/health.
-func Health(w http.ResponseWriter, r *http.Request) {
-	response.Success(w, healthResponse{
+func NewHealth(px *proxmox.Client) *Health { return &Health{px: px} }
+
+type healthResponse struct {
+	Status         string `json:"status"`
+	Timestamp      string `json:"timestamp"`
+	Version        string `json:"version"`
+	ProxmoxOK      bool   `json:"proxmox_ok"`
+	ProxmoxVersion string `json:"proxmox_version,omitempty"`
+	ProxmoxError   string `json:"proxmox_error,omitempty"`
+}
+
+// Check handles GET /api/health.
+func (h *Health) Check(w http.ResponseWriter, r *http.Request) {
+	out := healthResponse{
 		Status:    "ok",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	})
+		Version:   build.Version,
+	}
+
+	// Brief Proxmox probe — never block the health endpoint for long.
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if v, err := h.px.Version(ctx); err == nil {
+		out.ProxmoxOK = true
+		out.ProxmoxVersion = v
+	} else {
+		out.ProxmoxOK = false
+		out.ProxmoxError = err.Error()
+	}
+
+	response.Success(w, out)
 }

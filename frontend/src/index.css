@@ -2,15 +2,85 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Nimbus design tokens ───────────────────────────────── */
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: #fcfbfa;
+    color: theme('colors.ink');
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: theme('fontFamily.display');
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+
+  code,
+  .mono {
+    font-family: theme('fontFamily.mono');
+  }
+}
+
+@layer components {
+  .glass {
+    background: rgba(255, 255, 255, 0.78);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: theme('borderRadius.lg');
+    box-shadow: theme('boxShadow.glass');
+  }
+  .glass-strong {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(28px) saturate(160%);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+  }
+
+  .eyebrow {
+    font-family: theme('fontFamily.mono');
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: theme('colors.ink-3');
+    margin-bottom: 16px;
+  }
+
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: radial-gradient(circle at 30% 30%, theme('colors.c1'), transparent 60%),
+      radial-gradient(circle at 70% 40%, theme('colors.c2'), transparent 60%),
+      radial-gradient(circle at 50% 70%, theme('colors.c3'), transparent 60%), #ffffff;
+    border: 1px solid theme('colors.line-2');
+    box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.9);
+    flex-shrink: 0;
+  }
+  .brand-mark-lg {
+    width: 80px;
+    height: 80px;
+    border-radius: 24px;
+  }
+}
+
+/* ── Nimbus design tokens (used by auth pages) ──────────── */
 :root {
   --bg-top: #FCFBFA;
   --bg-bot: #F8F7F5;
-
-  --blob-peach: #F8AF82;
-  --blob-pink: #F496B4;
-  --blob-lavender: #D2AAF0;
-  --blob-soft-peach: #F8B496;
 
   --ink: #14121C;
   --ink-body: #44424F;
@@ -33,14 +103,6 @@
 
 * {
   box-sizing: border-box;
-}
-
-body {
-  font-family: var(--font-sans);
-  color: var(--ink-body);
-  background: transparent;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
 /* ── Typography ─────────────────────────────────────────── */
@@ -175,16 +237,6 @@ body {
 
 .n-input.n-input-error:focus {
   box-shadow: 0 0 0 3px rgba(184, 58, 58, 0.08);
-}
-
-/* ── Card / surface ─────────────────────────────────────── */
-.n-card {
-  background: var(--surface);
-  border-radius: 18px;
-  border: 1px solid var(--hairline);
-  box-shadow:
-    0 1px 0 rgba(20, 18, 28, 0.02),
-    0 30px 60px -30px rgba(20, 18, 28, 0.12);
 }
 
 /* ── Divider ─────────────────────────────────────────────── */
@@ -339,70 +391,6 @@ body {
   font-family: var(--font-sans);
 }
 
-/* ── Glass surface ───────────────────────────────────────── */
-.glass {
-  background: rgba(255, 255, 255, 0.78);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  border-radius: 16px;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
-    0 0 0 1px rgba(20, 18, 28, 0.04),
-    0 12px 40px -12px rgba(20, 18, 28, 0.10),
-    0 2px 6px -2px rgba(20, 18, 28, 0.04);
-}
-
-.glass-strong {
-  background: rgba(255, 255, 255, 0.92);
-}
-
-/* ── Brand mark ──────────────────────────────────────────── */
-.brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background:
-    radial-gradient(circle at 30% 30%, rgba(248, 175, 130, 0.9) 0%, transparent 60%),
-    radial-gradient(circle at 70% 60%, rgba(244, 150, 180, 0.8) 0%, transparent 50%),
-    radial-gradient(circle at 40% 80%, rgba(210, 170, 240, 0.7) 0%, transparent 55%),
-    #fff;
-  flex-shrink: 0;
-}
-
-/* ── Eyebrow label ───────────────────────────────────────── */
-.eyebrow {
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-mute);
-}
-
-/* ── Background blobs ────────────────────────────────────── */
-.blobs {
-  position: fixed;
-  inset: 0;
-  z-index: -2;
-  background: linear-gradient(180deg, #fcfbfa 0%, #f8f7f5 100%);
-}
-
-.blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(110px);
-}
-
-.grain {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  opacity: 0.18;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  background-size: 200px 200px;
-  pointer-events: none;
-}
-
 /* ── Animations ──────────────────────────────────────────── */
 @keyframes nPulse {
   0%, 100% { opacity: 1; }
@@ -415,4 +403,32 @@ body {
 
 .n-spin {
   animation: nSpin 0.8s linear infinite;
+}
+
+/* ── Background blobs ────────────────────────────────────── */
+.blobs {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  overflow: hidden;
+  pointer-events: none;
+  background: linear-gradient(180deg, #fcfbfa 0%, #f8f7f5 100%);
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(110px);
+  opacity: 1;
+}
+
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.18;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 200px 200px;
 }

@@ -1,21 +1,24 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"nimbus/internal/api"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/ippool"
 	"nimbus/internal/oauth"
+	"nimbus/internal/provision"
+	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
-
-	"github.com/joho/godotenv"
 )
 
 //go:embed all:frontend/dist
@@ -33,24 +36,27 @@ func main() {
 		return
 	}
 
-	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
-		log.Printf("warning: could not load .env: %v", err)
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
 	}
-
-	cfg := config.Load()
 	if *port != "" {
 		cfg.Port = *port
 	}
 	if *dbPath != "" {
 		cfg.DBPath = *dbPath
 	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
-	database, err := db.New(cfg.DBPath)
+	database, err := db.New(cfg.DBPath,
+		&db.User{}, &db.Session{}, &db.VM{}, ippool.Model(),
+	)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
 
-	svc := service.NewExampleService(database)
 	authSvc := service.NewAuthService(database)
 
 	var github oauth.Provider
@@ -72,7 +78,29 @@ func main() {
 		log.Printf("Google OAuth enabled")
 	}
 
-	router := api.NewRouter(svc, authSvc, github, google)
+	pool := ippool.New(database.DB)
+	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
+		log.Fatalf("failed to seed IP pool: %v", err)
+	}
+
+	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 30*time.Second)
+
+	provSvc := provision.New(pveClient, pool, database.DB, provision.Config{
+		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
+		ExcludedNodes:    cfg.ExcludedNodes,
+		GatewayIP:        cfg.GatewayIP,
+		Nameserver:       cfg.Nameserver,
+		SearchDomain:     cfg.SearchDomain,
+	})
+
+	router := api.NewRouter(api.Deps{
+		Auth:      authSvc,
+		GitHub:    github,
+		Google:    google,
+		Provision: provSvc,
+		Pool:      pool,
+		Proxmox:   pveClient,
+	})
 
 	distFS, err := fs.Sub(frontendFS, "frontend/dist")
 	if err != nil {
@@ -83,8 +111,14 @@ func main() {
 	mux.Handle("/api/", router)
 	mux.Handle("/", spaHandler(http.FS(distFS)))
 
-	log.Printf("nimbus %s starting on :%s", build.Version, cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
+	log.Printf("nimbus %s starting on :%s (proxmox=%s, pool=%s..%s)",
+		build.Version, cfg.Port, cfg.ProxmoxHost, cfg.IPPoolStart, cfg.IPPoolEnd)
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

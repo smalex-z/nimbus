@@ -1,19 +1,20 @@
 import { ReactNode } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
 import api from '@/api/client'
 import { useAuth } from '@/context/AuthContext'
 
 interface LayoutProps {
   children: ReactNode
+  showNav?: boolean
 }
 
-const NAV_ITEMS = [
-  { label: 'Dashboard', path: '/' },
-  { label: 'Settings', path: '/settings' },
+const navItems: Array<{ label: string; path: string }> = [
+  { label: 'Provision', path: '/' },
+  { label: 'My machines', path: '/vms' },
+  { label: 'Nodes', path: '/nodes' },
 ]
 
-export default function Layout({ children }: LayoutProps) {
-  const location = useLocation()
+export default function Layout({ children, showNav = true }: LayoutProps) {
   const navigate = useNavigate()
   const { user } = useAuth()
 
@@ -26,155 +27,69 @@ export default function Layout({ children }: LayoutProps) {
   }
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <nav
-        style={{
-          background: 'rgba(252, 251, 250, 0.85)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(20, 18, 28, 0.07)',
-          position: 'sticky',
-          top: 0,
-          zIndex: 50,
-        }}
-      >
-        <div
+    <div className="min-h-screen flex flex-col">
+      {showNav && (
+        <nav
+          className="sticky top-0 z-50 border-b border-line"
           style={{
-            maxWidth: 1100,
-            margin: '0 auto',
-            padding: '0 24px',
-            height: 54,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
+            backdropFilter: 'blur(20px) saturate(140%)',
+            WebkitBackdropFilter: 'blur(20px) saturate(140%)',
+            background: 'rgba(255,255,255,0.75)',
           }}
         >
-          <Link to="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div className="brand-mark" />
-            <span
-              style={{
-                fontFamily: 'var(--font-display)',
-                fontSize: 17,
-                fontWeight: 400,
-                color: 'var(--ink)',
-                letterSpacing: '-0.02em',
-              }}
-            >
-              Nimbus
-            </span>
-          </Link>
+          <div className="max-w-[1200px] mx-auto px-8 py-4 flex items-center justify-between">
+            <Link to="/" className="flex items-center gap-2.5 cursor-pointer no-underline">
+              <div className="brand-mark" />
+              <span className="font-display font-semibold text-xl tracking-tight text-ink">
+                Nimbus
+              </span>
+            </Link>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            {NAV_ITEMS.map((item) => {
-              const active = location.pathname === item.path
-              return (
-                <Link
+            <div className="flex gap-1 items-center">
+              {navItems.map((item) => (
+                <NavLink
                   key={item.path}
                   to={item.path}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: 8,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    textDecoration: 'none',
-                    transition: 'background 0.15s, color 0.15s',
-                    background: active ? 'rgba(20,18,28,0.06)' : 'transparent',
-                    color: active ? 'var(--ink)' : 'var(--ink-mute)',
-                  }}
+                  end={item.path === '/'}
+                  className={({ isActive }) =>
+                    `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
+                      isActive
+                        ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+                        : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+                    }`
+                  }
                 >
                   {item.label}
-                </Link>
-              )
-            })}
+                </NavLink>
+              ))}
 
-            <div style={{ width: 1, height: 16, background: 'rgba(20,18,28,0.1)', margin: '0 6px' }} />
+              <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
 
-            {user && (
-              <span
-                style={{
-                  padding: '6px 10px',
-                  fontSize: 13,
-                  color: 'var(--ink-mute)',
-                  fontFamily: 'var(--font-mono)',
-                  letterSpacing: '-0.01em',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
+              {user && (
+                <span className="px-2.5 py-2 text-sm text-ink-2 font-mono flex items-center gap-1.5">
+                  {user.name}
+                  {user.is_admin && (
+                    <span className="text-[10px] font-semibold tracking-wider uppercase font-sans text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded">
+                      admin
+                    </span>
+                  )}
+                </span>
+              )}
+
+              <button
+                onClick={handleSignOut}
+                className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors"
               >
-                {user.name}
-                {user.is_admin && (
-                  <span style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    letterSpacing: '0.05em',
-                    textTransform: 'uppercase',
-                    fontFamily: 'var(--font-sans)',
-                    color: '#9a5c2e',
-                    background: 'rgba(248,175,130,0.15)',
-                    border: '1px solid rgba(248,175,130,0.4)',
-                    padding: '1px 6px',
-                    borderRadius: 4,
-                  }}>
-                    admin
-                  </span>
-                )}
-              </span>
-            )}
-
-            <button
-              onClick={handleSignOut}
-              style={{
-                padding: '6px 12px',
-                borderRadius: 8,
-                fontSize: 13,
-                fontWeight: 500,
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--ink-mute)',
-                cursor: 'pointer',
-                transition: 'background 0.15s, color 0.15s',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'rgba(20,18,28,0.06)'
-                e.currentTarget.style.color = 'var(--ink)'
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent'
-                e.currentTarget.style.color = 'var(--ink-mute)'
-              }}
-            >
-              Sign out
-            </button>
+                Sign out
+              </button>
+            </div>
           </div>
-        </div>
-      </nav>
+        </nav>
+      )}
 
-      <main
-        style={{
-          flex: 1,
-          maxWidth: 1100,
-          margin: '0 auto',
-          width: '100%',
-          padding: '32px 24px',
-        }}
-      >
+      <main className="flex-1 max-w-[1200px] mx-auto w-full px-8 py-12 pb-20 animate-fadeIn">
         {children}
       </main>
-
-      <footer
-        style={{
-          borderTop: '1px solid rgba(20, 18, 28, 0.07)',
-          padding: '14px 24px',
-          textAlign: 'center',
-          fontSize: 11,
-          color: 'var(--ink-mute)',
-          fontFamily: 'var(--font-mono)',
-          letterSpacing: '0.02em',
-        }}
-      >
-        nimbus · self-hosted vm provisioning
-      </footer>
     </div>
   )
 }
