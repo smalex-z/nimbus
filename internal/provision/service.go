@@ -112,6 +112,11 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Only generated keys get a stored name — BYO keys are managed by the user.
+	var keyName string
+	if sshPrivateKey != "" {
+		keyName = "nimbus-" + req.Hostname
+	}
 
 	// Step 1: reserve IP. defer release on any later failure.
 	ip, err := s.pool.Reserve(ctx, req.Hostname)
@@ -233,6 +238,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Username:   username,
 		Status:     "running",
 		OwnerID:    req.OwnerID,
+		KeyName:    keyName,
 		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
@@ -250,6 +256,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Tier:          req.Tier,
 		Node:          target,
 		SSHPrivateKey: sshPrivateKey,
+		KeyName:       keyName,
 		Warning:       warning,
 	}, nil
 }

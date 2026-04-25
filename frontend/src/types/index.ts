@@ -37,6 +37,7 @@ export interface VM {
   username: string
   status: VMStatus
   owner_id?: number | null
+  key_name?: string
   error_msg?: string
 }
 
@@ -57,6 +58,7 @@ export interface ProvisionResult {
   tier: TierName
   node: string
   ssh_private_key?: string
+  key_name?: string
   // Non-empty when the VM was created but reachability couldn't be confirmed
   // (usually Nimbus running outside the cluster LAN). Credentials are valid.
   warning?: string
