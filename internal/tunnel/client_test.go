@@ -13,9 +13,9 @@ import (
 	"nimbus/internal/tunnel"
 )
 
-// newMockGopher spins up an httptest server and returns it plus a Client
-// wired to it. The handler closure inspects requests and produces canned
-// responses per test.
+// newMockGopher spins up an httptest server that mimics Gopher's standard
+// {success, data, error} envelope. The handler closure inspects requests and
+// produces canned responses per test.
 func newMockGopher(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *tunnel.Client) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -25,6 +25,31 @@ func newMockGopher(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *t
 		t.Fatalf("tunnel.New: %v", err)
 	}
 	return srv, c
+}
+
+// writeOK writes Gopher's {"success":true,"data":<v>} envelope.
+func writeOK(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"data":    v,
+	}); err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
+}
+
+// writeErr writes Gopher's {"success":false,"error":msg} envelope at status.
+func writeErr(t *testing.T, w http.ResponseWriter, status int, msg string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"success": false,
+		"error":   msg,
+	}); err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
 }
 
 func TestNew_EmptyBaseURL_ReturnsNil(t *testing.T) {
@@ -68,8 +93,7 @@ func TestCreate_HappyPath_SendsBearerAndReturnsTunnel(t *testing.T) {
 		capturedMethod = r.Method
 		body, _ := io.ReadAll(r.Body)
 		capturedBody = string(body)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tunnel.Tunnel{
+		writeOK(t, w, tunnel.Tunnel{
 			ID:           "t-123",
 			Subdomain:    "my-app",
 			Status:       tunnel.StatusPending,
@@ -77,7 +101,7 @@ func TestCreate_HappyPath_SendsBearerAndReturnsTunnel(t *testing.T) {
 		})
 	})
 	got, err := c.Create(context.Background(), tunnel.CreateRequest{
-		Subdomain: "my-app", TargetIP: "10.0.0.42", TargetPort: 22,
+		Subdomain: "my-app", TargetIP: "10.0.0.42", TargetPort: 80,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -91,10 +115,9 @@ func TestCreate_HappyPath_SendsBearerAndReturnsTunnel(t *testing.T) {
 	if capturedMethod != http.MethodPost || capturedPath != "/api/v1/tunnels" {
 		t.Errorf("%s %s", capturedMethod, capturedPath)
 	}
-	// Body must contain the form fields as JSON.
 	if !contains(capturedBody, `"subdomain":"my-app"`) ||
 		!contains(capturedBody, `"target_ip":"10.0.0.42"`) ||
-		!contains(capturedBody, `"target_port":22`) {
+		!contains(capturedBody, `"target_port":80`) {
 		t.Errorf("request body = %s", capturedBody)
 	}
 }
@@ -102,28 +125,29 @@ func TestCreate_HappyPath_SendsBearerAndReturnsTunnel(t *testing.T) {
 func TestCreate_409_ReturnsErrSubdomainTaken(t *testing.T) {
 	t.Parallel()
 	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"subdomain in use"}`))
+		writeErr(t, w, http.StatusConflict, "subdomain in use")
 	})
 	_, err := c.Create(context.Background(), tunnel.CreateRequest{
-		Subdomain: "taken", TargetIP: "10.0.0.42", TargetPort: 22,
+		Subdomain: "taken", TargetIP: "10.0.0.42", TargetPort: 80,
 	})
 	if !errors.Is(err, tunnel.ErrSubdomainTaken) {
 		t.Errorf("err = %v, want ErrSubdomainTaken", err)
 	}
 }
 
-func TestCreate_500_ReturnsHTTPError(t *testing.T) {
+func TestCreate_500_SurfacesEnvelopeError(t *testing.T) {
 	t.Parallel()
 	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`oh no`))
+		writeErr(t, w, http.StatusInternalServerError, "database unreachable")
 	})
 	_, err := c.Create(context.Background(), tunnel.CreateRequest{
-		Subdomain: "x", TargetIP: "10.0.0.42", TargetPort: 22,
+		Subdomain: "x", TargetIP: "10.0.0.42", TargetPort: 80,
 	})
 	if err == nil || errors.Is(err, tunnel.ErrSubdomainTaken) {
 		t.Errorf("err = %v, want generic non-2xx", err)
+	}
+	if msg := err.Error(); !contains(msg, "database unreachable") {
+		t.Errorf("error should surface envelope message, got %q", msg)
 	}
 }
 
@@ -132,8 +156,7 @@ func TestGet_ReturnsTunnel(t *testing.T) {
 	var capturedPath string
 	_, c := newMockGopher(t, func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tunnel.Tunnel{
+		writeOK(t, w, tunnel.Tunnel{
 			ID: "t-123", Subdomain: "my-app", Status: tunnel.StatusActive,
 			URL: "https://my-app.example.com",
 		})
@@ -150,10 +173,24 @@ func TestGet_ReturnsTunnel(t *testing.T) {
 	}
 }
 
+func TestGet_404_ReturnsError(t *testing.T) {
+	t.Parallel()
+	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(t, w, http.StatusNotFound, "tunnel not found")
+	})
+	_, err := c.Get(context.Background(), "missing")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+	if !contains(err.Error(), "tunnel not found") {
+		t.Errorf("error should surface envelope message, got %q", err.Error())
+	}
+}
+
 func TestDelete_404_IsIdempotent(t *testing.T) {
 	t.Parallel()
 	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		writeErr(t, w, http.StatusNotFound, "tunnel not found")
 	})
 	if err := c.Delete(context.Background(), "missing"); err != nil {
 		t.Errorf("Delete on missing tunnel = %v, want nil", err)
@@ -166,7 +203,7 @@ func TestDelete_2xx_OK(t *testing.T) {
 	_, c := newMockGopher(t, func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
-		w.WriteHeader(http.StatusNoContent)
+		writeOK(t, w, nil) // success envelope with empty data
 	})
 	if err := c.Delete(context.Background(), "t-1"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -176,13 +213,18 @@ func TestDelete_2xx_OK(t *testing.T) {
 	}
 }
 
-func TestList_ReturnsTunnels(t *testing.T) {
+func TestList_UnwrapsPaginatedItems(t *testing.T) {
 	t.Parallel()
 	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]tunnel.Tunnel{
-			{ID: "a", Subdomain: "one", Status: tunnel.StatusActive},
-			{ID: "b", Subdomain: "two", Status: tunnel.StatusPending},
+		// Mirrors Gopher's actual shape: data.items + pagination metadata.
+		writeOK(t, w, map[string]any{
+			"items": []tunnel.Tunnel{
+				{ID: "a", Subdomain: "one", Status: tunnel.StatusActive},
+				{ID: "b", Subdomain: "two", Status: tunnel.StatusPending},
+			},
+			"limit":  50,
+			"offset": 0,
+			"total":  2,
 		})
 	})
 	got, err := c.List(context.Background())
@@ -191,6 +233,23 @@ func TestList_ReturnsTunnels(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
+	}
+}
+
+func TestList_EmptyItems(t *testing.T) {
+	t.Parallel()
+	_, c := newMockGopher(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeOK(t, w, map[string]any{
+			"items": []tunnel.Tunnel{},
+			"limit": 50, "offset": 0, "total": 0,
+		})
+	})
+	got, err := c.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty list, got %d items", len(got))
 	}
 }
 

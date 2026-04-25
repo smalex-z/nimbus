@@ -137,13 +137,15 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 }
 
 // List returns every tunnel known to Gopher. Admin-scoped — non-admin tokens
-// may receive a filtered list.
+// may receive a filtered list. Gopher paginates server-side; for now we
+// surface the first page (default limit) which is sufficient for any
+// realistic admin view today. Add cursoring if/when it bites.
 func (c *Client) List(ctx context.Context) ([]Tunnel, error) {
-	var out []Tunnel
-	if err := c.do(ctx, http.MethodGet, "/api/v1/tunnels", nil, &out); err != nil {
+	var page paginatedTunnels
+	if err := c.do(ctx, http.MethodGet, "/api/v1/tunnels", nil, &page); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return page.Items, nil
 }
 
 // httpError carries a non-2xx response so callers can branch on status code.
@@ -156,8 +158,25 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("tunnel: gopher returned HTTP %d: %s", e.Status, e.Body)
 }
 
+// envelope is Gopher's standard {success, data, error} JSON wrapper. Every
+// response carries it, including 4xx/5xx errors.
+type envelope struct {
+	Success bool            `json:"success"`
+	Data    json.RawMessage `json:"data"`
+	Error   string          `json:"error,omitempty"`
+}
+
+// paginatedTunnels mirrors Gopher's {items, limit, offset, total} list shape.
+type paginatedTunnels struct {
+	Items  []Tunnel `json:"items"`
+	Limit  int      `json:"limit,omitempty"`
+	Offset int      `json:"offset,omitempty"`
+	Total  int      `json:"total,omitempty"`
+}
+
 // do is the shared request body. body and out are optional; pass nil to skip
-// either side. Non-2xx responses are returned as *httpError.
+// either side. Decodes Gopher's {success,data,error} envelope on every
+// response and surfaces server-supplied messages on failure.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -172,6 +191,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("tunnel: new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -181,17 +201,35 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// Try to decode the envelope. Gopher uses it consistently, but if a
+	// proxy/middleware in front returns a non-JSON 5xx page we still want a
+	// useful error.
+	var env envelope
+	if len(respBody) > 0 {
+		_ = json.Unmarshal(respBody, &env)
+	}
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if out == nil || len(respBody) == 0 {
+		if !env.Success && env.Error != "" {
+			return fmt.Errorf("tunnel: %s %s: %s", method, path, env.Error)
+		}
+		if out == nil || len(env.Data) == 0 {
 			return nil
 		}
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("tunnel: decode %s %s: %w", method, path, err)
+		if err := json.Unmarshal(env.Data, out); err != nil {
+			return fmt.Errorf("tunnel: decode data for %s %s: %w (body=%s)",
+				method, path, err, strings.TrimSpace(string(respBody)))
 		}
 		return nil
 	}
+
 	if resp.StatusCode == http.StatusConflict {
 		return ErrSubdomainTaken
 	}
-	return &httpError{Status: resp.StatusCode, Body: strings.TrimSpace(string(respBody))}
+	body409 := env.Error
+	if body409 == "" {
+		body409 = strings.TrimSpace(string(respBody))
+	}
+	return &httpError{Status: resp.StatusCode, Body: body409}
 }

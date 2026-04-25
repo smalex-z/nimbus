@@ -206,6 +206,7 @@ func main() {
 		Pool:       pool,
 		Reconciler: reconciler,
 		Proxmox:    pveClient,
+		Tunnels:    tunnelClient,
 		Config:     cfg,
 		Restart:    restartSelf,
 	})

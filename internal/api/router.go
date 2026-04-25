@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 // Deps bundles the dependencies the router needs.
@@ -27,6 +28,7 @@ type Deps struct {
 	Pool       *ippool.Pool
 	Reconciler *ippool.Reconciler
 	Proxmox    *proxmox.Client
+	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
 	Config     *config.Config
 	Restart    func()
 }
@@ -51,6 +53,7 @@ func NewRouter(d Deps) http.Handler {
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
 	settings := handlers.NewSettings(d.Auth)
+	tunnels := handlers.NewTunnels(d.Tunnels)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -115,6 +118,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Use(requireAdmin)
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
+				r.Get("/tunnels", tunnels.List)
 			})
 		})
 	})

@@ -36,6 +36,7 @@ type createVMRequest struct {
 	GenerateKey  bool   `json:"generate_key,omitempty"`
 	PublicTunnel bool   `json:"public_tunnel,omitempty"`
 	Subdomain    string `json:"subdomain,omitempty"`
+	TunnelPort   int    `json:"tunnel_port,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -60,6 +61,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		GenerateKey:  req.GenerateKey,
 		PublicTunnel: req.PublicTunnel,
 		Subdomain:    req.Subdomain,
+		TunnelPort:   req.TunnelPort,
 	})
 	if err != nil {
 		response.FromError(w, err)
@@ -158,6 +160,12 @@ func validateCreate(req createVMRequest) error {
 		return &internalerrors.ValidationError{
 			Field:   "ssh",
 			Message: "specify at most one of ssh_key_id, ssh_pubkey, or generate_key",
+		}
+	}
+	if req.PublicTunnel && (req.TunnelPort < 0 || req.TunnelPort > 65535) {
+		return &internalerrors.ValidationError{
+			Field:   "tunnel_port",
+			Message: "must be 1–65535 (omit or 0 for default 80)",
 		}
 	}
 	return nil

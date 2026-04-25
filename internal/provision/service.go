@@ -225,10 +225,14 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		tunnelError string
 	)
 	if req.PublicTunnel && s.tunnels != nil {
+		port := req.TunnelPort
+		if port == 0 {
+			port = 80
+		}
 		t, terr := s.tunnels.Create(ctx, tunnel.CreateRequest{
 			Subdomain:  req.Subdomain,
 			TargetIP:   ip,
-			TargetPort: 80,
+			TargetPort: port,
 		})
 		switch {
 		case errors.Is(terr, tunnel.ErrSubdomainTaken):

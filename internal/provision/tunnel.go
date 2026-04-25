@@ -14,10 +14,19 @@ import (
 	"nimbus/internal/tunnel"
 )
 
-// tunnelBootstrapSSHTimeout caps the entire SSH-and-run-script step. The
+// tunnelBootstrapSSHTimeout caps each SSH dial+handshake+exec attempt. The
 // `curl … | sh` is fast (rathole binary download + start), but we don't want
 // to sit forever on a hung connection.
 const tunnelBootstrapSSHTimeout = 30 * time.Second
+
+// tunnelBootstrapMaxAttempts caps how many times we'll retry the connect.
+// WaitForIP confirms the agent reports an IP; sshd may still be a couple of
+// seconds behind, so a small retry budget catches the common race without
+// stretching provisioning.
+const (
+	tunnelBootstrapMaxAttempts = 3
+	tunnelBootstrapRetryDelay  = 5 * time.Second
+)
 
 // tunnelActiveTimeout / tunnelPollInterval pace the post-bootstrap status poll.
 // Design §10.1 specifies 60 s / 3 s.
@@ -52,9 +61,9 @@ func (s *Service) privateKeyForBootstrap(ctx context.Context, key *db.SSHKey, ju
 }
 
 // runTunnelBootstrap dials the VM, executes `curl <bootstrap_url> | sh`, and
-// returns nil on success. host:port defaults to ip:22. The remote command
-// runs synchronously — return only after the bootstrap script finishes (or
-// errors).
+// returns nil on success. The dial+handshake is retried — sshd may not be
+// listening immediately after WaitForIP returns. The remote command itself
+// is NOT retried; a failure there is a real script error, not a race.
 func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL string) error {
 	if bootstrapURL == "" {
 		return errors.New("empty bootstrap URL")
@@ -73,38 +82,60 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL 
 		Timeout:         tunnelBootstrapSSHTimeout,
 	}
 
+	var lastErr error
+	for attempt := 1; attempt <= tunnelBootstrapMaxAttempts; attempt++ {
+		client, err := dialSSH(ctx, ip, cfg)
+		if err != nil {
+			lastErr = err
+			if attempt == tunnelBootstrapMaxAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(tunnelBootstrapRetryDelay):
+			}
+			continue
+		}
+		defer client.Close() //nolint:errcheck
+
+		session, err := client.NewSession()
+		if err != nil {
+			return fmt.Errorf("new session: %w", err)
+		}
+		defer session.Close() //nolint:errcheck
+
+		// Single-quote the URL so the shell doesn't interpret special
+		// characters from Gopher's bootstrap path (tokens, query strings).
+		cmd := fmt.Sprintf("curl -fsSL '%s' | sh", strings.ReplaceAll(bootstrapURL, "'", "'\\''"))
+		out, runErr := session.CombinedOutput(cmd)
+		if runErr != nil {
+			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	return fmt.Errorf("ssh connect failed after %d attempts: %w", tunnelBootstrapMaxAttempts, lastErr)
+}
+
+// dialSSH opens a single SSH session to ip:22 with the supplied config,
+// honoring ctx cancellation. Returns a usable *ssh.Client; caller must Close.
+func dialSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapSSHTimeout)
 	defer cancel()
 
 	dialer := &net.Dialer{Timeout: tunnelBootstrapSSHTimeout}
 	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(ip, "22"))
 	if err != nil {
-		return fmt.Errorf("dial %s:22: %w", ip, err)
+		return nil, fmt.Errorf("dial %s:22: %w", ip, err)
 	}
-	defer conn.Close() //nolint:errcheck
 	_ = conn.SetDeadline(time.Now().Add(tunnelBootstrapSSHTimeout))
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(ip, "22"), cfg)
 	if err != nil {
-		return fmt.Errorf("ssh handshake: %w", err)
+		_ = conn.Close()
+		return nil, fmt.Errorf("ssh handshake: %w", err)
 	}
-	client := ssh.NewClient(clientConn, chans, reqs)
-	defer client.Close() //nolint:errcheck
-
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("new session: %w", err)
-	}
-	defer session.Close() //nolint:errcheck
-
-	// Single-quote the URL so the shell doesn't interpret special characters
-	// from Gopher's bootstrap path (tokens, query strings).
-	cmd := fmt.Sprintf("curl -fsSL '%s' | sh", strings.ReplaceAll(bootstrapURL, "'", "'\\''"))
-	out, err := session.CombinedOutput(cmd)
-	if err != nil {
-		return fmt.Errorf("bootstrap command failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
 // waitTunnelActive polls Gopher until the tunnel is active or the budget is
