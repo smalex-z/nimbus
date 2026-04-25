@@ -1,11 +1,15 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,26 +154,33 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 }
 
 type discoverResult struct {
-	IsHypervisor bool     `json:"is_hypervisor"`
-	Endpoints    []string `json:"endpoints"`
+	IsHypervisor     bool     `json:"is_hypervisor"`
+	Endpoints        []string `json:"endpoints"`
+	SuggestedGateway string   `json:"suggested_gateway,omitempty"`
 }
 
 // Discover handles GET /api/setup/discover.
-// It checks whether we're running on a Proxmox host and scans the local
-// subnet for any hosts with port 8006 open, so the wizard can pre-fill
-// or suggest the API URL without the user having to know it.
+// It checks whether we're running on a Proxmox host and scans all local
+// subnets for hosts with port 8006 open, so the wizard can suggest the URL.
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	result := discoverResult{Endpoints: []string{}}
 
-	// Running directly on a Proxmox node — localhost always works.
+	// Running directly on a Proxmox node — seed the list with this node's
+	// own IPs (avoids a localhost entry that duplicates the scanned result).
 	if _, err := os.Stat("/etc/pve"); err == nil {
 		result.IsHypervisor = true
-		result.Endpoints = append(result.Endpoints, "https://localhost:8006")
+		result.SuggestedGateway = defaultGateway()
+		for _, ip := range localIPv4s() {
+			url := "https://" + ip + ":8006"
+			if !containsStr(result.Endpoints, url) {
+				result.Endpoints = append(result.Endpoints, url)
+			}
+		}
 	}
 
-	// Scan the local subnet for anything with 8006 open.
-	// Use a 4-second budget so the wizard feels responsive.
-	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+	// Scan all local subnets for anything with 8006 open.
+	// Use a 6-second budget to give multi-subnet clusters time to respond.
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 
 	for _, ip := range scanPort8006(ctx) {
@@ -182,17 +193,24 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, result)
 }
 
-// scanPort8006 returns the IPs in the local subnet that have TCP 8006 open.
+// scanPort8006 returns the IPs across all local subnets that have TCP 8006 open.
 func scanPort8006(ctx context.Context) []string {
-	subnet := localSubnet()
-	if subnet == nil {
+	seen := map[string]bool{}
+	var allHosts []string
+	for _, subnet := range localSubnets() {
+		for _, h := range subnetHosts(subnet) {
+			if !seen[h] {
+				seen[h] = true
+				allHosts = append(allHosts, h)
+			}
+		}
+	}
+	if len(allHosts) == 0 {
 		return nil
 	}
-
-	hosts := subnetHosts(subnet)
-	// Cap to avoid unreasonably long scans on large subnets.
-	if len(hosts) > 512 {
-		hosts = hosts[:512]
+	// Cap to avoid unreasonably long scans on very large subnets.
+	if len(allHosts) > 1024 {
+		allHosts = allHosts[:1024]
 	}
 
 	var (
@@ -203,18 +221,19 @@ func scanPort8006(ctx context.Context) []string {
 	)
 
 	dialer := &net.Dialer{}
-	for _, ip := range hosts {
+outer:
+	for _, ip := range allHosts {
 		ip := ip
 		select {
 		case <-ctx.Done():
-			break
+			break outer
 		case sem <- struct{}{}:
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			dialCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+			dialCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
 			defer cancel()
 			conn, err := dialer.DialContext(dialCtx, "tcp", ip+":8006")
 			if err == nil {
@@ -229,12 +248,13 @@ func scanPort8006(ctx context.Context) []string {
 	return found
 }
 
-// localSubnet returns the IPv4 subnet of the first non-loopback interface.
-func localSubnet() *net.IPNet {
+// localIPv4s returns all non-loopback IPv4 addresses on this host.
+func localIPv4s() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
+	var ips []string
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -242,11 +262,32 @@ func localSubnet() *net.IPNet {
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
 			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-				return ipNet
+				ips = append(ips, ipNet.IP.String())
 			}
 		}
 	}
-	return nil
+	return ips
+}
+
+// localSubnets returns the IPv4 subnets of all non-loopback interfaces.
+func localSubnets() []*net.IPNet {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var subnets []*net.IPNet
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+				subnets = append(subnets, ipNet)
+			}
+		}
+	}
+	return subnets
 }
 
 // subnetHosts returns all host addresses in subnet (excludes network and broadcast).
@@ -273,6 +314,42 @@ func subnetHosts(subnet *net.IPNet) []string {
 		}
 	}
 	return hosts
+}
+
+// defaultGateway reads the default route from /proc/net/route.
+// The gateway field is a little-endian hex IPv4 address.
+func defaultGateway() string {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck
+
+	scanner := bufio.NewScanner(f)
+	scanner.Scan() // skip header line
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		if fields[1] != "00000000" { // destination 0.0.0.0 = default route
+			continue
+		}
+		gwHex := fields[2]
+		if len(gwHex) != 8 {
+			continue
+		}
+		b := make([]byte, 4)
+		for i := range 4 {
+			v, err := strconv.ParseUint(gwHex[i*2:i*2+2], 16, 8)
+			if err != nil {
+				return ""
+			}
+			b[3-i] = byte(v) // little-endian → network order
+		}
+		return fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3])
+	}
+	return ""
 }
 
 func containsStr(ss []string, s string) bool {

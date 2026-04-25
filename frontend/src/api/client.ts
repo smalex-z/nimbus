@@ -73,6 +73,7 @@ export async function provisionVM(req: ProvisionRequest): Promise<ProvisionResul
 export interface DiscoverResult {
   is_hypervisor: boolean
   endpoints: string[]
+  suggested_gateway?: string
 }
 
 export async function discoverProxmox(): Promise<DiscoverResult> {

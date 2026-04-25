@@ -32,7 +32,7 @@ interface NetworkFields {
 export default function Setup() {
   const [step, setStep] = useState<Step>('proxmox')
   const [proxmox, setProxmox] = useState<ProxmoxFields>({
-    host: 'https://localhost:8006',
+    host: '',
     tokenId: 'root@pam!nimbus',
     tokenSecret: '',
   })
@@ -44,11 +44,38 @@ export default function Setup() {
     searchDomain: '',
     port: '',
   })
+  const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
+  const [discovering, setDiscovering] = useState(true)
+  const [hostAutofilled, setHostAutofilled] = useState(false)
+  const [gatewayAutofilled, setGatewayAutofilled] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testOk, setTestOk] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  useEffect(() => {
+    discoverProxmox()
+      .then((d) => {
+        setDiscovery(d)
+        if (d.is_hypervisor && d.endpoints.length > 0) {
+          setProxmox((p) => {
+            if (p.host) return p
+            setHostAutofilled(true)
+            return { ...p, host: d.endpoints[0] }
+          })
+        }
+        if (d.suggested_gateway) {
+          setNetwork((n) => {
+            if (n.gatewayIp) return n
+            setGatewayAutofilled(true)
+            return { ...n, gatewayIp: d.suggested_gateway! }
+          })
+        }
+      })
+      .catch(() => setDiscovery({ is_hypervisor: false, endpoints: [] }))
+      .finally(() => setDiscovering(false))
+  }, [])
 
   const updateProxmox = (key: keyof ProxmoxFields, value: string) => {
     setProxmox((p) => ({ ...p, [key]: value }))
@@ -185,13 +212,21 @@ export default function Setup() {
             testing={testing}
             testOk={testOk}
             testError={testError}
+            discovery={discovery}
+            discovering={discovering}
+            hostAutofilled={hostAutofilled}
+            onDismissHostHint={() => setHostAutofilled(false)}
             onNext={() => setStep('network')}
           />
         )}
         {step === 'network' && (
           <NetworkStep
             fields={network}
-            onChange={(key, val) => setNetwork((n) => ({ ...n, [key]: val }))}
+            onChange={(key, val) => {
+              if (key === 'gatewayIp') setGatewayAutofilled(false)
+              setNetwork((n) => ({ ...n, [key]: val }))
+            }}
+            gatewayAutofilled={gatewayAutofilled}
             onBack={() => setStep('proxmox')}
             onNext={() => setStep('review')}
           />
@@ -220,21 +255,16 @@ interface ProxmoxStepProps {
   testing: boolean
   testOk: string | null
   testError: string | null
+  discovery: DiscoverResult | null
+  discovering: boolean
+  hostAutofilled: boolean
+  onDismissHostHint: () => void
   onNext: () => void
 }
 
-function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, onNext }: ProxmoxStepProps) {
+function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, discovery, discovering, hostAutofilled, onDismissHostHint, onNext }: ProxmoxStepProps) {
   const canNext = !!fields.host && !!fields.tokenId && !!fields.tokenSecret && !!testOk
-  const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
-  const [discovering, setDiscovering] = useState(true)
   const [guideOpen, setGuideOpen] = useState(false)
-
-  useEffect(() => {
-    discoverProxmox()
-      .then(setDiscovery)
-      .catch(() => setDiscovery({ is_hypervisor: false, endpoints: [] }))
-      .finally(() => setDiscovering(false))
-  }, [])
 
   return (
     <div>
@@ -245,65 +275,46 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, onN
         cluster node — Nimbus discovers the rest automatically.
       </p>
 
-      {/* Discovery banner */}
-      <div className="mb-5">
-        {discovering ? (
-          <div className="flex items-center gap-2 text-sm text-ink-3 py-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-ink-3 animate-pulse inline-block" />
-            Scanning local network for Proxmox nodes…
-          </div>
-        ) : discovery && discovery.is_hypervisor ? (
-          <div className="flex items-start gap-3 p-3.5 rounded-[10px] bg-[rgba(45,125,90,0.07)] border border-[rgba(45,125,90,0.2)] text-sm">
-            <span className="text-good mt-0.5">✓</span>
-            <div>
-              <span className="font-medium text-good">Running on a Proxmox host.</span>
-              <span className="text-ink-2">
-                {' '}
-                <code className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
-                  https://localhost:8006
-                </code>{' '}
-                is pre-filled — you can use it as-is.
-              </span>
-            </div>
-          </div>
-        ) : discovery && discovery.endpoints.length > 0 ? (
-          <div className="p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2 text-sm">
-            <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">
-              Detected on this network
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {discovery.endpoints.map((ep) => (
-                <button
-                  key={ep}
-                  onClick={() => onChange('host', ep)}
-                  className={`font-mono text-xs px-3 py-1.5 rounded-[8px] border transition-colors cursor-pointer ${
-                    fields.host === ep
-                      ? 'bg-ink text-white border-ink'
-                      : 'bg-white border-line-2 text-ink hover:border-ink-3'
-                  }`}
-                >
-                  {ep}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-start gap-3 p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2 text-sm text-ink-2">
-            <span className="text-ink-3 mt-0.5">○</span>
-            No Proxmox nodes found on this network. Enter the cluster URL manually — it
-            may be on a different subnet or reachable via a public endpoint.
-          </div>
-        )}
-      </div>
-
       <Card className="p-8 flex flex-col gap-5">
         <Input
           label="Proxmox API URL"
+          labelAddon={
+            hostAutofilled ? (
+              <AutofillBadge message="API URL auto-detected — this machine is a Proxmox node. Verify it looks correct before continuing." />
+            ) : undefined
+          }
           placeholder="https://192.168.0.1:8006"
           value={fields.host}
-          onChange={(e) => onChange('host', e.target.value)}
-          hint="Any node in your cluster — include https:// and port 8006. Nimbus discovers the rest of the cluster from here. Self-signed TLS certs are accepted."
+          onChange={(e) => {
+            onDismissHostHint()
+            onChange('host', e.target.value)
+          }}
+          hint="Any node in your cluster — include https:// and port 8006. Self-signed TLS certs are accepted."
         />
+        {/* Detected endpoints — subtle inline suggestion */}
+        {discovering ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-ink-3 -mt-2">
+            <span className="w-1 h-1 rounded-full bg-ink-3 animate-pulse inline-block" />
+            Scanning for PVE nodes…
+          </div>
+        ) : discovery && discovery.endpoints.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5 -mt-2">
+            <span className="text-[11px] text-ink-3 font-mono">detected:</span>
+            {discovery.endpoints.map((ep) => (
+              <button
+                key={ep}
+                onClick={() => onChange('host', ep)}
+                className={`font-mono text-[11px] px-2 py-0.5 rounded-[5px] border transition-colors cursor-pointer ${
+                  fields.host === ep
+                    ? 'bg-ink text-white border-ink'
+                    : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
+                }`}
+              >
+                {ep}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <Input
           label="Token ID"
           placeholder="root@pam!nimbus"
@@ -420,6 +431,20 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, onN
   )
 }
 
+function AutofillBadge({ message }: { message: string }) {
+  return (
+    <span className="relative group inline-flex items-center">
+      <span className="inline-flex items-center gap-1 text-[10px] font-mono font-medium text-[#2563EB] bg-[rgba(59,130,246,0.08)] border border-[rgba(59,130,246,0.18)] px-1.5 py-0.5 rounded-full cursor-default select-none leading-none">
+        ↳ auto-filled
+      </span>
+      <span className="pointer-events-none absolute bottom-full left-0 mb-2 w-64 px-3 py-2.5 rounded-[8px] bg-[#1b1726] text-white text-[11px] leading-relaxed opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-20 shadow-lg">
+        {message}
+        <span className="absolute top-full left-4 block w-2 h-2 bg-[#1b1726] rotate-45 -mt-1" />
+      </span>
+    </span>
+  )
+}
+
 function GuideStep({
   n,
   children,
@@ -450,11 +475,12 @@ function GuideStep({
 interface NetworkStepProps {
   fields: NetworkFields
   onChange: (key: keyof NetworkFields, value: string) => void
+  gatewayAutofilled: boolean
   onBack: () => void
   onNext: () => void
 }
 
-function NetworkStep({ fields, onChange, onBack, onNext }: NetworkStepProps) {
+function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: NetworkStepProps) {
   const canNext = !!fields.ipPoolStart && !!fields.ipPoolEnd && !!fields.gatewayIp
   const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
   return (
@@ -493,6 +519,11 @@ function NetworkStep({ fields, onChange, onBack, onNext }: NetworkStepProps) {
         </div>
         <Input
           label="Gateway IP *"
+          labelAddon={
+            gatewayAutofilled ? (
+              <AutofillBadge message="Gateway auto-detected from this host's default route. Verify it matches your LAN router before continuing." />
+            ) : undefined
+          }
           placeholder="192.168.0.1"
           value={fields.gatewayIp}
           onChange={(e) => onChange('gatewayIp', e.target.value)}

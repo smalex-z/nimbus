@@ -185,6 +185,6 @@ func primaryIP() string {
 	if err != nil {
 		return "localhost"
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
