@@ -79,7 +79,7 @@ export default function SignIn() {
               <span style={{ flex: 1 }}>Continue with GitHub</span>
               <ArrowRightIcon size={14} />
             </button>
-            <button className="n-provider" type="button">
+            <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/google' }}>
               <GoogleIcon size={18} />
               <span style={{ flex: 1 }}>Continue with Google</span>
               <ArrowRightIcon size={14} />

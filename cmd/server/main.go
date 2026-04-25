@@ -62,7 +62,17 @@ func main() {
 		log.Printf("GitHub OAuth enabled")
 	}
 
-	router := api.NewRouter(svc, authSvc, github)
+	var google oauth.Provider
+	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
+		google = &oauth.Google{
+			ClientID:     cfg.GoogleClientID,
+			ClientSecret: cfg.GoogleClientSecret,
+			RedirectURI:  cfg.AppURL + "/api/auth/google/callback",
+		}
+		log.Printf("Google OAuth enabled")
+	}
+
+	router := api.NewRouter(svc, authSvc, github, google)
 
 	distFS, err := fs.Sub(frontendFS, "frontend/dist")
 	if err != nil {
