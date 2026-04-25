@@ -1008,11 +1008,13 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 	tc, _ := newGopherStub(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
+			// Match Gopher's real envelope shape so tunnel.Client decodes ok.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"t-soft","subdomain":"soft","status":"pending","bootstrap_url":"https://gopher.example.com/bootstrap/abc"}`))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"t-soft","subdomain":"soft","status":"pending","bootstrap_url":"https://gopher.example.com/bootstrap/abc"}}`))
 		case http.MethodDelete:
 			seenDelete.Store(true)
-			w.WriteHeader(http.StatusNoContent)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":null}`))
 		default:
 			t.Errorf("unexpected method %s", r.Method)
 			w.WriteHeader(http.StatusBadRequest)

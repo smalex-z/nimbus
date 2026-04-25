@@ -34,6 +34,12 @@ function isValidSubdomain(s: string): boolean {
   return SUBDOMAIN_RE.test(s.trim())
 }
 
+function isValidPort(s: string): boolean {
+  if (s.trim() === '') return false
+  const n = Number(s)
+  return Number.isInteger(n) && n >= 1 && n <= 65535
+}
+
 const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 interface FormState {
@@ -46,6 +52,7 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   subdomain: string
+  tunnelPort: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -58,6 +65,7 @@ const DEFAULT_FORM: FormState = {
   privKey: '',
   publicTunnel: false,
   subdomain: '',
+  tunnelPort: '80',
 }
 
 export default function Provision() {
@@ -130,7 +138,10 @@ export default function Provision() {
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
     if (form.keyMode === 'saved' && form.savedKeyId === null) return false
-    if (form.publicTunnel && !isValidSubdomain(form.subdomain)) return false
+    if (form.publicTunnel) {
+      if (!isValidSubdomain(form.subdomain)) return false
+      if (!isValidPort(form.tunnelPort)) return false
+    }
     return true
   }, [form])
 
@@ -164,6 +175,10 @@ export default function Provision() {
         subdomain:
           form.publicTunnel && form.subdomain.trim()
             ? form.subdomain.trim()
+            : undefined,
+        tunnel_port:
+          form.publicTunnel && isValidPort(form.tunnelPort)
+            ? Number(form.tunnelPort)
             : undefined,
       })
       setResult(res)
@@ -535,7 +550,7 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
           </div>
         </label>
         {form.publicTunnel && (
-          <div className="mt-2">
+          <div className="mt-2 grid grid-cols-1 sm:grid-cols-[1fr_120px] gap-3">
             <Input
               label="Subdomain"
               placeholder="my-project"
@@ -546,7 +561,20 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
                   ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
                   : undefined
               }
-              hint="Lowercase letters, digits, hyphens. The full URL is shown after provisioning."
+              hint="The full URL is shown after provisioning."
+            />
+            <Input
+              label="In-VM port"
+              placeholder="80"
+              inputMode="numeric"
+              value={form.tunnelPort}
+              onChange={(e) => updateForm('tunnelPort', e.target.value.replace(/[^0-9]/g, ''))}
+              error={
+                form.tunnelPort && !isValidPort(form.tunnelPort)
+                  ? '1–65535'
+                  : undefined
+              }
+              hint="Default 80."
             />
           </div>
         )}
@@ -566,7 +594,8 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
   const tunnelLabel = (() => {
     if (!form.publicTunnel) return 'no'
     if (!isValidSubdomain(form.subdomain)) return '—'
-    return `${form.subdomain}.…`
+    const port = isValidPort(form.tunnelPort) ? form.tunnelPort : '80'
+    return `${form.subdomain}.… → :${port}`
   })()
   const sshLabel = (() => {
     if (form.keyMode === 'gen') return 'generate (vaulted)'

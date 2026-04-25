@@ -23,9 +23,11 @@ type Request struct {
 
 	// PublicTunnel asks Nimbus to register a Gopher tunnel for the new VM and
 	// expose it at Subdomain.<gopher-zone>. Silently ignored when GOPHER_API_URL
-	// is unset.
+	// is unset. TunnelPort is the in-VM target port Gopher should forward to;
+	// 0 → 80 (the typical HTTP service port — Gopher does TLS termination).
 	PublicTunnel bool
 	Subdomain    string
+	TunnelPort   int
 }
 
 // Result is the value returned to the user after a successful provision.
