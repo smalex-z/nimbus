@@ -27,6 +27,8 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
+	"nimbus/internal/sshkeys"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -80,6 +82,11 @@ type Config struct {
 	GatewayIP        string
 	Nameserver       string
 	SearchDomain     string
+	// CPUType is the Proxmox CPU model applied to each clone. Empty leaves
+	// whatever the template set, which on default Proxmox installs is the
+	// AVX-less kvm64/x86-64-v2-AES — see config.VMCPUType for the default
+	// and why x86-64-v3 is the right baseline.
+	CPUType string
 
 	// IPReadyTimeout caps the agent/TCP polling loop. 0 means use the default
 	// (120s, per design doc).
@@ -101,6 +108,8 @@ type Service struct {
 	pool     *ippool.Pool
 	verifier IPVerifier
 	db       *gorm.DB
+	cipher   *secrets.Cipher // encrypts SSH private keys at rest
+	keys     *sshkeys.Service
 	cfg      Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
@@ -112,14 +121,22 @@ type Service struct {
 // reports IPs as free; production wiring should call SetIPVerifier with a
 // real *ippool.Reconciler so concurrent provisions across multiple Nimbus
 // instances catch each other's reservations before the clone step.
-func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cfg Config) *Service {
+func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, keys *sshkeys.Service, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
 		cfg.IPReadyTimeout = 120 * time.Second
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
-	return &Service{px: px, pool: pool, verifier: noopVerifier{}, db: database, cfg: cfg}
+	return &Service{
+		px:       px,
+		pool:     pool,
+		verifier: noopVerifier{},
+		db:       database,
+		cipher:   cipher,
+		keys:     keys,
+		cfg:      cfg,
+	}
 }
 
 // SetIPVerifier installs (or replaces) the IP verifier used after each Reserve
@@ -143,17 +160,19 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, &internalerrors.ValidationError{Field: "tier", Message: fmt.Sprintf("unknown tier %q", req.Tier)}
 	}
 
-	templateOffset, ok := proxmox.TemplateOffsets[req.OSTemplate]
-	if !ok {
+	if _, ok := proxmox.TemplateOffsets[req.OSTemplate]; !ok {
 		return nil, &internalerrors.ValidationError{Field: "os_template", Message: fmt.Sprintf("unknown os_template %q", req.OSTemplate)}
 	}
-	templateVMID := s.cfg.TemplateBaseVMID + templateOffset
 
-	// Resolve SSH key.
-	sshPubKey, sshPrivateKey, err := s.resolveSSHKey(req)
+	// Resolve SSH key. The service may either reuse an existing vault entry
+	// or create a new one (generate / BYO / default-fallback).
+	sshKey, sshPrivateKey, err := s.resolveSSHKey(ctx, req)
 	if err != nil {
 		return nil, err
 	}
+	keyID := sshKey.ID
+	keyName := sshKey.Name
+	sshPubKey := sshKey.PublicKey
 
 	// Step 1: reserve IP. defer release on any later failure.
 	ip, err := s.pool.Reserve(ctx, req.Hostname)
@@ -180,13 +199,17 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 
-	// Step 2: gather cluster snapshot and score.
-	target, err := s.pickNode(ctx, tier, templateVMID)
+	// Step 2: gather cluster snapshot and score, restricted to nodes that
+	// have a template for the requested OS. The per-node templateVMID lookup
+	// uses the node_templates table (filled in by bootstrap) so we don't have
+	// to fan out a TemplateExists call per node.
+	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: clone the template (serialized to avoid VMID races).
+	// Step 3: clone the template (serialized to avoid VMID races on the
+	// fresh-VMID assignment for the new VM).
 	s.cloneMu.Lock()
 	defer s.cloneMu.Unlock()
 
@@ -195,12 +218,10 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("nextid: %w", err)
 	}
 
-	sourceNode := s.cfg.SourceNode
-	if sourceNode == "" {
-		sourceNode = target
-	}
-
-	taskID, err := s.px.CloneVM(ctx, sourceNode, target, templateVMID, newVMID, req.Hostname)
+	// Source and target node are the same — the template lives on the picked
+	// node by definition (pickNode only returns nodes that have a template
+	// row in the DB for this OS). Local clones are fast.
+	taskID, err := s.px.CloneVM(ctx, target, target, templateVMID, newVMID, req.Hostname)
 	if err != nil {
 		return nil, fmt.Errorf("clone vm: %w", err)
 	}
@@ -216,6 +237,9 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.cfg.GatewayIP),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
+		Cores:        tier.CPU,
+		Memory:       int(tier.MemMB),
+		CPU:          s.cfg.CPUType,
 	}
 	if err := s.px.SetCloudInit(ctx, target, newVMID, cloudInit); err != nil {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
@@ -242,11 +266,31 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	// Step 7: wait for IP readiness.
+	//
+	// A timeout here is genuinely ambiguous — could mean "VM never came up"
+	// or "VM is up but Nimbus's network position can't reach its IP". We
+	// treat them differently:
+	//
+	//   - context.DeadlineExceeded → soft success: VM is real, commit the
+	//     allocation, populate Result.Warning so the user knows reachability
+	//     wasn't confirmed. They can SSH from a machine on the cluster LAN.
+	//   - any other error (Proxmox API failure, agent crash) → hard failure:
+	//     release the IP and return 500.
+	var warning string
 	waitCtx, cancel := context.WithTimeout(ctx, s.cfg.IPReadyTimeout)
 	defer cancel()
 	if err := WaitForIP(waitCtx, s.px, target, newVMID, ip, s.cfg.PollInterval); err != nil {
-		s.persistFailedVM(ctx, req, ip, target, newVMID, err)
-		return nil, fmt.Errorf("wait for ready: %w", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			warning = fmt.Sprintf(
+				"VM was created and configured, but Nimbus could not confirm reachability on %s within %s. "+
+					"This usually means Nimbus is running outside the cluster's LAN. "+
+					"The credentials are valid — try SSHing from a machine on the cluster network.",
+				ip, s.cfg.IPReadyTimeout)
+			// fall through to the success path
+		} else {
+			s.persistFailedVM(ctx, req, ip, target, newVMID, err)
+			return nil, fmt.Errorf("wait for ready: %w", err)
+		}
 	}
 
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
@@ -255,6 +299,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	}
 	released = true // success path — do NOT run the deferred release
 
+	// The encrypted private key (if any) lives on the ssh_keys row referenced
+	// by SSHKeyID — not on the VM itself anymore.
 	vm := &db.VM{
 		VMID:       newVMID,
 		Hostname:   req.Hostname,
@@ -265,6 +311,10 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Username:   username,
 		Status:     "running",
 		OwnerID:    req.OwnerID,
+		SSHKeyID:   &keyID,
+		KeyName:    keyName,
+		SSHPubKey:  sshPubKey,
+		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
@@ -281,6 +331,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Tier:          req.Tier,
 		Node:          target,
 		SSHPrivateKey: sshPrivateKey,
+		KeyName:       keyName,
+		Warning:       warning,
 	}, nil
 }
 
@@ -295,6 +347,28 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 		return nil, fmt.Errorf("list vms: %w", err)
 	}
 	return vms, nil
+}
+
+// GetPrivateKey returns the decrypted private key for a VM, if one is
+// available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound
+// when the VM has no linked key, or the linked key has no vaulted private
+// half (e.g. user imported a public-only key, or deleted the key after
+// provision).
+func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateKey string, err error) {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return "", "", fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if vm.SSHKeyID == nil {
+		return "", "", &internalerrors.NotFoundError{
+			Resource: "private_key",
+			ID:       fmt.Sprintf("vm:%d", id),
+		}
+	}
+	return s.keys.GetPrivateKey(ctx, *vm.SSHKeyID)
 }
 
 // Get returns a single VM by row ID.
@@ -367,40 +441,113 @@ func (s *Service) verifyAndRetryReserve(ctx context.Context, initialIP, hostname
 	}
 }
 
-// resolveSSHKey returns (publicKey, privateKey, error). privateKey is
-// non-empty only when the user asked us to generate one.
-func (s *Service) resolveSSHKey(req Request) (string, string, error) {
-	if req.GenerateKey {
-		pub, priv, err := GenerateEd25519()
+// resolveSSHKey returns the SSHKey row to use for this VM and, if a fresh
+// private key was generated as part of this provision, the plaintext private
+// half so it can be returned to the user once.
+//
+// Cases:
+//   - SSHKeyID set        → load the named row from the vault.
+//   - GenerateKey=true    → mint a new keypair, persist as a new vault row.
+//   - SSHPubKey set       → import (with optional PrivKey vaulted) as a new vault row.
+//   - none of the above   → use the owner's default key, if any.
+func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, string, error) {
+	switch {
+	case req.SSHKeyID != nil:
+		row, err := s.keys.Get(ctx, *req.SSHKeyID)
 		if err != nil {
-			return "", "", fmt.Errorf("generate ssh key: %w", err)
+			return nil, "", err
 		}
-		return pub, priv, nil
-	}
-	if req.SSHPubKey == "" {
-		return "", "", &internalerrors.ValidationError{
-			Field:   "ssh_pubkey",
-			Message: "ssh_pubkey or generate_key must be provided",
+		return row, "", nil
+
+	case req.GenerateKey:
+		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+			Name:     "nimbus-" + req.Hostname,
+			Generate: true,
+			OwnerID:  req.OwnerID,
+		})
+		if err != nil {
+			return nil, "", err
 		}
+		// Pull the plaintext back out so the API response can show it once.
+		_, priv, err := s.keys.GetPrivateKey(ctx, row.ID)
+		if err != nil {
+			return nil, "", fmt.Errorf("retrieve generated key: %w", err)
+		}
+		return row, priv, nil
+
+	case req.SSHPubKey != "":
+		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+			Name:       "nimbus-" + req.Hostname,
+			PublicKey:  req.SSHPubKey,
+			PrivateKey: req.SSHPrivKey,
+			OwnerID:    req.OwnerID,
+		})
+		if err != nil {
+			// Remap field names so errors reference the JSON keys the VMs API
+			// exposes, not the keys-service internal field names.
+			return nil, "", remapKeyFields(err)
+		}
+		return row, "", nil
+
+	default:
+		row, err := s.keys.GetDefault(ctx, req.OwnerID)
+		if err != nil {
+			var nf *internalerrors.NotFoundError
+			if errors.As(err, &nf) {
+				return nil, "", &internalerrors.ValidationError{
+					Field:   "ssh",
+					Message: "no SSH key supplied and no default key is set — pick a key, paste one, or generate one",
+				}
+			}
+			return nil, "", err
+		}
+		return row, "", nil
 	}
-	return req.SSHPubKey, "", nil
 }
 
-// pickNode collects live telemetry (concurrent fan-out across nodes for the
-// per-node ListVMs / TemplateExists calls), filters via nodescore.Eligible,
-// then picks the best.
-func (s *Service) pickNode(ctx context.Context, tier nodescore.Tier, templateVMID int) (string, error) {
+// pickNode collects live cluster telemetry, intersects it with the set of
+// nodes that have a template for the requested OS (via the node_templates
+// table), scores the survivors, and returns the winner along with the
+// templateVMID to clone from on that node.
+//
+// The template-presence check is now a single DB query instead of a per-node
+// Proxmox API fan-out — much faster and matches the actual source of truth.
+func (s *Service) pickNode(
+	ctx context.Context,
+	tier nodescore.Tier,
+	osKey string,
+) (target string, templateVMID int, err error) {
+	// Fetch all node_templates rows for this OS in one query. Returned
+	// (node, vmid) pairs are exactly the nodes eligible to host this OS.
+	var templates []db.NodeTemplate
+	if err := s.db.WithContext(ctx).
+		Where("os = ?", osKey).
+		Find(&templates).Error; err != nil {
+		return "", 0, fmt.Errorf("lookup templates for os %s: %w", osKey, err)
+	}
+	if len(templates) == 0 {
+		return "", 0, &internalerrors.ConflictError{
+			Message: fmt.Sprintf("no node has a template for os %q — run bootstrap first", osKey),
+		}
+	}
+	templateVMIDByNode := make(map[string]int, len(templates))
+	templatesPresent := make(map[string]bool, len(templates))
+	for _, t := range templates {
+		templateVMIDByNode[t.Node] = t.VMID
+		templatesPresent[t.Node] = true
+	}
+
+	// Live telemetry: nodes for scoring + per-node VM counts for tie-break.
 	nodes, err := s.px.GetNodes(ctx)
 	if err != nil {
-		return "", fmt.Errorf("get nodes: %w", err)
+		return "", 0, fmt.Errorf("get nodes: %w", err)
 	}
 
 	var (
-		mu               sync.Mutex
-		vmCounts         = make(map[string]int)
-		templatesPresent = make(map[string]bool)
-		errs             []error
-		wg               sync.WaitGroup
+		mu       sync.Mutex
+		vmCounts = make(map[string]int)
+		errs     []error
+		wg       sync.WaitGroup
 	)
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
@@ -408,44 +555,38 @@ func (s *Service) pickNode(ctx context.Context, tier nodescore.Tier, templateVMI
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 		})
-		if n.Status != "online" {
-			continue
+		if n.Status != "online" || !templatesPresent[n.Name] {
+			continue // skip vm-counts for nodes we already know are ineligible
 		}
 		nodeName := n.Name
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			vms, err := s.px.ListVMs(ctx, nodeName)
-			present, terr := s.px.TemplateExists(ctx, nodeName, templateVMID)
 
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, fmt.Errorf("list vms on %s: %w", nodeName, err))
-			} else {
-				vmCounts[nodeName] = len(vms)
+				return
 			}
-			if terr != nil {
-				errs = append(errs, fmt.Errorf("template check on %s: %w", nodeName, terr))
-			} else {
-				templatesPresent[nodeName] = present
-			}
+			vmCounts[nodeName] = len(vms)
 		}()
 	}
 	wg.Wait()
 	if len(errs) > 0 {
-		// Return the first error — they're all "transient cluster issues".
-		return "", fmt.Errorf("cluster snapshot: %w", errs[0])
+		return "", 0, fmt.Errorf("cluster snapshot: %w", errs[0])
 	}
 
 	candidates := nodescore.Eligible(scoringNodes, vmCounts, tier, s.cfg.ExcludedNodes, templatesPresent)
 	pick := nodescore.Pick(candidates)
 	if pick == nil {
-		return "", &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=vmid_%d", tier.Name, templateVMID),
+		return "", 0, &internalerrors.ConflictError{
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s (templates exist on %d node(s) but none meet resource requirements)",
+				tier.Name, osKey, len(templates)),
 		}
 	}
-	return pick.Node.Name, nil
+	return pick.Node.Name, templateVMIDByNode[pick.Node.Name], nil
 }
 
 func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node string, vmid int, cause error) {
@@ -460,6 +601,24 @@ func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node str
 		OwnerID:    req.OwnerID,
 		ErrorMsg:   cause.Error(),
 	}).Error
+}
+
+// remapKeyFields rewrites a ValidationError's Field from the keys-service
+// payload names ("public_key", "private_key") to the VM-API names
+// ("ssh_pubkey", "ssh_privkey"), so error messages reference the JSON field
+// the user actually sent. Non-validation errors are passed through unchanged.
+func remapKeyFields(err error) error {
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		return err
+	}
+	switch ve.Field {
+	case "public_key":
+		ve.Field = "ssh_pubkey"
+	case "private_key":
+		ve.Field = "ssh_privkey"
+	}
+	return ve
 }
 
 // formatResult is the body of (*Result).String — kept separate to satisfy the

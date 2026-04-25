@@ -4,10 +4,11 @@
 # Falls back to prompting for cluster IP/hostname when run outside a PVE host.
 #
 # Flags:
-#   --dry-run      Validate inputs and print what would be done; no files written, no systemd installed.
-#   --reconfigure  Re-prompt with existing values pre-filled. Default if env file already exists.
-#   --upgrade      Replace the binary only; leave env file and systemd unit alone.
-#   -h | --help    Show this help.
+#   --dry-run         Validate inputs and print what would be done; no files written, no systemd installed.
+#   --reconfigure     Re-prompt with existing values pre-filled. Default if env file already exists.
+#   --upgrade         Replace the binary only; leave env file and systemd unit alone.
+#   --skip-bootstrap  Skip the post-install template bootstrap step.
+#   -h | --help       Show this help.
 set -euo pipefail
 
 # ----------------------------------------------------------------------
@@ -27,13 +28,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_PORT="8080"
 DEFAULT_POOL_OFFSET_START="100"
 DEFAULT_POOL_OFFSET_END="199"
-TEMPLATE_VMIDS=(9000 9001 9002 9003)
+TEMPLATE_OS_KEYS=(ubuntu-24.04 ubuntu-22.04 debian-12 debian-11)
 TEMPLATE_NAMES=("Ubuntu 24.04" "Ubuntu 22.04" "Debian 12" "Debian 11")
 
 # Modes
 DRY_RUN=0
 RECONFIGURE=0
 UPGRADE=0
+SKIP_BOOTSTRAP=0
 
 # ----------------------------------------------------------------------
 # Output helpers
@@ -65,10 +67,11 @@ usage() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run)     DRY_RUN=1; shift ;;
-    --reconfigure) RECONFIGURE=1; shift ;;
-    --upgrade)     UPGRADE=1; shift ;;
-    -h|--help)     usage ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    --reconfigure)    RECONFIGURE=1; shift ;;
+    --upgrade)        UPGRADE=1; shift ;;
+    --skip-bootstrap) SKIP_BOOTSTRAP=1; shift ;;
+    -h|--help)        usage ;;
     *)             die "Unknown flag: $1 (try --help)" ;;
   esac
 done
@@ -280,44 +283,32 @@ validate_proxmox() {
 }
 
 validate_templates() {
-  header "Checking templates on each node"
+  header "Checking templates on the cluster"
 
-  local nodes_json
-  nodes_json=$(pve_curl "/nodes" | jq -r '.data[].node')
+  # New model: VMIDs are cluster-wide unique, so each (node, OS) pair gets a
+  # Proxmox-assigned VMID. Templates are identified by NAME ("<os>-template")
+  # rather than fixed VMID. We list all cluster VMs once and group templates
+  # by OS key.
+  local resources
+  resources=$(pve_curl "/cluster/resources?type=vm")
 
-  local i template_vmid template_name found_any nodes_with cloud_init_ok
-  for i in "${!TEMPLATE_VMIDS[@]}"; do
-    template_vmid="${TEMPLATE_VMIDS[$i]}"
+  local i os_key template_name nodes_with cloud_init_ok
+  for i in "${!TEMPLATE_OS_KEYS[@]}"; do
+    os_key="${TEMPLATE_OS_KEYS[$i]}"
     template_name="${TEMPLATE_NAMES[$i]}"
-    nodes_with=()
-    cloud_init_ok=()
-
-    while IFS= read -r node; do
-      [ -n "$node" ] || continue
-      local cfg
-      cfg=$(pve_curl "/nodes/${node}/qemu/${template_vmid}/config" 2>/dev/null || true)
-      local has_cfg
-      has_cfg=$(echo "$cfg" | jq -r 'if .data then "yes" else "no" end' 2>/dev/null || echo "no")
-      if [ "$has_cfg" = "yes" ]; then
-        nodes_with+=("$node")
-        # Look for any drive that contains 'cloudinit' (ide2, scsi*, etc.)
-        local has_ci
-        has_ci=$(echo "$cfg" | jq -r '.data | to_entries[] | select(.value | type == "string" and contains("cloudinit")) | .key' 2>/dev/null | head -1)
-        if [ -n "$has_ci" ]; then
-          cloud_init_ok+=("$node")
-        fi
-      fi
-    done <<< "$nodes_json"
-
-    found_any=${#nodes_with[@]}
-    if [ "$found_any" -eq 0 ]; then
-      warn "$template_name (VMID $template_vmid): not found on any node — this OS will be unavailable"
-    elif [ "${#cloud_init_ok[@]}" -lt "$found_any" ]; then
-      warn "$template_name (VMID $template_vmid): present on $found_any node(s) but missing cloud-init drive on some — provisioning will fail silently for those"
+    # Templates created by the new bootstrap have name "<os>-template".
+    nodes_with=$(echo "$resources" \
+      | jq -r --arg name "${os_key}-template" \
+        '.data | map(select(.template == 1 and .name == $name)) | length')
+    if [ "$nodes_with" = "0" ]; then
+      warn "$template_name: no template found on any node — provisioning this OS will fail until bootstrap creates one"
     else
-      ok "$template_name (VMID $template_vmid): present + cloud-init drive on $found_any node(s)"
+      ok "$template_name: template present on $nodes_with node(s)"
     fi
   done
+
+  echo
+  info "If templates are missing, the wizard's bootstrap step (next) will create them."
 }
 
 # ----------------------------------------------------------------------
@@ -444,6 +435,75 @@ start_service() {
 }
 
 # ----------------------------------------------------------------------
+# Template bootstrap — runs after the service is healthy.
+#
+# Posts to /api/admin/bootstrap-templates with an empty body, which kicks
+# off the default flow: every catalogue OS on every online node. Skipped
+# when --skip-bootstrap or --dry-run.
+# ----------------------------------------------------------------------
+bootstrap_templates() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "(dry-run) Would prompt for template bootstrap"
+    return
+  fi
+  if [ "$SKIP_BOOTSTRAP" -eq 1 ]; then
+    info "Skipping template bootstrap (--skip-bootstrap). Run later with:"
+    info "  curl -X POST http://localhost:${PORT}/api/admin/bootstrap-templates -d '{}'"
+    return
+  fi
+
+  header "Bootstrap templates"
+  echo "  Nimbus needs OS templates on the cluster to provision VMs."
+  echo "  Default: download all 4 OSes (Ubuntu 24.04/22.04, Debian 12/11)"
+  echo "           on every online cluster node."
+  echo
+  echo "  Total download: ~2 GB per node (parallel across nodes)."
+  echo "  Total time:     ~10-20 min depending on internet speed."
+  echo "  Re-runs are fast — already-existing templates are skipped."
+  echo
+  read -rp "  Bootstrap templates now? [Y/n]: " bootstrap_yn
+  if [[ "$bootstrap_yn" =~ ^[Nn]$ ]]; then
+    info "Skipped. Run later with:"
+    info "  curl -X POST http://localhost:${PORT}/api/admin/bootstrap-templates -d '{}'"
+    return
+  fi
+
+  echo
+  info "Working — this can take a while. Tail progress in another shell with:"
+  info "  journalctl -u $APP_NAME -f"
+  echo
+
+  local result_file="/tmp/${APP_NAME}-bootstrap-$$.json"
+  if curl -sf --max-time 1800 \
+    -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://localhost:${PORT}/api/admin/bootstrap-templates" \
+    > "$result_file"; then
+    local n_created n_skipped n_failed
+    n_created=$(jq -r '.data.created | length' "$result_file")
+    n_skipped=$(jq -r '.data.skipped | length' "$result_file")
+    n_failed=$(jq -r  '.data.failed  | length' "$result_file")
+
+    if [ "$n_created" != "0" ]; then
+      ok "$n_created template(s) created:"
+      jq -r '.data.created[] | "    ✓ \(.os) → vmid \(.vmid) on \(.node) (\(.duration))"' "$result_file"
+    fi
+    if [ "$n_skipped" != "0" ]; then
+      info "$n_skipped template(s) already existed and were skipped."
+    fi
+    if [ "$n_failed" != "0" ]; then
+      warn "$n_failed template(s) failed:"
+      jq -r '.data.failed[] | "    ✗ \(.os) on \(.node): \(.error)"' "$result_file"
+      warn "Re-run bootstrap to retry just the failed ones (idempotent)."
+    fi
+  else
+    warn "Bootstrap call failed. Nimbus is installed but cannot provision until templates exist."
+    warn "Check service logs (journalctl -u $APP_NAME -n 100) and re-run:"
+    warn "  curl -X POST http://localhost:${PORT}/api/admin/bootstrap-templates -d '{}'"
+  fi
+  rm -f "$result_file"
+}
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 main() {
@@ -474,6 +534,7 @@ main() {
   install_binary
   write_systemd_unit
   start_service
+  bootstrap_templates
 
   printf "\n%s%s%s\n" "$C_BOLD$C_GREEN" "Nimbus is installed." "$C_RESET"
   printf "  Portal:  %shttp://%s:%s%s\n" "$C_BOLD" "$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost)" "$PORT" "$C_RESET"

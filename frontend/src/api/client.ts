@@ -2,11 +2,14 @@ import axios, { AxiosInstance } from 'axios'
 import type {
   ClusterStats,
   ClusterVM,
+  CreateKeyRequest,
+  CreateKeyResponse,
   HealthResponse,
   IPAllocation,
   NodeView,
   ProvisionRequest,
   ProvisionResult,
+  SSHKey,
   VM,
 } from '@/types'
 
@@ -23,6 +26,15 @@ const api: AxiosInstance = axios.create({
 const provisionClient: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 200000,
+  withCredentials: true,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// Bootstrap downloads cloud images and creates templates on every cluster node.
+// Can take up to 30 min on a large cluster — timeout matches server WriteTimeout.
+const bootstrapClient: AxiosInstance = axios.create({
+  baseURL: '/api',
+  timeout: 35 * 60 * 1000,
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -56,6 +68,7 @@ const unwrap = (instance: AxiosInstance, redirectOn401 = false) => {
 
 unwrap(api, true)
 unwrap(provisionClient)
+unwrap(bootstrapClient)
 
 export async function getHealth(): Promise<HealthResponse> {
   const { data } = await api.get<HealthResponse>('/health')
@@ -90,6 +103,43 @@ export async function getClusterStats(): Promise<ClusterStats> {
 export async function provisionVM(req: ProvisionRequest): Promise<ProvisionResult> {
   const { data } = await provisionClient.post<ProvisionResult>('/vms', req)
   return data
+}
+
+export interface VMPrivateKey {
+  key_name: string
+  private_key: string
+}
+
+export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
+  const { data } = await api.get<VMPrivateKey>(`/vms/${id}/private-key`)
+  return data
+}
+
+export async function listKeys(): Promise<SSHKey[]> {
+  const { data } = await api.get<SSHKey[]>('/keys')
+  return data
+}
+
+export async function createKey(req: CreateKeyRequest): Promise<CreateKeyResponse> {
+  const { data } = await api.post<CreateKeyResponse>('/keys', req)
+  return data
+}
+
+export async function getKeyPrivate(id: number): Promise<VMPrivateKey> {
+  const { data } = await api.get<VMPrivateKey>(`/keys/${id}/private-key`)
+  return data
+}
+
+export async function setDefaultKey(id: number): Promise<void> {
+  await api.post(`/keys/${id}/default`, {})
+}
+
+export async function attachPrivateKey(id: number, privateKey: string): Promise<void> {
+  await api.post(`/keys/${id}/private-key`, { private_key: privateKey })
+}
+
+export async function deleteKey(id: number): Promise<void> {
+  await api.delete(`/keys/${id}`)
 }
 
 export interface DiscoverResult {
@@ -140,6 +190,30 @@ export async function testProxmoxConnection(
 
 export async function saveSetupConfig(req: SaveConfigRequest): Promise<{ message: string }> {
   const { data } = await api.post<{ message: string }>('/setup/save', req)
+  return data
+}
+
+export interface TemplateOutcome {
+  os: string
+  vmid: number
+  node: string
+  duration: number
+  error?: string
+}
+
+export interface BootstrapResult {
+  created: TemplateOutcome[]
+  skipped: TemplateOutcome[]
+  failed: TemplateOutcome[]
+}
+
+export async function bootstrapTemplates(): Promise<BootstrapResult> {
+  const { data } = await bootstrapClient.post<BootstrapResult>('/admin/bootstrap-templates', {})
+  return data
+}
+
+export async function getBootstrapStatus(): Promise<{ bootstrapped: boolean }> {
+  const { data } = await api.get<{ bootstrapped: boolean }>('/admin/bootstrap-status')
   return data
 }
 

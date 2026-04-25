@@ -229,7 +229,10 @@ func (c *Client) CloneVM(ctx context.Context, sourceNode, targetNode string, tem
 	params.Set("name", name)
 	params.Set("target", targetNode)
 	params.Set("full", "1")
-	params.Set("pool", "nimbus")
+	// NOTE: omitting `pool` here — assigning to a Proxmox pool requires the
+	// pool to pre-exist on the cluster. Pools are an organizational feature,
+	// not a functional requirement. Future enhancement: auto-create a
+	// "nimbus" pool on first run via POST /pools, then opt VMs into it.
 
 	var taskID string
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(sourceNode), templateVMID)
@@ -267,15 +270,27 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval 
 	}
 }
 
-// SetCloudInit applies cloud-init config to a VM. The sshkeys field is
-// URL-encoded automatically (handled by url.Values.Encode in c.do).
+// SetCloudInit applies cloud-init config to a VM.
+//
+// CRITICAL: the `sshkeys` field MUST be pre-URL-encoded before being placed
+// in the form body. Proxmox does its own URL-decode of the value AFTER the
+// form layer decodes it once — so the wire format is double-encoded. If
+// passed plain ("ssh-ed25519 AAAA..."), Proxmox rejects with
+// "invalid format - invalid urlencoded string". Documented in design doc
+// §5.2 NOTE and confirmed by forum thread:
+// https://forum.proxmox.com/threads/injecting-qemu-ssh-keys-via-the-api.118449/
+//
+// We use percent-encoding (%20 for spaces) instead of `+` for spaces, since
+// some Proxmox parsers treat `+` as a literal in this field.
 func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg CloudInitConfig) error {
 	params := url.Values{}
 	if cfg.CIUser != "" {
 		params.Set("ciuser", cfg.CIUser)
 	}
 	if cfg.SSHKeys != "" {
-		params.Set("sshkeys", cfg.SSHKeys)
+		// QueryEscape uses + for spaces; replace with %20 to be safe.
+		encoded := strings.ReplaceAll(url.QueryEscape(cfg.SSHKeys), "+", "%20")
+		params.Set("sshkeys", encoded)
 	}
 	if cfg.IPConfig0 != "" {
 		params.Set("ipconfig0", cfg.IPConfig0)
@@ -285,6 +300,15 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	}
 	if cfg.SearchDomain != "" {
 		params.Set("searchdomain", cfg.SearchDomain)
+	}
+	if cfg.Cores > 0 {
+		params.Set("cores", strconv.Itoa(cfg.Cores))
+	}
+	if cfg.Memory > 0 {
+		params.Set("memory", strconv.Itoa(cfg.Memory))
+	}
+	if cfg.CPU != "" {
+		params.Set("cpu", cfg.CPU)
 	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
@@ -340,6 +364,231 @@ func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetStorages lists the storage backends configured on a node. Used by the
+// bootstrap flow to detect which storage to use for downloaded cloud images
+// (needs `iso` content) vs. VM disks (needs `images` content).
+func (c *Client) GetStorages(ctx context.Context, node string) ([]Storage, error) {
+	var out []Storage
+	path := fmt.Sprintf("/nodes/%s/storage", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetStorageConfig returns the cluster-wide configuration for one storage,
+// including the comma-separated list of content types it accepts.
+func (c *Client) GetStorageConfig(ctx context.Context, storage string) (*Storage, error) {
+	var s Storage
+	path := fmt.Sprintf("/storage/%s", url.PathEscape(storage))
+	if err := c.do(ctx, http.MethodGet, path, nil, &s); err != nil {
+		return nil, err
+	}
+	// /storage/{name} returns the storage config without "storage" populated;
+	// fill it in for the caller.
+	if s.Storage == "" {
+		s.Storage = storage
+	}
+	return &s, nil
+}
+
+// EnsureStorageContent guarantees the given storage accepts a particular
+// content type (e.g. "import"). If the type is already in the storage's
+// content list this is a no-op; otherwise the storage is reconfigured.
+//
+// This is a cluster-wide operation that affects every node sharing the
+// storage. It only ADDS a content type — never removes — so it's safe to
+// call repeatedly and won't disturb existing usage.
+//
+// Used by bootstrap to make a `dir` storage usable as both an ISO download
+// target AND a source for `import-from` (which requires `import` or `images`
+// content type, while download-url plus the existing usage requires `iso`).
+func (c *Client) EnsureStorageContent(ctx context.Context, storage, contentType string) error {
+	cur, err := c.GetStorageConfig(ctx, storage)
+	if err != nil {
+		return fmt.Errorf("get storage %s config: %w", storage, err)
+	}
+	parts := strings.Split(cur.Content, ",")
+	for _, p := range parts {
+		if strings.TrimSpace(p) == contentType {
+			return nil // already there, no-op
+		}
+	}
+	parts = append(parts, contentType)
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+
+	params := url.Values{}
+	params.Set("content", strings.Join(parts, ","))
+	path := fmt.Sprintf("/storage/%s", url.PathEscape(storage))
+	if err := c.do(ctx, http.MethodPut, path, params, nil); err != nil {
+		return fmt.Errorf("update storage %s content types: %w", storage, err)
+	}
+	return nil
+}
+
+// StorageContentItem is one entry returned by GET /nodes/{n}/storage/{s}/content.
+// We only care about the volid (the canonical "<storage>:<type>/<filename>"
+// reference) for existence checks before downloading.
+type StorageContentItem struct {
+	Volid   string `json:"volid"`
+	Format  string `json:"format"`
+	Size    uint64 `json:"size"`
+	Content string `json:"content"`
+}
+
+// StorageHasFile reports whether a given filename exists in a node's storage
+// under the named content type. Used by bootstrap to skip downloads when the
+// cloud image is already cached — Proxmox's download-url refuses to overwrite,
+// so we check first.
+//
+// volid format used for matching is "<storage>:<contentType>/<filename>".
+func (c *Client) StorageHasFile(
+	ctx context.Context,
+	node, storage, contentType, filename string,
+) (bool, error) {
+	var items []StorageContentItem
+	params := url.Values{}
+	params.Set("content", contentType)
+	path := fmt.Sprintf("/nodes/%s/storage/%s/content",
+		url.PathEscape(node), url.PathEscape(storage))
+	if err := c.do(ctx, http.MethodGet, path, params, &items); err != nil {
+		return false, err
+	}
+	want := fmt.Sprintf("%s:%s/%s", storage, contentType, filename)
+	for _, it := range items {
+		if it.Volid == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// DownloadStorageURL downloads a remote URL into a node-local storage as the
+// given content type (typically "import" for cloud-image disks Nimbus will
+// later use as VM-creation sources). Returns a task UPID for caller-side
+// polling via WaitForTask.
+//
+// PVE 8+ feature. The download happens on the Proxmox node — Nimbus only
+// dispatches the request, then polls for completion.
+//
+// The content parameter must match a content type the storage is configured
+// to accept; see EnsureStorageContent to add types programmatically.
+//
+// NOTE: Proxmox refuses to overwrite an existing file ("refusing to override").
+// Callers must check StorageHasFile first if they need idempotent behavior.
+func (c *Client) DownloadStorageURL(
+	ctx context.Context,
+	node, storage, contentType, urlStr, filename string,
+) (string, error) {
+	params := url.Values{}
+	params.Set("url", urlStr)
+	params.Set("content", contentType)
+	params.Set("filename", filename)
+	// "verify-certificates" defaults to true in Proxmox; cloud-images.ubuntu.com
+	// has a valid cert so we don't override.
+
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/storage/%s/download-url",
+		url.PathEscape(node), url.PathEscape(storage))
+	if err := c.do(ctx, http.MethodPost, path, params, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// CreateVMWithImport creates a new VM on a node whose primary disk is imported
+// from a file already present on that node. Used by the bootstrap flow to turn
+// a downloaded cloud image into a Proxmox VM (which we then convert to a
+// template).
+//
+// The wire-level magic happens in the scsi0 parameter:
+//
+//	scsi0=<DiskStorage>:0,import-from=<absolute path on node>
+//
+// The literal "0" tells Proxmox to derive the disk size from the source image.
+// The import-from path is the file path on the node — typically
+// /var/lib/vz/template/iso/<filename> for downloads to "local" storage.
+//
+// Cloud images need a serial console to boot headless (the SerialOnly option
+// adds serial0=socket + vga=serial0). The qemu-guest-agent flag enables agent
+// support but does NOT install the agent inside the guest — that ships with
+// the cloud image.
+//
+// Returns the task UPID for caller-side polling.
+func (c *Client) CreateVMWithImport(
+	ctx context.Context,
+	node string, vmid int, opts CreateVMOpts,
+) (string, error) {
+	bridge := opts.Bridge
+	if bridge == "" {
+		bridge = "vmbr0"
+	}
+	osType := opts.OSType
+	if osType == "" {
+		osType = "l26"
+	}
+	memory := opts.Memory
+	if memory == 0 {
+		memory = 1024
+	}
+	cores := opts.Cores
+	if cores == 0 {
+		cores = 1
+	}
+
+	params := url.Values{}
+	params.Set("vmid", strconv.Itoa(vmid))
+	params.Set("name", opts.Name)
+	params.Set("memory", strconv.Itoa(memory))
+	params.Set("cores", strconv.Itoa(cores))
+	params.Set("ostype", osType)
+	params.Set("net0", fmt.Sprintf("virtio,bridge=%s", bridge))
+	params.Set("scsihw", "virtio-scsi-pci")
+	params.Set("scsi0", fmt.Sprintf("%s:0,import-from=%s", opts.DiskStorage, opts.ImagePath))
+	params.Set("boot", "c")
+	params.Set("bootdisk", "scsi0")
+	if opts.SerialOnly {
+		params.Set("serial0", "socket")
+		params.Set("vga", "serial0")
+	}
+	if opts.AgentEnabled {
+		params.Set("agent", "enabled=1")
+	}
+
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodPost, path, params, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// SetCloudInitDrive attaches a cloud-init drive to an existing VM. This is
+// required before the VM can accept cloud-init config (ciuser, sshkeys, etc.)
+// at clone time — without the drive, cloud-init has nowhere to read its config
+// and the SetCloudInit values are silently ignored at boot.
+//
+// `ide2=<storage>:cloudinit` is the canonical attachment form, matching what
+// `qm set <vmid> --ide2 <storage>:cloudinit` produces.
+func (c *Client) SetCloudInitDrive(
+	ctx context.Context,
+	node string, vmid int, storage string,
+) error {
+	params := url.Values{}
+	params.Set("ide2", fmt.Sprintf("%s:cloudinit", storage))
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
+// ConvertToTemplate marks a VM as a Proxmox template. Templates are immutable
+// — they cannot be booted, only cloned. This is the final step of bootstrap.
+func (c *Client) ConvertToTemplate(ctx context.Context, node string, vmid int) error {
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/template", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, url.Values{}, nil)
 }
 
 // Version returns the Proxmox VE version string. Used by /api/health.
