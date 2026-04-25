@@ -73,6 +73,64 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// IsConfigured reports whether all required fields are present.
+// Used to decide between setup mode and normal startup.
+func (c *Config) IsConfigured() bool {
+	return c.ProxmoxHost != "" &&
+		c.ProxmoxTokenID != "" &&
+		c.ProxmoxTokenSecret != "" &&
+		c.IPPoolStart != "" &&
+		c.IPPoolEnd != "" &&
+		c.GatewayIP != ""
+}
+
+// EnvValues holds the fields written by the setup wizard.
+type EnvValues struct {
+	ProxmoxHost        string
+	ProxmoxTokenID     string
+	ProxmoxTokenSecret string
+	IPPoolStart        string
+	IPPoolEnd          string
+	GatewayIP          string
+	Nameserver         string
+	SearchDomain       string
+	Port               string
+}
+
+// EnvFilePath returns the path where the runtime config should be written.
+// Uses /etc/nimbus/nimbus.env when that directory exists and is writable
+// (i.e. production after `nimbus install`), otherwise .env in the CWD.
+func EnvFilePath() string {
+	const prod = "/etc/nimbus/nimbus.env"
+	if fi, err := os.Stat("/etc/nimbus"); err == nil && fi.IsDir() {
+		if f, err := os.OpenFile(prod, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600); err == nil {
+			_ = f.Close()
+			return prod
+		}
+	}
+	return ".env"
+}
+
+// WriteEnvFile writes v to path as KEY=VALUE pairs, replacing any existing file.
+func WriteEnvFile(path string, v EnvValues) error {
+	content := fmt.Sprintf(
+		"# Nimbus configuration — written by setup wizard.\n"+
+			"PROXMOX_HOST=%s\n"+
+			"PROXMOX_TOKEN_ID=%s\n"+
+			"PROXMOX_TOKEN_SECRET=%s\n"+
+			"IP_POOL_START=%s\n"+
+			"IP_POOL_END=%s\n"+
+			"GATEWAY_IP=%s\n"+
+			"NAMESERVER=%s\n"+
+			"SEARCH_DOMAIN=%s\n"+
+			"PORT=%s\n",
+		v.ProxmoxHost, v.ProxmoxTokenID, v.ProxmoxTokenSecret,
+		v.IPPoolStart, v.IPPoolEnd, v.GatewayIP,
+		v.Nameserver, v.SearchDomain, v.Port,
+	)
+	return os.WriteFile(path, []byte(content), 0600)
+}
+
 // Validate returns an error listing any missing required fields. Optional
 // integrations (OAuth, Gopher) are not checked.
 func (c *Config) Validate() error {

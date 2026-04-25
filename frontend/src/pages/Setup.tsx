@@ -1,0 +1,663 @@
+import { useEffect, useState } from 'react'
+import Background from '@/components/Background'
+import Card from '@/components/ui/Card'
+import Button from '@/components/ui/Button'
+import Input from '@/components/ui/Input'
+import {
+  getSetupStatus,
+  testProxmoxConnection,
+  saveSetupConfig,
+  discoverProxmox,
+  type SaveConfigRequest,
+  type DiscoverResult,
+} from '@/api/client'
+
+type Step = 'proxmox' | 'network' | 'review' | 'restarting'
+
+interface ProxmoxFields {
+  host: string
+  tokenId: string
+  tokenSecret: string
+}
+
+interface NetworkFields {
+  ipPoolStart: string
+  ipPoolEnd: string
+  gatewayIp: string
+  nameserver: string
+  searchDomain: string
+  port: string
+}
+
+export default function Setup() {
+  const [step, setStep] = useState<Step>('proxmox')
+  const [proxmox, setProxmox] = useState<ProxmoxFields>({
+    host: 'https://localhost:8006',
+    tokenId: 'root@pam!nimbus',
+    tokenSecret: '',
+  })
+  const [network, setNetwork] = useState<NetworkFields>({
+    ipPoolStart: '',
+    ipPoolEnd: '',
+    gatewayIp: '',
+    nameserver: '',
+    searchDomain: '',
+    port: '',
+  })
+  const [testing, setTesting] = useState(false)
+  const [testOk, setTestOk] = useState<string | null>(null)
+  const [testError, setTestError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const updateProxmox = (key: keyof ProxmoxFields, value: string) => {
+    setProxmox((p) => ({ ...p, [key]: value }))
+    setTestOk(null)
+    setTestError(null)
+  }
+
+  const handleTest = async () => {
+    setTesting(true)
+    setTestOk(null)
+    setTestError(null)
+    try {
+      const res = await testProxmoxConnection({
+        proxmox_host: proxmox.host,
+        proxmox_token_id: proxmox.tokenId,
+        proxmox_token_secret: proxmox.tokenSecret,
+      })
+      setTestOk(`Connected — Proxmox VE ${res.proxmox_version}`)
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : 'connection failed')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    setSaveError(null)
+    const req: SaveConfigRequest = {
+      proxmox_host: proxmox.host,
+      proxmox_token_id: proxmox.tokenId,
+      proxmox_token_secret: proxmox.tokenSecret,
+      ip_pool_start: network.ipPoolStart,
+      ip_pool_end: network.ipPoolEnd,
+      gateway_ip: network.gatewayIp,
+    }
+    if (network.nameserver) req.nameserver = network.nameserver
+    if (network.searchDomain) req.search_domain = network.searchDomain
+    if (network.port) req.port = network.port
+    try {
+      await saveSetupConfig(req)
+      setStep('restarting')
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'save failed')
+      setSaving(false)
+    }
+  }
+
+  if (step === 'restarting') {
+    return <RestartingView />
+  }
+
+  const steps: Step[] = ['proxmox', 'network', 'review']
+  const stepIndex = steps.indexOf(step)
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Background />
+
+      {/* Minimal header */}
+      <div
+        className="sticky top-0 z-50 border-b border-line"
+        style={{
+          backdropFilter: 'blur(20px) saturate(140%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(140%)',
+          background: 'rgba(255,255,255,0.75)',
+        }}
+      >
+        <div className="max-w-[720px] mx-auto px-8 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="brand-mark" />
+            <span className="font-display font-semibold text-xl tracking-tight">Nimbus</span>
+          </div>
+          <div className="font-mono text-xs text-ink-3 tracking-widest uppercase">
+            Setup wizard
+          </div>
+        </div>
+      </div>
+
+      <main className="flex-1 max-w-[720px] mx-auto w-full px-8 py-12 animate-fadeIn">
+        {/* Step indicator */}
+        <div className="flex items-center gap-3 mb-10 flex-wrap">
+          {(['proxmox', 'network', 'review'] as const).map((s, i) => (
+            <div key={s} className="flex items-center gap-3">
+              <div
+                className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium transition-colors ${
+                  i < stepIndex
+                    ? 'bg-ink text-white'
+                    : i === stepIndex
+                      ? 'bg-ink text-white'
+                      : 'bg-[rgba(27,23,38,0.07)] text-ink-3'
+                }`}
+              >
+                {i < stepIndex ? '✓' : i + 1}
+              </div>
+              <span
+                className={`text-sm font-medium capitalize ${
+                  i === stepIndex ? 'text-ink' : 'text-ink-3'
+                }`}
+              >
+                {s === 'proxmox' ? 'Proxmox' : s === 'network' ? 'Network' : 'Review'}
+              </span>
+              <div className="w-8 h-px bg-line-2" />
+            </div>
+          ))}
+
+          {/* Future steps — visible but locked */}
+          <div className="flex items-center gap-3">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
+              4
+            </div>
+            <span className="text-sm font-medium text-ink-3">Gopher</span>
+            <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
+              optional · soon
+            </span>
+          </div>
+          <div className="w-8 h-px bg-line-2" />
+          <div className="flex items-center gap-3">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
+              5
+            </div>
+            <span className="text-sm font-medium text-ink-3">Templates</span>
+            <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
+              soon
+            </span>
+          </div>
+        </div>
+
+        {step === 'proxmox' && (
+          <ProxmoxStep
+            fields={proxmox}
+            onChange={updateProxmox}
+            onTest={handleTest}
+            testing={testing}
+            testOk={testOk}
+            testError={testError}
+            onNext={() => setStep('network')}
+          />
+        )}
+        {step === 'network' && (
+          <NetworkStep
+            fields={network}
+            onChange={(key, val) => setNetwork((n) => ({ ...n, [key]: val }))}
+            onBack={() => setStep('proxmox')}
+            onNext={() => setStep('review')}
+          />
+        )}
+        {step === 'review' && (
+          <ReviewStep
+            proxmox={proxmox}
+            network={network}
+            onBack={() => setStep('network')}
+            onSave={handleSave}
+            saving={saving}
+            saveError={saveError}
+          />
+        )}
+      </main>
+    </div>
+  )
+}
+
+// ── Step 1: Proxmox ──────────────────────────────────────────────────────────
+
+interface ProxmoxStepProps {
+  fields: ProxmoxFields
+  onChange: (key: keyof ProxmoxFields, value: string) => void
+  onTest: () => void
+  testing: boolean
+  testOk: string | null
+  testError: string | null
+  onNext: () => void
+}
+
+function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, onNext }: ProxmoxStepProps) {
+  const canNext = !!fields.host && !!fields.tokenId && !!fields.tokenSecret && !!testOk
+  const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
+  const [discovering, setDiscovering] = useState(true)
+  const [guideOpen, setGuideOpen] = useState(false)
+
+  useEffect(() => {
+    discoverProxmox()
+      .then(setDiscovery)
+      .catch(() => setDiscovery({ is_hypervisor: false, endpoints: [] }))
+      .finally(() => setDiscovering(false))
+  }, [])
+
+  return (
+    <div>
+      <div className="eyebrow">Step 1 of 3</div>
+      <h2 className="text-3xl mt-1 mb-2">Connect to Proxmox</h2>
+      <p className="text-base text-ink-2 leading-relaxed mb-6">
+        Nimbus needs an API token to talk to your Proxmox cluster. Enter the URL of any
+        cluster node — Nimbus discovers the rest automatically.
+      </p>
+
+      {/* Discovery banner */}
+      <div className="mb-5">
+        {discovering ? (
+          <div className="flex items-center gap-2 text-sm text-ink-3 py-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-ink-3 animate-pulse inline-block" />
+            Scanning local network for Proxmox nodes…
+          </div>
+        ) : discovery && discovery.is_hypervisor ? (
+          <div className="flex items-start gap-3 p-3.5 rounded-[10px] bg-[rgba(45,125,90,0.07)] border border-[rgba(45,125,90,0.2)] text-sm">
+            <span className="text-good mt-0.5">✓</span>
+            <div>
+              <span className="font-medium text-good">Running on a Proxmox host.</span>
+              <span className="text-ink-2">
+                {' '}
+                <code className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  https://localhost:8006
+                </code>{' '}
+                is pre-filled — you can use it as-is.
+              </span>
+            </div>
+          </div>
+        ) : discovery && discovery.endpoints.length > 0 ? (
+          <div className="p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2 text-sm">
+            <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3 mb-2">
+              Detected on this network
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {discovery.endpoints.map((ep) => (
+                <button
+                  key={ep}
+                  onClick={() => onChange('host', ep)}
+                  className={`font-mono text-xs px-3 py-1.5 rounded-[8px] border transition-colors cursor-pointer ${
+                    fields.host === ep
+                      ? 'bg-ink text-white border-ink'
+                      : 'bg-white border-line-2 text-ink hover:border-ink-3'
+                  }`}
+                >
+                  {ep}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start gap-3 p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2 text-sm text-ink-2">
+            <span className="text-ink-3 mt-0.5">○</span>
+            No Proxmox nodes found on this network. Enter the cluster URL manually — it
+            may be on a different subnet or reachable via a public endpoint.
+          </div>
+        )}
+      </div>
+
+      <Card className="p-8 flex flex-col gap-5">
+        <Input
+          label="Proxmox API URL"
+          placeholder="https://192.168.0.1:8006"
+          value={fields.host}
+          onChange={(e) => onChange('host', e.target.value)}
+          hint="Any node in your cluster — include https:// and port 8006. Nimbus discovers the rest of the cluster from here. Self-signed TLS certs are accepted."
+        />
+        <Input
+          label="Token ID"
+          placeholder="root@pam!nimbus"
+          value={fields.tokenId}
+          onChange={(e) => onChange('tokenId', e.target.value)}
+          hint="Format: user@realm!tokenname — e.g. root@pam!nimbus. See the guide below if you haven't created one yet."
+        />
+        <Input
+          label="Token secret"
+          type="password"
+          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          value={fields.tokenSecret}
+          onChange={(e) => onChange('tokenSecret', e.target.value)}
+          hint="The UUID shown once when you created the token. Lost it? Delete the token in the Proxmox UI and create a new one."
+        />
+
+        <div className="flex items-center gap-3 mt-1">
+          <Button
+            variant="ghost"
+            onClick={onTest}
+            disabled={!fields.host || !fields.tokenId || !fields.tokenSecret || testing}
+          >
+            {testing ? 'Testing…' : 'Test connection'}
+          </Button>
+          {testOk && (
+            <span className="text-sm text-good flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-good inline-block" />
+              {testOk}
+            </span>
+          )}
+          {testError && <span className="text-sm text-bad">{testError}</span>}
+        </div>
+      </Card>
+
+      {/* Inline token creation guide */}
+      <div className="mt-4 rounded-[10px] border border-line-2 overflow-hidden">
+        <button
+          className="w-full flex items-center justify-between px-5 py-3.5 text-sm font-medium text-ink hover:bg-[rgba(27,23,38,0.03)] transition-colors text-left"
+          onClick={() => setGuideOpen((o) => !o)}
+        >
+          <span className="flex items-center gap-2">
+            <span className="text-ink-3">?</span>
+            How to create a Proxmox API token
+          </span>
+          <span className="text-ink-3 text-xs">{guideOpen ? '▲' : '▼'}</span>
+        </button>
+
+        {guideOpen && (
+          <div className="px-5 pb-5 border-t border-line bg-[rgba(27,23,38,0.02)]">
+            <ol className="mt-4 flex flex-col gap-3 text-sm text-ink-2">
+              <GuideStep n={1}>
+                Open the Proxmox web UI in your browser at{' '}
+                <span className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  https://&lt;your-node-ip&gt;:8006
+                </span>{' '}
+                and log in.
+              </GuideStep>
+              <GuideStep n={2}>
+                In the left sidebar, click{' '}
+                <strong className="text-ink">Datacenter</strong> (the top-level item, not a
+                specific node).
+              </GuideStep>
+              <GuideStep n={3}>
+                Go to{' '}
+                <span className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  Permissions → API Tokens
+                </span>{' '}
+                in the submenu, then click <strong className="text-ink">Add</strong>.
+              </GuideStep>
+              <GuideStep n={4}>
+                Set <strong className="text-ink">User</strong> to{' '}
+                <code className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  root@pam
+                </code>{' '}
+                and <strong className="text-ink">Token ID</strong> to{' '}
+                <code className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  nimbus
+                </code>
+                .
+              </GuideStep>
+              <GuideStep n={5} highlight>
+                <strong>Uncheck "Privilege Separation".</strong> Without this, the token
+                has no effective permissions and all API calls will fail with 403.
+              </GuideStep>
+              <GuideStep n={6}>
+                Click <strong className="text-ink">Add</strong>. Copy the token secret from
+                the popup immediately — Proxmox will not show it again. If you miss it,
+                delete the token and create a new one.
+              </GuideStep>
+              <GuideStep n={7}>
+                Paste the Token ID (
+                <code className="font-mono text-xs bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+                  root@pam!nimbus
+                </code>
+                ) and secret into the fields above, then click{' '}
+                <strong className="text-ink">Test connection</strong>.
+              </GuideStep>
+            </ol>
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end mt-6">
+        <Button onClick={onNext} disabled={!canNext}>
+          Next: Network →
+        </Button>
+      </div>
+      {!testOk && fields.tokenSecret && (
+        <p className="text-xs text-ink-3 text-right mt-2">
+          Test the connection before continuing.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function GuideStep({
+  n,
+  children,
+  highlight = false,
+}: {
+  n: number
+  children: React.ReactNode
+  highlight?: boolean
+}) {
+  return (
+    <li
+      className={`flex gap-3 ${highlight ? 'p-3 rounded-[8px] bg-[rgba(184,101,15,0.06)] border border-[rgba(184,101,15,0.2)] text-warn' : ''}`}
+    >
+      <span
+        className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono font-medium mt-0.5 ${
+          highlight ? 'bg-warn text-white' : 'bg-[rgba(27,23,38,0.07)] text-ink-3'
+        }`}
+      >
+        {n}
+      </span>
+      <span className="leading-relaxed">{children}</span>
+    </li>
+  )
+}
+
+// ── Step 2: Network ──────────────────────────────────────────────────────────
+
+interface NetworkStepProps {
+  fields: NetworkFields
+  onChange: (key: keyof NetworkFields, value: string) => void
+  onBack: () => void
+  onNext: () => void
+}
+
+function NetworkStep({ fields, onChange, onBack, onNext }: NetworkStepProps) {
+  const canNext = !!fields.ipPoolStart && !!fields.ipPoolEnd && !!fields.gatewayIp
+  const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
+  return (
+    <div>
+      <div className="eyebrow">Step 2 of 3</div>
+      <h2 className="text-3xl mt-1 mb-2">Network</h2>
+      <p className="text-base text-ink-2 leading-relaxed mb-8">
+        Nimbus allocates a static IP from this pool for every VM it provisions. Pick a
+        contiguous range of unused addresses on your LAN — nothing outside this range will
+        ever be touched.
+      </p>
+
+      {/* Required fields */}
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] font-mono font-medium uppercase tracking-widest text-ink">
+          Required
+        </span>
+        <span className="text-bad text-sm leading-none">*</span>
+      </div>
+      <Card className="p-8 flex flex-col gap-5 mb-6 border-[1.5px] border-line-2">
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Pool start IP *"
+            placeholder="192.168.0.100"
+            value={fields.ipPoolStart}
+            onChange={(e) => onChange('ipPoolStart', e.target.value)}
+            hint="First IP Nimbus may assign. Must be inside your LAN subnet and not already in use."
+          />
+          <Input
+            label="Pool end IP *"
+            placeholder="192.168.0.200"
+            value={fields.ipPoolEnd}
+            onChange={(e) => onChange('ipPoolEnd', e.target.value)}
+            hint="Last IP in the range (inclusive). A /24 gives you up to 101 addresses between .100–.200."
+          />
+        </div>
+        <Input
+          label="Gateway IP *"
+          placeholder="192.168.0.1"
+          value={fields.gatewayIp}
+          onChange={(e) => onChange('gatewayIp', e.target.value)}
+          hint="Your router's LAN IP — the default route injected into every VM via cloud-init. Usually ends in .1."
+        />
+      </Card>
+
+      {/* Optional fields */}
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] font-mono font-medium uppercase tracking-widest text-ink-3">
+          Optional
+        </span>
+        <span className="text-[11px] text-ink-3">— safe defaults apply if left blank</span>
+      </div>
+      <Card className="p-8 flex flex-col gap-5">
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Nameserver"
+            placeholder="1.1.1.1 8.8.8.8"
+            value={fields.nameserver}
+            onChange={(e) => onChange('nameserver', e.target.value)}
+            hint="DNS resolvers injected into VMs. Space-separated. Defaults to Cloudflare + Google."
+          />
+          <Input
+            label="Search domain"
+            placeholder="local"
+            value={fields.searchDomain}
+            onChange={(e) => onChange('searchDomain', e.target.value)}
+            hint="Appended to unqualified hostnames inside VMs (e.g. 'local' so 'myhost' resolves as 'myhost.local')."
+          />
+        </div>
+        <Input
+          label="HTTP port"
+          placeholder="8080"
+          value={fields.port}
+          onChange={(e) => onChange('port', e.target.value)}
+          hint="Port this Nimbus server listens on. Change if 8080 is already taken on this host."
+        />
+      </Card>
+
+      {missing && (
+        <p className="text-xs text-bad mt-4 text-right">
+          Fill in all required fields to continue.
+        </p>
+      )}
+
+      <div className="flex justify-between mt-6">
+        <Button variant="ghost" onClick={onBack}>
+          ← Back
+        </Button>
+        <Button onClick={onNext} disabled={!canNext}>
+          Next: Review →
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Step 3: Review ───────────────────────────────────────────────────────────
+
+interface ReviewStepProps {
+  proxmox: ProxmoxFields
+  network: NetworkFields
+  onBack: () => void
+  onSave: () => void
+  saving: boolean
+  saveError: string | null
+}
+
+function ReviewStep({ proxmox, network, onBack, onSave, saving, saveError }: ReviewStepProps) {
+  return (
+    <div>
+      <div className="eyebrow">Step 3 of 3</div>
+      <h2 className="text-3xl mt-1 mb-2">Review & save</h2>
+      <p className="text-base text-ink-2 leading-relaxed mb-8">
+        Nimbus will write these values to the config file and restart.
+      </p>
+
+      <Card className="p-8">
+        <SectionLabel>Proxmox</SectionLabel>
+        <ReviewRow label="API URL" value={proxmox.host} />
+        <ReviewRow label="Token ID" value={proxmox.tokenId} />
+        <ReviewRow label="Token secret" value={'•'.repeat(16)} />
+
+        <SectionLabel className="mt-6">Network</SectionLabel>
+        <ReviewRow label="IP pool" value={`${network.ipPoolStart} – ${network.ipPoolEnd}`} />
+        <ReviewRow label="Gateway" value={network.gatewayIp} />
+        <ReviewRow label="Nameserver" value={network.nameserver || '1.1.1.1 8.8.8.8'} />
+        <ReviewRow label="Search domain" value={network.searchDomain || 'local'} />
+        <ReviewRow label="Port" value={network.port || '8080'} />
+      </Card>
+
+      {saveError && (
+        <div className="mt-4 p-3.5 rounded-[10px] bg-[rgba(184,58,58,0.06)] border border-[rgba(184,58,58,0.2)] text-bad text-sm">
+          {saveError}
+        </div>
+      )}
+
+      <div className="flex justify-between mt-6">
+        <Button variant="ghost" onClick={onBack} disabled={saving}>
+          ← Back
+        </Button>
+        <Button onClick={onSave} disabled={saving}>
+          {saving ? 'Saving…' : 'Save & start Nimbus →'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function SectionLabel({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-3 ${className}`}>
+      {children}
+    </div>
+  )
+}
+
+function ReviewRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between py-2.5 border-b border-dashed border-line text-[13px] last:border-b-0">
+      <span className="text-ink-3">{label}</span>
+      <span className="font-mono text-ink text-xs">{value}</span>
+    </div>
+  )
+}
+
+// ── Restarting ───────────────────────────────────────────────────────────────
+
+function RestartingView() {
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      while (!cancelled) {
+        await new Promise((r) => setTimeout(r, 1500))
+        try {
+          const status = await getSetupStatus()
+          if (status.configured) {
+            window.location.replace('/')
+            return
+          }
+        } catch {
+          // server is restarting — keep polling
+        }
+      }
+    }
+    poll()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Background />
+      <div className="flex-1 grid place-items-center">
+        <Card className="w-full max-w-[480px] p-12 text-center mx-4">
+          <div className="brand-mark brand-mark-lg mx-auto animate-pulse" />
+          <div className="eyebrow mt-7">One moment</div>
+          <h2 className="text-3xl mt-1">Starting Nimbus…</h2>
+          <p className="text-base text-ink-2 mt-4 leading-relaxed">
+            Configuration saved. The server is restarting — you'll be redirected automatically.
+          </p>
+        </Card>
+      </div>
+    </div>
+  )
+}
