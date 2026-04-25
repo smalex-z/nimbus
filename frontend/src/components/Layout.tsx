@@ -1,5 +1,5 @@
 import { ReactNode } from 'react'
-import { Link, NavLink, useNavigate } from 'react-router-dom'
+import { Link, NavLink } from 'react-router-dom'
 import api from '@/api/client'
 import { useAuth } from '@/context/AuthContext'
 
@@ -15,14 +15,13 @@ const navItems: Array<{ label: string; path: string }> = [
 ]
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
-  const navigate = useNavigate()
   const { user } = useAuth()
 
   const handleSignOut = async () => {
     try {
       await api.post('/auth/logout')
     } finally {
-      navigate('/login')
+      window.location.replace('/login')
     }
   }
 
@@ -62,6 +61,24 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   {item.label}
                 </NavLink>
               ))}
+
+              {user?.is_admin && (
+                <>
+                  <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
+                  <NavLink
+                    to="/settings"
+                    className={({ isActive }) =>
+                      `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
+                        isActive
+                          ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+                          : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+                      }`
+                    }
+                  >
+                    Settings
+                  </NavLink>
+                </>
+              )}
 
               <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
 

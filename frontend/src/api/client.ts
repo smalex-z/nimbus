@@ -142,4 +142,40 @@ export async function createAdminAccount(req: CreateAdminRequest): Promise<{ id:
   return data
 }
 
+export interface OAuthProviders {
+  github: boolean
+  google: boolean
+}
+
+export interface OAuthSettingsView {
+  github_client_id: string
+  google_client_id: string
+  github_configured: boolean
+  google_configured: boolean
+}
+
+export interface SaveOAuthSettingsRequest {
+  github_client_id?: string
+  github_client_secret?: string
+  google_client_id?: string
+  google_client_secret?: string
+}
+
+export async function getProviders(): Promise<OAuthProviders> {
+  const { data } = await api.get<OAuthProviders>('/auth/providers')
+  return data
+}
+
+export async function getOAuthSettings(): Promise<OAuthSettingsView> {
+  const { data } = await api.get<OAuthSettingsView>('/settings/oauth')
+  return data
+}
+
+export async function saveOAuthSettings(
+  req: SaveOAuthSettingsRequest,
+): Promise<{ message: string }> {
+  const { data } = await api.put<{ message: string }>('/settings/oauth', req)
+  return data
+}
+
 export default api

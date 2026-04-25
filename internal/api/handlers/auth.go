@@ -23,13 +23,53 @@ const (
 // Auth handles authentication endpoints.
 type Auth struct {
 	auth   *service.AuthService
-	github oauth.Provider
-	google oauth.Provider
+	appURL string
 }
 
-// NewAuth creates a new Auth handler. github and google may be nil if not configured.
-func NewAuth(auth *service.AuthService, github, google oauth.Provider) *Auth {
-	return &Auth{auth: auth, github: github, google: google}
+// NewAuth creates a new Auth handler. appURL is used for the Google OAuth redirect URI.
+func NewAuth(auth *service.AuthService, appURL string) *Auth {
+	return &Auth{auth: auth, appURL: appURL}
+}
+
+// githubProvider loads GitHub OAuth credentials from the DB on each call.
+// Returns nil if credentials are not configured.
+func (a *Auth) githubProvider() oauth.Provider {
+	settings, err := a.auth.GetOAuthSettings()
+	if err != nil || settings.GitHubClientID == "" || settings.GitHubClientSecret == "" {
+		return nil
+	}
+	return &oauth.GitHub{
+		ClientID:     settings.GitHubClientID,
+		ClientSecret: settings.GitHubClientSecret,
+	}
+}
+
+// googleProvider loads Google OAuth credentials from the DB on each call.
+// Returns nil if credentials are not configured.
+func (a *Auth) googleProvider() oauth.Provider {
+	settings, err := a.auth.GetOAuthSettings()
+	if err != nil || settings.GoogleClientID == "" || settings.GoogleClientSecret == "" {
+		return nil
+	}
+	return &oauth.Google{
+		ClientID:     settings.GoogleClientID,
+		ClientSecret: settings.GoogleClientSecret,
+		RedirectURI:  a.appURL + "/api/auth/google/callback",
+	}
+}
+
+// Providers handles GET /api/auth/providers — public endpoint that tells the
+// frontend which OAuth providers have credentials configured in the DB.
+func (a *Auth) Providers(w http.ResponseWriter, r *http.Request) {
+	settings, err := a.auth.GetOAuthSettings()
+	if err != nil {
+		response.Success(w, map[string]bool{"github": false, "google": false})
+		return
+	}
+	response.Success(w, map[string]bool{
+		"github": settings.GitHubClientID != "" && settings.GitHubClientSecret != "",
+		"google": settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
+	})
 }
 
 // --- cookie helpers ---------------------------------------------------------
@@ -242,21 +282,21 @@ func (a *Auth) oauthCallback(provider oauth.Provider, providerName string) http.
 // --- GitHub OAuth -----------------------------------------------------------
 
 func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
-	a.oauthStart(a.github)(w, r)
+	a.oauthStart(a.githubProvider())(w, r)
 }
 
 func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.github, "github")(w, r)
+	a.oauthCallback(a.githubProvider(), "github")(w, r)
 }
 
 // --- Google OAuth -----------------------------------------------------------
 
 func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
-	a.oauthStart(a.google)(w, r)
+	a.oauthStart(a.googleProvider())(w, r)
 }
 
 func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.google, "google")(w, r)
+	a.oauthCallback(a.googleProvider(), "google")(w, r)
 }
 
 // --- misc -------------------------------------------------------------------

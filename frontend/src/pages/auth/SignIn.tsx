@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import api from '@/api/client'
+import api, { getProviders } from '@/api/client'
+import type { OAuthProviders } from '@/api/client'
 import { NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
 
 const HEADING_PLAIN = 'Welcome to '
@@ -34,7 +35,12 @@ export default function SignIn() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [providers, setProviders] = useState<OAuthProviders | null>(null)
   const { displayed, done } = useTypingEffect(HEADING_FULL)
+
+  useEffect(() => {
+    getProviders().then(setProviders).catch(() => setProviders({ github: false, google: false }))
+  }, [])
 
   const plainVisible = displayed.slice(0, HEADING_PLAIN.length)
   const italicVisible = displayed.slice(HEADING_PLAIN.length)
@@ -105,21 +111,28 @@ export default function SignIn() {
             Sign in to provision VMs on the cluster.
           </p>
 
-          {/* OAuth providers */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-            <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/github' }}>
-              <GithubIcon size={18} />
-              <span style={{ flex: 1 }}>Continue with GitHub</span>
-              <ArrowRightIcon size={14} />
-            </button>
-            <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/google' }}>
-              <GoogleIcon size={18} />
-              <span style={{ flex: 1 }}>Continue with Google</span>
-              <ArrowRightIcon size={14} />
-            </button>
-          </div>
-
-          <div className="n-divider" style={{ marginBottom: 20 }}>or</div>
+          {/* OAuth providers — only rendered when admin has configured them */}
+          {(providers?.github || providers?.google) && (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+                {providers.github && (
+                  <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/github' }}>
+                    <GithubIcon size={18} />
+                    <span style={{ flex: 1 }}>Continue with GitHub</span>
+                    <ArrowRightIcon size={14} />
+                  </button>
+                )}
+                {providers.google && (
+                  <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/google' }}>
+                    <GoogleIcon size={18} />
+                    <span style={{ flex: 1 }}>Continue with Google</span>
+                    <ArrowRightIcon size={14} />
+                  </button>
+                )}
+              </div>
+              <div className="n-divider" style={{ marginBottom: 20 }}>or</div>
+            </>
+          )}
 
           {error && (
             <div
