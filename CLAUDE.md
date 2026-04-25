@@ -46,12 +46,6 @@ Don't add error handling for impossible cases, comments that re-state the code,
 or backwards-compat shims for code that hasn't been released. If you find drift
 in adjacent code, mention it and ask before fixing it in the same PR.
 
-### Plan-mode for non-trivial work
-
-For anything that touches more than ~3 files or changes a public interface, draft a
-plan in `~/.claude/plans/` and use `ExitPlanMode` for approval before editing.
-Trivial fixes (typo, format, single-line patch) don't need this.
-
 ---
 
 ## Project orientation
@@ -85,7 +79,7 @@ internal/
   ctxutil/              request-context helpers (current user, …)
   build/                build-time version info (ldflags)
 frontend/               React 18 + TS + Vite + Tailwind SPA
-scripts/                build.sh, dev.sh, install.sh
+scripts/                build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 .github/workflows/      build, test, lint, release
 ```
 

@@ -8,6 +8,7 @@
 package install
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -31,13 +32,29 @@ const (
 // Run executes the install subcommand. If not running as root it re-execs
 // itself via sudo (which may be passwordless after the first install
 // thanks to the sudoers rule written below).
-func Run() {
+//
+// With --upgrade, only the binary is replaced and the service restarted;
+// env file, systemd unit, sudoers rule, and service user are left alone.
+func Run(args []string) {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	upgrade := fs.Bool("upgrade", false, "replace binary and restart service; leave config/systemd/sudoers untouched")
+	_ = fs.Parse(args)
+
 	if runtime.GOOS != "linux" {
 		fatalf("nimbus install only supports Linux")
 	}
 
 	if os.Getuid() != 0 {
 		selfExecWithSudo()
+		return
+	}
+
+	if *upgrade {
+		fmt.Println("\nNimbus Upgrade")
+		fmt.Println("────────────────────────────────────────────────")
+		step("Installing binary", installBinary)
+		step("Restarting service", startService)
+		fmt.Printf("\n✅ Nimbus upgraded.\n\n")
 		return
 	}
 
