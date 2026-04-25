@@ -544,17 +544,17 @@ func TestClient_ListClusterIPs(t *testing.T) {
 func TestClient_ListClusterIPs_PartialNodeFailure(t *testing.T) {
 	t.Parallel()
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api2/json/nodes":
+		switch r.URL.Path {
+		case "/api2/json/nodes":
 			writeEnvelope(w, []proxmox.Node{
 				{Name: "good", Status: "online"},
 				{Name: "bad", Status: "online"},
 			})
-		case r.URL.Path == "/api2/json/nodes/good/qemu":
+		case "/api2/json/nodes/good/qemu":
 			writeEnvelope(w, []proxmox.VMStatus{{VMID: 200, Name: "ok-vm", Status: "running"}})
-		case r.URL.Path == "/api2/json/nodes/good/qemu/200/config":
+		case "/api2/json/nodes/good/qemu/200/config":
 			writeEnvelope(w, map[string]any{"ipconfig0": "ip=10.0.0.10/24"})
-		case r.URL.Path == "/api2/json/nodes/bad/qemu":
+		case "/api2/json/nodes/bad/qemu":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"errors":"node down"}`))
 		default:
