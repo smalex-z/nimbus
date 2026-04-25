@@ -5,9 +5,7 @@ interface CardProps extends HTMLAttributes<HTMLDivElement> {
   strong?: boolean
 }
 
-// Card is the frosted glass surface used everywhere in the Nimbus UI. The
-// `strong` variant boosts the backdrop blur — matches `.glass-strong` in the
-// mockup, used for modals.
+// Card is the frosted glass surface used throughout the Nimbus UI.
 export default function Card({
   children,
   strong = false,

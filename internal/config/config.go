@@ -34,11 +34,16 @@ type Config struct {
 	Nameserver   string
 	SearchDomain string
 
-	// Optional integrations (Phase 2+, accepted but unused in Phase 1)
-	OAuthClientID     string
-	OAuthClientSecret string
-	GopherAPIURL      string
-	GopherAPIKey      string
+	// OAuth
+	AppURL             string
+	GitHubClientID     string
+	GitHubClientSecret string
+	GoogleClientID     string
+	GoogleClientSecret string
+
+	// Optional integrations
+	GopherAPIURL string
+	GopherAPIKey string
 }
 
 // Load reads configuration from process environment. If `.env` exists in the
@@ -64,8 +69,11 @@ func Load() (*Config, error) {
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
-		OAuthClientID:           os.Getenv("OAUTH_CLIENT_ID"),
-		OAuthClientSecret:       os.Getenv("OAUTH_CLIENT_SECRET"),
+		AppURL:                  getEnv("APP_URL", "http://localhost:5173"),
+		GitHubClientID:          os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret:      os.Getenv("GITHUB_CLIENT_SECRET"),
+		GoogleClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GopherAPIURL:            os.Getenv("GOPHER_API_URL"),
 		GopherAPIKey:            os.Getenv("GOPHER_API_KEY"),
 	}

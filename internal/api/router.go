@@ -13,11 +13,12 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/service"
 )
 
-// Deps bundles the dependencies the router needs. A struct beats a long
-// positional argument list and lets cmd/server compose at construction time.
+// Deps bundles the dependencies the router needs.
 type Deps struct {
+	Auth      *service.AuthService
 	Provision *provision.Service
 	Pool      *ippool.Pool
 	Proxmox   *proxmox.Client
@@ -39,22 +40,49 @@ func NewRouter(d Deps) http.Handler {
 	vms := handlers.NewVMs(d.Provision)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
-	setup := handlers.NewSetup(d.Config, d.Restart)
+	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
+	settings := handlers.NewSettings(d.Auth)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
 		r.Get("/setup/status", setup.Status)
+		r.Post("/setup/admin", setup.CreateAdmin)
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
 
-		// VM provisioning is long-running — bump the timeout on this route only.
-		// Keep other routes at the default short timeout.
+		// VM provisioning — long-running, gets its own timeout.
 		r.Route("/vms", func(r chi.Router) {
 			r.Use(middleware.Timeout(180 * time.Second))
 			r.Get("/", vms.List)
 			r.Post("/", vms.Create)
 			r.Get("/{id}", vms.Get)
+		})
+
+		// Auth routes (public)
+		r.Post("/auth/register", auth.Register)
+		r.Post("/auth/login", auth.Login)
+		r.Post("/auth/logout", auth.Logout)
+		r.Get("/auth/github", auth.GitHubStart)
+		r.Get("/auth/github/callback", auth.GitHubCallback)
+		r.Get("/auth/google", auth.GoogleStart)
+		r.Get("/auth/google/callback", auth.GoogleCallback)
+		r.Get("/auth/providers", auth.Providers)
+
+		// Protected routes — require a valid session cookie
+		r.Group(func(r chi.Router) {
+			r.Use(requireAuth(d.Auth))
+
+			r.Get("/me", auth.Me)
+			r.Get("/users", auth.ListUsers)
+
+			// Admin-only routes
+			r.Group(func(r chi.Router) {
+				r.Use(requireAdmin)
+				r.Get("/settings/oauth", settings.GetOAuth)
+				r.Put("/settings/oauth", settings.SaveOAuth)
+			})
 		})
 	})
 
