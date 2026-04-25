@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from '@/context/AuthContext'
 import Background from '@/components/Background'
@@ -11,8 +12,33 @@ import Claim from '@/pages/admin/Claim'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
+import Setup from '@/pages/Setup'
+import { getSetupStatus } from '@/api/client'
+
+type AppState = 'loading' | 'setup' | 'ready'
 
 export default function App() {
+  const [state, setState] = useState<AppState>('loading')
+
+  useEffect(() => {
+    getSetupStatus()
+      .then((s) => setState(s.configured ? 'ready' : 'setup'))
+      .catch(() => setState('setup'))
+  }, [])
+
+  if (state === 'loading') {
+    return (
+      <div className="min-h-screen grid place-items-center">
+        <Background />
+        <div className="brand-mark brand-mark-lg animate-pulse" />
+      </div>
+    )
+  }
+
+  if (state === 'setup') {
+    return <Setup />
+  }
+
   return (
     <BrowserRouter>
       <AuthProvider>
