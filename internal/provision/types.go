@@ -18,6 +18,13 @@ type Request struct {
 // SSHPrivateKey is populated only when GenerateKey was true on the request.
 // It is never persisted and never logged — see (*Result).String for the
 // redacted form used in log lines.
+//
+// Warning, when non-empty, indicates a "soft success": the VM was created
+// and configured but Nimbus could not verify it was reachable on its
+// assigned IP within the readiness budget. The credentials are still valid
+// — they just couldn't be confirmed. Most common cause: Nimbus running
+// outside the cluster's LAN, where the VM's internal IP isn't routable
+// from Nimbus's network position.
 type Result struct {
 	VMID          int    `json:"vmid"`
 	Hostname      string `json:"hostname"`
@@ -27,6 +34,7 @@ type Result struct {
 	Tier          string `json:"tier"`
 	Node          string `json:"node"`
 	SSHPrivateKey string `json:"ssh_private_key,omitempty"`
+	Warning       string `json:"warning,omitempty"`
 }
 
 // String returns a log-safe representation of the Result that omits the

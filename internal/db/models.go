@@ -1,6 +1,8 @@
 package db
 
 import (
+	"time"
+
 	"gorm.io/gorm"
 )
 
@@ -22,3 +24,19 @@ type VM struct {
 	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
 	ErrorMsg   string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
 }
+
+// NodeTemplate maps an (OS, node) pair to the Proxmox VMID where that node's
+// copy of the template lives. Required because Proxmox VMIDs are cluster-wide
+// unique — we can't naively use VMID 9000 for "Ubuntu 24.04 on every node",
+// so each node's template gets a Proxmox-assigned VMID, and we look it up at
+// provision time by (node, os).
+type NodeTemplate struct {
+	Node      string    `gorm:"column:node;primaryKey;not null"    json:"node"`
+	OS        string    `gorm:"column:os;primaryKey;not null"      json:"os"`
+	VMID      int       `gorm:"column:vmid;uniqueIndex;not null"   json:"vmid"`
+	CreatedAt time.Time `gorm:"column:created_at"                  json:"created_at"`
+}
+
+// TableName pins the table name to avoid GORM's default pluralization choosing
+// something unexpected for the unusual struct name.
+func (NodeTemplate) TableName() string { return "node_templates" }

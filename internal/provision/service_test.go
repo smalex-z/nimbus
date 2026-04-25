@@ -99,16 +99,29 @@ func happyFakePVE(t *testing.T) *fakePVE {
 	}
 }
 
-func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool) {
+func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool, *db.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.New(path, ippool.Model(), &db.VM{})
+	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{})
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), "10.0.0.1", "10.0.0.5"); err != nil {
 		t.Fatalf("Seed: %v", err)
+	}
+
+	// Seed node_templates rows so the new pickNode DB lookup finds eligible
+	// nodes. happyFakePVE returns one node "alpha", so all 4 OS templates
+	// live there at unique VMIDs.
+	vmid := 9000
+	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+		if err := database.Create(&db.NodeTemplate{
+			Node: "alpha", OS: os, VMID: vmid,
+		}).Error; err != nil {
+			t.Fatalf("seed node_templates: %v", err)
+		}
+		vmid++
 	}
 
 	svc := provision.New(fake, pool, database.DB, provision.Config{
@@ -119,12 +132,12 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		IPReadyTimeout:   1 * time.Second,
 		PollInterval:     5 * time.Millisecond,
 	})
-	return svc, pool
+	return svc, pool, database
 }
 
 func TestProvision_HappyPath_BringYourOwnKey(t *testing.T) {
 	t.Parallel()
-	svc, pool := newTestService(t, happyFakePVE(t))
+	svc, pool, _ := newTestService(t, happyFakePVE(t))
 
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "test-vm",
@@ -160,7 +173,7 @@ func TestProvision_HappyPath_BringYourOwnKey(t *testing.T) {
 func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	t.Parallel()
 	fake := happyFakePVE(t)
-	svc, _ := newTestService(t, fake)
+	svc, _, _ := newTestService(t, fake)
 
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:    "gen-vm",
@@ -188,6 +201,84 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	}
 }
 
+func TestProvision_WaitForIPTimeout_SoftSuccess(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Simulate the agent never reporting the expected IP — eventually
+	// WaitForIP exhausts its budget and returns context.DeadlineExceeded.
+	fake.getAgentIfaces = func(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
+		return []proxmox.NetworkInterface{}, nil // no IPs reported, ever
+	}
+	svc, pool, _ := newTestService(t, fake)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "unreachable-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	if err != nil {
+		t.Fatalf("expected soft success, got error: %v", err)
+	}
+	if res.Warning == "" {
+		t.Errorf("expected non-empty Warning on soft success")
+	}
+	if !strings.Contains(res.Warning, "could not confirm reachability") {
+		t.Errorf("warning text doesn't explain reachability issue: %q", res.Warning)
+	}
+	if res.VMID != 200 {
+		t.Errorf("VMID = %d, want 200", res.VMID)
+	}
+	if res.IP != "10.0.0.1" {
+		t.Errorf("IP = %s, want 10.0.0.1", res.IP)
+	}
+
+	// IP must be marked allocated even though reachability wasn't confirmed —
+	// the VM is real and holds the IP.
+	rows, _ := pool.List(context.Background())
+	allocated := false
+	for _, r := range rows {
+		if r.IP == "10.0.0.1" && r.Status == ippool.StatusAllocated {
+			allocated = true
+		}
+	}
+	if !allocated {
+		t.Errorf("expected IP 10.0.0.1 to be allocated after soft success")
+	}
+}
+
+func TestProvision_WaitForIPHardError_StillFails(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Replace the agent endpoint with one that returns a non-timeout error
+	// the WaitForIP loop is happy to swallow → but we want a different path.
+	// Easier: hijack StartVM to return a non-timeout error to ensure hard
+	// failures still return 500. (WaitForIP only returns ctx.Err — there's
+	// no other "hard" error path inside it. So we exercise the same logic
+	// via a different step that DOES return non-timeout errors.)
+	fake.startVM = func(_ context.Context, _ string, _ int) (string, error) {
+		return "", errors.New("boom: hardware on fire")
+	}
+	svc, pool, _ := newTestService(t, fake)
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "fail-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  "ssh-ed25519 AAAA",
+	})
+	if err == nil {
+		t.Fatalf("expected error for non-timeout failure")
+	}
+	// IP must be released back to free.
+	rows, _ := pool.List(context.Background())
+	for _, r := range rows {
+		if r.IP == "10.0.0.1" && r.Status != ippool.StatusFree {
+			t.Errorf("IP %s status = %s, want free after hard failure", r.IP, r.Status)
+		}
+	}
+}
+
 func TestProvision_FailureReleasesIP(t *testing.T) {
 	t.Parallel()
 	fake := happyFakePVE(t)
@@ -195,7 +286,7 @@ func TestProvision_FailureReleasesIP(t *testing.T) {
 	fake.setCloudInit = func(_ context.Context, _ string, _ int, _ proxmox.CloudInitConfig) error {
 		return errors.New("boom")
 	}
-	svc, pool := newTestService(t, fake)
+	svc, pool, _ := newTestService(t, fake)
 
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "boom-vm",
@@ -225,7 +316,7 @@ func TestProvision_NoEligibleNode(t *testing.T) {
 			{Name: "alpha", Status: "offline", MaxMem: 16 << 30},
 		}, nil
 	}
-	svc, pool := newTestService(t, fake)
+	svc, pool, _ := newTestService(t, fake)
 
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "lonely-vm",
@@ -256,18 +347,25 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 			{Name: "bravo", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30},
 		}, nil
 	}
-	// Only bravo has the template.
-	fake.templateExists = func(_ context.Context, n string, _ int) (bool, error) {
-		return n == "bravo", nil
-	}
 	captured := atomic.Pointer[string]{}
 	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
-		t := target
-		captured.Store(&t)
+		tgt := target
+		captured.Store(&tgt)
 		return "UPID", nil
 	}
 
-	svc, _ := newTestService(t, fake)
+	svc, _, database := newTestService(t, fake)
+	// Override the default seed: drop alpha's templates, give bravo the
+	// one we need. With only bravo eligible, the scorer must pick it.
+	if err := database.Where("node = ?", "alpha").Delete(&db.NodeTemplate{}).Error; err != nil {
+		t.Fatalf("clear alpha templates: %v", err)
+	}
+	if err := database.Create(&db.NodeTemplate{
+		Node: "bravo", OS: "ubuntu-24.04", VMID: 9100,
+	}).Error; err != nil {
+		t.Fatalf("seed bravo template: %v", err)
+	}
+
 	if _, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "tpl-vm",
 		Tier:       "small",
@@ -284,7 +382,7 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 
 func TestProvision_UnknownTier(t *testing.T) {
 	t.Parallel()
-	svc, _ := newTestService(t, happyFakePVE(t))
+	svc, _, _ := newTestService(t, happyFakePVE(t))
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "x",
 		Tier:       "bogus",
@@ -299,7 +397,7 @@ func TestProvision_UnknownTier(t *testing.T) {
 
 func TestProvision_UnknownOSTemplate(t *testing.T) {
 	t.Parallel()
-	svc, _ := newTestService(t, happyFakePVE(t))
+	svc, _, _ := newTestService(t, happyFakePVE(t))
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "x",
 		Tier:       "small",

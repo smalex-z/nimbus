@@ -19,6 +19,38 @@ type VMStatus struct {
 	Template int    `json:"template"`
 }
 
+// Storage describes one storage entry on a node, returned by GET /nodes/{n}/storage.
+//
+// The Content field is a comma-separated list (Proxmox sends it as a string) of
+// the content types this storage accepts: "iso", "images", "rootdir", "backup",
+// "vztmpl", "snippets". Bootstrap uses this to pick the right storage for
+// downloaded cloud images vs. VM disks.
+type Storage struct {
+	Storage string `json:"storage"`
+	Type    string `json:"type"`    // "dir", "lvmthin", "nfs", "ceph", ...
+	Content string `json:"content"` // comma-separated
+	Enabled int    `json:"enabled"` // 0/1
+	Active  int    `json:"active"`  // 0/1
+}
+
+// CreateVMOpts are the parameters for CreateVMWithImport. See the method
+// docstring for the exact wire format these get translated into.
+type CreateVMOpts struct {
+	Name        string
+	Memory      int    // MB
+	Cores       int    // vCPUs
+	Bridge      string // network bridge, e.g. "vmbr0"
+	DiskStorage string // e.g. "local-lvm" — where the imported disk lands
+	// ImagePath identifies the source image to import. API tokens cannot pass
+	// raw filesystem paths — use a Proxmox volid like "local:iso/foo.img"
+	// instead of "/var/lib/vz/template/iso/foo.img". The field name is kept
+	// for backward compat but the value should always be a volid in practice.
+	ImagePath    string
+	SerialOnly   bool   // cloud images need serial0=socket + vga=serial0 to boot headless
+	AgentEnabled bool   // enables the qemu-guest-agent feature flag
+	OSType       string // "l26" for Linux 2.6+ — Proxmox uses this for sane defaults
+}
+
 // CloudInitConfig carries the cloud-init values Nimbus injects per-clone.
 //
 // SSHKeys is the *raw* OpenSSH authorized-keys string (one or more keys, one

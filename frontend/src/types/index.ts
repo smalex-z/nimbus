@@ -57,6 +57,11 @@ export interface ProvisionResult {
   tier: TierName
   node: string
   ssh_private_key?: string
+  // Soft-success warning. Non-empty when the VM was created and configured
+  // but Nimbus couldn't verify reachability on the assigned IP. Credentials
+  // are still valid — usually means Nimbus is running outside the cluster's
+  // LAN. UI shows a yellow banner above the credentials when this is set.
+  warning?: string
 }
 
 export interface NodeView {

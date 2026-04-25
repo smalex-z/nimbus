@@ -103,11 +103,9 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, &internalerrors.ValidationError{Field: "tier", Message: fmt.Sprintf("unknown tier %q", req.Tier)}
 	}
 
-	templateOffset, ok := proxmox.TemplateOffsets[req.OSTemplate]
-	if !ok {
+	if _, ok := proxmox.TemplateOffsets[req.OSTemplate]; !ok {
 		return nil, &internalerrors.ValidationError{Field: "os_template", Message: fmt.Sprintf("unknown os_template %q", req.OSTemplate)}
 	}
-	templateVMID := s.cfg.TemplateBaseVMID + templateOffset
 
 	// Resolve SSH key.
 	sshPubKey, sshPrivateKey, err := s.resolveSSHKey(req)
@@ -130,13 +128,15 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		}
 	}()
 
-	// Step 2: gather cluster snapshot and score.
-	target, err := s.pickNode(ctx, tier, templateVMID)
+	// Step 2: gather cluster snapshot and score, restricted to nodes that
+	// have a template for the requested OS.
+	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: clone the template (serialized to avoid VMID races).
+	// Step 3: clone the template (serialized to avoid VMID races on the
+	// fresh-VMID assignment for the new VM).
 	s.cloneMu.Lock()
 	defer s.cloneMu.Unlock()
 
@@ -145,12 +145,10 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("nextid: %w", err)
 	}
 
-	sourceNode := s.cfg.SourceNode
-	if sourceNode == "" {
-		sourceNode = target
-	}
-
-	taskID, err := s.px.CloneVM(ctx, sourceNode, target, templateVMID, newVMID, req.Hostname)
+	// Source and target node are the same — the template lives on the picked
+	// node by definition (pickNode only returns nodes that have a template
+	// row in the DB for this OS). Local clones are fast.
+	taskID, err := s.px.CloneVM(ctx, target, target, templateVMID, newVMID, req.Hostname)
 	if err != nil {
 		return nil, fmt.Errorf("clone vm: %w", err)
 	}
@@ -192,11 +190,31 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	// Step 7: wait for IP readiness.
+	//
+	// A timeout here is genuinely ambiguous — could mean "VM never came up"
+	// or "VM is up but Nimbus's network position can't reach its IP". We
+	// treat them differently:
+	//
+	//   - context.DeadlineExceeded → soft success: VM is real, commit the
+	//     allocation, populate Result.Warning so the user knows reachability
+	//     wasn't confirmed. They can SSH from a machine on the cluster LAN.
+	//   - any other error (Proxmox API failure, agent crash) → hard failure:
+	//     release the IP and return 500.
+	var warning string
 	waitCtx, cancel := context.WithTimeout(ctx, s.cfg.IPReadyTimeout)
 	defer cancel()
 	if err := WaitForIP(waitCtx, s.px, target, newVMID, ip, s.cfg.PollInterval); err != nil {
-		s.persistFailedVM(ctx, req, ip, target, newVMID, err)
-		return nil, fmt.Errorf("wait for ready: %w", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			warning = fmt.Sprintf(
+				"VM was created and configured, but Nimbus could not confirm reachability on %s within %s. "+
+					"This usually means Nimbus is running outside the cluster's LAN. "+
+					"The credentials are valid — try SSHing from a machine on the cluster network.",
+				ip, s.cfg.IPReadyTimeout)
+			// fall through to the success path
+		} else {
+			s.persistFailedVM(ctx, req, ip, target, newVMID, err)
+			return nil, fmt.Errorf("wait for ready: %w", err)
+		}
 	}
 
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
@@ -215,6 +233,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Username:   username,
 		Status:     "running",
 		OwnerID:    req.OwnerID,
+		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
@@ -231,6 +250,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		Tier:          req.Tier,
 		Node:          target,
 		SSHPrivateKey: sshPrivateKey,
+		Warning:       warning,
 	}, nil
 }
 
@@ -278,21 +298,49 @@ func (s *Service) resolveSSHKey(req Request) (string, string, error) {
 	return req.SSHPubKey, "", nil
 }
 
-// pickNode collects live telemetry (concurrent fan-out across nodes for the
-// per-node ListVMs / TemplateExists calls), filters via nodescore.Eligible,
-// then picks the best.
-func (s *Service) pickNode(ctx context.Context, tier nodescore.Tier, templateVMID int) (string, error) {
+// pickNode collects live cluster telemetry, intersects it with the set of
+// nodes that have a template for the requested OS (via the node_templates
+// table), scores the survivors, and returns the winner along with the
+// templateVMID to clone from on that node.
+//
+// The template-presence check is now a single DB query instead of a per-node
+// Proxmox API fan-out — much faster and matches the actual source of truth.
+func (s *Service) pickNode(
+	ctx context.Context,
+	tier nodescore.Tier,
+	osKey string,
+) (target string, templateVMID int, err error) {
+	// Fetch all node_templates rows for this OS in one query. Returned
+	// (node, vmid) pairs are exactly the nodes eligible to host this OS.
+	var templates []db.NodeTemplate
+	if err := s.db.WithContext(ctx).
+		Where("os = ?", osKey).
+		Find(&templates).Error; err != nil {
+		return "", 0, fmt.Errorf("lookup templates for os %s: %w", osKey, err)
+	}
+	if len(templates) == 0 {
+		return "", 0, &internalerrors.ConflictError{
+			Message: fmt.Sprintf("no node has a template for os %q — run bootstrap first", osKey),
+		}
+	}
+	templateVMIDByNode := make(map[string]int, len(templates))
+	templatesPresent := make(map[string]bool, len(templates))
+	for _, t := range templates {
+		templateVMIDByNode[t.Node] = t.VMID
+		templatesPresent[t.Node] = true
+	}
+
+	// Live telemetry: nodes for scoring + per-node VM counts for tie-break.
 	nodes, err := s.px.GetNodes(ctx)
 	if err != nil {
-		return "", fmt.Errorf("get nodes: %w", err)
+		return "", 0, fmt.Errorf("get nodes: %w", err)
 	}
 
 	var (
-		mu               sync.Mutex
-		vmCounts         = make(map[string]int)
-		templatesPresent = make(map[string]bool)
-		errs             []error
-		wg               sync.WaitGroup
+		mu       sync.Mutex
+		vmCounts = make(map[string]int)
+		errs     []error
+		wg       sync.WaitGroup
 	)
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
@@ -300,44 +348,38 @@ func (s *Service) pickNode(ctx context.Context, tier nodescore.Tier, templateVMI
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 		})
-		if n.Status != "online" {
-			continue
+		if n.Status != "online" || !templatesPresent[n.Name] {
+			continue // skip vm-counts for nodes we already know are ineligible
 		}
 		nodeName := n.Name
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			vms, err := s.px.ListVMs(ctx, nodeName)
-			present, terr := s.px.TemplateExists(ctx, nodeName, templateVMID)
 
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, fmt.Errorf("list vms on %s: %w", nodeName, err))
-			} else {
-				vmCounts[nodeName] = len(vms)
+				return
 			}
-			if terr != nil {
-				errs = append(errs, fmt.Errorf("template check on %s: %w", nodeName, terr))
-			} else {
-				templatesPresent[nodeName] = present
-			}
+			vmCounts[nodeName] = len(vms)
 		}()
 	}
 	wg.Wait()
 	if len(errs) > 0 {
-		// Return the first error — they're all "transient cluster issues".
-		return "", fmt.Errorf("cluster snapshot: %w", errs[0])
+		return "", 0, fmt.Errorf("cluster snapshot: %w", errs[0])
 	}
 
 	candidates := nodescore.Eligible(scoringNodes, vmCounts, tier, s.cfg.ExcludedNodes, templatesPresent)
 	pick := nodescore.Pick(candidates)
 	if pick == nil {
-		return "", &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=vmid_%d", tier.Name, templateVMID),
+		return "", 0, &internalerrors.ConflictError{
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s (templates exist on %d node(s) but none meet resource requirements)",
+				tier.Name, osKey, len(templates)),
 		}
 	}
-	return pick.Node.Name, nil
+	return pick.Node.Name, templateVMIDByNode[pick.Node.Name], nil
 }
 
 func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node string, vmid int, cause error) {

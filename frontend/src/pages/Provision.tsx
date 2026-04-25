@@ -340,12 +340,20 @@ interface ResultViewProps {
 
 function ResultView({ result, onReset }: ResultViewProps) {
   const sshCommand = `ssh ${result.username}@${result.ip}`
+  const hasWarning = Boolean(result.warning)
+  const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
+  const statusColorClass = hasWarning
+    ? 'bg-[rgba(184,101,15,0.12)] text-warn'
+    : 'bg-[rgba(45,125,90,0.1)] text-good'
+  const dotColorClass = hasWarning ? 'bg-warn' : 'bg-good'
   return (
     <div className="py-5 pb-10">
       <Card className="max-w-[720px] mx-auto p-11">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[rgba(45,125,90,0.1)] text-good text-xs font-mono tracking-wide mb-4">
-          <span className="w-1.5 h-1.5 rounded-full bg-good" />
-          MACHINE READY
+        <div
+          className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono tracking-wide mb-4 ${statusColorClass}`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${dotColorClass}`} />
+          {statusLabel}
         </div>
         <h2 className="text-3xl">{result.hostname} is live.</h2>
         <p className="text-base text-ink-2 mt-2">
@@ -353,6 +361,15 @@ function ResultView({ result, onReset }: ResultViewProps) {
             ? "Save the private key now — we won't show it again."
             : 'Use your SSH key to connect.'}
         </p>
+
+        {hasWarning && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">⚠</span>
+            <div>
+              <strong>Reachability not confirmed.</strong> {result.warning}
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />

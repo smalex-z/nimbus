@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"nimbus/internal/api/handlers"
+	"nimbus/internal/bootstrap"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
@@ -18,6 +19,7 @@ import (
 // positional argument list and lets cmd/server compose at construction time.
 type Deps struct {
 	Provision *provision.Service
+	Bootstrap *bootstrap.Service
 	Pool      *ippool.Pool
 	Proxmox   *proxmox.Client
 }
@@ -36,6 +38,7 @@ func NewRouter(d Deps) http.Handler {
 	vms := handlers.NewVMs(d.Provision)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
+	admin := handlers.NewAdmin(d.Bootstrap)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -50,6 +53,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/", vms.List)
 			r.Post("/", vms.Create)
 			r.Get("/{id}", vms.Get)
+		})
+
+		// Admin operations: template bootstrap. This can take 10-20 minutes
+		// when downloading all 4 OSes across all online nodes — give it room.
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(middleware.Timeout(30 * time.Minute))
+			r.Post("/bootstrap-templates", admin.BootstrapTemplates)
 		})
 	})
 
