@@ -34,6 +34,7 @@ type Result struct {
 	Tier          string `json:"tier"`
 	Node          string `json:"node"`
 	SSHPrivateKey string `json:"ssh_private_key,omitempty"`
+	KeyName       string `json:"key_name,omitempty"`
 	Warning       string `json:"warning,omitempty"`
 }
 

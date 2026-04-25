@@ -486,10 +486,29 @@ interface LoadingViewProps {
   hostname: string
 }
 
+// Soft thresholds (seconds) that drive the perceived progression of the
+// checklist. The backend call is synchronous with no progress stream, so these
+// are heuristic — calibrated to the typical 30–60s end-to-end provision time.
+// The final step stays "active" until the request resolves, however long that
+// takes.
+const PROVISION_STAGES: { label: string; until: number }[] = [
+  { label: 'Validating request & allocating IP', until: 3 },
+  { label: 'Cloning golden template', until: 18 },
+  { label: 'Applying cloud-init & resizing disk', until: 25 },
+  { label: 'Booting & waiting for guest agent', until: Infinity },
+]
+
 function LoadingView({ hostname }: LoadingViewProps) {
-  // Steps mirror the design-doc §5.2 flow. They animate based on elapsed time
-  // since this is a synchronous backend call — we don't have a real progress
-  // stream. The user sees forward motion which beats a single spinner.
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const activeIndex = PROVISION_STAGES.findIndex((s) => elapsed < s.until)
+
+  const fmt = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`)
+
   return (
     <div className="grid place-items-center min-h-[calc(100vh-160px)]">
       <Card className="w-full max-w-[560px] p-12 text-center">
@@ -504,12 +523,14 @@ function LoadingView({ hostname }: LoadingViewProps) {
         <p className="text-base text-ink-2 mt-4 leading-relaxed">
           Hold tight — your machine is on its way. Provisioning typically takes 30–60s.
         </p>
+        <div className="mt-4 font-mono text-2xl text-ink tabular-nums">{fmt(elapsed)}</div>
 
-        <div className="mt-9 text-left border-t border-line">
-          <ProvisionStep label="Validating request & allocating IP" status="active" />
-          <ProvisionStep label="Cloning golden template" status="pending" />
-          <ProvisionStep label="Applying cloud-init configuration" status="pending" />
-          <ProvisionStep label="Booting & waiting for guest agent" status="pending" />
+        <div className="mt-7 text-left border-t border-line">
+          {PROVISION_STAGES.map((stage, i) => {
+            const status: ProvisionStepProps['status'] =
+              i < activeIndex ? 'done' : i === activeIndex ? 'active' : 'pending'
+            return <ProvisionStep key={stage.label} label={stage.label} status={status} />
+          })}
         </div>
       </Card>
     </div>
@@ -551,7 +572,9 @@ interface ResultViewProps {
 }
 
 function ResultView({ result, onReset }: ResultViewProps) {
-  const sshCommand = `ssh ${result.username}@${result.ip}`
+  const sshCommand = result.key_name
+    ? `ssh -i ~/.ssh/${result.key_name} ${result.username}@${result.ip}`
+    : `ssh ${result.username}@${result.ip}`
   const hasWarning = Boolean(result.warning)
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
@@ -597,20 +620,16 @@ function ResultView({ result, onReset }: ResultViewProps) {
             <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-1.5">
               Private key (Ed25519)
             </div>
-            <pre className="p-4 rounded-[10px] bg-ink text-white font-mono text-[11px] leading-relaxed overflow-auto max-h-[200px] whitespace-pre">
-              {result.ssh_private_key}
-            </pre>
-            <CopyButton
-              value={result.ssh_private_key}
-              label="COPY KEY"
-              className="mt-2 px-3 py-1.5"
+            <PrivateKeyDownload
+              keyName={result.key_name ?? `nimbus-${result.hostname}`}
+              privateKey={result.ssh_private_key}
             />
 
             <div className="mt-6 p-3.5 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
               <span className="text-base">⚠</span>
               <div>
-                <strong>This is the only time you'll see the private key.</strong>{' '}
-                Save it to your SSH config now. Nimbus does not store it anywhere.
+                <strong>This is the only time you can download the private key.</strong>{' '}
+                Save it now. Nimbus does not store it anywhere.
               </div>
             </div>
           </div>
@@ -645,6 +664,53 @@ function CredCell({ label, value, fullWidth = false }: CredCellProps) {
       <div className="font-mono text-sm text-ink break-all flex items-center justify-between gap-3">
         <span>{value}</span>
         <CopyButton value={value} />
+      </div>
+    </div>
+  )
+}
+
+interface PrivateKeyDownloadProps {
+  keyName: string
+  privateKey: string
+}
+
+function PrivateKeyDownload({ keyName, privateKey }: PrivateKeyDownloadProps) {
+  const [downloaded, setDownloaded] = useState(false)
+
+  const download = () => {
+    // Ensure the file ends with a single trailing newline — OpenSSH expects it.
+    const content = privateKey.endsWith('\n') ? privateKey : privateKey + '\n'
+    const blob = new Blob([content], { type: 'application/x-pem-file' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = keyName
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    setDownloaded(true)
+  }
+
+  const tooltip =
+    `After download, move it into place:\n` +
+    `  mv ~/Downloads/${keyName} ~/.ssh/${keyName}\n` +
+    `  chmod 600 ~/.ssh/${keyName}`
+
+  return (
+    <div className="flex items-center gap-3 flex-wrap">
+      <button
+        type="button"
+        onClick={download}
+        title={tooltip}
+        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-[10px] bg-ink text-white font-mono text-xs tracking-wide hover:bg-ink-2 transition-colors"
+      >
+        <span aria-hidden>↓</span>
+        <span>DOWNLOAD PRIVATE KEY</span>
+      </button>
+      <div className="font-mono text-xs text-ink-3">
+        <span className="text-ink-2">{keyName}</span>
+        {downloaded && <span className="ml-2 text-good">✓ downloaded</span>}
       </div>
     </div>
   )

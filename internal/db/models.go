@@ -22,6 +22,7 @@ type VM struct {
 	Username   string `gorm:"column:username"                         json:"username"`
 	Status     string `gorm:"column:status;index;not null"            json:"status"`
 	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
+	KeyName    string `gorm:"column:key_name"                         json:"key_name,omitempty"`
 	ErrorMsg   string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
 }
 
