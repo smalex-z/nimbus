@@ -9,17 +9,21 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"nimbus/internal/api/handlers"
+	"nimbus/internal/bootstrap"
 	"nimbus/internal/config"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
+	"nimbus/internal/sshkeys"
 )
 
 // Deps bundles the dependencies the router needs.
 type Deps struct {
 	Auth       *service.AuthService
 	Provision  *provision.Service
+	Bootstrap  *bootstrap.Service
+	Keys       *sshkeys.Service
 	Pool       *ippool.Pool
 	Reconciler *ippool.Reconciler
 	Proxmox    *proxmox.Client
@@ -39,8 +43,10 @@ func NewRouter(d Deps) http.Handler {
 
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
+	keys := handlers.NewKeys(d.Keys)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
+	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
 	settings := handlers.NewSettings(d.Auth)
@@ -64,6 +70,24 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/", vms.List)
 			r.Post("/", vms.Create)
 			r.Get("/{id}", vms.Get)
+			r.Get("/{id}/private-key", vms.GetPrivateKey)
+		})
+
+		r.Route("/keys", func(r chi.Router) {
+			r.Get("/", keys.List)
+			r.Post("/", keys.Create)
+			r.Get("/{id}", keys.Get)
+			r.Delete("/{id}", keys.Delete)
+			r.Get("/{id}/private-key", keys.PrivateKey)
+			r.Post("/{id}/private-key", keys.AttachPrivateKey)
+			r.Post("/{id}/default", keys.SetDefault)
+		})
+
+		// Admin operations: template bootstrap. This can take 10-20 minutes
+		// when downloading all 4 OSes across all online nodes — give it room.
+		r.Route("/admin", func(r chi.Router) {
+			r.Get("/bootstrap-status", bs.BootstrapStatus)
+			r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
 		})
 
 		// Auth routes (public)

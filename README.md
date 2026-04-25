@@ -6,10 +6,11 @@ A user fills out one form (hostname, tier, OS, SSH key) and within ~60 seconds r
 a freshly-provisioned Linux VM with a static IP and SSH credentials. Like launching an
 EC2 instance, but on hardware you control with zero cloud dependency.
 
-Built on a multi-node Proxmox VE cluster. Architected to be general-purpose and deployable
-on any Proxmox cluster.
+Built on a multi-node Proxmox VE cluster. Originally designed for ACM@UCLA's internal
+infrastructure, but architected to be general-purpose and deployable on any Proxmox cluster.
 
 A static UI mockup of the full multi-phase product is available at [`nimbusx.html`](./nimbusx.html).
+
 
 ## Phase 1 (this repo, MVP)
 
@@ -78,9 +79,24 @@ After clicking Add, copy the secret value **immediately** — Proxmox shows it o
 
 The combined token ID for the env file is `root@pam!nimbus`.
 
-## Templates required on the cluster
+## Templates — auto-bootstrap
 
-Each cluster node should have these template VMIDs available locally:
+Nimbus needs cloud-image templates on the cluster to provision VMs (the standard
+"clone an image, customize via cloud-init" pattern). **The install wizard handles
+this automatically** — you don't have to SSH into nodes or run `qm` commands.
+
+After the install wizard configures and starts the service, it prompts:
+
+```
+Bootstrap templates now? [Y/n]:
+```
+
+Pressing Enter downloads the cloud images for all four OSes (Ubuntu 24.04/22.04,
+Debian 12/11) on every online cluster node and converts them into Proxmox
+templates. ~2 GB per node, parallel across nodes. Total time ~10-20 min on a
+typical home lab.
+
+The bootstrap creates these template VMIDs:
 
 | OS | VMID |
 |---|---|
@@ -89,13 +105,34 @@ Each cluster node should have these template VMIDs available locally:
 | Debian 12 | 9002 |
 | Debian 11 | 9003 |
 
-All templates must:
-- Be cloud images (not installer ISOs) — cloud-init pre-installed
-- Have `qemu-guest-agent` installed and enabled
-- Have a cloud-init drive attached (e.g. `qm set 9000 --ide2 local-lvm:cloudinit`)
-- Be converted to Proxmox template format (immutable)
+Each template has cloud-init pre-installed, qemu-guest-agent ready, a cloud-init
+drive attached, and is marked immutable. Re-running the bootstrap is idempotent:
+already-existing templates are skipped.
 
-The install wizard checks for missing templates and warns per-node.
+### Manual bootstrap (re-runs, adding a new node, etc.)
+
+Either via the API:
+
+```bash
+# Defaults: all 4 OSes, all online nodes
+curl -X POST http://localhost:8080/api/admin/bootstrap-templates -d '{}'
+
+# Subset
+curl -X POST http://localhost:8080/api/admin/bootstrap-templates \
+  -d '{"os":["ubuntu-24.04"], "nodes":["motik7"]}'
+```
+
+Or via the CLI:
+
+```bash
+./nimbus bootstrap                                # all 4 OSes, all online nodes
+./nimbus bootstrap --os ubuntu-24.04              # one OS, all online nodes
+./nimbus bootstrap --node motik7                  # all OSes, one node
+./nimbus bootstrap --force                        # re-create even if exists
+```
+
+Both routes share the same code path. The CLI is just a convenience wrapper for
+ops; the wizard uses the HTTP endpoint.
 
 ## Architecture
 
@@ -146,6 +183,7 @@ or `./.env` (development). See `.env.example`.
 | `GET /api/nodes` | Live cluster status |
 | `GET /api/ips` | IP pool state |
 | `GET /api/health` | Liveness + Proxmox reachability |
+| `POST /api/admin/bootstrap-templates` | Download cloud images and create templates (long-running, up to 30 min) |
 
 Provision request:
 

@@ -11,6 +11,7 @@ interface LayoutProps {
 const navItems: Array<{ label: string; path: string }> = [
   { label: 'Provision', path: '/' },
   { label: 'My machines', path: '/vms' },
+  { label: 'Keys', path: '/keys' },
   { label: 'Nodes', path: '/nodes' },
 ]
 
