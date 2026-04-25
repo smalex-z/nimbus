@@ -83,7 +83,7 @@ func (g *Google) exchangeCode(ctx context.Context, code string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("google token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var t googleTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
@@ -104,7 +104,7 @@ func (g *Google) getUserInfo(ctx context.Context, token string) (*googleUserInfo
 	if err != nil {
 		return nil, fmt.Errorf("google userinfo request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var info googleUserInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {

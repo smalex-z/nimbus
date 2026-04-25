@@ -69,13 +69,13 @@ func Load() (*Config, error) {
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
-		AppURL:             getEnv("APP_URL", "http://localhost:5173"),
-		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
-		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
-		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GopherAPIURL:       os.Getenv("GOPHER_API_URL"),
-		GopherAPIKey:       os.Getenv("GOPHER_API_KEY"),
+		AppURL:                  getEnv("APP_URL", "http://localhost:5173"),
+		GitHubClientID:          os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret:      os.Getenv("GITHUB_CLIENT_SECRET"),
+		GoogleClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GopherAPIURL:            os.Getenv("GOPHER_API_URL"),
+		GopherAPIKey:            os.Getenv("GOPHER_API_KEY"),
 	}
 
 	return cfg, nil
