@@ -25,6 +25,7 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 //go:embed all:frontend/dist
@@ -169,6 +170,17 @@ func main() {
 		CPUType:          cfg.VMCPUType,
 	})
 	provSvc.SetIPVerifier(reconciler)
+
+	// Optional Gopher tunnel client. nil when GOPHER_API_URL is unset — the
+	// service then silently skips tunnel work even if the request asks for it.
+	tunnelClient, err := tunnel.New(cfg.GopherAPIURL, cfg.GopherAPIKey, 15*time.Second)
+	if err != nil {
+		log.Fatalf("failed to init tunnel client: %v", err)
+	}
+	if tunnelClient != nil {
+		log.Printf("gopher tunnel integration enabled (url=%s)", cfg.GopherAPIURL)
+		provSvc.SetTunnelClient(tunnelClient)
+	}
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,

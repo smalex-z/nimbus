@@ -27,13 +27,15 @@ type VMs struct {
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
 
 type createVMRequest struct {
-	Hostname    string `json:"hostname"`
-	Tier        string `json:"tier"`
-	OSTemplate  string `json:"os_template"`
-	SSHKeyID    *uint  `json:"ssh_key_id,omitempty"`
-	SSHPubKey   string `json:"ssh_pubkey,omitempty"`
-	SSHPrivKey  string `json:"ssh_privkey,omitempty"`
-	GenerateKey bool   `json:"generate_key,omitempty"`
+	Hostname     string `json:"hostname"`
+	Tier         string `json:"tier"`
+	OSTemplate   string `json:"os_template"`
+	SSHKeyID     *uint  `json:"ssh_key_id,omitempty"`
+	SSHPubKey    string `json:"ssh_pubkey,omitempty"`
+	SSHPrivKey   string `json:"ssh_privkey,omitempty"`
+	GenerateKey  bool   `json:"generate_key,omitempty"`
+	PublicTunnel bool   `json:"public_tunnel,omitempty"`
+	Subdomain    string `json:"subdomain,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -49,13 +51,15 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := h.svc.Provision(r.Context(), provision.Request{
-		Hostname:    req.Hostname,
-		Tier:        req.Tier,
-		OSTemplate:  req.OSTemplate,
-		SSHKeyID:    req.SSHKeyID,
-		SSHPubKey:   req.SSHPubKey,
-		SSHPrivKey:  req.SSHPrivKey,
-		GenerateKey: req.GenerateKey,
+		Hostname:     req.Hostname,
+		Tier:         req.Tier,
+		OSTemplate:   req.OSTemplate,
+		SSHKeyID:     req.SSHKeyID,
+		SSHPubKey:    req.SSHPubKey,
+		SSHPrivKey:   req.SSHPrivKey,
+		GenerateKey:  req.GenerateKey,
+		PublicTunnel: req.PublicTunnel,
+		Subdomain:    req.Subdomain,
 	})
 	if err != nil {
 		response.FromError(w, err)

@@ -49,6 +49,9 @@ export interface VM {
   owner_id?: number | null
   key_name?: string
   error_msg?: string
+  tunnel_id?: string
+  tunnel_url?: string
+  tunnel_error?: string
 }
 
 export interface ProvisionRequest {
@@ -59,6 +62,8 @@ export interface ProvisionRequest {
   ssh_pubkey?: string
   ssh_privkey?: string
   generate_key?: boolean
+  public_tunnel?: boolean
+  subdomain?: string
 }
 
 export interface SSHKey {
@@ -104,6 +109,11 @@ export interface ProvisionResult {
   // Non-empty when the VM was created but reachability couldn't be confirmed
   // (usually Nimbus running outside the cluster LAN). Credentials are valid.
   warning?: string
+  // Tunnel fields (Phase 2 — Gopher integration). tunnel_url is set when the
+  // tunnel is active; tunnel_error carries any tunnel-specific failure. VM
+  // success is independent of either.
+  tunnel_url?: string
+  tunnel_error?: string
 }
 
 export interface NodeView {

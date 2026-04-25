@@ -80,6 +80,7 @@ internal/
   install/              installer + setup-wizard mode
   service/              auth service (sessions, password hashing)
   oauth/                GitHub + Google OAuth flows
+  tunnel/               Gopher reverse-tunnel HTTP client (Phase 2)
   errors/               typed error sentinels (ValidationError, ConflictError, …)
   ctxutil/              request-context helpers (current user, …)
   build/                build-time version info (ldflags)
@@ -220,6 +221,33 @@ These three packages co-evolve. After any non-trivial edit:
    in a state where the *next* `Reserve` cannot return the rejected IP.
 4. Update the truth table in `~/.claude/plans/can-you-confirm-something-rustling-fog.md`
    if the decision policy changed.
+
+## Gopher tunnel integration (Phase 2)
+
+Optional. Set `GOPHER_API_URL` + `GOPHER_API_KEY` to enable. When `GOPHER_API_URL`
+is empty `tunnel.New` returns `(nil, nil)` and `provision.Service` silently
+ignores `public_tunnel` fields on incoming requests.
+
+Provision flow with tunnel enabled:
+
+1. **Local validation**: subdomain syntax checked before IP reserve.
+2. **After Reserve + Verify**: register with Gopher (target_ip = reserved IP,
+   target_port = 80). HTTP 409 → `ValidationError(field=subdomain)` with the IP
+   released by the deferred Release. Other errors → log + soft-fail
+   (`tunnel_error` set, VM still provisioned). On success: defer-delete
+   triggered on any later failure.
+3. **After WaitForIP**: if the VM is reachable (no warning), Nimbus SSHes in
+   with the resolved private key and runs `curl -fsSL <bootstrap_url> | sh`.
+   On soft-success (VM unreachable from Nimbus), the bootstrap is **skipped**
+   and `tunnel_error` carries the manual recovery command.
+4. **Poll** Gopher GET /tunnels/:id every 3 s for up to 60 s. Active → `tunnel_url`
+   on Result + persisted on the VM row. Otherwise → `tunnel_error` set, tunnel
+   left registered for the user to retry.
+5. **VM-side never fails for tunnel reasons** — design §10 invariant.
+
+The bootstrap step needs a private key. If only a public key is in the SSHKey
+row (the user imported a pubkey-only entry, or attached one later), the
+bootstrap is skipped with `tunnel_error="private half not available"`.
 
 ## Configuration knobs added in this branch
 
