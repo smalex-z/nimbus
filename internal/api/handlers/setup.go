@@ -178,13 +178,13 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	if result.IsHypervisor {
 		// Always put localhost first on hypervisors
 		result.Endpoints = append(result.Endpoints, "https://localhost:8006")
-		
+
 		// Add remote cluster nodes, skipping local IPs
 		if len(clusterIPs) > 0 {
 			localIPs := localIPv4s()
 			for _, ip := range clusterIPs {
 				if containsStr(localIPs, ip) {
-					continue // skip—localhost already covers this machine
+					continue // skip - localhost already covers this machine
 				}
 				url := "https://" + ip + ":8006"
 				if !containsStr(result.Endpoints, url) {
