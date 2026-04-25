@@ -76,38 +76,68 @@ func (s *AuthService) Register(p RegisterParams) (*UserView, error) {
 	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
 }
 
-// Login verifies credentials and creates a session.
+// Login verifies credentials and returns a new session ID.
 // Returns ErrInvalidCredentials if the email is not found or the password is wrong.
-func (s *AuthService) Login(email, password string) (*db.Session, *UserView, error) {
+func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	var user db.User
 	if err := s.db.Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, ErrInvalidCredentials
+			return "", nil, ErrInvalidCredentials
 		}
-		return nil, nil, err
+		return "", nil, err
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return nil, nil, ErrInvalidCredentials
+		return "", nil, ErrInvalidCredentials
 	}
 
+	sessionID, err := s.CreateSession(user.ID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return sessionID, &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+}
+
+// UpsertOAuthUser finds a user by email or creates one if none exists.
+// Used by OAuth providers where a password hash is not applicable.
+func (s *AuthService) UpsertOAuthUser(name, email string) (*UserView, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	name = strings.TrimSpace(name)
+
+	var user db.User
+	err := s.db.Where("email = ?", email).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		user = db.User{Name: name, Email: email}
+		if err := s.db.Create(&user).Error; err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+}
+
+// CreateSession creates a new session for the given user ID and returns the session ID.
+func (s *AuthService) CreateSession(userID uint) (string, error) {
 	id, err := generateSessionID()
 	if err != nil {
-		return nil, nil, err
+		return "", err
 	}
 
 	session := &db.Session{
 		ID:        id,
-		UserID:    user.ID,
+		UserID:    userID,
 		ExpiresAt: time.Now().Add(sessionDuration),
 	}
 	if err := s.db.Create(session).Error; err != nil {
-		return nil, nil, err
+		return "", err
 	}
 
-	return session, &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+	return id, nil
 }
 
 // GetUserBySessionID returns the user for a valid, non-expired session.

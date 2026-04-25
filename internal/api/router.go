@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"nimbus/internal/api/handlers"
+	"nimbus/internal/oauth"
 	"nimbus/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -11,7 +12,7 @@ import (
 )
 
 // NewRouter builds and returns the application router.
-func NewRouter(svc *service.ExampleService, authSvc *service.AuthService) http.Handler {
+func NewRouter(svc *service.ExampleService, authSvc *service.AuthService, github oauth.Provider) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -24,10 +25,12 @@ func NewRouter(svc *service.ExampleService, authSvc *service.AuthService) http.H
 		r.Get("/health", handlers.Health)
 
 		// Public auth routes
-		auth := handlers.NewAuth(authSvc)
+		auth := handlers.NewAuth(authSvc, github)
 		r.Post("/auth/register", auth.Register)
 		r.Post("/auth/login", auth.Login)
 		r.Post("/auth/logout", auth.Logout)
+		r.Get("/auth/github", auth.GitHubStart)
+		r.Get("/auth/github/callback", auth.GitHubCallback)
 
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {

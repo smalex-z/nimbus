@@ -74,7 +74,7 @@ export default function SignIn() {
 
           {/* OAuth providers */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-            <button className="n-provider" type="button">
+            <button className="n-provider" type="button" onClick={() => { window.location.href = '/api/auth/github' }}>
               <GithubIcon size={18} />
               <span style={{ flex: 1 }}>Continue with GitHub</span>
               <ArrowRightIcon size={14} />

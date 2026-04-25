@@ -1,27 +1,60 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/ctxutil"
+	"nimbus/internal/oauth"
 	"nimbus/internal/service"
 )
 
-const sessionCookieName = "nimbus_sid"
+const (
+	sessionCookieName  = "nimbus_sid"
+	oauthStateCookie   = "nimbus_oauth_state"
+)
 
 // Auth handles authentication endpoints.
 type Auth struct {
-	auth *service.AuthService
+	auth   *service.AuthService
+	github oauth.Provider
 }
 
-// NewAuth creates a new Auth handler.
-func NewAuth(auth *service.AuthService) *Auth {
-	return &Auth{auth: auth}
+// NewAuth creates a new Auth handler. github may be nil if GitHub OAuth is not configured.
+func NewAuth(auth *service.AuthService, github oauth.Provider) *Auth {
+	return &Auth{auth: auth, github: github}
 }
+
+// --- helpers ----------------------------------------------------------------
+
+func setSessionCookie(w http.ResponseWriter, sessionID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   7 * 24 * 60 * 60,
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+}
+
+// --- email/password ---------------------------------------------------------
 
 type registerRequest struct {
 	Name     string `json:"name"`
@@ -84,7 +117,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, user, err := a.auth.Login(req.Email, req.Password)
+	sessionID, user, err := a.auth.Login(req.Email, req.Password)
 	if errors.Is(err, service.ErrInvalidCredentials) {
 		response.Error(w, http.StatusUnauthorized, "Invalid email or password")
 		return
@@ -94,15 +127,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    session.ID,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   7 * 24 * 60 * 60,
-	})
-
+	setSessionCookie(w, sessionID)
 	response.Success(w, user)
 }
 
@@ -117,14 +142,89 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = a.auth.Logout(cookie.Value)
 	}
+	clearSessionCookie(w)
+	response.NoContent(w)
+}
+
+// --- GitHub OAuth -----------------------------------------------------------
+
+// GitHubStart handles GET /api/auth/github — redirects the browser to GitHub.
+func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
+	if a.github == nil {
+		response.Error(w, http.StatusServiceUnavailable, "GitHub OAuth is not configured")
+		return
+	}
+
+	state, err := generateState()
+	if err != nil {
+		response.InternalError(w, "Failed to initiate OAuth")
+		return
+	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
+		Name:     oauthStateCookie,
+		Value:    state,
 		Path:     "/",
 		HttpOnly: true,
-		MaxAge:   -1,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600,
 	})
 
-	response.NoContent(w)
+	http.Redirect(w, r, a.github.AuthURL(state), http.StatusTemporaryRedirect)
+}
+
+// GitHubCallback handles GET /api/auth/github/callback — GitHub sends the user here.
+func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
+	// Validate state to prevent CSRF.
+	stateCookie, err := r.Cookie(oauthStateCookie)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Redirect(w, r, "/auth/callback?error=invalid_state", http.StatusTemporaryRedirect)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
+
+	// GitHub sends ?error=access_denied if the user cancelled.
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		http.Redirect(w, r, "/auth/callback?error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/auth/callback?error=missing_code", http.StatusTemporaryRedirect)
+		return
+	}
+
+	userInfo, err := a.github.Exchange(r.Context(), code)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed", http.StatusTemporaryRedirect)
+		return
+	}
+
+	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed", http.StatusTemporaryRedirect)
+		return
+	}
+
+	sessionID, err := a.auth.CreateSession(user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=session_failed", http.StatusTemporaryRedirect)
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+
+	q := url.Values{}
+	q.Set("provider", "github")
+	q.Set("login", userInfo.Login)
+	http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
+}
+
+func generateState() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

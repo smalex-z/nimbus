@@ -12,7 +12,10 @@ import (
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/oauth"
 	"nimbus/internal/service"
+
+	"github.com/joho/godotenv"
 )
 
 //go:embed all:frontend/dist
@@ -28,6 +31,10 @@ func main() {
 	if *version {
 		log.Printf("nimbus %s", build.Version)
 		return
+	}
+
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Printf("warning: could not load .env: %v", err)
 	}
 
 	cfg := config.Load()
@@ -46,7 +53,16 @@ func main() {
 	svc := service.NewExampleService(database)
 	authSvc := service.NewAuthService(database)
 
-	router := api.NewRouter(svc, authSvc)
+	var github oauth.Provider
+	if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
+		github = &oauth.GitHub{
+			ClientID:     cfg.GitHubClientID,
+			ClientSecret: cfg.GitHubClientSecret,
+		}
+		log.Printf("GitHub OAuth enabled")
+	}
+
+	router := api.NewRouter(svc, authSvc, github)
 
 	distFS, err := fs.Sub(frontendFS, "frontend/dist")
 	if err != nil {
