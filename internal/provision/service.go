@@ -55,6 +55,11 @@ type Config struct {
 	GatewayIP        string
 	Nameserver       string
 	SearchDomain     string
+	// CPUType is the Proxmox CPU model applied to each clone. Empty leaves
+	// whatever the template set, which on default Proxmox installs is the
+	// AVX-less kvm64/x86-64-v2-AES — see config.VMCPUType for the default
+	// and why x86-64-v3 is the right baseline.
+	CPUType string
 
 	// IPReadyTimeout caps the agent/TCP polling loop. 0 means use the default
 	// (120s, per design doc).
@@ -174,6 +179,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
 		Memory:       int(tier.MemMB),
+		CPU:          s.cfg.CPUType,
 	}
 	if err := s.px.SetCloudInit(ctx, target, newVMID, cloudInit); err != nil {
 		return nil, fmt.Errorf("set cloud-init: %w", err)

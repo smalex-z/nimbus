@@ -68,6 +68,12 @@ type CloudInitConfig struct {
 	SearchDomain string // e.g. "local"
 	Cores        int    // vCPU count; 0 leaves the cloned value unchanged
 	Memory       int    // memory in MiB; 0 leaves the cloned value unchanged
+	// CPU is the Proxmox CPU model (e.g. "x86-64-v3", "host"). Empty leaves
+	// the cloned value unchanged — which means falling back to whatever the
+	// template set (typically Proxmox's default kvm64/x86-64-v2-AES, neither
+	// of which exposes AVX/AVX2 to the guest). Set "x86-64-v3" or higher when
+	// the workload needs AVX2 (Bun, Claude Code, modern numerics).
+	CPU string
 }
 
 // IPAddress is one entry inside a NetworkInterface's ip-addresses list.

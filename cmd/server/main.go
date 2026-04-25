@@ -138,6 +138,7 @@ func main() {
 		GatewayIP:        cfg.GatewayIP,
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
+		CPUType:          cfg.VMCPUType,
 	})
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{

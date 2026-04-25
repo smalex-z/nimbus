@@ -288,6 +288,9 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	if cfg.Memory > 0 {
 		params.Set("memory", strconv.Itoa(cfg.Memory))
 	}
+	if cfg.CPU != "" {
+		params.Set("cpu", cfg.CPU)
+	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
 	return c.do(ctx, http.MethodPost, path, params, nil)

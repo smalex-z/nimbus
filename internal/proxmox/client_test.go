@@ -104,6 +104,7 @@ func TestClient_SetCloudInit_FormEncoded(t *testing.T) {
 		IPConfig0:    "ip=192.168.0.142/24,gw=192.168.0.1",
 		Nameserver:   "1.1.1.1 8.8.8.8",
 		SearchDomain: "local",
+		CPU:          "x86-64-v3",
 	}
 	if err := c.SetCloudInit(context.Background(), "node1", 200, cfg); err != nil {
 		t.Fatalf("SetCloudInit: %v", err)
@@ -136,6 +137,9 @@ func TestClient_SetCloudInit_FormEncoded(t *testing.T) {
 	}
 	if got := parsed.Get("ciuser"); got != "ubuntu" {
 		t.Errorf("ciuser = %q", got)
+	}
+	if got := parsed.Get("cpu"); got != "x86-64-v3" {
+		t.Errorf("cpu = %q, want x86-64-v3", got)
 	}
 
 	// Verify the wire bytes contain the DOUBLE-encoded sshkeys — the form
