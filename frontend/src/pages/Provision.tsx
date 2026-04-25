@@ -362,6 +362,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
             : 'Use your SSH key to connect.'}
         </p>
 
+
         {hasWarning && (
           <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
             <span className="text-base">⚠</span>

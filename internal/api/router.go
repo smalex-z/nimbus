@@ -10,6 +10,7 @@ import (
 
 	"nimbus/internal/api/handlers"
 	"nimbus/internal/bootstrap"
+	"nimbus/internal/config"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
@@ -22,9 +23,11 @@ type Deps struct {
 	Bootstrap *bootstrap.Service
 	Pool      *ippool.Pool
 	Proxmox   *proxmox.Client
+	Config    *config.Config
+	Restart   func()
 }
 
-// NewRouter builds and returns the application router.
+// NewRouter builds and returns the application router for normal (configured) mode.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
@@ -39,9 +42,11 @@ func NewRouter(d Deps) http.Handler {
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
 	admin := handlers.NewAdmin(d.Bootstrap)
+	setup := handlers.NewSetup(d.Config, d.Restart)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
+		r.Get("/setup/status", setup.Status)
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
@@ -61,6 +66,32 @@ func NewRouter(d Deps) http.Handler {
 			r.Use(middleware.Timeout(30 * time.Minute))
 			r.Post("/bootstrap-templates", admin.BootstrapTemplates)
 		})
+	})
+
+	return r
+}
+
+// NewSetupRouter builds a minimal router for unconfigured (setup) mode.
+// Only setup and health routes are registered; all other API calls 404.
+func NewSetupRouter(cfg *config.Config, restart func()) http.Handler {
+	r := chi.NewRouter()
+
+	r.Use(middleware.RequestID)
+	r.Use(corsMiddleware)
+	r.Use(loggingMiddleware)
+	r.Use(recoveryMiddleware)
+
+	setup := handlers.NewSetup(cfg, restart)
+
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"status":"setup"}}`))
+		})
+		r.Get("/setup/status", setup.Status)
+		r.Get("/setup/discover", setup.Discover)
+		r.Post("/setup/test", setup.Test)
+		r.Post("/setup/save", setup.Save)
 	})
 
 	return r

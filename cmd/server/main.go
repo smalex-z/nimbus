@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"nimbus/internal/api"
@@ -58,6 +59,32 @@ func main() {
 	if *dbPath != "" {
 		cfg.DBPath = *dbPath
 	}
+
+	distFS, err := fs.Sub(frontendFS, "frontend/dist")
+	if err != nil {
+		log.Fatalf("failed to create frontend sub-filesystem: %v", err)
+	}
+
+	// Start in setup mode when required config is absent.
+	if !cfg.IsConfigured() {
+		log.Printf("nimbus %s starting in setup mode on :%s", build.Version, cfg.Port)
+		router := api.NewSetupRouter(cfg, restartSelf)
+
+		mux := http.NewServeMux()
+		mux.Handle("/api/", router)
+		mux.Handle("/", spaHandler(http.FS(distFS)))
+
+		srv := &http.Server{
+			Addr:              ":" + cfg.Port,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		if err := srv.ListenAndServe(); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+		return
+	}
+
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
@@ -107,12 +134,9 @@ func main() {
 		Bootstrap: bootstrapSvc,
 		Pool:      pool,
 		Proxmox:   pveClient,
+		Config:    cfg,
+		Restart:   restartSelf,
 	})
-
-	distFS, err := fs.Sub(frontendFS, "frontend/dist")
-	if err != nil {
-		log.Fatalf("failed to create frontend sub-filesystem: %v", err)
-	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
@@ -215,6 +239,20 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// restartSelf replaces the current process image with a fresh start via exec.
+// The new process inherits the current environment (with any os.Setenv changes
+// applied by the setup handler before this is called).
+func restartSelf() {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("restart: cannot locate executable: %v", err)
+		return
+	}
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		log.Printf("restart: exec failed: %v", err)
+	}
 }
 
 // spaHandler serves static files and falls back to index.html for unknown paths,

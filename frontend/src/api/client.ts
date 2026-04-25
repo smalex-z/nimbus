@@ -70,4 +70,54 @@ export async function provisionVM(req: ProvisionRequest): Promise<ProvisionResul
   return data
 }
 
+export interface DiscoverResult {
+  is_hypervisor: boolean
+  endpoints: string[]
+  suggested_gateway?: string
+}
+
+export async function discoverProxmox(): Promise<DiscoverResult> {
+  const { data } = await api.get<DiscoverResult>('/setup/discover')
+  return data
+}
+
+export interface SetupStatus {
+  configured: boolean
+}
+
+export interface TestConnRequest {
+  proxmox_host: string
+  proxmox_token_id: string
+  proxmox_token_secret: string
+}
+
+export interface SaveConfigRequest {
+  proxmox_host: string
+  proxmox_token_id: string
+  proxmox_token_secret: string
+  ip_pool_start: string
+  ip_pool_end: string
+  gateway_ip: string
+  nameserver?: string
+  search_domain?: string
+  port?: string
+}
+
+export async function getSetupStatus(): Promise<SetupStatus> {
+  const { data } = await api.get<SetupStatus>('/setup/status')
+  return data
+}
+
+export async function testProxmoxConnection(
+  req: TestConnRequest,
+): Promise<{ proxmox_version: string }> {
+  const { data } = await api.post<{ proxmox_version: string }>('/setup/test', req)
+  return data
+}
+
+export async function saveSetupConfig(req: SaveConfigRequest): Promise<{ message: string }> {
+  const { data } = await api.post<{ message: string }>('/setup/save', req)
+  return data
+}
+
 export default api
