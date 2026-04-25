@@ -103,7 +103,7 @@ export default function Admin() {
       storageUsed: clusterStats?.storage_used ?? 0,
       storageTotal: clusterStats?.storage_total ?? 0,
     }
-  }, [nodes, vms, ips, clusterStats])
+  }, [nodes, ips, clusterStats])
 
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
