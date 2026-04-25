@@ -187,75 +187,111 @@ function SummaryStats({ stats }: { stats: StatsShape }) {
   const storagePct = stats.storageTotal > 0 ? (stats.storageUsed / stats.storageTotal) * 100 : 0
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-      <StatCard
-        label="Nodes"
-        primary={`${stats.nodesOnline} online`}
-        secondary={`${stats.nodesTotal} total`}
+    <div className="space-y-3">
+      <CountStatsCard
+        items={[
+          { label: 'Nodes', value: stats.nodesOnline, sub: `/ ${stats.nodesTotal} total`, detail: 'online' },
+          { label: 'VMs', value: stats.clusterVMsRunning, sub: `/ ${stats.clusterVMsTotal} total`, detail: 'running' },
+          { label: 'IP pool', value: stats.allocatedIPs, sub: `/ ${stats.totalIPs} total`, detail: 'allocated' },
+        ]}
       />
-      <StatCard
-        label="VMs"
-        primary={`${stats.clusterVMsRunning} running`}
-        secondary={`${stats.clusterVMsTotal} total on cluster`}
-      />
-      <StatCard
-        label="IP pool"
-        primary={`${stats.allocatedIPs} allocated`}
-        secondary={`${stats.totalIPs - stats.allocatedIPs} free of ${stats.totalIPs}`}
-      />
-      <UsageStatCard
-        label="Cluster CPU"
-        primary={`${stats.usedCores.toFixed(2)}`}
-        secondary={`/ ${stats.totalCores} cores`}
-        pct={cpuPct}
-      />
-      <UsageStatCard
-        label="Cluster memory"
-        primary={formatBytes(stats.sumMemUsed)}
-        secondary={`/ ${formatBytes(stats.sumMemTotal)}`}
-        pct={memPct}
-      />
-      <UsageStatCard
-        label="Cluster storage"
-        primary={formatBytes(stats.storageUsed)}
-        secondary={`/ ${formatBytes(stats.storageTotal)}`}
-        pct={storagePct}
+      <GaugeStatsCard
+        items={[
+          { label: 'CPU', pct: cpuPct, detail: `${stats.usedCores.toFixed(1)} / ${stats.totalCores} cores`, id: 'gauge-cpu' },
+          { label: 'Memory', pct: memPct, detail: `${formatBytes(stats.sumMemUsed)} / ${formatBytes(stats.sumMemTotal)}`, id: 'gauge-memory' },
+          { label: 'Storage', pct: storagePct, detail: `${formatBytes(stats.storageUsed)} / ${formatBytes(stats.storageTotal)}`, id: 'gauge-storage' },
+        ]}
       />
     </div>
   )
 }
 
-function UsageStatCard({
-  label,
-  primary,
-  secondary,
-  pct,
+function HalfCircleGauge({ pct, id }: { pct: number; id: string }) {
+  const r = 90
+  const cx = 100
+  const cy = 100
+  const circumHalf = Math.PI * r
+  const fillLen = Math.min(pct / 100, 1) * circumHalf
+  const d = `M ${cx - r},${cy} A ${r},${r} 0 0 1 ${cx + r},${cy}`
+
+  // The gradient is compressed to span exactly the visible fill portion of the arc,
+  // so the full c1→c2 spectrum is always visible regardless of fill percentage —
+  // matching how CSS linear-gradient renders on the UsageBar fill div.
+  const t = Math.min(pct / 100, 1)
+  const fillEndX = cx - r * Math.cos(Math.PI * t)  // x-coord at arc parameter t
+  const gradX2 = pct > 0 ? fillEndX : cx - r + 0.01  // avoid zero-length gradient
+
+  return (
+    <svg viewBox="0 0 200 110" className="w-full">
+      <defs>
+        <linearGradient id={id} x1={cx - r} y1={0} x2={gradX2} y2={0} gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#F8AF82" />
+          <stop offset="100%" stopColor="#F496B4" />
+        </linearGradient>
+      </defs>
+      <path d={d} fill="none" stroke="rgba(20,18,28,0.07)" strokeWidth="14" strokeLinecap="round" />
+      <path
+        d={d}
+        fill="none"
+        stroke={`url(#${id})`}
+        strokeWidth="14"
+        strokeLinecap="round"
+        strokeDasharray={`${fillLen} ${circumHalf}`}
+      />
+      <text
+        x="100"
+        y="88"
+        textAnchor="middle"
+        fontSize="34"
+        fontWeight="500"
+        fontFamily="Fraunces, serif"
+        fill="#14121C"
+      >
+        {pct.toFixed(0)}%
+      </text>
+    </svg>
+  )
+}
+
+function CountStatsCard({
+  items,
 }: {
-  label: string
-  primary: string
-  secondary: string
-  pct: number
+  items: { label: string; value: number; sub: string; detail: string }[]
 }) {
   return (
-    <Card className="p-5">
-      <div className="eyebrow mb-3">{label}</div>
-      <div className="font-display text-lg font-medium">
-        {primary}
-        <span className="text-ink-3 text-sm font-normal"> {secondary}</span>
-      </div>
-      <div className="mt-3">
-        <UsageBar label="" pct={pct} hint={`${pct.toFixed(0)}%`} />
+    <Card className="py-6">
+      <div className="grid grid-cols-3 divide-x divide-line">
+        {items.map((item) => (
+          <div key={item.label} className="px-8">
+            <div className="eyebrow mb-3">{item.label}</div>
+            <div className="flex items-baseline gap-2">
+              <span className="font-display text-5xl font-medium leading-none">{item.value}</span>
+              <span className="font-mono text-xl text-ink-3">{item.sub}</span>
+            </div>
+            <div className="font-mono text-xs text-ink-3 uppercase tracking-wider mt-2">{item.detail}</div>
+          </div>
+        ))}
       </div>
     </Card>
   )
 }
 
-function StatCard({ label, primary, secondary }: { label: string; primary: string; secondary: string }) {
+function GaugeStatsCard({
+  items,
+}: {
+  items: { label: string; pct: number; detail: string; id: string }[]
+}) {
   return (
-    <Card className="p-5">
-      <div className="eyebrow mb-2">{label}</div>
-      <div className="font-display text-lg font-medium">{primary}</div>
-      <div className="font-mono text-[11px] text-ink-3 mt-1">{secondary}</div>
+    <Card className="py-6">
+      <div className="grid grid-cols-3 divide-x divide-line">
+        {items.map((item) => (
+          <div key={item.label} className="px-8 flex flex-col items-center">
+            <div className="eyebrow w-full mb-2">{item.label}</div>
+            <HalfCircleGauge pct={item.pct} id={item.id} />
+            <div className="font-mono text-sm text-ink-3 text-center mt-1">{item.detail}</div>
+          </div>
+        ))}
+      </div>
     </Card>
   )
 }
