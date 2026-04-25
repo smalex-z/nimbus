@@ -6,8 +6,10 @@ A user fills out one form (hostname, tier, OS, SSH key) and within ~60 seconds r
 a freshly-provisioned Linux VM with a static IP and SSH credentials. Like launching an
 EC2 instance, but on hardware you control with zero cloud dependency.
 
-Built on a multi-node Proxmox VE cluster. Originally designed for ACM@UCLA's internal
-infrastructure, but architected to be general-purpose and deployable on any Proxmox cluster.
+Built on a multi-node Proxmox VE cluster. Architected to be general-purpose and deployable
+on any Proxmox cluster.
+
+A static UI mockup of the full multi-phase product is available at [`nimbusx.html`](./nimbusx.html).
 
 ## Phase 1 (this repo, MVP)
 
@@ -17,11 +19,11 @@ infrastructure, but architected to be general-purpose and deployable on any Prox
 - ✅ Static IP allocation from a managed pool (atomic, conflict-free)
 - ✅ Automatic node selection by live cluster scoring (60% memory free, 40% CPU free)
 - ⏸ XL tier — admin approval required (not enabled until OAuth)
-- ⏸ OAuth/auth — Phase 1 ships without authentication
+- ⏸ OAuth/SSO auth — Phase 1 ships without authentication
 - ⏸ VM deletion endpoint — defer past MVP
 
 Future phases (see `nimbus-design-v03.docx` for full design):
-- Phase 2 — Public HTTPS subdomains via Gopher tunnel integration
+- Phase 2 — SSO login + user accounts; public HTTPS subdomains via reverse proxy + TLS; admin fleet dashboard with approval queue and IP pool visualization
 - Phase 3 — Per-user S3 (MinIO) storage
 - Phase 4 — GPU compute via ASUS Ascent GX10 bare metal
 
