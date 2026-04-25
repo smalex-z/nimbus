@@ -14,7 +14,7 @@ BINARY_NAME="nimbus"
 PRERELEASE=0
 
 # ----------------------------------------------------------------------
-# Output helpers (style mirrored from scripts/install.sh)
+# Output helpers
 # ----------------------------------------------------------------------
 if [ -t 1 ]; then
   C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
