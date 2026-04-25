@@ -34,6 +34,13 @@ type Config struct {
 	Nameserver   string
 	SearchDomain string
 
+	// VMCPUType is the Proxmox `cpu` model applied to every provisioned VM.
+	// Default x86-64-v3 (Haswell baseline) guarantees AVX2 in the guest while
+	// remaining portable across any Haswell-or-newer host. Override via
+	// VM_CPU_TYPE — e.g. "host" for max performance on a single-host setup,
+	// or "x86-64-v2-AES" if any cluster node predates Haswell.
+	VMCPUType string
+
 	// Cross-instance IP reconciliation. Defaults are tuned for the typical
 	// "two operators sharing one Proxmox cluster" deployment; raise the
 	// vacate threshold if your cluster has long-running migrations.
@@ -77,6 +84,7 @@ func Load() (*Config, error) {
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
+		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v3"),
 
 		ReconcileIntervalSeconds: getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),
 		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),

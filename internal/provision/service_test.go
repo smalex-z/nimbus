@@ -14,7 +14,22 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
+	"nimbus/internal/sshkeys"
 )
+
+// realPubKey returns a parseable ssh-ed25519 public key. The provision
+// service now validates BYO public keys (it computes a fingerprint when
+// persisting them through the keys service), so tests can no longer hand in
+// arbitrary stub strings.
+func realPubKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := sshkeys.GenerateEd25519()
+	if err != nil {
+		t.Fatalf("generate test pubkey: %v", err)
+	}
+	return pub
+}
 
 // fakePVE is a hand-rolled mock of provision.ProxmoxClient. Each method has
 // a function field the test can override to inject behavior; defaults return
@@ -99,10 +114,10 @@ func happyFakePVE(t *testing.T) *fakePVE {
 	}
 }
 
-func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool) {
+func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool, *db.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.New(path, ippool.Model(), &db.VM{})
+	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
@@ -111,26 +126,46 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		t.Fatalf("Seed: %v", err)
 	}
 
-	svc := provision.New(fake, pool, database.DB, provision.Config{
+	// Seed node_templates rows so the new pickNode DB lookup finds eligible
+	// nodes. happyFakePVE returns one node "alpha", so all 4 OS templates
+	// live there at unique VMIDs.
+	vmid := 9000
+	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+		if err := database.Create(&db.NodeTemplate{
+			Node: "alpha", OS: os, VMID: vmid,
+		}).Error; err != nil {
+			t.Fatalf("seed node_templates: %v", err)
+		}
+		vmid++
+	}
+
+	cipher, err := secrets.New(make([]byte, secrets.KeyLen))
+	if err != nil {
+		t.Fatalf("secrets.New: %v", err)
+	}
+	keysSvc := sshkeys.New(database.DB, cipher)
+
+	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: 9000,
 		GatewayIP:        "10.0.0.1",
 		Nameserver:       "1.1.1.1",
 		SearchDomain:     "local",
 		IPReadyTimeout:   1 * time.Second,
 		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
 	})
-	return svc, pool
+	return svc, pool, database
 }
 
 func TestProvision_HappyPath_BringYourOwnKey(t *testing.T) {
 	t.Parallel()
-	svc, pool := newTestService(t, happyFakePVE(t))
+	svc, pool, _ := newTestService(t, happyFakePVE(t))
 
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "test-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA test@laptop",
+		SSHPubKey:  realPubKey(t),
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -160,7 +195,7 @@ func TestProvision_HappyPath_BringYourOwnKey(t *testing.T) {
 func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	t.Parallel()
 	fake := happyFakePVE(t)
-	svc, _ := newTestService(t, fake)
+	svc, _, _ := newTestService(t, fake)
 
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:    "gen-vm",
@@ -186,6 +221,95 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	if !strings.HasPrefix(cfg.SSHKeys, "ssh-ed25519 ") {
 		t.Errorf("SetCloudInit got non-ed25519 public key: %q", cfg.SSHKeys)
 	}
+	// Cloned VMs inherit the template's resources (1 core / 1024 MiB), so the
+	// tier's CPU/memory must be applied via the same /config call.
+	if cfg.Cores != 2 {
+		t.Errorf("SetCloudInit Cores = %d, want 2 (medium)", cfg.Cores)
+	}
+	if cfg.CPU != "x86-64-v3" {
+		t.Errorf("SetCloudInit CPU = %q, want x86-64-v3", cfg.CPU)
+	}
+	if cfg.Memory != 2048 {
+		t.Errorf("SetCloudInit Memory = %d, want 2048 (medium)", cfg.Memory)
+	}
+}
+
+func TestProvision_WaitForIPTimeout_SoftSuccess(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Simulate the agent never reporting the expected IP — eventually
+	// WaitForIP exhausts its budget and returns context.DeadlineExceeded.
+	fake.getAgentIfaces = func(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
+		return []proxmox.NetworkInterface{}, nil // no IPs reported, ever
+	}
+	svc, pool, _ := newTestService(t, fake)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "unreachable-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	})
+	if err != nil {
+		t.Fatalf("expected soft success, got error: %v", err)
+	}
+	if res.Warning == "" {
+		t.Errorf("expected non-empty Warning on soft success")
+	}
+	if !strings.Contains(res.Warning, "could not confirm reachability") {
+		t.Errorf("warning text doesn't explain reachability issue: %q", res.Warning)
+	}
+	if res.VMID != 200 {
+		t.Errorf("VMID = %d, want 200", res.VMID)
+	}
+	if res.IP != "10.0.0.1" {
+		t.Errorf("IP = %s, want 10.0.0.1", res.IP)
+	}
+
+	// IP must be marked allocated even though reachability wasn't confirmed —
+	// the VM is real and holds the IP.
+	rows, _ := pool.List(context.Background())
+	allocated := false
+	for _, r := range rows {
+		if r.IP == "10.0.0.1" && r.Status == ippool.StatusAllocated {
+			allocated = true
+		}
+	}
+	if !allocated {
+		t.Errorf("expected IP 10.0.0.1 to be allocated after soft success")
+	}
+}
+
+func TestProvision_WaitForIPHardError_StillFails(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Replace the agent endpoint with one that returns a non-timeout error
+	// the WaitForIP loop is happy to swallow → but we want a different path.
+	// Easier: hijack StartVM to return a non-timeout error to ensure hard
+	// failures still return 500. (WaitForIP only returns ctx.Err — there's
+	// no other "hard" error path inside it. So we exercise the same logic
+	// via a different step that DOES return non-timeout errors.)
+	fake.startVM = func(_ context.Context, _ string, _ int) (string, error) {
+		return "", errors.New("boom: hardware on fire")
+	}
+	svc, pool, _ := newTestService(t, fake)
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "fail-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	})
+	if err == nil {
+		t.Fatalf("expected error for non-timeout failure")
+	}
+	// IP must be released back to free.
+	rows, _ := pool.List(context.Background())
+	for _, r := range rows {
+		if r.IP == "10.0.0.1" && r.Status != ippool.StatusFree {
+			t.Errorf("IP %s status = %s, want free after hard failure", r.IP, r.Status)
+		}
+	}
 }
 
 func TestProvision_FailureReleasesIP(t *testing.T) {
@@ -195,13 +319,13 @@ func TestProvision_FailureReleasesIP(t *testing.T) {
 	fake.setCloudInit = func(_ context.Context, _ string, _ int, _ proxmox.CloudInitConfig) error {
 		return errors.New("boom")
 	}
-	svc, pool := newTestService(t, fake)
+	svc, pool, _ := newTestService(t, fake)
 
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "boom-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -225,13 +349,13 @@ func TestProvision_NoEligibleNode(t *testing.T) {
 			{Name: "alpha", Status: "offline", MaxMem: 16 << 30},
 		}, nil
 	}
-	svc, pool := newTestService(t, fake)
+	svc, pool, _ := newTestService(t, fake)
 
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "lonely-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	var conflict *internalerrors.ConflictError
 	if !errors.As(err, &conflict) {
@@ -256,23 +380,30 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 			{Name: "bravo", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30},
 		}, nil
 	}
-	// Only bravo has the template.
-	fake.templateExists = func(_ context.Context, n string, _ int) (bool, error) {
-		return n == "bravo", nil
-	}
 	captured := atomic.Pointer[string]{}
 	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
-		t := target
-		captured.Store(&t)
+		tgt := target
+		captured.Store(&tgt)
 		return "UPID", nil
 	}
 
-	svc, _ := newTestService(t, fake)
+	svc, _, database := newTestService(t, fake)
+	// Override the default seed: drop alpha's templates, give bravo the
+	// one we need. With only bravo eligible, the scorer must pick it.
+	if err := database.Where("node = ?", "alpha").Delete(&db.NodeTemplate{}).Error; err != nil {
+		t.Fatalf("clear alpha templates: %v", err)
+	}
+	if err := database.Create(&db.NodeTemplate{
+		Node: "bravo", OS: "ubuntu-24.04", VMID: 9100,
+	}).Error; err != nil {
+		t.Fatalf("seed bravo template: %v", err)
+	}
+
 	if _, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "tpl-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -284,12 +415,12 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 
 func TestProvision_UnknownTier(t *testing.T) {
 	t.Parallel()
-	svc, _ := newTestService(t, happyFakePVE(t))
+	svc, _, _ := newTestService(t, happyFakePVE(t))
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "x",
 		Tier:       "bogus",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
@@ -299,12 +430,251 @@ func TestProvision_UnknownTier(t *testing.T) {
 
 func TestProvision_UnknownOSTemplate(t *testing.T) {
 	t.Parallel()
-	svc, _ := newTestService(t, happyFakePVE(t))
+	svc, _, _ := newTestService(t, happyFakePVE(t))
 	_, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:   "x",
 		Tier:       "small",
 		OSTemplate: "windows-95",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
+	})
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+}
+
+func TestProvision_GenerateKey_StoresAndRetrievesFromVault(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:    "vault-vm",
+		Tier:        "small",
+		OSTemplate:  "ubuntu-24.04",
+		GenerateKey: true,
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var vm db.VM
+	if err := database.First(&vm, "vmid = ?", res.VMID).Error; err != nil {
+		t.Fatalf("load vm: %v", err)
+	}
+	if vm.SSHKeyID == nil {
+		t.Fatal("expected VM.SSHKeyID to point at the generated key")
+	}
+
+	// The encrypted blob now lives on the linked ssh_keys row.
+	var key db.SSHKey
+	if err := database.First(&key, *vm.SSHKeyID).Error; err != nil {
+		t.Fatalf("load ssh_key: %v", err)
+	}
+	if !key.HasPrivateKey() {
+		t.Fatal("expected encrypted private key on ssh_keys row")
+	}
+	if strings.Contains(string(key.PrivKeyCT), "BEGIN OPENSSH PRIVATE KEY") {
+		t.Fatal("private key was stored as plaintext")
+	}
+	if key.Source != sshkeys.SourceGenerated {
+		t.Errorf("Source = %q, want generated", key.Source)
+	}
+
+	// GetPrivateKey decrypts and returns the same value the user got at
+	// provision time.
+	keyName, priv, err := svc.GetPrivateKey(context.Background(), vm.ID)
+	if err != nil {
+		t.Fatalf("GetPrivateKey: %v", err)
+	}
+	if keyName != "nimbus-vault-vm" {
+		t.Errorf("KeyName = %q, want nimbus-vault-vm", keyName)
+	}
+	if priv != res.SSHPrivateKey {
+		t.Errorf("vault returned different private key than the API response")
+	}
+}
+
+func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "byo-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var vm db.VM
+	if err := database.First(&vm, "hostname = ?", "byo-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	if vm.SSHKeyID == nil {
+		t.Fatal("expected SSHKeyID to be set even for public-only BYO")
+	}
+
+	// The linked ssh_keys row should hold the public key but no encrypted
+	// private half — the user opted not to vault it.
+	var key db.SSHKey
+	if err := database.First(&key, *vm.SSHKeyID).Error; err != nil {
+		t.Fatalf("load ssh_key: %v", err)
+	}
+	if key.HasPrivateKey() {
+		t.Error("BYO without privkey should not populate the vault columns")
+	}
+
+	_, _, err := svc.GetPrivateKey(context.Background(), vm.ID)
+	var nf *internalerrors.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("expected NotFound from GetPrivateKey, got %v", err)
+	}
+}
+
+func TestProvision_BYO_MismatchedKeypair_Rejected(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+
+	// Generate one keypair, then keep the private half from a *different*
+	// keypair so the two don't match.
+	pubA, _, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, privB, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Provision(context.Background(), provision.Request{
+		Hostname:   "mismatch-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  pubA,
+		SSHPrivKey: privB,
+	})
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError on mismatched keypair, got %v", err)
+	}
+	if ve.Field != "ssh_privkey" {
+		t.Errorf("ValidationError.Field = %q, want ssh_privkey", ve.Field)
+	}
+}
+
+func TestProvision_BYO_MatchingKeypair_StoredInVault(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "byo-vault-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  pub,
+		SSHPrivKey: priv,
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var row db.VM
+	if err := database.First(&row, "hostname = ?", "byo-vault-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := svc.GetPrivateKey(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetPrivateKey: %v", err)
+	}
+	if got != "nimbus-byo-vault-vm" {
+		t.Errorf("KeyName = %q, want nimbus-byo-vault-vm", got)
+	}
+}
+
+func TestProvision_UseSavedKey_LinksWithoutDuplicating(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	cipher, _ := secrets.New(make([]byte, secrets.KeyLen))
+	keys := sshkeys.New(database.DB, cipher)
+	key, err := keys.Create(context.Background(), sshkeys.CreateRequest{
+		Name: "saved", Generate: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "saved-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHKeyID:   &key.ID,
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var vm db.VM
+	if err := database.First(&vm, "hostname = ?", "saved-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	if vm.SSHKeyID == nil || *vm.SSHKeyID != key.ID {
+		t.Errorf("VM.SSHKeyID = %v, want %d", vm.SSHKeyID, key.ID)
+	}
+	if vm.KeyName != "saved" {
+		t.Errorf("VM.KeyName = %q, want saved", vm.KeyName)
+	}
+
+	// We must NOT have created a duplicate ssh_keys row for this VM.
+	var n int64
+	if err := database.Model(&db.SSHKey{}).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("ssh_keys count = %d, want 1 (no duplicate row created)", n)
+	}
+}
+
+func TestProvision_NoSSHInputUsesDefaultKey(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	cipher, _ := secrets.New(make([]byte, secrets.KeyLen))
+	keys := sshkeys.New(database.DB, cipher)
+	def, err := keys.Create(context.Background(), sshkeys.CreateRequest{
+		Name: "default", Generate: true, SetDefault: true,
+	})
+	if err != nil {
+		t.Fatalf("Create default: %v", err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "default-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	var vm db.VM
+	if err := database.First(&vm, "hostname = ?", "default-vm").Error; err != nil {
+		t.Fatal(err)
+	}
+	if vm.SSHKeyID == nil || *vm.SSHKeyID != def.ID {
+		t.Errorf("VM.SSHKeyID = %v, want %d (default)", vm.SSHKeyID, def.ID)
+	}
+}
+
+func TestProvision_NoSSHInputAndNoDefault_ValidationError(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "x",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
 	})
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
@@ -328,7 +698,7 @@ func (f *fakeVerifier) VerifyFree(ctx context.Context, ip string) (bool, *int, e
 // does not allocate a different IP than Reserve picked.
 func TestProvision_VerifyHappyPath(t *testing.T) {
 	t.Parallel()
-	svc, _ := newTestService(t, happyFakePVE(t))
+	svc, _, _ := newTestService(t, happyFakePVE(t))
 	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
 		return true, nil, nil
 	}}
@@ -338,7 +708,7 @@ func TestProvision_VerifyHappyPath(t *testing.T) {
 		Hostname:   "ok-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -364,7 +734,7 @@ func TestProvision_VerifyRaceLost_RetriesNextIP(t *testing.T) {
 			{Name: "ens18", IPAddresses: []proxmox.IPAddress{{IPAddress: "10.0.0.2", IPAddressType: "ipv4"}}},
 		}, nil
 	}
-	svc, pool := newTestService(t, fake)
+	svc, pool, _ := newTestService(t, fake)
 
 	// First call returns "held"; subsequent calls return "free".
 	heldVMID := 999
@@ -381,7 +751,7 @@ func TestProvision_VerifyRaceLost_RetriesNextIP(t *testing.T) {
 		Hostname:   "race-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -409,7 +779,7 @@ func TestProvision_VerifyRaceLost_RetriesNextIP(t *testing.T) {
 // rejections, Provision returns a ConflictError and the last IP is released.
 func TestProvision_VerifyExhaustsRetries(t *testing.T) {
 	t.Parallel()
-	svc, pool := newTestService(t, happyFakePVE(t))
+	svc, pool, _ := newTestService(t, happyFakePVE(t))
 
 	heldVMID := 888
 	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
@@ -421,7 +791,7 @@ func TestProvision_VerifyExhaustsRetries(t *testing.T) {
 		Hostname:   "doomed-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	var conflict *internalerrors.ConflictError
 	if !errors.As(err, &conflict) {
@@ -449,7 +819,7 @@ func TestProvision_VerifyErrorTreatedAsUnsafe(t *testing.T) {
 			{Name: "ens18", IPAddresses: []proxmox.IPAddress{{IPAddress: "10.0.0.2", IPAddressType: "ipv4"}}},
 		}, nil
 	}
-	svc, _ := newTestService(t, fake)
+	svc, _, _ := newTestService(t, fake)
 
 	var firstCall atomic.Bool
 	v := &fakeVerifier{verify: func(_ context.Context, _ string) (bool, *int, error) {
@@ -464,7 +834,7 @@ func TestProvision_VerifyErrorTreatedAsUnsafe(t *testing.T) {
 		Hostname:   "transient-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-		SSHPubKey:  "ssh-ed25519 AAAA",
+		SSHPubKey:  realPubKey(t),
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)

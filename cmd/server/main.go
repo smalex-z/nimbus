@@ -3,31 +3,41 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
 	"nimbus/internal/api"
+	"nimbus/internal/bootstrap"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
-	"nimbus/internal/install"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/secrets"
 	"nimbus/internal/service"
+	"nimbus/internal/sshkeys"
 )
 
 //go:embed all:frontend/dist
 var frontendFS embed.FS
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "install" {
-		install.Run()
+	// Subcommand dispatch — `nimbus bootstrap [flags]` runs the template
+	// bootstrap once and exits, sharing the same code path as the HTTP
+	// endpoint. Useful for ops/wizard, doesn't require the server to be running.
+	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
+		if err := runBootstrap(os.Args[2:]); err != nil {
+			log.Fatalf("bootstrap failed: %v", err)
+		}
 		return
 	}
 
@@ -78,8 +88,14 @@ func main() {
 		return
 	}
 
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
+
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.VM{}, &db.OAuthSettings{}, ippool.Model(),
+		&db.User{}, &db.Session{}, &db.OAuthSettings{},
+		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{},
+		ippool.Model(),
 	)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
@@ -92,7 +108,36 @@ func main() {
 		log.Fatalf("failed to seed IP pool: %v", err)
 	}
 
-	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 30*time.Second)
+	// Bootstrap the master encryption key for the SSH key vault. On first run
+	// this generates a 32-byte AES-256 key and persists it next to the rest of
+	// Nimbus's env config; on subsequent runs the existing key is reused.
+	encKey, err := secrets.LoadOrCreateKey(config.EnvFilePath())
+	if err != nil {
+		log.Fatalf("failed to load/create encryption key: %v", err)
+	}
+	cipher, err := secrets.New(encKey)
+	if err != nil {
+		log.Fatalf("failed to init secrets cipher: %v", err)
+	}
+
+	// Long timeout: the bootstrap path makes calls that wait on Proxmox tasks
+	// (image downloads) which can run for several minutes. The HTTP server
+	// route timeout is the real upper bound; this just controls per-request
+	// transport timeout for individual API calls.
+	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 5*time.Minute)
+
+	keysSvc := sshkeys.New(database.DB, cipher)
+
+	// Migrate any pre-existing per-VM vault entries into the ssh_keys table.
+	// Idempotent — VMs that already have ssh_key_id set are skipped. Failures
+	// are logged but don't abort startup.
+	migCtx, migCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if n, err := sshkeys.MigrateLegacyVMKeys(migCtx, database.DB); err != nil {
+		log.Printf("warning: ssh-key migration failed: %v", err)
+	} else if n > 0 {
+		log.Printf("migrated %d legacy per-VM vault entries into ssh_keys", n)
+	}
+	migCancel()
 
 	reconciler := ippool.NewReconciler(pool, pveClient,
 		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
@@ -115,18 +160,37 @@ func main() {
 	defer cancelBg()
 	go runReconcileLoop(bgCtx, reconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
-	provSvc := provision.New(pveClient, pool, database.DB, provision.Config{
+	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
 		GatewayIP:        cfg.GatewayIP,
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
+		CPUType:          cfg.VMCPUType,
 	})
 	provSvc.SetIPVerifier(reconciler)
+
+	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
+		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
+	})
+
+	// Best-effort startup migration: import any pre-existing templates from
+	// the cluster into the node_templates table so provision lookups work
+	// without requiring a re-bootstrap. Logged on failure but doesn't block
+	// startup — the bootstrap endpoint remains the recovery path.
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if n, err := bootstrap.SyncFromProxmox(syncCtx, database.DB, pveClient); err != nil {
+		log.Printf("warning: template sync from proxmox failed: %v", err)
+	} else if n > 0 {
+		log.Printf("imported %d existing template(s) into node_templates", n)
+	}
+	syncCancel()
 
 	router := api.NewRouter(api.Deps{
 		Auth:       authSvc,
 		Provision:  provSvc,
+		Bootstrap:  bootstrapSvc,
+		Keys:       keysSvc,
 		Pool:       pool,
 		Reconciler: reconciler,
 		Proxmox:    pveClient,
@@ -144,10 +208,97 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Match the longest route timeout so the server doesn't cut bootstrap
+		// connections short.
+		WriteTimeout: 35 * time.Minute,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// runBootstrap executes the `nimbus bootstrap` subcommand.
+//
+// Loads config the same way as the server (env / .env), constructs a Proxmox
+// client and bootstrap service, runs the bootstrap, and prints results.
+// Exits with code 1 if any template failed.
+func runBootstrap(args []string) error {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	osList := fs.String("os", "", "comma-separated OS keys (default: all 4)")
+	nodeList := fs.String("node", "", "comma-separated node names (default: all online nodes)")
+	force := fs.Bool("force", false, "re-create templates even if they already exist")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	pveClient := proxmox.New(cfg.ProxmoxHost, cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret, 5*time.Minute)
+	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	svc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
+		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
+	})
+
+	req := bootstrap.Request{Force: *force}
+	if *osList != "" {
+		req.OS = splitCSV(*osList)
+	}
+	if *nodeList != "" {
+		req.Nodes = splitCSV(*nodeList)
+	}
+
+	log.Printf("Bootstrapping templates (proxmox=%s, OS=%v, nodes=%v)",
+		cfg.ProxmoxHost, req.OS, req.Nodes)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	res, err := svc.Bootstrap(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	for _, o := range res.Created {
+		log.Printf("✓ created  %s (vmid %d) on %s in %s", o.OS, o.VMID, o.Node, o.Duration)
+	}
+	for _, o := range res.Skipped {
+		log.Printf("⤳ skipped  %s (vmid %d) on %s — already exists", o.OS, o.VMID, o.Node)
+	}
+	for _, o := range res.Failed {
+		log.Printf("✗ failed   %s (vmid %d) on %s after %s: %s", o.OS, o.VMID, o.Node, o.Duration, o.Error)
+	}
+
+	// Pretty JSON to stdout for scripting.
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(res); err != nil {
+		return err
+	}
+
+	if len(res.Failed) > 0 {
+		os.Exit(1)
+	}
+	return nil
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // runReconcileLoop runs reconciler.Reconcile every interval until ctx is

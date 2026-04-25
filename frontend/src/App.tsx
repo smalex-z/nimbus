@@ -5,6 +5,7 @@ import Background from '@/components/Background'
 import Layout from '@/components/Layout'
 import RequireAuth from '@/components/RequireAuth'
 import Admin from '@/pages/Admin'
+import Keys from '@/pages/Keys'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Nodes from '@/pages/Nodes'
@@ -57,6 +58,7 @@ export default function App() {
                   <Routes>
                     <Route path="/" element={<Provision />} />
                     <Route path="/vms" element={<MyVMs />} />
+                    <Route path="/keys" element={<Keys />} />
                     <Route path="/nodes" element={<Nodes />} />
                     <Route path="/settings" element={<Settings />} />
                     <Route path="/admin" element={<Admin />} />
