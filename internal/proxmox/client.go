@@ -282,6 +282,12 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	if cfg.SearchDomain != "" {
 		params.Set("searchdomain", cfg.SearchDomain)
 	}
+	if cfg.Cores > 0 {
+		params.Set("cores", strconv.Itoa(cfg.Cores))
+	}
+	if cfg.Memory > 0 {
+		params.Set("memory", strconv.Itoa(cfg.Memory))
+	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
 	return c.do(ctx, http.MethodPost, path, params, nil)

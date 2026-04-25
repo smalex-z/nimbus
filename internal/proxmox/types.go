@@ -51,7 +51,11 @@ type CreateVMOpts struct {
 	OSType       string // "l26" for Linux 2.6+ — Proxmox uses this for sane defaults
 }
 
-// CloudInitConfig carries the cloud-init values Nimbus injects per-clone.
+// CloudInitConfig carries the per-clone configuration Nimbus applies after
+// cloning a template. Cloud-init fields (CIUser, SSHKeys, …) and hardware
+// fields (Cores, Memory) all target the same Proxmox /config endpoint, so
+// they're set in one round-trip — Cores/Memory must be applied here because
+// a fresh clone otherwise inherits the template's small defaults.
 //
 // SSHKeys is the *raw* OpenSSH authorized-keys string (one or more keys, one
 // per line). The client URL-encodes it on the wire — callers MUST NOT
@@ -62,6 +66,8 @@ type CloudInitConfig struct {
 	IPConfig0    string // e.g. "ip=192.168.0.142/24,gw=192.168.0.1"
 	Nameserver   string // e.g. "1.1.1.1 8.8.8.8"
 	SearchDomain string // e.g. "local"
+	Cores        int    // vCPU count; 0 leaves the cloned value unchanged
+	Memory       int    // memory in MiB; 0 leaves the cloned value unchanged
 }
 
 // IPAddress is one entry inside a NetworkInterface's ip-addresses list.
