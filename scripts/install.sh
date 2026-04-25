@@ -7,6 +7,13 @@ INSTALL_DIR="/opt/$APP_NAME"
 SERVICE_USER="$APP_NAME"
 DATA_DIR="/var/lib/$APP_NAME"
 
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then 
+    SUDO="sudo"
+else
+    SUDO=""
+fi
+
 if [ ! -f "./nimbus" ]; then
     echo "Error: './nimbus' binary not found. Run './scripts/build.sh' first."
     exit 1
@@ -15,17 +22,17 @@ fi
 echo "Installing $APP_NAME..."
 
 # Create system user (ignore error if already exists)
-sudo useradd -r -s /bin/false "$SERVICE_USER" 2>/dev/null || true
+$SUDO useradd -r -s /bin/false "$SERVICE_USER" 2>/dev/null || true
 
 # Create directories
-sudo mkdir -p "$INSTALL_DIR" "$DATA_DIR"
+$SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 # Copy binary
-sudo cp nimbus "$INSTALL_DIR/"
-sudo chmod 755 "$INSTALL_DIR/nimbus"
+$SUDO cp nimbus "$INSTALL_DIR/"
+$SUDO chmod 755 "$INSTALL_DIR/nimbus"
 
 # Create systemd service unit
-sudo tee /etc/systemd/system/"$APP_NAME".service > /dev/null <<EOF
+$SUDO tee /etc/systemd/system/"$APP_NAME".service > /dev/null <<EOF
 [Unit]
 Description=$APP_NAME
 Documentation=https://github.com/smalex-z/nimbus
@@ -45,13 +52,18 @@ WantedBy=multi-user.target
 EOF
 
 # Set ownership
-sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" "$DATA_DIR"
+$SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" "$DATA_DIR"
 
 # Reload and enable
-sudo systemctl daemon-reload
-sudo systemctl enable "$APP_NAME"
-sudo systemctl restart "$APP_NAME"
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable "$APP_NAME"
+$SUDO systemctl restart "$APP_NAME"
 
 echo "✅ $APP_NAME installed and running"
-echo "Check status: sudo systemctl status $APP_NAME"
-echo "View logs:    sudo journalctl -u $APP_NAME -f"
+if [ -z "$SUDO" ]; then
+    echo "Check status: systemctl status $APP_NAME"
+    echo "View logs:    journalctl -u $APP_NAME -f"
+else
+    echo "Check status: sudo systemctl status $APP_NAME"
+    echo "View logs:    sudo journalctl -u $APP_NAME -f"
+fi

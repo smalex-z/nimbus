@@ -6,10 +6,10 @@
 *.dylib
 *.test
 *.out
-homestack
-homestack-linux-*
-homestack-darwin-*
-homestack-windows-*
+nimbus
+nimbus-linux-*
+nimbus-darwin-*
+nimbus-windows-*
 
 # Frontend
 frontend/node_modules/
