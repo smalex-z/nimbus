@@ -80,6 +80,16 @@ export async function provisionVM(req: ProvisionRequest): Promise<ProvisionResul
   return data
 }
 
+export interface VMPrivateKey {
+  key_name: string
+  private_key: string
+}
+
+export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
+  const { data } = await api.get<VMPrivateKey>(`/vms/${id}/private-key`)
+  return data
+}
+
 export interface DiscoverResult {
   is_hypervisor: boolean
   endpoints: string[]

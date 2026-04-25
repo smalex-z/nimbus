@@ -23,7 +23,14 @@ type VM struct {
 	Status     string `gorm:"column:status;index;not null"            json:"status"`
 	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
 	KeyName    string `gorm:"column:key_name"                         json:"key_name,omitempty"`
-	ErrorMsg   string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
+	// Public half of the SSH key, stored as the raw "ssh-<algo> <base64> <comment>" line.
+	SSHPubKey string `gorm:"column:ssh_pubkey"                       json:"ssh_pubkey,omitempty"`
+	// Encrypted private half. Empty when the user opted out of key-vault storage
+	// (BYO without supplying a private key). Encryption is AES-256-GCM with the
+	// nonce stored alongside; the master key lives outside the DB (env var).
+	SSHPrivKeyCT    []byte `gorm:"column:ssh_privkey_ct"                json:"-"`
+	SSHPrivKeyNonce []byte `gorm:"column:ssh_privkey_nonce"             json:"-"`
+	ErrorMsg        string `gorm:"column:error_msg"                     json:"error_msg,omitempty"`
 }
 
 // NodeTemplate maps an (OS, node) pair to the Proxmox VMID where that node's

@@ -31,6 +31,7 @@ type createVMRequest struct {
 	Tier        string `json:"tier"`
 	OSTemplate  string `json:"os_template"`
 	SSHPubKey   string `json:"ssh_pubkey,omitempty"`
+	SSHPrivKey  string `json:"ssh_privkey,omitempty"`
 	GenerateKey bool   `json:"generate_key,omitempty"`
 }
 
@@ -51,6 +52,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Tier:        req.Tier,
 		OSTemplate:  req.OSTemplate,
 		SSHPubKey:   req.SSHPubKey,
+		SSHPrivKey:  req.SSHPrivKey,
 		GenerateKey: req.GenerateKey,
 	})
 	if err != nil {
@@ -68,6 +70,31 @@ func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, vms)
+}
+
+// GetPrivateKey handles GET /api/vms/{id}/private-key. Returns
+// {key_name, private_key} for vault-stored keys; 404 when no key was
+// deposited for this VM.
+//
+// Phase 1 has no auth, so this is reachable to anyone who can hit the API
+// (matching the rest of the surface). Once OAuth lands, owner gating goes
+// here first.
+func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	keyName, privateKey, err := h.svc.GetPrivateKey(r.Context(), uint(id))
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, map[string]string{
+		"key_name":    keyName,
+		"private_key": privateKey,
+	})
 }
 
 // Get handles GET /api/vms/{id}.

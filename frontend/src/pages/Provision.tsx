@@ -31,6 +31,7 @@ interface FormState {
   os: OSTemplate
   keyMode: KeyMode
   pubKey: string
+  privKey: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -39,6 +40,7 @@ const DEFAULT_FORM: FormState = {
   os: 'ubuntu-24.04',
   keyMode: 'gen',
   pubKey: '',
+  privKey: '',
 }
 
 export default function Provision() {
@@ -105,11 +107,13 @@ export default function Provision() {
     setError(null)
     setView('loading')
     try {
+      const trimmedPriv = form.keyMode === 'byo' ? form.privKey.trim() : ''
       const res = await provisionVM({
         hostname: form.hostname,
         tier: form.tier,
         os_template: form.os,
         ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
+        ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
         generate_key: form.keyMode === 'gen' ? true : undefined,
       })
       setResult(res)
@@ -368,20 +372,60 @@ function FormBody({ form, updateForm }: FormBodyProps) {
           />
           <RadioCard
             title="Bring your own key"
-            description="Paste or upload a public key. We never store the private half."
+            description="Paste or upload a public key. Optionally store the private half so you can download it later."
             selected={form.keyMode === 'byo'}
             onClick={() => updateForm('keyMode', 'byo')}
           />
         </div>
         {form.keyMode === 'byo' && (
-          <div className="mt-4 flex flex-col gap-2">
-            <Textarea
-              monospace
-              placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@laptop"
-              value={form.pubKey}
-              onChange={(e) => updateForm('pubKey', e.target.value)}
-            />
-            <PubKeyFileUpload onLoad={(text) => updateForm('pubKey', text)} />
+          <div className="mt-4 flex flex-col gap-5">
+            <div className="flex flex-col gap-2">
+              <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
+                Public key
+              </div>
+              <Textarea
+                monospace
+                placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@laptop"
+                value={form.pubKey}
+                onChange={(e) => updateForm('pubKey', e.target.value)}
+              />
+              <KeyFileUpload
+                accept=".pub,.txt,text/plain"
+                buttonLabel="Upload .pub file"
+                maxBytes={16 * 1024}
+                sizeError="File too large — public keys are typically under 1 KB."
+                onLoad={(text) => updateForm('pubKey', text)}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
+                  Private key — optional
+                </div>
+                <span className="text-[11px] text-ink-3">
+                  Stored encrypted. Never leaves Nimbus unless you ask for it.
+                </span>
+              </div>
+              <Textarea
+                monospace
+                placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'}
+                value={form.privKey}
+                onChange={(e) => updateForm('privKey', e.target.value)}
+              />
+              <KeyFileUpload
+                accept=".pem,.key,.txt,text/plain,application/x-pem-file"
+                buttonLabel="Upload private key file"
+                maxBytes={64 * 1024}
+                sizeError="File too large — private keys are typically under 4 KB."
+                onLoad={(text) => updateForm('privKey', text)}
+              />
+              <p className="text-[11px] text-ink-3 leading-relaxed">
+                Paste only if you'd like Nimbus to vault the key so you can re-download
+                it later. Leave blank to keep the private half on your machine only — the
+                public key alone is enough to log in.
+              </p>
+            </div>
           </div>
         )}
       </div>
@@ -402,14 +446,22 @@ function FormBody({ form, updateForm }: FormBodyProps) {
   )
 }
 
-function PubKeyFileUpload({ onLoad }: { onLoad: (text: string) => void }) {
+interface KeyFileUploadProps {
+  accept: string
+  buttonLabel: string
+  maxBytes: number
+  sizeError: string
+  onLoad: (text: string) => void
+}
+
+function KeyFileUpload({ accept, buttonLabel, maxBytes, sizeError, onLoad }: KeyFileUploadProps) {
   const [fileName, setFileName] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const handleFile = async (file: File) => {
     setError(null)
-    if (file.size > 16 * 1024) {
-      setError('File too large — public keys are typically under 1 KB.')
+    if (file.size > maxBytes) {
+      setError(sizeError)
       return
     }
     try {
@@ -428,10 +480,10 @@ function PubKeyFileUpload({ onLoad }: { onLoad: (text: string) => void }) {
   return (
     <div className="flex items-center gap-3">
       <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-[8px] border border-line-2 bg-white/85 text-[12px] text-ink cursor-pointer hover:border-ink transition-colors">
-        <span>Upload .pub file</span>
+        <span>{buttonLabel}</span>
         <input
           type="file"
-          accept=".pub,.txt,text/plain"
+          accept={accept}
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0]
@@ -466,7 +518,13 @@ function Summary({ form, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="Disk" value={diskLabel} />
         <SummaryRow
           label="SSH"
-          value={form.keyMode === 'byo' ? 'your key' : 'generate'}
+          value={
+            form.keyMode === 'gen'
+              ? 'generate (vaulted)'
+              : form.privKey.trim()
+                ? 'your key (vaulted)'
+                : 'your key'
+          }
         />
       </div>
     </>
@@ -625,11 +683,12 @@ function ResultView({ result, onReset }: ResultViewProps) {
               privateKey={result.ssh_private_key}
             />
 
-            <div className="mt-6 p-3.5 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
-              <span className="text-base">⚠</span>
+            <div className="mt-6 p-3.5 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
+              <span className="text-base">🔒</span>
               <div>
-                <strong>This is the only time you can download the private key.</strong>{' '}
-                Save it now. Nimbus does not store it anywhere.
+                <strong>Saved to the Nimbus vault.</strong>{' '}
+                Encrypted at rest — you can re-download it from the My Machines page if
+                you lose this copy.
               </div>
             </div>
           </div>
