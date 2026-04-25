@@ -1,15 +1,19 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import Background from '@/components/Background'
 import Layout from '@/components/Layout'
-import Dashboard from '@/pages/Dashboard'
-import Settings from '@/pages/Settings'
+import MyVMs from '@/pages/MyVMs'
+import Nodes from '@/pages/Nodes'
+import Provision from '@/pages/Provision'
 
 export default function App() {
   return (
     <BrowserRouter>
+      <Background />
       <Layout>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/" element={<Provision />} />
+          <Route path="/vms" element={<MyVMs />} />
+          <Route path="/nodes" element={<Nodes />} />
         </Routes>
       </Layout>
     </BrowserRouter>

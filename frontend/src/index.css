@@ -1,3 +1,103 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: #fcfbfa;
+    color: theme('colors.ink');
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: theme('fontFamily.display');
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+
+  code,
+  .mono {
+    font-family: theme('fontFamily.mono');
+  }
+}
+
+@layer components {
+  /* Frosted glass card — matches the .glass class in nimbusx mockup. */
+  .glass {
+    background: rgba(255, 255, 255, 0.78);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: theme('borderRadius.lg');
+    box-shadow: theme('boxShadow.glass');
+  }
+  .glass-strong {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(28px) saturate(160%);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+  }
+
+  .eyebrow {
+    font-family: theme('fontFamily.mono');
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: theme('colors.ink-3');
+    margin-bottom: 16px;
+  }
+
+  /* Brand mark — same gradient ball used in nav and loading screens. */
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: radial-gradient(circle at 30% 30%, theme('colors.c1'), transparent 60%),
+      radial-gradient(circle at 70% 40%, theme('colors.c2'), transparent 60%),
+      radial-gradient(circle at 50% 70%, theme('colors.c3'), transparent 60%), #ffffff;
+    border: 1px solid theme('colors.line-2');
+    box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.9);
+  }
+  .brand-mark-lg {
+    width: 80px;
+    height: 80px;
+    border-radius: 24px;
+  }
+}
+
+/* Background blobs — fixed full-screen layer, behind content. */
+.blobs {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  overflow: hidden;
+  pointer-events: none;
+  background: linear-gradient(180deg, #fcfbfa 0%, #f8f7f5 100%);
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(110px);
+  opacity: 1;
+}
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.18;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0'/></filter><rect width='200' height='200' filter='url(%23n)'/></svg>");
+}

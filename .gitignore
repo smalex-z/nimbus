@@ -25,6 +25,11 @@ cmd/server/frontend/dist/*.css
 *.db-shm
 *.db-wal
 
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
 # IDE
 .idea/
 .vscode/

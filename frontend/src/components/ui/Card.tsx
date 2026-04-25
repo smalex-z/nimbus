@@ -1,20 +1,23 @@
-import { ReactNode } from 'react'
+import { HTMLAttributes, ReactNode } from 'react'
 
-interface CardProps {
-  title?: string
+interface CardProps extends HTMLAttributes<HTMLDivElement> {
   children: ReactNode
-  className?: string
+  strong?: boolean
 }
 
-export default function Card({ title, children, className = '' }: CardProps) {
+// Card is the frosted glass surface used everywhere in the Nimbus UI. The
+// `strong` variant boosts the backdrop blur — matches `.glass-strong` in the
+// mockup, used for modals.
+export default function Card({
+  children,
+  strong = false,
+  className = '',
+  ...rest
+}: CardProps) {
+  const glassClass = strong ? 'glass glass-strong' : 'glass'
   return (
-    <div className={`bg-white rounded-lg border border-gray-200 shadow-sm ${className}`}>
-      {title && (
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h3 className="text-base font-semibold text-gray-900">{title}</h3>
-        </div>
-      )}
-      <div className="px-6 py-4">{children}</div>
+    <div className={`${glassClass} ${className}`} {...rest}>
+      {children}
     </div>
   )
 }
