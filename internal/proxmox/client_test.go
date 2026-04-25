@@ -210,14 +210,28 @@ func TestClient_TemplateExists(t *testing.T) {
 			statusCode:  http.StatusNotFound,
 			wantPresent: false,
 		},
+		{
+			// Proxmox quirk: missing VMID on a node returns 500, not 404.
+			name:       "Proxmox 500 with 'does not exist' message",
+			statusCode: http.StatusInternalServerError,
+			body: map[string]any{
+				"data":    nil,
+				"message": "Configuration file 'nodes/hppve/qemu-server/9000.conf' does not exist\n",
+			},
+			wantPresent: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.statusCode)
 				if tt.statusCode == http.StatusOK {
 					writeEnvelope(w, tt.body)
+					return
+				}
+				w.WriteHeader(tt.statusCode)
+				if tt.body != nil {
+					_ = json.NewEncoder(w).Encode(tt.body)
 				}
 			})
 			got, err := c.TemplateExists(context.Background(), "node1", 9000)

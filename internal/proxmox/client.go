@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,7 +158,14 @@ func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (boo
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
 	err := c.do(ctx, http.MethodGet, path, nil, &cfg)
 	if err != nil {
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		// Proxmox quirk: GET /nodes/{node}/qemu/{vmid}/config returns
+		// HTTP 500 (not 404) when the VMID doesn't exist on that node.
+		// The body contains "does not exist". Treat as not-present.
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
 			return false, nil
 		}
 		return false, err
