@@ -29,6 +29,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -110,6 +111,7 @@ type Service struct {
 	db       *gorm.DB
 	cipher   *secrets.Cipher // encrypts SSH private keys at rest
 	keys     *sshkeys.Service
+	tunnels  *tunnel.Client // optional Gopher client; nil disables tunnel support
 	cfg      Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
@@ -148,6 +150,13 @@ func (s *Service) SetIPVerifier(v IPVerifier) {
 	}
 }
 
+// SetTunnelClient installs (or replaces) the Gopher tunnel client. Passing
+// nil disables tunnel support — Provision will silently skip tunnel work
+// regardless of req.PublicTunnel.
+func (s *Service) SetTunnelClient(t *tunnel.Client) {
+	s.tunnels = t
+}
+
 // Provision executes the 9-step flow from design doc §5.2.
 //
 // On any failure after the IP is reserved, we release the IP back to the pool
@@ -162,6 +171,15 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 
 	if _, ok := proxmox.TemplateOffsets[req.OSTemplate]; !ok {
 		return nil, &internalerrors.ValidationError{Field: "os_template", Message: fmt.Sprintf("unknown os_template %q", req.OSTemplate)}
+	}
+
+	// Tunnel pre-flight (cheap, local-only): reject obviously-bad subdomains
+	// before we burn any other resources. The actual register call happens
+	// after IP reserve.
+	if req.PublicTunnel && s.tunnels != nil {
+		if err := tunnel.ValidateSubdomain(req.Subdomain); err != nil {
+			return nil, &internalerrors.ValidationError{Field: "subdomain", Message: err.Error()}
+		}
 	}
 
 	// Resolve SSH key. The service may either reuse an existing vault entry
@@ -198,6 +216,47 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Step 1c: register the Gopher tunnel BEFORE we spend cycles on the clone
+	// so a taken subdomain fails fast. Subdomain syntax was validated above
+	// (before the reserve) — this is the network round-trip.
+	var (
+		tunnelObj   *tunnel.Tunnel
+		tunnelError string
+	)
+	if req.PublicTunnel && s.tunnels != nil {
+		t, terr := s.tunnels.Create(ctx, tunnel.CreateRequest{
+			Subdomain:  req.Subdomain,
+			TargetIP:   ip,
+			TargetPort: 80,
+		})
+		switch {
+		case errors.Is(terr, tunnel.ErrSubdomainTaken):
+			return nil, &internalerrors.ValidationError{Field: "subdomain", Message: "subdomain already taken"}
+		case terr != nil:
+			// Infra-side failure: log and keep going without a tunnel —
+			// "Gopher failure must not fail the VM provision" (design §10).
+			log.Printf("tunnel: register failed (continuing without tunnel): %v", terr)
+			tunnelError = "tunnel registration failed: " + terr.Error()
+		default:
+			tunnelObj = t
+		}
+	}
+	// Deferred best-effort cleanup. Cleared when we reach the success path so
+	// the tunnel survives. Mirrors the IP-release pattern.
+	tunnelToCleanup := ""
+	if tunnelObj != nil {
+		tunnelToCleanup = tunnelObj.ID
+	}
+	defer func() {
+		if tunnelToCleanup != "" && s.tunnels != nil {
+			delCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.tunnels.Delete(delCtx, tunnelToCleanup); err != nil {
+				log.Printf("tunnel: cleanup delete failed for %s: %v", tunnelToCleanup, err)
+			}
+		}
+	}()
 
 	// Step 2: gather cluster snapshot and score, restricted to nodes that
 	// have a template for the requested OS. The per-node templateVMID lookup
@@ -293,6 +352,43 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 
+	// Step 7b: Gopher tunnel bootstrap. If we successfully registered a tunnel
+	// AND WaitForIP confirmed reachability (no warning), SSH in and run the
+	// one-line bootstrap, then poll Gopher for active. Skipped on soft-success
+	// because Nimbus can't reach the VM to bootstrap from there. All failures
+	// are recorded as tunnel_error — the VM provision never fails for tunnel
+	// reasons (design §10).
+	tunnelURL := ""
+	if tunnelObj != nil {
+		switch {
+		case warning != "":
+			tunnelError = "VM unreachable from Nimbus, can't bootstrap tunnel — " +
+				"tunnel registered but inactive. Run the bootstrap manually:" +
+				"\n  curl " + tunnelObj.BootstrapURL + " | sh"
+			// Keep the registered tunnel — user can finish bootstrap manually.
+		default:
+			privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
+			if perr != nil {
+				log.Printf("tunnel: cannot bootstrap (no private key available): %v", perr)
+				tunnelError = "tunnel bootstrap skipped: " + perr.Error()
+			} else if berr := runTunnelBootstrap(ctx, ip, username, privKey, tunnelObj.BootstrapURL); berr != nil {
+				log.Printf("tunnel: bootstrap ssh failed: %v", berr)
+				tunnelError = "tunnel bootstrap failed: " + berr.Error()
+			} else {
+				active, perr := s.waitTunnelActive(ctx, tunnelObj.ID)
+				switch {
+				case perr != nil:
+					log.Printf("tunnel: poll failed: %v", perr)
+					tunnelError = "tunnel did not become active: " + perr.Error()
+				case active.URL != "":
+					tunnelURL = active.URL
+				default:
+					tunnelError = "tunnel registered but URL was not returned"
+				}
+			}
+		}
+	}
+
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
 	if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
 		return nil, fmt.Errorf("mark allocated: %w", err)
@@ -316,11 +412,17 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		SSHPubKey:  sshPubKey,
 		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
+	if tunnelObj != nil {
+		vm.TunnelID = tunnelObj.ID
+	}
+	vm.TunnelURL = tunnelURL
+	vm.TunnelError = tunnelError
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
 		// IP is already marked allocated so we don't strand it.
 		return nil, fmt.Errorf("persist vm: %w", err)
 	}
+	tunnelToCleanup = "" // success — keep the tunnel
 
 	return &Result{
 		VMID:          newVMID,
@@ -333,6 +435,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		SSHPrivateKey: sshPrivateKey,
 		KeyName:       keyName,
 		Warning:       warning,
+		TunnelURL:     tunnelURL,
+		TunnelError:   tunnelError,
 	}, nil
 }
 

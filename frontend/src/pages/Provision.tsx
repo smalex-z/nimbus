@@ -28,6 +28,12 @@ import {
 type ViewState = 'form' | 'loading' | 'result' | 'error'
 type KeyMode = 'saved' | 'byo' | 'gen'
 
+const SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+function isValidSubdomain(s: string): boolean {
+  return SUBDOMAIN_RE.test(s.trim())
+}
+
 const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 interface FormState {
@@ -38,6 +44,8 @@ interface FormState {
   savedKeyId: number | null
   pubKey: string
   privKey: string
+  publicTunnel: boolean
+  subdomain: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -48,6 +56,8 @@ const DEFAULT_FORM: FormState = {
   savedKeyId: null,
   pubKey: '',
   privKey: '',
+  publicTunnel: false,
+  subdomain: '',
 }
 
 export default function Provision() {
@@ -120,6 +130,7 @@ export default function Provision() {
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
     if (form.keyMode === 'saved' && form.savedKeyId === null) return false
+    if (form.publicTunnel && !isValidSubdomain(form.subdomain)) return false
     return true
   }, [form])
 
@@ -149,6 +160,11 @@ export default function Provision() {
         ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
         ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
         generate_key: form.keyMode === 'gen' ? true : undefined,
+        public_tunnel: form.publicTunnel ? true : undefined,
+        subdomain:
+          form.publicTunnel && form.subdomain.trim()
+            ? form.subdomain.trim()
+            : undefined,
       })
       setResult(res)
       setView('result')
@@ -502,17 +518,38 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
         )}
       </div>
 
-      <div className="flex flex-col gap-2 opacity-50">
+      <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">Public access</label>
-        <div className="flex items-center gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/60">
-          <span className="w-[18px] h-[18px] rounded-md border-[1.5px] border-ink-3 bg-white" />
+        <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+          <input
+            type="checkbox"
+            checked={form.publicTunnel}
+            onChange={(e) => updateForm('publicTunnel', e.target.checked)}
+            className="mt-0.5 w-4 h-4 accent-ink"
+          />
           <div className="flex-1">
             <div className="text-sm font-medium">Expose at a public hostname</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Coming in Phase 2 — Gopher tunnel integration.
+              Routes <span className="font-mono">https://&lt;subdomain&gt;</span> through Gopher to this VM's port 80.
             </div>
           </div>
-        </div>
+        </label>
+        {form.publicTunnel && (
+          <div className="mt-2">
+            <Input
+              label="Subdomain"
+              placeholder="my-project"
+              value={form.subdomain}
+              onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
+              error={
+                form.subdomain && !isValidSubdomain(form.subdomain)
+                  ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
+                  : undefined
+              }
+              hint="Lowercase letters, digits, hyphens. The full URL is shown after provisioning."
+            />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -526,6 +563,11 @@ interface SummaryProps {
 }
 
 function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
+  const tunnelLabel = (() => {
+    if (!form.publicTunnel) return 'no'
+    if (!isValidSubdomain(form.subdomain)) return '—'
+    return `${form.subdomain}.…`
+  })()
   const sshLabel = (() => {
     if (form.keyMode === 'gen') return 'generate (vaulted)'
     if (form.keyMode === 'saved') {
@@ -544,6 +586,7 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="vCPU / RAM" value={tierLabel} />
         <SummaryRow label="Disk" value={diskLabel} />
         <SummaryRow label="SSH" value={sshLabel} />
+        <SummaryRow label="Public tunnel" value={tunnelLabel} />
       </div>
     </>
   )
@@ -683,12 +726,37 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
+        {result.tunnel_url && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">🌐</span>
+            <div>
+              <strong>Public tunnel live.</strong>{' '}
+              <a href={result.tunnel_url} target="_blank" rel="noreferrer" className="font-mono underline">
+                {result.tunnel_url}
+              </a>
+            </div>
+          </div>
+        )}
+
+        {result.tunnel_error && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">⚠</span>
+            <div>
+              <strong>Tunnel not active.</strong>{' '}
+              <span className="whitespace-pre-line">{result.tunnel_error}</span>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
           <CredCell label="IP address" value={result.ip} />
           <CredCell label="Username" value={result.username} />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
           <CredCell label="SSH command" value={sshCommand} fullWidth />
+          {result.tunnel_url && (
+            <CredCell label="Public URL" value={result.tunnel_url} fullWidth />
+          )}
         </div>
 
         {result.ssh_private_key && (

@@ -79,11 +79,22 @@ function VMRow({ vm }: { vm: VM }) {
   return (
     <Card className="p-5">
       <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto_auto] gap-5 items-center">
-        <div>
+        <div className="min-w-0">
           <div className="font-display text-lg font-medium">{vm.hostname}</div>
           <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
+          {vm.tunnel_url && (
+            <a
+              href={vm.tunnel_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block font-mono text-[11px] text-good underline mt-1 truncate max-w-full"
+              title={vm.tunnel_url}
+            >
+              🌐 {vm.tunnel_url}
+            </a>
+          )}
         </div>
         <span className="font-mono text-[11px] px-2.5 py-1 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider justify-self-start sm:justify-self-auto">
           {vm.tier}
