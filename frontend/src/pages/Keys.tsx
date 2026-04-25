@@ -180,47 +180,52 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
         {mode === 'import' && (
           <>
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                  Public key
-                </div>
-                <KeyFileUpload
-                  accept=".pub,.txt,text/plain"
-                  buttonLabel="Upload .pub file"
-                  maxBytes={16 * 1024}
-                  sizeError="File too large — public keys are typically under 1 KB."
-                  onLoad={setPubKey}
-                />
-              </div>
-              <Textarea
-                monospace
-                placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@laptop"
-                value={pubKey}
-                onChange={(e) => setPubKey(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                  Private key — optional
+              <label className="text-[13px] text-ink">
+                <span className="font-semibold">Private key</span>{' '}
+                <span className="text-ink-3 font-normal">(PEM or OpenSSH format) — optional</span>
+              </label>
+              <div className="flex items-stretch gap-3">
+                <div className="flex-1 min-w-0">
+                  <Textarea
+                    monospace
+                    placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…'}
+                    value={privKey}
+                    onChange={(e) => setPrivKey(e.target.value)}
+                  />
                 </div>
                 <KeyFileUpload
                   accept=".pem,.key,.txt,text/plain,application/x-pem-file"
-                  buttonLabel="Upload private key file"
                   maxBytes={64 * 1024}
                   sizeError="File too large — private keys are typically under 4 KB."
                   onLoad={setPrivKey}
                 />
               </div>
-              <Textarea
-                monospace
-                placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'}
-                value={privKey}
-                onChange={(e) => setPrivKey(e.target.value)}
-              />
               <p className="text-[11px] text-ink-3">
                 Stored encrypted. Nothing leaves Nimbus unless you ask.
               </p>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-[13px] text-ink">
+                <span className="font-semibold">Public key</span>{' '}
+                <span className="text-ink-3 font-normal">(authorized_keys format)</span>
+              </label>
+              <div className="flex items-stretch gap-3">
+                <div className="flex-1 min-w-0">
+                  <Textarea
+                    monospace
+                    placeholder="ssh-ed25519 AAAA..."
+                    value={pubKey}
+                    onChange={(e) => setPubKey(e.target.value)}
+                  />
+                </div>
+                <KeyFileUpload
+                  accept=".pub,.txt,text/plain"
+                  maxBytes={16 * 1024}
+                  sizeError="File too large — public keys are typically under 1 KB."
+                  onLoad={setPubKey}
+                />
+              </div>
             </div>
           </>
         )}
@@ -232,7 +237,7 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
             onChange={(e) => setSetDefault(e.target.checked)}
             className="w-4 h-4 accent-ink"
           />
-          <span className="text-sm text-ink">Use as the default key for new VMs</span>
+          <span className="text-sm text-ink">Set as default key</span>
         </label>
 
         {err && (
@@ -246,7 +251,11 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
             Cancel
           </Button>
           <Button onClick={submit} disabled={!canSubmit || submitting}>
-            {submitting ? 'Saving…' : mode === 'gen' ? 'Generate & save →' : 'Save key →'}
+            {submitting
+              ? 'Saving…'
+              : mode === 'gen'
+                ? 'Generate key pair'
+                : 'Save key pair'}
           </Button>
         </div>
       </div>
