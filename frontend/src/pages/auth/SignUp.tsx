@@ -1,7 +1,33 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import api from '@/api/client'
 import { NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
+
+const HEADING_PLAIN = 'Get '
+const HEADING_ITALIC = 'started.'
+const HEADING_FULL = HEADING_PLAIN + HEADING_ITALIC
+
+function useTypingEffect(text: string, speed = 42) {
+  const [displayed, setDisplayed] = useState('')
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    let i = 0
+    setDisplayed('')
+    setDone(false)
+    const id = setInterval(() => {
+      i++
+      setDisplayed(text.slice(0, i))
+      if (i >= text.length) {
+        setDone(true)
+        clearInterval(id)
+      }
+    }, speed)
+    return () => clearInterval(id)
+  }, [text, speed])
+
+  return { displayed, done }
+}
 
 export default function SignUp() {
   const [name, setName] = useState('')
@@ -11,6 +37,10 @@ export default function SignUp() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
+  const { displayed, done: typingDone } = useTypingEffect(HEADING_FULL)
+
+  const plainVisible = displayed.slice(0, HEADING_PLAIN.length)
+  const italicVisible = displayed.slice(HEADING_PLAIN.length)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -77,8 +107,12 @@ export default function SignUp() {
             className="n-display"
             style={{ fontSize: 34, lineHeight: 1.05, margin: '0 0 8px' }}
           >
-            Get{' '}
-            <span className="n-display-italic">started.</span>
+            {plainVisible}
+            {italicVisible && <span className="n-display-italic">{italicVisible}</span>}
+            <span
+              className={typingDone ? 'n-cursor-blink' : ''}
+              style={{ display: 'inline-block', width: 2, height: '0.8em', background: 'currentColor', marginLeft: 2, verticalAlign: 'middle' }}
+            />
           </h1>
           <p
             style={{

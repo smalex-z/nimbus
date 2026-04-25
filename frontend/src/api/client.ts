@@ -131,4 +131,15 @@ export async function saveSetupConfig(req: SaveConfigRequest): Promise<{ message
   return data
 }
 
+export interface CreateAdminRequest {
+  name: string
+  email: string
+  password: string
+}
+
+export async function createAdminAccount(req: CreateAdminRequest): Promise<{ id: number; name: string; email: string; is_admin: boolean }> {
+  const { data } = await api.post('/setup/admin', req)
+  return data
+}
+
 export default api

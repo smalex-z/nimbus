@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -168,6 +169,65 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		h.restart()
 	}()
+}
+
+type createAdminRequest struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// CreateAdmin handles POST /api/setup/admin — creates the first admin account
+// and opens a session. Returns 409 if any user already exists.
+func (h *Setup) CreateAdmin(w http.ResponseWriter, r *http.Request) {
+	if h.auth == nil {
+		response.Error(w, http.StatusServiceUnavailable, "server is in setup mode")
+		return
+	}
+
+	var req createAdminRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	req.Email = strings.TrimSpace(req.Email)
+
+	switch {
+	case req.Name == "":
+		response.BadRequest(w, "name is required")
+		return
+	case req.Email == "":
+		response.BadRequest(w, "email is required")
+		return
+	case len(req.Password) < 8:
+		response.BadRequest(w, "password must be at least 8 characters")
+		return
+	}
+
+	user, err := h.auth.RegisterFirstAdmin(service.RegisterParams{
+		Name:     req.Name,
+		Email:    req.Email,
+		Password: req.Password,
+	})
+	if errors.Is(err, service.ErrUsersExist) {
+		response.Conflict(w, "admin account already exists")
+		return
+	}
+	if err != nil {
+		response.InternalError(w, "failed to create admin account")
+		return
+	}
+
+	sessionID, err := h.auth.CreateSession(user.ID)
+	if err != nil {
+		response.InternalError(w, "failed to create session")
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+	response.Success(w, user)
 }
 
 type discoverResult struct {

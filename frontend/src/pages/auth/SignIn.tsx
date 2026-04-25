@@ -1,14 +1,43 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import api from '@/api/client'
 import { NimbusBrand, NimbusFooter, GithubIcon, GoogleIcon, ArrowRightIcon } from '@/components/nimbus'
 
+const HEADING_PLAIN = 'Welcome to '
+const HEADING_ITALIC = 'Nimbus.'
+const HEADING_FULL = HEADING_PLAIN + HEADING_ITALIC
+
+function useTypingEffect(text: string, speed = 42) {
+  const [displayed, setDisplayed] = useState('')
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    let i = 0
+    setDisplayed('')
+    setDone(false)
+    const id = setInterval(() => {
+      i++
+      setDisplayed(text.slice(0, i))
+      if (i >= text.length) {
+        setDone(true)
+        clearInterval(id)
+      }
+    }, speed)
+    return () => clearInterval(id)
+  }, [text, speed])
+
+  return { displayed, done }
+}
+
 export default function SignIn() {
-  const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const { displayed, done } = useTypingEffect(HEADING_FULL)
+
+  const plainVisible = displayed.slice(0, HEADING_PLAIN.length)
+  const italicVisible = displayed.slice(HEADING_PLAIN.length)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -16,7 +45,7 @@ export default function SignIn() {
     try {
       setLoading(true)
       await api.post('/auth/login', { email, password })
-      navigate('/')
+      window.location.replace('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
@@ -65,8 +94,12 @@ export default function SignIn() {
             className="n-display"
             style={{ fontSize: 34, lineHeight: 1.05, margin: '0 0 8px' }}
           >
-            Welcome{' '}
-            <span className="n-display-italic">back.</span>
+            {plainVisible}
+            {italicVisible && <span className="n-display-italic">{italicVisible}</span>}
+            <span
+              className={done ? 'n-cursor-blink' : ''}
+              style={{ display: 'inline-block', width: 2, height: '0.8em', background: 'currentColor', marginLeft: 2, verticalAlign: 'middle' }}
+            />
           </h1>
           <p style={{ margin: '0 0 24px', fontSize: 14, color: 'var(--ink-body)', lineHeight: 1.5 }}>
             Sign in to provision VMs on the cluster.

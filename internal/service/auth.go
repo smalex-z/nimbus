@@ -18,6 +18,7 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrSessionNotFound     = errors.New("session not found or expired")
 	ErrAdminAlreadyClaimed = errors.New("admin already claimed")
+	ErrUsersExist          = errors.New("users already exist")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -176,6 +177,35 @@ func generateSessionID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// RegisterFirstAdmin creates the first admin account. Returns ErrUsersExist if
+// any user already exists — only valid for the initial setup wizard.
+func (s *AuthService) RegisterFirstAdmin(p RegisterParams) (*UserView, error) {
+	has, err := s.HasAnyUsers()
+	if err != nil {
+		return nil, err
+	}
+	if has {
+		return nil, ErrUsersExist
+	}
+
+	email := strings.ToLower(strings.TrimSpace(p.Email))
+	hash, err := bcrypt.GenerateFromPassword([]byte(p.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	user := &db.User{
+		Name:         strings.TrimSpace(p.Name),
+		Email:        email,
+		PasswordHash: string(hash),
+		IsAdmin:      true,
+	}
+	if err := s.db.Create(user).Error; err != nil {
+		return nil, err
+	}
+	return userToView(user), nil
 }
 
 // HasAnyUsers returns true if at least one user account exists.
