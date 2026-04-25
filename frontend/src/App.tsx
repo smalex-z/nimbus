@@ -19,10 +19,18 @@ type AppState = 'loading' | 'setup' | 'ready'
 
 export default function App() {
   const [state, setState] = useState<AppState>('loading')
+  const [skipToAdmin, setSkipToAdmin] = useState(false)
 
   useEffect(() => {
     getSetupStatus()
-      .then((s) => setState(s.configured ? 'ready' : 'setup'))
+      .then((s) => {
+        if (!s.configured || s.needs_admin_setup) {
+          setSkipToAdmin(s.configured && s.needs_admin_setup)
+          setState('setup')
+        } else {
+          setState('ready')
+        }
+      })
       .catch(() => setState('setup'))
   }, [])
 
@@ -36,7 +44,7 @@ export default function App() {
   }
 
   if (state === 'setup') {
-    return <Setup />
+    return <Setup initialStep={skipToAdmin ? 'admin' : 'proxmox'} />
   }
 
   return (

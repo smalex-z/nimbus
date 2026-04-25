@@ -43,7 +43,7 @@ func NewRouter(d Deps) http.Handler {
 	vms := handlers.NewVMs(d.Provision)
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
-	setup := handlers.NewSetup(d.Config, d.Restart)
+	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)

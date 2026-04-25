@@ -16,21 +16,38 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/config"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/service"
 )
 
 // Setup handles the first-run configuration wizard API.
 type Setup struct {
 	cfg     *config.Config
 	restart func()
+	auth    *service.AuthService // nil in setup mode (Proxmox not yet configured)
 }
 
 func NewSetup(cfg *config.Config, restart func()) *Setup {
 	return &Setup{cfg: cfg, restart: restart}
 }
 
+// NewSetupWithAuth is used in normal mode where the DB is available.
+func NewSetupWithAuth(cfg *config.Config, restart func(), auth *service.AuthService) *Setup {
+	return &Setup{cfg: cfg, restart: restart, auth: auth}
+}
+
 // Status handles GET /api/setup/status.
 func (h *Setup) Status(w http.ResponseWriter, r *http.Request) {
-	response.Success(w, map[string]bool{"configured": h.cfg.IsConfigured()})
+	needsAdminSetup := true
+	if h.auth != nil {
+		has, err := h.auth.HasAnyUsers()
+		if err == nil {
+			needsAdminSetup = !has
+		}
+	}
+	response.Success(w, map[string]any{
+		"configured":        h.cfg.IsConfigured(),
+		"needs_admin_setup": needsAdminSetup,
+	})
 }
 
 type testConnRequest struct {
