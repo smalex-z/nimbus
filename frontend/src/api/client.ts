@@ -20,8 +20,7 @@ const api: AxiosInstance = axios.create({
 })
 
 // Provisioning is a long-running call (template clone, cloud-init, boot,
-// agent ready) that can legitimately take 60-180s. Use a separate client with
-// a generous timeout so the SPA waits patiently rather than aborting.
+// agent ready) that can legitimately take 60-180s.
 const provisionClient: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 200000,
@@ -39,7 +38,7 @@ const bootstrapClient: AxiosInstance = axios.create({
 })
 
 // Both clients unwrap the standard `{success, data}` envelope.
-const unwrap = (instance: AxiosInstance) => {
+const unwrap = (instance: AxiosInstance, redirectOn401 = false) => {
   instance.interceptors.response.use(
     (response) => {
       const body = response.data
@@ -49,12 +48,23 @@ const unwrap = (instance: AxiosInstance) => {
       return response
     },
     (error) => {
+      if (redirectOn401) {
+        const url: string = error.config?.url ?? ''
+        if (
+          error.response?.status === 401 &&
+          !url.includes('/auth/') &&
+          !url.includes('/me')
+        ) {
+          window.location.href = '/login'
+        }
+      }
       const message = error.response?.data?.error ?? error.message ?? 'unknown error'
       return Promise.reject(new Error(message))
     },
   )
 }
-unwrap(api)
+
+unwrap(api, true)
 unwrap(provisionClient)
 unwrap(bootstrapClient)
 
@@ -129,6 +139,7 @@ export async function discoverProxmox(): Promise<DiscoverResult> {
 
 export interface SetupStatus {
   configured: boolean
+  needs_admin_setup: boolean
 }
 
 export interface TestConnRequest {
@@ -187,6 +198,53 @@ export async function bootstrapTemplates(): Promise<BootstrapResult> {
 
 export async function getBootstrapStatus(): Promise<{ bootstrapped: boolean }> {
   const { data } = await api.get<{ bootstrapped: boolean }>('/admin/bootstrap-status')
+  return data
+}
+
+export interface CreateAdminRequest {
+  name: string
+  email: string
+  password: string
+}
+
+export async function createAdminAccount(req: CreateAdminRequest): Promise<{ id: number; name: string; email: string; is_admin: boolean }> {
+  const { data } = await api.post('/setup/admin', req)
+  return data
+}
+
+export interface OAuthProviders {
+  github: boolean
+  google: boolean
+}
+
+export interface OAuthSettingsView {
+  github_client_id: string
+  google_client_id: string
+  github_configured: boolean
+  google_configured: boolean
+}
+
+export interface SaveOAuthSettingsRequest {
+  github_client_id?: string
+  github_client_secret?: string
+  google_client_id?: string
+  google_client_secret?: string
+}
+
+export async function getProviders(): Promise<OAuthProviders> {
+  const { data } = await api.get<OAuthProviders>('/auth/providers')
+  return data
+}
+
+export async function getOAuthSettings(): Promise<OAuthSettingsView> {
+  const { data } = await api.get<OAuthSettingsView>('/settings/oauth')
+  return data
+}
+
+export async function saveOAuthSettings(
+  req: SaveOAuthSettingsRequest,
+): Promise<{ message: string }> {
+  const { data } = await api.put<{ message: string }>('/settings/oauth', req)
   return data
 }
 

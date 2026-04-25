@@ -1,67 +1,45 @@
 package handlers
 
 import (
-	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
-	"time"
 
 	"nimbus/internal/api/response"
-	"nimbus/internal/bootstrap"
+	"nimbus/internal/ctxutil"
+	"nimbus/internal/service"
 )
 
-// Admin wraps long-running admin operations (template bootstrap today;
-// re-bootstrap, template refresh, etc. later).
+// Admin handles admin-specific endpoints.
 type Admin struct {
-	svc *bootstrap.Service
+	auth *service.AuthService
 }
 
-func NewAdmin(svc *bootstrap.Service) *Admin { return &Admin{svc: svc} }
-
-type bootstrapRequest struct {
-	Nodes []string `json:"nodes,omitempty"`
-	OS    []string `json:"os,omitempty"`
-	Force bool     `json:"force,omitempty"`
+// NewAdmin creates a new Admin handler.
+func NewAdmin(auth *service.AuthService) *Admin {
+	return &Admin{auth: auth}
 }
 
-// BootstrapStatus handles GET /api/admin/bootstrap-status.
-func (h *Admin) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	has, err := h.svc.HasTemplates(ctx)
+// Status handles GET /api/admin/status — public endpoint.
+func (a *Admin) Status(w http.ResponseWriter, r *http.Request) {
+	claimed, err := a.auth.IsAdminClaimed()
 	if err != nil {
-		response.InternalError(w, "db error: "+err.Error())
+		response.InternalError(w, "Failed to check admin status")
 		return
 	}
-	response.Success(w, map[string]bool{"bootstrapped": has})
+	response.Success(w, map[string]bool{"claimed": claimed})
 }
 
-// BootstrapTemplates handles POST /api/admin/bootstrap-templates.
-//
-// Synchronous — the call blocks for up to ~20 minutes while Proxmox downloads
-// cloud images, creates VMs, and converts them to templates. The route
-// timeout in the router is set generously to accommodate this.
-//
-// Empty body is valid: it kicks off the default flow (every catalogue OS on
-// every online node).
-func (h *Admin) BootstrapTemplates(w http.ResponseWriter, r *http.Request) {
-	var req bootstrapRequest
-	// Allow empty body for "use defaults" — only fail on actively malformed JSON.
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			response.BadRequest(w, "invalid JSON body")
+// Claim handles POST /api/admin/claim — requires auth middleware.
+// Promotes the current user to admin. Only succeeds when no admin exists yet.
+func (a *Admin) Claim(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if err := a.auth.ClaimAdmin(user.ID); err != nil {
+		if errors.Is(err, service.ErrAdminAlreadyClaimed) {
+			response.Error(w, http.StatusConflict, "Admin has already been claimed")
 			return
 		}
-	}
-
-	res, err := h.svc.Bootstrap(r.Context(), bootstrap.Request{
-		Nodes: req.Nodes,
-		OS:    req.OS,
-		Force: req.Force,
-	})
-	if err != nil {
-		response.FromError(w, err)
+		response.InternalError(w, "Failed to claim admin")
 		return
 	}
-	response.Success(w, res)
+	response.Success(w, map[string]string{"message": "Admin claimed successfully"})
 }

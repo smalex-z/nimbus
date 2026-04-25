@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -301,7 +302,8 @@ func TestClient_HTTPError(t *testing.T) {
 	t.Parallel()
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"errors":"permission denied"}`))
+		_, _ = w.Write([]byte(`{"errors"
+	"fmt":"permission denied"}`))
 	})
 	_, err := c.GetNodes(context.Background())
 	if err == nil {
@@ -574,5 +576,213 @@ func TestClient_ConvertToTemplate(t *testing.T) {
 	}
 	if capturedPath != "/api2/json/nodes/hppve/qemu/9000/template" {
 		t.Errorf("path = %s", capturedPath)
+	}
+}
+func TestParseIPConfig0(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		in     string
+		wantIP string
+		wantOK bool
+	}{
+		{"empty", "", "", false},
+		{"ipv4 with cidr and gw", "ip=192.168.0.142/24,gw=192.168.0.1", "192.168.0.142", true},
+		{"ipv4 bare", "ip=10.0.0.5", "10.0.0.5", true},
+		{"ipv4 with cidr no gw", "ip=10.0.0.5/24", "10.0.0.5", true},
+		{"dhcp with auto gw", "ip=dhcp,gw=auto", "", false},
+		{"dhcp only", "ip=dhcp", "", false},
+		{"ipv6 with prefix", "ip=2001:db8::1/64,gw6=fe80::1", "2001:db8::1", true},
+		{"malformed no equals", "ipconfig", "", false},
+		{"ip value not parseable", "ip=not-an-ip", "", false},
+		{"only gateway present", "gw=192.168.1.1", "", false},
+		{"ip key after others", "name=frodo,ip=10.0.0.42/24", "10.0.0.42", true},
+		{"whitespace tolerated", " ip = 10.0.0.7/24 , gw=10.0.0.1", "10.0.0.7", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := proxmox.ParseIPConfig0(tc.in)
+			if got != tc.wantIP || ok != tc.wantOK {
+				t.Errorf("ParseIPConfig0(%q) = (%q, %v), want (%q, %v)",
+					tc.in, got, ok, tc.wantIP, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestClient_GetVMConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns raw map on success", func(t *testing.T) {
+		t.Parallel()
+		_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+			writeEnvelope(w, map[string]any{
+				"name":      "vm-200",
+				"ipconfig0": "ip=10.0.0.42/24,gw=10.0.0.1",
+				"scsi0":     "local-lvm:vm-200-disk-0,size=10G",
+			})
+		})
+		cfg, err := c.GetVMConfig(context.Background(), "node1", 200)
+		if err != nil {
+			t.Fatalf("GetVMConfig: %v", err)
+		}
+		if cfg["ipconfig0"] != "ip=10.0.0.42/24,gw=10.0.0.1" {
+			t.Errorf("ipconfig0 = %v", cfg["ipconfig0"])
+		}
+	})
+
+	t.Run("404 returns ErrNotFound", func(t *testing.T) {
+		t.Parallel()
+		_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+		_, err := c.GetVMConfig(context.Background(), "node1", 999)
+		if !errors.Is(err, proxmox.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("Proxmox 500 'does not exist' normalizes to ErrNotFound", func(t *testing.T) {
+		t.Parallel()
+		_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"data":null,"message":"Configuration file 'nodes/x/qemu-server/999.conf' does not exist\n"}`))
+		})
+		_, err := c.GetVMConfig(context.Background(), "node1", 999)
+		if !errors.Is(err, proxmox.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestClient_ListClusterIPs builds a small mock cluster with two online nodes
+// and one offline node, with a mix of running/stopped/template VMs and
+// static/dhcp/missing ipconfig0 values, and asserts that ListClusterIPs returns
+// exactly the static-IP claims.
+func TestClient_ListClusterIPs(t *testing.T) {
+	t.Parallel()
+
+	// Per-node fixtures: node -> vmid -> { listVMs entry, configMap }
+	type vmFixture struct {
+		listVM proxmox.VMStatus
+		config map[string]any
+	}
+	fixtures := map[string]map[int]vmFixture{
+		"alpha": {
+			200: {
+				listVM: proxmox.VMStatus{VMID: 200, Name: "static-vm", Status: "running"},
+				config: map[string]any{"ipconfig0": "ip=10.0.0.10/24,gw=10.0.0.1"},
+			},
+			201: {
+				listVM: proxmox.VMStatus{VMID: 201, Name: "dhcp-vm", Status: "running"},
+				config: map[string]any{"ipconfig0": "ip=dhcp"},
+			},
+			9000: {
+				// Templates must be skipped.
+				listVM: proxmox.VMStatus{VMID: 9000, Name: "ubuntu-template", Status: "stopped", Template: 1},
+				config: map[string]any{"ipconfig0": "ip=192.168.99.99/24"},
+			},
+		},
+		"bravo": {
+			300: {
+				listVM: proxmox.VMStatus{VMID: 300, Name: "stopped-vm", Status: "stopped"},
+				// stopped VMs still hold their IP allocation; reconciler should see them
+				config: map[string]any{"ipconfig0": "ip=10.0.0.20/24"},
+			},
+			301: {
+				listVM: proxmox.VMStatus{VMID: 301, Name: "no-ipconfig", Status: "running"},
+				config: map[string]any{}, // no ipconfig0 at all
+			},
+		},
+	}
+
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api2/json/nodes":
+			writeEnvelope(w, []proxmox.Node{
+				{Name: "alpha", Status: "online"},
+				{Name: "bravo", Status: "online"},
+				{Name: "ghost", Status: "offline"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/qemu") && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/"):
+			node := strings.Split(r.URL.Path, "/")[4]
+			vms := make([]proxmox.VMStatus, 0)
+			for _, fx := range fixtures[node] {
+				vms = append(vms, fx.listVM)
+			}
+			writeEnvelope(w, vms)
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			parts := strings.Split(r.URL.Path, "/")
+			node := parts[4]
+			vmid := 0
+			_, _ = fmt.Sscanf(parts[6], "%d", &vmid)
+			if fx, ok := fixtures[node][vmid]; ok {
+				writeEnvelope(w, fx.config)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	})
+
+	got, err := c.ListClusterIPs(context.Background())
+	if err != nil {
+		t.Fatalf("ListClusterIPs: %v", err)
+	}
+	// Expected: static-vm (alpha/200/10.0.0.10) + stopped-vm (bravo/300/10.0.0.20)
+	// Skipped: dhcp-vm (dhcp), ubuntu-template (template), no-ipconfig (missing), ghost (offline)
+	want := map[string]proxmox.ClusterIP{
+		"10.0.0.10": {IP: "10.0.0.10", VMID: 200, Node: "alpha", Hostname: "static-vm", Source: "ipconfig0", RawConfig: "ip=10.0.0.10/24,gw=10.0.0.1"},
+		"10.0.0.20": {IP: "10.0.0.20", VMID: 300, Node: "bravo", Hostname: "stopped-vm", Source: "ipconfig0", RawConfig: "ip=10.0.0.20/24"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d cluster IPs, want %d: %+v", len(got), len(want), got)
+	}
+	for _, c := range got {
+		w, ok := want[c.IP]
+		if !ok {
+			t.Errorf("unexpected ClusterIP %+v", c)
+			continue
+		}
+		if c != w {
+			t.Errorf("ClusterIP for %s = %+v, want %+v", c.IP, c, w)
+		}
+	}
+}
+
+// TestClient_ListClusterIPs_PartialNodeFailure ensures one node failing does
+// not blackhole the whole walk: callers receive both partial results and a
+// joined error so they can decide whether to use them.
+func TestClient_ListClusterIPs_PartialNodeFailure(t *testing.T) {
+	t.Parallel()
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes":
+			writeEnvelope(w, []proxmox.Node{
+				{Name: "good", Status: "online"},
+				{Name: "bad", Status: "online"},
+			})
+		case "/api2/json/nodes/good/qemu":
+			writeEnvelope(w, []proxmox.VMStatus{{VMID: 200, Name: "ok-vm", Status: "running"}})
+		case "/api2/json/nodes/good/qemu/200/config":
+			writeEnvelope(w, map[string]any{"ipconfig0": "ip=10.0.0.10/24"})
+		case "/api2/json/nodes/bad/qemu":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errors":"node down"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	got, err := c.ListClusterIPs(context.Background())
+	if err == nil {
+		t.Errorf("expected joined error from bad node")
+	}
+	if len(got) != 1 || got[0].IP != "10.0.0.10" {
+		t.Errorf("expected partial result containing 10.0.0.10, got %+v", got)
 	}
 }
