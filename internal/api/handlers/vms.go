@@ -30,7 +30,9 @@ type createVMRequest struct {
 	Hostname    string `json:"hostname"`
 	Tier        string `json:"tier"`
 	OSTemplate  string `json:"os_template"`
+	SSHKeyID    *uint  `json:"ssh_key_id,omitempty"`
 	SSHPubKey   string `json:"ssh_pubkey,omitempty"`
+	SSHPrivKey  string `json:"ssh_privkey,omitempty"`
 	GenerateKey bool   `json:"generate_key,omitempty"`
 }
 
@@ -50,7 +52,9 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Hostname:    req.Hostname,
 		Tier:        req.Tier,
 		OSTemplate:  req.OSTemplate,
+		SSHKeyID:    req.SSHKeyID,
 		SSHPubKey:   req.SSHPubKey,
+		SSHPrivKey:  req.SSHPrivKey,
 		GenerateKey: req.GenerateKey,
 	})
 	if err != nil {
@@ -68,6 +72,31 @@ func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, vms)
+}
+
+// GetPrivateKey handles GET /api/vms/{id}/private-key. Returns
+// {key_name, private_key} for vault-stored keys; 404 when no key was
+// deposited for this VM.
+//
+// Phase 1 has no auth, so this is reachable to anyone who can hit the API
+// (matching the rest of the surface). Once OAuth lands, owner gating goes
+// here first.
+func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	keyName, privateKey, err := h.svc.GetPrivateKey(r.Context(), uint(id))
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, map[string]string{
+		"key_name":    keyName,
+		"private_key": privateKey,
+	})
 }
 
 // Get handles GET /api/vms/{id}.
@@ -109,16 +138,22 @@ func validateCreate(req createVMRequest) error {
 			Message: "must be one of ubuntu-24.04, ubuntu-22.04, debian-12, debian-11",
 		}
 	}
-	if req.GenerateKey && req.SSHPubKey != "" {
-		return &internalerrors.ValidationError{
-			Field:   "ssh",
-			Message: "exactly one of ssh_pubkey or generate_key must be provided",
-		}
+	// At most one SSH-key input mode at a time. None is allowed — the
+	// service falls back to the user's default key.
+	modes := 0
+	if req.SSHKeyID != nil {
+		modes++
 	}
-	if !req.GenerateKey && req.SSHPubKey == "" {
+	if req.GenerateKey {
+		modes++
+	}
+	if req.SSHPubKey != "" {
+		modes++
+	}
+	if modes > 1 {
 		return &internalerrors.ValidationError{
 			Field:   "ssh",
-			Message: "exactly one of ssh_pubkey or generate_key must be provided",
+			Message: "specify at most one of ssh_key_id, ssh_pubkey, or generate_key",
 		}
 	}
 	return nil
