@@ -36,6 +36,36 @@ type clusterVMView struct {
 	CreatedAt     string `json:"created_at,omitempty"`
 }
 
+type clusterStatsView struct {
+	StorageUsed  uint64 `json:"storage_used"`
+	StorageTotal uint64 `json:"storage_total"`
+}
+
+// Stats handles GET /api/cluster/stats — aggregate cluster-level stats that
+// don't fit per-node (storage pools span the cluster).
+func (h *Cluster) Stats(w http.ResponseWriter, r *http.Request) {
+	pools, err := h.px.GetClusterStorage(r.Context())
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+
+	// Shared storage appears once per node; dedupe by storage name.
+	seen := make(map[string]bool)
+	var used, total uint64
+	for _, p := range pools {
+		if p.Shared == 1 {
+			if seen[p.Storage] {
+				continue
+			}
+			seen[p.Storage] = true
+		}
+		used += p.Used
+		total += p.Total
+	}
+	response.Success(w, clusterStatsView{StorageUsed: used, StorageTotal: total})
+}
+
 // ListVMs handles GET /api/cluster/vms — every VM on the cluster, joined with
 // Nimbus DB info where available.
 func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {

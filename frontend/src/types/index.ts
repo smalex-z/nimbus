@@ -70,6 +70,11 @@ export interface NodeView {
   vm_count_total: number
 }
 
+export interface ClusterStats {
+  storage_used: number
+  storage_total: number
+}
+
 export type ClusterVMStatus = 'running' | 'stopped' | 'paused'
 
 export interface ClusterVM {

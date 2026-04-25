@@ -1,5 +1,6 @@
 import axios, { AxiosInstance } from 'axios'
 import type {
+  ClusterStats,
   ClusterVM,
   HealthResponse,
   IPAllocation,
@@ -68,6 +69,11 @@ export async function listVMs(): Promise<VM[]> {
 
 export async function listClusterVMs(): Promise<ClusterVM[]> {
   const { data } = await api.get<ClusterVM[]>('/cluster/vms')
+  return data
+}
+
+export async function getClusterStats(): Promise<ClusterStats> {
+  const { data } = await api.get<ClusterStats>('/cluster/stats')
   return data
 }
 

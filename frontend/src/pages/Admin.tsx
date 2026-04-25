@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
 import { formatBytes } from '@/lib/format'
-import type { ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName } from '@/types'
+import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName } from '@/types'
 
 interface AdminData {
   nodes: NodeView[]
   vms: ClusterVM[]
   ips: IPAllocation[]
+  clusterStats: ClusterStats | null
   loading: boolean
   error: string | null
 }
@@ -20,18 +21,20 @@ function useAdminData(): AdminData {
   const [nodes, setNodes] = useState<NodeView[]>([])
   const [vms, setVMs] = useState<ClusterVM[]>([])
   const [ips, setIPs] = useState<IPAllocation[]>([])
+  const [clusterStats, setClusterStats] = useState<ClusterStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const fetch = () => {
-      Promise.all([listNodes(), listClusterVMs(), listIPs()])
-        .then(([n, v, i]) => {
+      Promise.all([listNodes(), listClusterVMs(), listIPs(), getClusterStats()])
+        .then(([n, v, i, s]) => {
           if (!cancelled) {
             setNodes(n)
             setVMs(v)
             setIPs(i)
+            setClusterStats(s)
             setError(null)
           }
         })
@@ -50,7 +53,7 @@ function useAdminData(): AdminData {
     }
   }, [])
 
-  return { nodes, vms, ips, loading, error }
+  return { nodes, vms, ips, clusterStats, loading, error }
 }
 
 interface FilterState {
@@ -62,7 +65,7 @@ interface FilterState {
 const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
 
 export default function Admin() {
-  const { nodes, vms, ips, loading, error } = useAdminData()
+  const { nodes, vms, ips, clusterStats, loading, error } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -79,6 +82,10 @@ export default function Admin() {
     const onlineNodes = nodes.filter((n) => n.status === 'online')
     const sumMemUsed = onlineNodes.reduce((a, n) => a + n.mem_used, 0)
     const sumMemTotal = onlineNodes.reduce((a, n) => a + n.mem_total, 0)
+    // CPU aggregation: weight each node's utilization by its core count so a
+    // 16-core node hitting 50% counts more than an 8-core node at 50%.
+    const totalCores = onlineNodes.reduce((a, n) => a + n.max_cpu, 0)
+    const usedCores = onlineNodes.reduce((a, n) => a + n.cpu * n.max_cpu, 0)
     const clusterVMsRunning = onlineNodes.reduce((a, n) => a + n.vm_count, 0)
     const clusterVMsTotal = onlineNodes.reduce((a, n) => a + n.vm_count_total, 0)
     const allocatedIPs = ips.filter((i) => i.status === 'allocated').length
@@ -91,8 +98,12 @@ export default function Admin() {
       totalIPs: ips.length,
       sumMemUsed,
       sumMemTotal,
+      totalCores,
+      usedCores,
+      storageUsed: clusterStats?.storage_used ?? 0,
+      storageTotal: clusterStats?.storage_total ?? 0,
     }
-  }, [nodes, vms, ips])
+  }, [nodes, vms, ips, clusterStats])
 
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
@@ -164,13 +175,19 @@ interface StatsShape {
   totalIPs: number
   sumMemUsed: number
   sumMemTotal: number
+  totalCores: number
+  usedCores: number
+  storageUsed: number
+  storageTotal: number
 }
 
 function SummaryStats({ stats }: { stats: StatsShape }) {
   const memPct = stats.sumMemTotal > 0 ? (stats.sumMemUsed / stats.sumMemTotal) * 100 : 0
+  const cpuPct = stats.totalCores > 0 ? (stats.usedCores / stats.totalCores) * 100 : 0
+  const storagePct = stats.storageTotal > 0 ? (stats.storageUsed / stats.storageTotal) * 100 : 0
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
       <StatCard
         label="Nodes"
         primary={`${stats.nodesOnline} online`}
@@ -186,17 +203,50 @@ function SummaryStats({ stats }: { stats: StatsShape }) {
         primary={`${stats.allocatedIPs} allocated`}
         secondary={`${stats.totalIPs - stats.allocatedIPs} free of ${stats.totalIPs}`}
       />
-      <Card className="p-5">
-        <div className="eyebrow mb-3">Cluster memory</div>
-        <div className="font-display text-lg font-medium">
-          {formatBytes(stats.sumMemUsed)}
-          <span className="text-ink-3 text-sm font-normal"> / {formatBytes(stats.sumMemTotal)}</span>
-        </div>
-        <div className="mt-3">
-          <UsageBar label="" pct={memPct} hint={`${memPct.toFixed(0)}%`} />
-        </div>
-      </Card>
+      <UsageStatCard
+        label="Cluster CPU"
+        primary={`${stats.usedCores.toFixed(2)}`}
+        secondary={`/ ${stats.totalCores} cores`}
+        pct={cpuPct}
+      />
+      <UsageStatCard
+        label="Cluster memory"
+        primary={formatBytes(stats.sumMemUsed)}
+        secondary={`/ ${formatBytes(stats.sumMemTotal)}`}
+        pct={memPct}
+      />
+      <UsageStatCard
+        label="Cluster storage"
+        primary={formatBytes(stats.storageUsed)}
+        secondary={`/ ${formatBytes(stats.storageTotal)}`}
+        pct={storagePct}
+      />
     </div>
+  )
+}
+
+function UsageStatCard({
+  label,
+  primary,
+  secondary,
+  pct,
+}: {
+  label: string
+  primary: string
+  secondary: string
+  pct: number
+}) {
+  return (
+    <Card className="p-5">
+      <div className="eyebrow mb-3">{label}</div>
+      <div className="font-display text-lg font-medium">
+        {primary}
+        <span className="text-ink-3 text-sm font-normal"> {secondary}</span>
+      </div>
+      <div className="mt-3">
+        <UsageBar label="" pct={pct} hint={`${pct.toFixed(0)}%`} />
+      </div>
+    </Card>
   )
 }
 

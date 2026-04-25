@@ -44,6 +44,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
 		r.Get("/cluster/vms", cluster.ListVMs)
+		r.Get("/cluster/stats", cluster.Stats)
 
 		// VM provisioning is long-running — bump the timeout on this route only.
 		// Keep other routes at the default short timeout.

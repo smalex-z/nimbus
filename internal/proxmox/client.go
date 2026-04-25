@@ -311,6 +311,18 @@ func (c *Client) GetAgentInterfaces(ctx context.Context, node string, vmid int) 
 	return res.Result, nil
 }
 
+// GetClusterStorage returns every storage entry visible at the cluster level.
+// Shared storage appears once per node; callers must dedupe by Storage name.
+func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error) {
+	var out []ClusterStorage
+	params := url.Values{}
+	params.Set("type", "storage")
+	if err := c.do(ctx, http.MethodGet, "/cluster/resources", params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Version returns the Proxmox VE version string. Used by /api/health.
 func (c *Client) Version(ctx context.Context) (string, error) {
 	var v struct {

@@ -19,6 +19,20 @@ type VMStatus struct {
 	Template int    `json:"template"`
 }
 
+// ClusterStorage is one row from /cluster/resources?type=storage. A shared
+// storage pool appears once per node; callers should dedupe by Storage name
+// when Shared==1 to avoid double-counting.
+//
+// /cluster/resources reports capacity under maxdisk/disk (NOT total/used —
+// those keys are only on /nodes/{node}/storage).
+type ClusterStorage struct {
+	Storage string `json:"storage"`
+	Node    string `json:"node"`
+	Shared  int    `json:"shared"`
+	Total   uint64 `json:"maxdisk"`
+	Used    uint64 `json:"disk"`
+}
+
 // CloudInitConfig carries the cloud-init values Nimbus injects per-clone.
 //
 // SSHKeys is the *raw* OpenSSH authorized-keys string (one or more keys, one
