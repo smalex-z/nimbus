@@ -447,8 +447,17 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
         {form.keyMode === 'byo' && (
           <div className="mt-4 flex flex-col gap-5">
             <div className="flex flex-col gap-2">
-              <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                Public key
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
+                  Public key
+                </div>
+                <KeyFileUpload
+                  accept=".pub,.txt,text/plain"
+                  buttonLabel="Upload .pub file"
+                  maxBytes={16 * 1024}
+                  sizeError="File too large — public keys are typically under 1 KB."
+                  onLoad={(text) => updateForm('pubKey', text)}
+                />
               </div>
               <Textarea
                 monospace
@@ -456,23 +465,20 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
                 value={form.pubKey}
                 onChange={(e) => updateForm('pubKey', e.target.value)}
               />
-              <KeyFileUpload
-                accept=".pub,.txt,text/plain"
-                buttonLabel="Upload .pub file"
-                maxBytes={16 * 1024}
-                sizeError="File too large — public keys are typically under 1 KB."
-                onLoad={(text) => updateForm('pubKey', text)}
-              />
             </div>
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
                   Private key — optional
                 </div>
-                <span className="text-[11px] text-ink-3">
-                  Stored encrypted. Never leaves Nimbus unless you ask for it.
-                </span>
+                <KeyFileUpload
+                  accept=".pem,.key,.txt,text/plain,application/x-pem-file"
+                  buttonLabel="Upload private key file"
+                  maxBytes={64 * 1024}
+                  sizeError="File too large — private keys are typically under 4 KB."
+                  onLoad={(text) => updateForm('privKey', text)}
+                />
               </div>
               <Textarea
                 monospace
@@ -480,17 +486,11 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
                 value={form.privKey}
                 onChange={(e) => updateForm('privKey', e.target.value)}
               />
-              <KeyFileUpload
-                accept=".pem,.key,.txt,text/plain,application/x-pem-file"
-                buttonLabel="Upload private key file"
-                maxBytes={64 * 1024}
-                sizeError="File too large — private keys are typically under 4 KB."
-                onLoad={(text) => updateForm('privKey', text)}
-              />
               <p className="text-[11px] text-ink-3 leading-relaxed">
                 Paste only if you'd like Nimbus to vault the key so you can re-download
                 it later. Leave blank to keep the private half on your machine only — the
-                public key alone is enough to log in.
+                public key alone is enough to log in. Stored encrypted; never leaves
+                Nimbus unless you ask for it.
               </p>
             </div>
           </div>

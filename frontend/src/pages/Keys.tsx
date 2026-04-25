@@ -180,8 +180,17 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
         {mode === 'import' && (
           <>
             <div className="flex flex-col gap-2">
-              <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                Public key
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
+                  Public key
+                </div>
+                <KeyFileUpload
+                  accept=".pub,.txt,text/plain"
+                  buttonLabel="Upload .pub file"
+                  maxBytes={16 * 1024}
+                  sizeError="File too large — public keys are typically under 1 KB."
+                  onLoad={setPubKey}
+                />
               </div>
               <Textarea
                 monospace
@@ -189,22 +198,19 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                 value={pubKey}
                 onChange={(e) => setPubKey(e.target.value)}
               />
-              <KeyFileUpload
-                accept=".pub,.txt,text/plain"
-                buttonLabel="Upload .pub file"
-                maxBytes={16 * 1024}
-                sizeError="File too large — public keys are typically under 1 KB."
-                onLoad={setPubKey}
-              />
             </div>
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
                   Private key — optional
                 </div>
-                <span className="text-[11px] text-ink-3">
-                  Stored encrypted. Nothing leaves Nimbus unless you ask.
-                </span>
+                <KeyFileUpload
+                  accept=".pem,.key,.txt,text/plain,application/x-pem-file"
+                  buttonLabel="Upload private key file"
+                  maxBytes={64 * 1024}
+                  sizeError="File too large — private keys are typically under 4 KB."
+                  onLoad={setPrivKey}
+                />
               </div>
               <Textarea
                 monospace
@@ -212,13 +218,9 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                 value={privKey}
                 onChange={(e) => setPrivKey(e.target.value)}
               />
-              <KeyFileUpload
-                accept=".pem,.key,.txt,text/plain,application/x-pem-file"
-                buttonLabel="Upload private key file"
-                maxBytes={64 * 1024}
-                sizeError="File too large — private keys are typically under 4 KB."
-                onLoad={setPrivKey}
-              />
+              <p className="text-[11px] text-ink-3">
+                Stored encrypted. Nothing leaves Nimbus unless you ask.
+              </p>
             </div>
           </>
         )}
