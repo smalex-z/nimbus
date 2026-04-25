@@ -34,3 +34,5 @@ cmd/server/frontend/dist/*.css
 # OS
 .DS_Store
 Thumbs.db
+
+.env

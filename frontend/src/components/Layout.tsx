@@ -1,11 +1,12 @@
 import { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
+import { NimbusBrand } from './nimbus'
 
 interface LayoutProps {
   children: ReactNode
 }
 
-const navItems = [
+const NAV_ITEMS = [
   { label: 'Dashboard', path: '/' },
   { label: 'Settings', path: '/settings' },
 ]
@@ -14,48 +15,90 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Navigation */}
-      <nav className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <span className="text-xl font-bold text-brand-700">🏠 Homestack</span>
-            <div className="flex space-x-4">
-              {navItems.map((item) => (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bot) 100%)',
+      }}
+    >
+      <nav
+        style={{
+          background: 'rgba(252, 251, 250, 0.85)',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+          borderBottom: '1px solid var(--hairline)',
+          position: 'sticky',
+          top: 0,
+          zIndex: 50,
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 1100,
+            margin: '0 auto',
+            padding: '0 24px',
+            height: 54,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <Link to="/" style={{ textDecoration: 'none' }}>
+            <NimbusBrand size="sm" />
+          </Link>
+          <div style={{ display: 'flex', gap: 2 }}>
+            {NAV_ITEMS.map((item) => {
+              const active = location.pathname === item.path
+              return (
                 <Link
                   key={item.path}
                   to={item.path}
-                  className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                    location.pathname === item.path
-                      ? 'bg-brand-100 text-brand-700'
-                      : 'text-gray-600 hover:text-brand-700 hover:bg-gray-100'
-                  }`}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontSize: 13,
+                    fontWeight: 500,
+                    fontFamily: 'var(--font-sans)',
+                    textDecoration: 'none',
+                    transition: 'background 0.15s, color 0.15s',
+                    background: active ? 'rgba(20,18,28,0.06)' : 'transparent',
+                    color: active ? 'var(--ink)' : 'var(--ink-mute)',
+                  }}
                 >
                   {item.label}
                 </Link>
-              ))}
-            </div>
+              )
+            })}
           </div>
         </div>
       </nav>
 
-      {/* Main content */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
+      <main
+        style={{
+          flex: 1,
+          maxWidth: 1100,
+          margin: '0 auto',
+          width: '100%',
+          padding: '32px 24px',
+        }}
+      >
         {children}
       </main>
 
-      <footer className="border-t border-gray-200 bg-white py-4">
-        <p className="text-center text-sm text-gray-500">
-          Powered by{' '}
-          <a
-            href="https://github.com/smalex-z/homestack"
-            className="text-brand-600 hover:underline"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Homestack
-          </a>
-        </p>
+      <footer
+        style={{
+          borderTop: '1px solid var(--hairline)',
+          padding: '14px 24px',
+          textAlign: 'center',
+          fontSize: 11,
+          color: 'var(--ink-mute)',
+          fontFamily: 'var(--font-mono)',
+          letterSpacing: '0.02em',
+        }}
+      >
+        nimbus · self-hosted vm provisioning
       </footer>
     </div>
   )

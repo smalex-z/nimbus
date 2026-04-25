@@ -55,15 +55,39 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <h1
+        className="n-display"
+        style={{ fontSize: 28, margin: 0 }}
+      >
+        Dashboard
+      </h1>
 
       {error && (
-        <div className="rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-700">
+        <div
+          style={{
+            padding: '12px 16px',
+            borderRadius: 10,
+            background: 'rgba(184,58,58,0.06)',
+            border: '1px solid rgba(184,58,58,0.2)',
+            color: 'var(--err)',
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
           {error}
           <button
-            className="ml-2 underline"
             onClick={() => setError(null)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--err)',
+              cursor: 'pointer',
+              fontSize: 12,
+              textDecoration: 'underline',
+            }}
           >
             Dismiss
           </button>
@@ -71,20 +95,24 @@ export default function Dashboard() {
       )}
 
       <Card title="Add User">
-        <form onSubmit={handleCreate} className="flex flex-col sm:flex-row gap-3">
-          <Input
-            placeholder="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
-          <Input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
+        <form onSubmit={handleCreate} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <Input
+              placeholder="Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+          </div>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <Input
+              type="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </div>
           <Button type="submit" disabled={submitting}>
             {submitting ? 'Adding…' : 'Add'}
           </Button>
@@ -93,21 +121,33 @@ export default function Dashboard() {
 
       <Card title="Users">
         {loading ? (
-          <p className="text-sm text-gray-500">Loading…</p>
+          <p style={{ fontSize: 13, color: 'var(--ink-mute)', margin: 0 }}>Loading…</p>
         ) : users.length === 0 ? (
-          <p className="text-sm text-gray-500">No users yet. Add one above!</p>
+          <p style={{ fontSize: 13, color: 'var(--ink-mute)', margin: 0 }}>
+            No users yet. Add one above!
+          </p>
         ) : (
-          <ul className="divide-y divide-gray-100">
-            {users.map((user) => (
-              <li key={user.id} className="flex items-center justify-between py-3">
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+            {users.map((user, i) => (
+              <li
+                key={user.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '12px 0',
+                  borderTop: i === 0 ? 'none' : '1px solid var(--hairline)',
+                }}
+              >
                 <div>
-                  <p className="text-sm font-medium text-gray-900">{user.name}</p>
-                  <p className="text-xs text-gray-500">{user.email}</p>
+                  <p style={{ margin: 0, fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>
+                    {user.name}
+                  </p>
+                  <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                    {user.email}
+                  </p>
                 </div>
-                <Button
-                  variant="danger"
-                  onClick={() => handleDelete(user.id)}
-                >
+                <Button variant="danger" onClick={() => handleDelete(user.id)}>
                   Delete
                 </Button>
               </li>

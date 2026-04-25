@@ -4,22 +4,27 @@ export default {
   theme: {
     extend: {
       colors: {
-        brand: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
+        ink: {
+          DEFAULT: '#14121C',
+          body: '#44424F',
+          mute: '#76747F',
+        },
+        nimbus: {
+          ok: '#1F7A4D',
+          warn: '#A85A0A',
+          err: '#B83A3A',
         },
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+        display: ['Fraunces', 'Georgia', 'serif'],
+        sans: ['Geist', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        mono: ['Geist Mono', 'SF Mono', 'Menlo', 'Consolas', 'monospace'],
+      },
+      borderRadius: {
+        card: '18px',
+      },
+      boxShadow: {
+        card: '0 1px 0 rgba(20,18,28,0.02), 0 30px 60px -30px rgba(20,18,28,0.12)',
       },
     },
   },
