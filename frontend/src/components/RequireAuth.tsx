@@ -1,6 +1,6 @@
 import { useEffect, ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '@/context/AuthContext'
+import { useAuth } from '@/hooks/useAuth'
 
 export default function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth()

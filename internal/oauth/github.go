@@ -90,7 +90,7 @@ func (g *GitHub) exchangeCode(ctx context.Context, code string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("github token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var t ghTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
@@ -111,7 +111,7 @@ func (g *GitHub) getUser(ctx context.Context, token string) (*ghUser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github user request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var u ghUser
 	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
@@ -129,7 +129,7 @@ func (g *GitHub) getPrimaryEmail(ctx context.Context, token string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("github emails request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var emails []ghEmail
 	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
