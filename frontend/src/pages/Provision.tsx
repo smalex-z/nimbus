@@ -15,6 +15,7 @@ import TierCard from '@/components/ui/TierCard'
 import RadioCard from '@/components/ui/RadioCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
+import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 import {
   OS_OPTIONS,
   type OSTemplate,
@@ -461,9 +462,9 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
                   />
                 </div>
                 <KeyFileUpload
-                  accept=".pem,.key,.txt,text/plain,application/x-pem-file"
                   maxBytes={64 * 1024}
                   sizeError="File too large — private keys are typically under 4 KB."
+                  validate={validatePrivateKey}
                   onLoad={(text) => updateForm('privKey', text)}
                 />
               </div>
@@ -490,9 +491,9 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
                   />
                 </div>
                 <KeyFileUpload
-                  accept=".pub,.txt,text/plain"
                   maxBytes={16 * 1024}
                   sizeError="File too large — public keys are typically under 1 KB."
+                  validate={validatePublicKey}
                   onLoad={(text) => updateForm('pubKey', text)}
                 />
               </div>

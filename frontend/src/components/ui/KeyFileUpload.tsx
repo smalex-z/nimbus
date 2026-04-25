@@ -1,10 +1,17 @@
 import { useState } from 'react'
 
 interface KeyFileUploadProps {
-  accept: string
   maxBytes: number
   sizeError: string
   onLoad: (text: string) => void
+  /**
+   * Inspect the file's text content and return an error string to reject the
+   * upload, or null to accept. SSH keys are usually extensionless
+   * (`id_ed25519`, `id_rsa`, `authorized_keys`), so the file picker doesn't
+   * filter by extension — any real "wrong file" check has to happen on the
+   * actual bytes here.
+   */
+  validate?: (text: string) => string | null
   /** Visible label under the icon. Defaults to "Browse". */
   buttonLabel?: string
 }
@@ -12,14 +19,14 @@ interface KeyFileUploadProps {
 /**
  * Vertical "Browse" affordance designed to sit on the right side of a
  * textarea. Stretches to match the height of its flex parent. Icon at the
- * top, label below; on success the filename replaces the label so the user
- * can see the file took.
+ * top, label below; on success the filename appears beneath the button so
+ * the user can see the file took.
  */
 export default function KeyFileUpload({
-  accept,
   maxBytes,
   sizeError,
   onLoad,
+  validate,
   buttonLabel = 'Browse',
 }: KeyFileUploadProps) {
   const [fileName, setFileName] = useState<string | null>(null)
@@ -27,21 +34,38 @@ export default function KeyFileUpload({
 
   const handleFile = async (file: File) => {
     setError(null)
+    setFileName(null)
     if (file.size > maxBytes) {
       setError(sizeError)
       return
     }
+    let text: string
     try {
-      const text = (await file.text()).trim()
-      if (!text) {
-        setError('File is empty.')
-        return
-      }
-      onLoad(text)
-      setFileName(file.name)
+      text = (await file.text()).trim()
     } catch {
       setError('Could not read file.')
+      return
     }
+    if (!text) {
+      setError('File is empty.')
+      return
+    }
+    // Reject obvious binaries — SSH keys are always text. A NUL byte in the
+    // payload is a strong signal we're looking at a binary (DER key, image,
+    // archive, etc.).
+    if (text.includes('\0')) {
+      setError("That doesn't look like a text file.")
+      return
+    }
+    if (validate) {
+      const reason = validate(text)
+      if (reason) {
+        setError(reason)
+        return
+      }
+    }
+    onLoad(text)
+    setFileName(file.name)
   }
 
   return (
@@ -68,7 +92,6 @@ export default function KeyFileUpload({
         <span className="text-[12px] font-medium leading-none">{buttonLabel}</span>
         <input
           type="file"
-          accept={accept}
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0]

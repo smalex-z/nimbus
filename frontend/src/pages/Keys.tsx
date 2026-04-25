@@ -14,6 +14,7 @@ import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import RadioCard from '@/components/ui/RadioCard'
 import Textarea from '@/components/ui/Textarea'
 import type { SSHKey } from '@/types'
+import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 
 type Mode = 'gen' | 'import'
 
@@ -194,9 +195,9 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                   />
                 </div>
                 <KeyFileUpload
-                  accept=".pem,.key,.txt,text/plain,application/x-pem-file"
                   maxBytes={64 * 1024}
                   sizeError="File too large — private keys are typically under 4 KB."
+                  validate={validatePrivateKey}
                   onLoad={setPrivKey}
                 />
               </div>
@@ -220,9 +221,9 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                   />
                 </div>
                 <KeyFileUpload
-                  accept=".pub,.txt,text/plain"
                   maxBytes={16 * 1024}
                   sizeError="File too large — public keys are typically under 1 KB."
+                  validate={validatePublicKey}
                   onLoad={setPubKey}
                 />
               </div>
