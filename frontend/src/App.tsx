@@ -4,11 +4,9 @@ import { AuthProvider } from '@/context/AuthContext'
 import Background from '@/components/Background'
 import Layout from '@/components/Layout'
 import RequireAuth from '@/components/RequireAuth'
-import RequireAdminClaim from '@/components/RequireAdminClaim'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Nodes from '@/pages/Nodes'
-import Claim from '@/pages/admin/Claim'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
@@ -19,17 +17,11 @@ type AppState = 'loading' | 'setup' | 'ready'
 
 export default function App() {
   const [state, setState] = useState<AppState>('loading')
-  const [skipToAdmin, setSkipToAdmin] = useState(false)
 
   useEffect(() => {
     getSetupStatus()
       .then((s) => {
-        if (!s.configured || s.needs_admin_setup) {
-          setSkipToAdmin(s.configured && s.needs_admin_setup)
-          setState('setup')
-        } else {
-          setState('ready')
-        }
+        setState(!s.configured || s.needs_admin_setup ? 'setup' : 'ready')
       })
       .catch(() => setState('setup'))
   }, [])
@@ -44,7 +36,7 @@ export default function App() {
   }
 
   if (state === 'setup') {
-    return <Setup initialStep={skipToAdmin ? 'admin' : 'proxmox'} />
+    return <Setup />
   }
 
   return (
@@ -52,36 +44,20 @@ export default function App() {
       <AuthProvider>
         <Background />
         <Routes>
-          {/* Auth pages — no nav wrapper */}
           <Route path="/login" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/auth/callback" element={<OAuthCallback />} />
-
-          {/* App pages — auth-gated */}
           <Route
             path="/*"
             element={
               <RequireAuth>
-                <Routes>
-                  {/* First-run admin claim — inside auth, outside admin-claim gate */}
-                  <Route path="/claim" element={<Claim />} />
-
-                  {/* Main app — only accessible once admin is claimed */}
-                  <Route
-                    path="/*"
-                    element={
-                      <RequireAdminClaim>
-                        <Layout>
-                          <Routes>
-                            <Route path="/" element={<Provision />} />
-                            <Route path="/vms" element={<MyVMs />} />
-                            <Route path="/nodes" element={<Nodes />} />
-                          </Routes>
-                        </Layout>
-                      </RequireAdminClaim>
-                    }
-                  />
-                </Routes>
+                <Layout>
+                  <Routes>
+                    <Route path="/" element={<Provision />} />
+                    <Route path="/vms" element={<MyVMs />} />
+                    <Route path="/nodes" element={<Nodes />} />
+                  </Routes>
+                </Layout>
               </RequireAuth>
             }
           />

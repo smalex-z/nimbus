@@ -432,3 +432,11 @@
   background-repeat: repeat;
   background-size: 200px 200px;
 }
+
+@keyframes n-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.n-cursor-blink {
+  animation: n-blink 1s step-end infinite;
+}

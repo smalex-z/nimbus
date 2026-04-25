@@ -48,6 +48,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
 		r.Get("/setup/status", setup.Status)
+		r.Post("/setup/admin", setup.CreateAdmin)
 
 		r.Get("/nodes", nodes.List)
 		r.Get("/ips", ips.List)
@@ -70,17 +71,12 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/auth/google", auth.GoogleStart)
 		r.Get("/auth/google/callback", auth.GoogleCallback)
 
-		// Admin status (public — needed by frontend before login)
-		admin := handlers.NewAdmin(d.Auth)
-		r.Get("/admin/status", admin.Status)
-
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {
 			r.Use(requireAuth(d.Auth))
 
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
-			r.Post("/admin/claim", admin.Claim)
 		})
 	})
 
