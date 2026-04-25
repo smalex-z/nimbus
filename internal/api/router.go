@@ -25,6 +25,9 @@ func NewRouter(svc *service.ExampleService, authSvc *service.AuthService) http.H
 
 		auth := handlers.NewAuth(authSvc)
 		r.Post("/auth/register", auth.Register)
+		r.Post("/auth/login", auth.Login)
+		r.Post("/auth/logout", auth.Logout)
+		r.Get("/me", auth.Me)
 
 		example := handlers.NewExample(svc)
 		r.Get("/users", example.ListUsers)

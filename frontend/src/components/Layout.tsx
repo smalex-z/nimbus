@@ -1,5 +1,6 @@
 import { ReactNode } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import api from '@/api/client'
 
 interface LayoutProps {
   children: ReactNode
@@ -12,6 +13,15 @@ const NAV_ITEMS = [
 
 export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
+  const navigate = useNavigate()
+
+  const handleSignOut = async () => {
+    try {
+      await api.post('/auth/logout')
+    } finally {
+      navigate('/login')
+    }
+  }
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -51,7 +61,8 @@ export default function Layout({ children }: LayoutProps) {
               Nimbus
             </span>
           </Link>
-          <div style={{ display: 'flex', gap: 2 }}>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             {NAV_ITEMS.map((item) => {
               const active = location.pathname === item.path
               return (
@@ -73,6 +84,33 @@ export default function Layout({ children }: LayoutProps) {
                 </Link>
               )
             })}
+
+            <div style={{ width: 1, height: 16, background: 'rgba(20,18,28,0.1)', margin: '0 6px' }} />
+
+            <button
+              onClick={handleSignOut}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 500,
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--ink-mute)',
+                cursor: 'pointer',
+                transition: 'background 0.15s, color 0.15s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(20,18,28,0.06)'
+                e.currentTarget.style.color = 'var(--ink)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'transparent'
+                e.currentTarget.style.color = 'var(--ink-mute)'
+              }}
+            >
+              Sign out
+            </button>
           </div>
         </div>
       </nav>

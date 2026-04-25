@@ -33,7 +33,7 @@ func New(path string) (*DB, error) {
 	}
 
 	// Auto-migrate all models.
-	if err := gormDB.AutoMigrate(&User{}); err != nil {
+	if err := gormDB.AutoMigrate(&User{}, &Session{}); err != nil {
 		return nil, err
 	}
 

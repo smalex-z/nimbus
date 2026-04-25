@@ -1,8 +1,11 @@
 package service
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
 	"nimbus/internal/db"
 
@@ -10,7 +13,13 @@ import (
 	"gorm.io/gorm"
 )
 
-var ErrEmailTaken = errors.New("email already registered")
+var (
+	ErrEmailTaken         = errors.New("email already registered")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrSessionNotFound    = errors.New("session not found or expired")
+)
+
+const sessionDuration = 7 * 24 * time.Hour
 
 // AuthService handles account creation and credential verification.
 type AuthService struct {
@@ -65,4 +74,70 @@ func (s *AuthService) Register(p RegisterParams) (*UserView, error) {
 	}
 
 	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+}
+
+// Login verifies credentials and creates a session.
+// Returns ErrInvalidCredentials if the email is not found or the password is wrong.
+func (s *AuthService) Login(email, password string) (*db.Session, *UserView, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+
+	var user db.User
+	if err := s.db.Where("email = ?", email).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrInvalidCredentials
+		}
+		return nil, nil, err
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, nil, ErrInvalidCredentials
+	}
+
+	id, err := generateSessionID()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	session := &db.Session{
+		ID:        id,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(sessionDuration),
+	}
+	if err := s.db.Create(session).Error; err != nil {
+		return nil, nil, err
+	}
+
+	return session, &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+}
+
+// GetUserBySessionID returns the user for a valid, non-expired session.
+func (s *AuthService) GetUserBySessionID(sessionID string) (*UserView, error) {
+	var session db.Session
+	err := s.db.Where("id = ? AND expires_at > ?", sessionID, time.Now()).First(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var user db.User
+	if err := s.db.First(&user, session.UserID).Error; err != nil {
+		return nil, err
+	}
+
+	return &UserView{ID: user.ID, Name: user.Name, Email: user.Email}, nil
+}
+
+// Logout deletes the session record.
+func (s *AuthService) Logout(sessionID string) error {
+	return s.db.Delete(&db.Session{}, "id = ?", sessionID).Error
+}
+
+func generateSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
