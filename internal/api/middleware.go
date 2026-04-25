@@ -9,6 +9,10 @@ import (
 	"runtime/debug"
 	"time"
 
+	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
+	"nimbus/internal/service"
+
 	"golang.org/x/time/rate"
 )
 
@@ -71,6 +75,41 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 				http.Error(w, `{"success":false,"error":"internal server error"}`, http.StatusInternalServerError)
 			}
 		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireAuth validates the session cookie and attaches the UserView to the
+// request context. Responds 401 if the cookie is missing or the session is expired.
+func requireAuth(authSvc *service.AuthService) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie("nimbus_sid")
+			if err != nil {
+				response.Error(w, http.StatusUnauthorized, "Not authenticated")
+				return
+			}
+
+			user, err := authSvc.GetUserBySessionID(cookie.Value)
+			if err != nil {
+				response.Error(w, http.StatusUnauthorized, "Session expired")
+				return
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctxutil.WithUser(r.Context(), user)))
+		})
+	}
+}
+
+// requireAdmin responds 403 if the authenticated user is not an admin.
+// Must be used after requireAuth.
+func requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := ctxutil.User(r.Context())
+		if user == nil || !user.IsAdmin {
+			response.Error(w, http.StatusForbidden, "Admin access required")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }

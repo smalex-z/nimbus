@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { AuthProvider } from '@/context/AuthContext'
 import Background from '@/components/Background'
 import Layout from '@/components/Layout'
+import RequireAuth from '@/components/RequireAuth'
+import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Nodes from '@/pages/Nodes'
-import Provision from '@/pages/Provision'
+import Settings from '@/pages/Settings'
+import SignIn from '@/pages/auth/SignIn'
+import SignUp from '@/pages/auth/SignUp'
+import OAuthCallback from '@/pages/auth/OAuthCallback'
 import Setup from '@/pages/Setup'
 import { getSetupStatus } from '@/api/client'
 
@@ -15,7 +21,9 @@ export default function App() {
 
   useEffect(() => {
     getSetupStatus()
-      .then((s) => setState(s.configured ? 'ready' : 'setup'))
+      .then((s) => {
+        setState(!s.configured || s.needs_admin_setup ? 'setup' : 'ready')
+      })
       .catch(() => setState('setup'))
   }, [])
 
@@ -34,14 +42,29 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <Background />
-      <Layout>
+      <AuthProvider>
+        <Background />
         <Routes>
-          <Route path="/" element={<Provision />} />
-          <Route path="/vms" element={<MyVMs />} />
-          <Route path="/nodes" element={<Nodes />} />
+          <Route path="/login" element={<SignIn />} />
+          <Route path="/signup" element={<SignUp />} />
+          <Route path="/auth/callback" element={<OAuthCallback />} />
+          <Route
+            path="/*"
+            element={
+              <RequireAuth>
+                <Layout>
+                  <Routes>
+                    <Route path="/" element={<Provision />} />
+                    <Route path="/vms" element={<MyVMs />} />
+                    <Route path="/nodes" element={<Nodes />} />
+                    <Route path="/settings" element={<Settings />} />
+                  </Routes>
+                </Layout>
+              </RequireAuth>
+            }
+          />
         </Routes>
-      </Layout>
+      </AuthProvider>
     </BrowserRouter>
   )
 }

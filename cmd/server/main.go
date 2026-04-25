@@ -19,6 +19,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/service"
 )
 
 //go:embed all:frontend/dist
@@ -77,10 +78,14 @@ func main() {
 		return
 	}
 
-	database, err := db.New(cfg.DBPath, ippool.Model(), &db.VM{})
+	database, err := db.New(cfg.DBPath,
+		&db.User{}, &db.Session{}, &db.VM{}, &db.OAuthSettings{}, ippool.Model(),
+	)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
+
+	authSvc := service.NewAuthService(database)
 
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
@@ -98,6 +103,7 @@ func main() {
 	})
 
 	router := api.NewRouter(api.Deps{
+		Auth:      authSvc,
 		Provision: provSvc,
 		Pool:      pool,
 		Proxmox:   pveClient,

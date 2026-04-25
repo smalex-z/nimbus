@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go run *)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"other@example.com\",\"password\":\"short\"}')",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Test User\",\"email\":\"other@example.com\",\"password\":\"short\"}')",
+      "Bash(kill %1)",
+      "Bash(rm -f /tmp/nimbus-test.db)",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Alice\",\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -c /tmp/nimbus-cookies.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -b /tmp/nimbus-cookies.txt http://localhost:8099/api/me)",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"wrongpass\"}')",
+      "Bash(curl -s -c /tmp/nimbus-cookies.txt -b /tmp/nimbus-cookies.txt -X POST http://localhost:8099/api/auth/logout)",
+      "Bash(lsof -ti:8099)",
+      "Bash(curl -s -c /tmp/nc.txt -X POST http://localhost:8099/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Alice\",\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -c /tmp/nc.txt -b /tmp/nc.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -b /tmp/nc.txt http://localhost:8099/api/me)",
+      "Bash(curl -s -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"badpass\"}')",
+      "Bash(curl -s -c /tmp/nc.txt -b /tmp/nc.txt -X POST http://localhost:8099/api/auth/logout)",
+      "Bash(curl -s http://localhost:8099/api/users)",
+      "Bash(curl -s -c /tmp/nc.txt -X POST http://localhost:8099/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@example.com\",\"password\":\"hunter99\"}')",
+      "Bash(curl -s -b /tmp/nc.txt http://localhost:8099/api/users)",
+      "Bash(rm -f /tmp/nimbus-s4.db /tmp/nc.txt)",
+      "Bash(git add *)",
+      "Bash(curl -s -X POST http://localhost:8080/api/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Nathan Zhang\",\"email\":\"nml707805@gmail.com\",\"password\":\"password123\"}')",
+      "Bash(jq)",
+      "Bash(curl -s http://localhost:8080/api/setup/status)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

@@ -14,6 +14,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
+        // Don't let Vite follow backend redirects — the browser must follow
+        // them so OAuth cookies are set on the correct origin.
+        autoRewrite: true,
       },
     },
   },
