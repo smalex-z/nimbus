@@ -447,51 +447,55 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
         {form.keyMode === 'byo' && (
           <div className="mt-4 flex flex-col gap-5">
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                  Public key
-                </div>
-                <KeyFileUpload
-                  accept=".pub,.txt,text/plain"
-                  buttonLabel="Upload .pub file"
-                  maxBytes={16 * 1024}
-                  sizeError="File too large — public keys are typically under 1 KB."
-                  onLoad={(text) => updateForm('pubKey', text)}
-                />
-              </div>
-              <Textarea
-                monospace
-                placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@laptop"
-                value={form.pubKey}
-                onChange={(e) => updateForm('pubKey', e.target.value)}
-              />
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="text-[11px] font-mono uppercase tracking-widest text-ink-3">
-                  Private key — optional
+              <label className="text-[13px] text-ink">
+                <span className="font-semibold">Private key</span>{' '}
+                <span className="text-ink-3 font-normal">(PEM or OpenSSH format) — optional</span>
+              </label>
+              <div className="flex items-stretch gap-3">
+                <div className="flex-1 min-w-0">
+                  <Textarea
+                    monospace
+                    placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…'}
+                    value={form.privKey}
+                    onChange={(e) => updateForm('privKey', e.target.value)}
+                  />
                 </div>
                 <KeyFileUpload
                   accept=".pem,.key,.txt,text/plain,application/x-pem-file"
-                  buttonLabel="Upload private key file"
                   maxBytes={64 * 1024}
                   sizeError="File too large — private keys are typically under 4 KB."
                   onLoad={(text) => updateForm('privKey', text)}
                 />
               </div>
-              <Textarea
-                monospace
-                placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'}
-                value={form.privKey}
-                onChange={(e) => updateForm('privKey', e.target.value)}
-              />
               <p className="text-[11px] text-ink-3 leading-relaxed">
                 Paste only if you'd like Nimbus to vault the key so you can re-download
                 it later. Leave blank to keep the private half on your machine only — the
                 public key alone is enough to log in. Stored encrypted; never leaves
                 Nimbus unless you ask for it.
               </p>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-[13px] text-ink">
+                <span className="font-semibold">Public key</span>{' '}
+                <span className="text-ink-3 font-normal">(authorized_keys format)</span>
+              </label>
+              <div className="flex items-stretch gap-3">
+                <div className="flex-1 min-w-0">
+                  <Textarea
+                    monospace
+                    placeholder="ssh-ed25519 AAAA..."
+                    value={form.pubKey}
+                    onChange={(e) => updateForm('pubKey', e.target.value)}
+                  />
+                </div>
+                <KeyFileUpload
+                  accept=".pub,.txt,text/plain"
+                  maxBytes={16 * 1024}
+                  sizeError="File too large — public keys are typically under 1 KB."
+                  onLoad={(text) => updateForm('pubKey', text)}
+                />
+              </div>
             </div>
           </div>
         )}
