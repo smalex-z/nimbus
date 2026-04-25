@@ -1,16 +1,15 @@
-linters:
+version: "2"
+
+formatters:
   enable:
     - gofmt
+
+linters:
+  enable:
     - govet
     - errcheck
     - staticcheck
-    - unused
-    - gosimple
     - ineffassign
-
-linters-settings:
-  gofmt:
-    simplify: true
 
 run:
   timeout: 5m
