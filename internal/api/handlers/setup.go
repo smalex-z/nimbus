@@ -160,26 +160,39 @@ type discoverResult struct {
 }
 
 // Discover handles GET /api/setup/discover.
-// It checks whether we're running on a Proxmox host and scans all local
-// subnets for hosts with port 8006 open, so the wizard can suggest the URL.
+// On a Proxmox hypervisor it reads corosync.conf for authoritative cluster
+// member IPs. On other hosts it scans all local subnets for port 8006.
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	result := discoverResult{Endpoints: []string{}}
 
-	// Running directly on a Proxmox node — seed the list with this node's
-	// own IPs (avoids a localhost entry that duplicates the scanned result).
 	if _, err := os.Stat("/etc/pve"); err == nil {
 		result.IsHypervisor = true
 		result.SuggestedGateway = defaultGateway()
-		for _, ip := range localIPv4s() {
+
+		// Use corosync.conf as the authoritative cluster member list —
+		// network scanning is unreliable between Proxmox nodes (iptables).
+		for _, ip := range corosyncNodeIPs() {
 			url := "https://" + ip + ":8006"
 			if !containsStr(result.Endpoints, url) {
 				result.Endpoints = append(result.Endpoints, url)
 			}
 		}
+
+		// Single-node (not yet clustered): fall back to local interface IPs.
+		if len(result.Endpoints) == 0 {
+			for _, ip := range localIPv4s() {
+				url := "https://" + ip + ":8006"
+				if !containsStr(result.Endpoints, url) {
+					result.Endpoints = append(result.Endpoints, url)
+				}
+			}
+		}
+
+		response.Success(w, result)
+		return
 	}
 
-	// Scan all local subnets for anything with 8006 open.
-	// Use a 6-second budget to give multi-subnet clusters time to respond.
+	// Not a hypervisor — scan all local subnets for anything with 8006 open.
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 
@@ -191,6 +204,27 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.Success(w, result)
+}
+
+// corosyncNodeIPs reads Proxmox cluster member IPs from /etc/pve/corosync.conf.
+func corosyncNodeIPs() []string {
+	data, err := os.ReadFile("/etc/pve/corosync.conf")
+	if err != nil {
+		return nil
+	}
+	var ips []string
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "ring0_addr:") {
+			continue
+		}
+		addr := strings.TrimSpace(strings.TrimPrefix(line, "ring0_addr:"))
+		if net.ParseIP(addr) != nil {
+			ips = append(ips, addr)
+		}
+	}
+	return ips
 }
 
 // scanPort8006 returns the IPs across all local subnets that have TCP 8006 open.
