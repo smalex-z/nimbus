@@ -5,7 +5,7 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Starting Homestack in development mode..."
+echo "Starting Nimbus in development mode..."
 echo "  Backend:  http://localhost:8080"
 echo "  Frontend: http://localhost:5173"
 echo ""
