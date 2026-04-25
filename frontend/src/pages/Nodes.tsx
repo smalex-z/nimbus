@@ -1,19 +1,10 @@
 import { useEffect, useState } from 'react'
 import { listNodes } from '@/api/client'
 import Card from '@/components/ui/Card'
+import StatusBadge from '@/components/ui/StatusBadge'
+import UsageBar from '@/components/ui/UsageBar'
+import { formatBytes } from '@/lib/format'
 import type { NodeView } from '@/types'
-
-const formatBytes = (bytes: number): string => {
-  if (bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = bytes
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(1)} ${units[i]}`
-}
 
 export default function Nodes() {
   const [nodes, setNodes] = useState<NodeView[]>([])
@@ -56,7 +47,6 @@ export default function Nodes() {
         {nodes.map((n) => {
           const memPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
           const cpuPct = n.cpu * 100
-          const isOnline = n.status === 'online'
           return (
             <Card key={n.name} className="p-6">
               <div className="flex items-center justify-between flex-wrap gap-3">
@@ -66,18 +56,7 @@ export default function Nodes() {
                     {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
                   </div>
                 </div>
-                <span
-                  className={`inline-flex items-center gap-1.5 font-mono text-xs ${
-                    isOnline ? 'text-good' : 'text-bad'
-                  }`}
-                >
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full ${
-                      isOnline ? 'bg-good' : 'bg-bad'
-                    }`}
-                  />
-                  {n.status.toUpperCase()}
-                </span>
+                <StatusBadge status={n.status} />
               </div>
 
               <div className="mt-5 grid grid-cols-2 gap-5">
@@ -92,22 +71,3 @@ export default function Nodes() {
   )
 }
 
-function UsageBar({ label, pct, hint }: { label: string; pct: number; hint: string }) {
-  return (
-    <div>
-      <div className="flex justify-between text-[11px] font-mono text-ink-3 mb-1.5 uppercase tracking-wider">
-        <span>{label}</span>
-        <span className="normal-case tracking-normal">{hint}</span>
-      </div>
-      <div className="h-2.5 rounded-md bg-[rgba(27,23,38,0.06)] overflow-hidden">
-        <div
-          className="h-full rounded-md"
-          style={{
-            width: `${Math.min(100, pct).toFixed(0)}%`,
-            background: 'linear-gradient(90deg, var(--c1, #F8AF82), var(--c2, #F496B4))',
-          }}
-        />
-      </div>
-    </div>
-  )
-}

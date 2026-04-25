@@ -354,6 +354,18 @@ func (c *Client) GetAgentInterfaces(ctx context.Context, node string, vmid int) 
 	return res.Result, nil
 }
 
+// GetClusterStorage returns every storage entry visible at the cluster level.
+// Shared storage appears once per node; callers must dedupe by Storage name.
+func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error) {
+	var out []ClusterStorage
+	params := url.Values{}
+	params.Set("type", "storage")
+	if err := c.do(ctx, http.MethodGet, "/cluster/resources", params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetStorages lists the storage backends configured on a node. Used by the
 // bootstrap flow to detect which storage to use for downloaded cloud images
 // (needs `iso` content) vs. VM disks (needs `images` content).

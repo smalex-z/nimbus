@@ -113,6 +113,29 @@ export interface NodeView {
   max_cpu: number
   mem_used: number
   mem_total: number
+  vm_count: number
+  vm_count_total: number
+}
+
+export interface ClusterStats {
+  storage_used: number
+  storage_total: number
+}
+
+export type ClusterVMStatus = 'running' | 'stopped' | 'paused'
+
+export interface ClusterVM {
+  vmid: number
+  name: string
+  node: string
+  status: ClusterVMStatus
+  nimbus_managed: boolean
+  hostname?: string
+  ip?: string
+  tier?: TierName
+  os_template?: OSTemplate
+  username?: string
+  created_at?: string
 }
 
 export interface IPAllocation {

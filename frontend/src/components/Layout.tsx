@@ -1,5 +1,6 @@
 import { ReactNode } from 'react'
 import { Link, NavLink } from 'react-router-dom'
+import nimbusLogo from '@/assets/Nimbus_Logo.png'
 import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -13,6 +14,7 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'My machines', path: '/vms' },
   { label: 'Keys', path: '/keys' },
   { label: 'Nodes', path: '/nodes' },
+  { label: 'Admin', path: '/admin' },
 ]
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
@@ -37,12 +39,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
             background: 'rgba(255,255,255,0.75)',
           }}
         >
-          <div className="max-w-[1200px] mx-auto px-8 py-4 flex items-center justify-between">
-            <Link to="/" className="flex items-center gap-2.5 cursor-pointer no-underline">
-              <div className="brand-mark" />
-              <span className="font-display font-semibold text-xl tracking-tight text-ink">
-                Nimbus
-              </span>
+          <div className="max-w-[1200px] mx-auto px-8 py-5 flex items-center justify-between">
+            <Link to="/" className="flex items-center cursor-pointer no-underline">
+              <img src={nimbusLogo} alt="Nimbus" className="h-8 w-auto" />
             </Link>
 
             <div className="flex gap-1 items-center">
