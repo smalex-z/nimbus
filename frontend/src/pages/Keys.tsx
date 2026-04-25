@@ -10,6 +10,7 @@ import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
 import Input from '@/components/ui/Input'
+import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import RadioCard from '@/components/ui/RadioCard'
 import Textarea from '@/components/ui/Textarea'
 import type { SSHKey } from '@/types'
@@ -188,6 +189,13 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                 value={pubKey}
                 onChange={(e) => setPubKey(e.target.value)}
               />
+              <KeyFileUpload
+                accept=".pub,.txt,text/plain"
+                buttonLabel="Upload .pub file"
+                maxBytes={16 * 1024}
+                sizeError="File too large — public keys are typically under 1 KB."
+                onLoad={setPubKey}
+              />
             </div>
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
@@ -203,6 +211,13 @@ function AddKeyForm({ onClose, onCreated }: AddKeyFormProps) {
                 placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'}
                 value={privKey}
                 onChange={(e) => setPrivKey(e.target.value)}
+              />
+              <KeyFileUpload
+                accept=".pem,.key,.txt,text/plain,application/x-pem-file"
+                buttonLabel="Upload private key file"
+                maxBytes={64 * 1024}
+                sizeError="File too large — private keys are typically under 4 KB."
+                onLoad={setPrivKey}
               />
             </div>
           </>

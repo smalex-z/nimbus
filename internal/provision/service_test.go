@@ -152,6 +152,7 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		SearchDomain:     "local",
 		IPReadyTimeout:   1 * time.Second,
 		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
 	})
 	return svc, pool, database
 }
@@ -224,6 +225,9 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	// tier's CPU/memory must be applied via the same /config call.
 	if cfg.Cores != 2 {
 		t.Errorf("SetCloudInit Cores = %d, want 2 (medium)", cfg.Cores)
+	}
+	if cfg.CPU != "x86-64-v3" {
+		t.Errorf("SetCloudInit CPU = %q, want x86-64-v3", cfg.CPU)
 	}
 	if cfg.Memory != 2048 {
 		t.Errorf("SetCloudInit Memory = %d, want 2048 (medium)", cfg.Memory)

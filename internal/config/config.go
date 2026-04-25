@@ -34,6 +34,13 @@ type Config struct {
 	Nameserver   string
 	SearchDomain string
 
+	// VMCPUType is the Proxmox `cpu` model applied to every provisioned VM.
+	// Default x86-64-v3 (Haswell baseline) guarantees AVX2 in the guest while
+	// remaining portable across any Haswell-or-newer host. Override via
+	// VM_CPU_TYPE — e.g. "host" for max performance on a single-host setup,
+	// or "x86-64-v2-AES" if any cluster node predates Haswell.
+	VMCPUType string
+
 	// Optional integrations (Phase 2+, accepted but unused in Phase 1)
 	OAuthClientID     string
 	OAuthClientSecret string
@@ -64,6 +71,7 @@ func Load() (*Config, error) {
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
+		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v3"),
 		OAuthClientID:           os.Getenv("OAUTH_CLIENT_ID"),
 		OAuthClientSecret:       os.Getenv("OAUTH_CLIENT_SECRET"),
 		GopherAPIURL:            os.Getenv("GOPHER_API_URL"),
