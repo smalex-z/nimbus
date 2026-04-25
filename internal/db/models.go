@@ -13,6 +13,11 @@ type User struct {
 	Email        string `gorm:"uniqueIndex;not null" json:"email"`
 	PasswordHash string `gorm:"default:''" json:"-"`
 	IsAdmin      bool   `gorm:"default:false" json:"is_admin"`
+	// VerifiedCodeVersion is the AccessCodeVersion the user last verified
+	// against. When the admin regenerates the access code, the version
+	// increments and this user's verification becomes stale, forcing them
+	// back through the verify form on their next action.
+	VerifiedCodeVersion int `gorm:"default:0" json:"-"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.
@@ -24,12 +29,17 @@ type Session struct {
 }
 
 // OAuthSettings stores OAuth provider credentials. Only a single row (ID=1) is used.
+// AccessCode is the 8-digit second-factor code non-admin users must enter to
+// gain access to provisioning features. AccessCodeVersion increments each time
+// the admin regenerates it, invalidating prior user verifications.
 type OAuthSettings struct {
 	ID                 uint   `gorm:"primaryKey"`
 	GitHubClientID     string `gorm:"default:''"`
 	GitHubClientSecret string `gorm:"default:''"`
 	GoogleClientID     string `gorm:"default:''"`
 	GoogleClientSecret string `gorm:"default:''"`
+	AccessCode         string `gorm:"default:''"`
+	AccessCodeVersion  int    `gorm:"default:0"`
 }
 
 // VM is the canonical record for a provisioned virtual machine.
