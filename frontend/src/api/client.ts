@@ -26,6 +26,15 @@ const provisionClient: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// Bootstrap downloads cloud images and creates templates on every cluster node.
+// Can take up to 30 min on a large cluster — timeout matches server WriteTimeout.
+const bootstrapClient: AxiosInstance = axios.create({
+  baseURL: '/api',
+  timeout: 35 * 60 * 1000,
+  withCredentials: true,
+  headers: { 'Content-Type': 'application/json' },
+})
+
 // Both clients unwrap the standard `{success, data}` envelope.
 const unwrap = (instance: AxiosInstance) => {
   instance.interceptors.response.use(
@@ -44,6 +53,7 @@ const unwrap = (instance: AxiosInstance) => {
 }
 unwrap(api)
 unwrap(provisionClient)
+unwrap(bootstrapClient)
 
 export async function getHealth(): Promise<HealthResponse> {
   const { data } = await api.get<HealthResponse>('/health')
@@ -117,6 +127,30 @@ export async function testProxmoxConnection(
 
 export async function saveSetupConfig(req: SaveConfigRequest): Promise<{ message: string }> {
   const { data } = await api.post<{ message: string }>('/setup/save', req)
+  return data
+}
+
+export interface TemplateOutcome {
+  os: string
+  vmid: number
+  node: string
+  duration: number
+  error?: string
+}
+
+export interface BootstrapResult {
+  created: TemplateOutcome[]
+  skipped: TemplateOutcome[]
+  failed: TemplateOutcome[]
+}
+
+export async function bootstrapTemplates(): Promise<BootstrapResult> {
+  const { data } = await bootstrapClient.post<BootstrapResult>('/admin/bootstrap-templates', {})
+  return data
+}
+
+export async function getBootstrapStatus(): Promise<{ bootstrapped: boolean }> {
+  const { data } = await api.get<{ bootstrapped: boolean }>('/admin/bootstrap-status')
   return data
 }
 

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/bootstrap"
@@ -20,6 +22,18 @@ type bootstrapRequest struct {
 	Nodes []string `json:"nodes,omitempty"`
 	OS    []string `json:"os,omitempty"`
 	Force bool     `json:"force,omitempty"`
+}
+
+// BootstrapStatus handles GET /api/admin/bootstrap-status.
+func (h *Admin) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	has, err := h.svc.HasTemplates(ctx)
+	if err != nil {
+		response.InternalError(w, "db error: "+err.Error())
+		return
+	}
+	response.Success(w, map[string]bool{"bootstrapped": has})
 }
 
 // BootstrapTemplates handles POST /api/admin/bootstrap-templates.

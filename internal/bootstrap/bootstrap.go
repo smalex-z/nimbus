@@ -106,6 +106,16 @@ func New(px ProxmoxClient, database *gorm.DB, cfg Config) *Service {
 	return &Service{px: px, db: database, cfg: cfg}
 }
 
+// HasTemplates reports whether any node_templates rows exist in the database,
+// i.e. whether bootstrap has been run at least once successfully.
+func (s *Service) HasTemplates(ctx context.Context) (bool, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&db.NodeTemplate{}).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // Request is one bootstrap invocation. All fields are optional — empty Request
 // means "all OSes in the catalogue, on every online node, idempotent".
 type Request struct {
