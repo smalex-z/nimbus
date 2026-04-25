@@ -23,6 +23,15 @@ type Session struct {
 	CreatedAt time.Time
 }
 
+// OAuthSettings stores OAuth provider credentials. Only a single row (ID=1) is used.
+type OAuthSettings struct {
+	ID                 uint   `gorm:"primaryKey"`
+	GitHubClientID     string `gorm:"default:''"`
+	GitHubClientSecret string `gorm:"default:''"`
+	GoogleClientID     string `gorm:"default:''"`
+	GoogleClientSecret string `gorm:"default:''"`
+}
+
 // VM is the canonical record for a provisioned virtual machine.
 type VM struct {
 	gorm.Model

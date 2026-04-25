@@ -179,6 +179,31 @@ func generateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// GetOAuthSettings returns the stored OAuth provider credentials.
+// Creates a default empty row on first call.
+func (s *AuthService) GetOAuthSettings() (*db.OAuthSettings, error) {
+	var settings db.OAuthSettings
+	err := s.db.FirstOrCreate(&settings, db.OAuthSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveOAuthSettings persists OAuth provider credentials. If a secret field is
+// empty the existing value is preserved so the UI doesn't need to re-send it.
+func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
+	existing, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	if next.GitHubClientSecret == "" {
+		next.GitHubClientSecret = existing.GitHubClientSecret
+	}
+	if next.GoogleClientSecret == "" {
+		next.GoogleClientSecret = existing.GoogleClientSecret
+	}
+	next.ID = 1
+	return s.db.Save(&next).Error
+}
+
 // RegisterFirstAdmin creates the first admin account. Returns ErrUsersExist if
 // any user already exists — only valid for the initial setup wizard.
 func (s *AuthService) RegisterFirstAdmin(p RegisterParams) (*UserView, error) {

@@ -17,7 +17,6 @@ import (
 	"nimbus/internal/db"
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
-	"nimbus/internal/oauth"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
@@ -80,32 +79,13 @@ func main() {
 	}
 
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.VM{}, ippool.Model(),
+		&db.User{}, &db.Session{}, &db.VM{}, &db.OAuthSettings{}, ippool.Model(),
 	)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
 
 	authSvc := service.NewAuthService(database)
-
-	var github oauth.Provider
-	if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
-		github = &oauth.GitHub{
-			ClientID:     cfg.GitHubClientID,
-			ClientSecret: cfg.GitHubClientSecret,
-		}
-		log.Printf("GitHub OAuth enabled")
-	}
-
-	var google oauth.Provider
-	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
-		google = &oauth.Google{
-			ClientID:     cfg.GoogleClientID,
-			ClientSecret: cfg.GoogleClientSecret,
-			RedirectURI:  cfg.AppURL + "/api/auth/google/callback",
-		}
-		log.Printf("Google OAuth enabled")
-	}
 
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
@@ -124,8 +104,6 @@ func main() {
 
 	router := api.NewRouter(api.Deps{
 		Auth:      authSvc,
-		GitHub:    github,
-		Google:    google,
 		Provision: provSvc,
 		Pool:      pool,
 		Proxmox:   pveClient,

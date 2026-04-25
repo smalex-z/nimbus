@@ -11,7 +11,6 @@ import (
 	"nimbus/internal/api/handlers"
 	"nimbus/internal/config"
 	"nimbus/internal/ippool"
-	"nimbus/internal/oauth"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
@@ -20,8 +19,6 @@ import (
 // Deps bundles the dependencies the router needs.
 type Deps struct {
 	Auth      *service.AuthService
-	GitHub    oauth.Provider
-	Google    oauth.Provider
 	Provision *provision.Service
 	Pool      *ippool.Pool
 	Proxmox   *proxmox.Client
@@ -44,6 +41,8 @@ func NewRouter(d Deps) http.Handler {
 	nodes := handlers.NewNodes(d.Proxmox)
 	ips := handlers.NewIPs(d.Pool)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
+	settings := handlers.NewSettings(d.Auth)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -62,7 +61,6 @@ func NewRouter(d Deps) http.Handler {
 		})
 
 		// Auth routes (public)
-		auth := handlers.NewAuth(d.Auth, d.GitHub, d.Google)
 		r.Post("/auth/register", auth.Register)
 		r.Post("/auth/login", auth.Login)
 		r.Post("/auth/logout", auth.Logout)
@@ -70,6 +68,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/auth/github/callback", auth.GitHubCallback)
 		r.Get("/auth/google", auth.GoogleStart)
 		r.Get("/auth/google/callback", auth.GoogleCallback)
+		r.Get("/auth/providers", auth.Providers)
 
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {
@@ -77,6 +76,13 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
+
+			// Admin-only routes
+			r.Group(func(r chi.Router) {
+				r.Use(requireAdmin)
+				r.Get("/settings/oauth", settings.GetOAuth)
+				r.Put("/settings/oauth", settings.SaveOAuth)
+			})
 		})
 	})
 

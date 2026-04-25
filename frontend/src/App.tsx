@@ -7,6 +7,7 @@ import RequireAuth from '@/components/RequireAuth'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Nodes from '@/pages/Nodes'
+import Settings from '@/pages/Settings'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
@@ -56,6 +57,7 @@ export default function App() {
                     <Route path="/" element={<Provision />} />
                     <Route path="/vms" element={<MyVMs />} />
                     <Route path="/nodes" element={<Nodes />} />
+                    <Route path="/settings" element={<Settings />} />
                   </Routes>
                 </Layout>
               </RequireAuth>
