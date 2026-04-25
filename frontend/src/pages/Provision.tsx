@@ -37,7 +37,7 @@ const DEFAULT_FORM: FormState = {
   hostname: '',
   tier: 'medium',
   os: 'ubuntu-24.04',
-  keyMode: 'byo',
+  keyMode: 'gen',
   pubKey: '',
 }
 
@@ -138,7 +138,7 @@ export default function Provision() {
           <div className="eyebrow">New machine</div>
           <h2 className="text-3xl">What are we spinning up today?</h2>
           <p className="text-base text-ink-2 mt-2 leading-relaxed">
-            Pick a size, paste a key, give it a name. Done in &lt; 60s.
+            Pick a size, give it a name, grab your key. Done in &lt; 60s.
           </p>
         </div>
       </div>
@@ -361,26 +361,27 @@ function FormBody({ form, updateForm }: FormBodyProps) {
         <label className="text-[13px] font-medium text-ink">SSH key</label>
         <div className="grid gap-2">
           <RadioCard
-            title="Bring your own key"
-            description="Paste a public key. We never store the private half."
-            selected={form.keyMode === 'byo'}
-            onClick={() => updateForm('keyMode', 'byo')}
-          />
-          <RadioCard
             title="Generate one for me"
             description="We'll mint an Ed25519 keypair and show you the private key once."
             selected={form.keyMode === 'gen'}
             onClick={() => updateForm('keyMode', 'gen')}
           />
+          <RadioCard
+            title="Bring your own key"
+            description="Paste or upload a public key. We never store the private half."
+            selected={form.keyMode === 'byo'}
+            onClick={() => updateForm('keyMode', 'byo')}
+          />
         </div>
         {form.keyMode === 'byo' && (
-          <div className="mt-4">
+          <div className="mt-4 flex flex-col gap-2">
             <Textarea
               monospace
               placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@laptop"
               value={form.pubKey}
               onChange={(e) => updateForm('pubKey', e.target.value)}
             />
+            <PubKeyFileUpload onLoad={(text) => updateForm('pubKey', text)} />
           </div>
         )}
       </div>
@@ -397,6 +398,52 @@ function FormBody({ form, updateForm }: FormBodyProps) {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function PubKeyFileUpload({ onLoad }: { onLoad: (text: string) => void }) {
+  const [fileName, setFileName] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleFile = async (file: File) => {
+    setError(null)
+    if (file.size > 16 * 1024) {
+      setError('File too large — public keys are typically under 1 KB.')
+      return
+    }
+    try {
+      const text = (await file.text()).trim()
+      if (!text) {
+        setError('File is empty.')
+        return
+      }
+      onLoad(text)
+      setFileName(file.name)
+    } catch {
+      setError('Could not read file.')
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-[8px] border border-line-2 bg-white/85 text-[12px] text-ink cursor-pointer hover:border-ink transition-colors">
+        <span>Upload .pub file</span>
+        <input
+          type="file"
+          accept=".pub,.txt,text/plain"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) handleFile(file)
+            e.target.value = ''
+          }}
+        />
+      </label>
+      {fileName && !error && (
+        <span className="text-xs text-ink-3 font-mono truncate">Loaded {fileName}</span>
+      )}
+      {error && <span className="text-xs text-bad">{error}</span>}
     </div>
   )
 }
