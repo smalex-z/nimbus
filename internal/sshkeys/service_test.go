@@ -159,6 +159,92 @@ func TestCreate_CommonSSHFilenames_Accepted(t *testing.T) {
 	}
 }
 
+func TestAttachPrivateKey_RoundTrips(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	pub, priv, err := sshkeys.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := svc.Create(context.Background(), sshkeys.CreateRequest{
+		Name:      "pub-only",
+		PublicKey: pub,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if key.HasPrivateKey() {
+		t.Fatal("expected pub-only key on create")
+	}
+
+	if err := svc.AttachPrivateKey(context.Background(), key.ID, priv); err != nil {
+		t.Fatalf("AttachPrivateKey: %v", err)
+	}
+	_, got, err := svc.GetPrivateKey(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("GetPrivateKey: %v", err)
+	}
+	if got != priv {
+		t.Errorf("vault returned different private key than was attached")
+	}
+}
+
+func TestAttachPrivateKey_AlreadyVaulted_Conflict(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	key, err := svc.Create(context.Background(), sshkeys.CreateRequest{
+		Name: "has-priv", Generate: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, priv, _ := sshkeys.GenerateEd25519()
+
+	err = svc.AttachPrivateKey(context.Background(), key.ID, priv)
+	var ce *internalerrors.ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected ConflictError, got %v", err)
+	}
+}
+
+func TestAttachPrivateKey_Mismatched_Rejected(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	pubA, _, _ := sshkeys.GenerateEd25519()
+	_, privB, _ := sshkeys.GenerateEd25519()
+	key, err := svc.Create(context.Background(), sshkeys.CreateRequest{
+		Name:      "pub-a",
+		PublicKey: pubA,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	err = svc.AttachPrivateKey(context.Background(), key.ID, privB)
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+	if ve.Field != "private_key" {
+		t.Errorf("Field = %q, want private_key", ve.Field)
+	}
+}
+
+func TestAttachPrivateKey_UnknownID_NotFound(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	_, priv, _ := sshkeys.GenerateEd25519()
+	err := svc.AttachPrivateKey(context.Background(), 999, priv)
+	var nf *internalerrors.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("expected NotFoundError, got %v", err)
+	}
+}
+
 func TestSetDefault_OnlyOneAtATime(t *testing.T) {
 	t.Parallel()
 	svc, _ := newTestService(t)

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  attachPrivateKey,
   createKey,
   deleteKey,
   getKeyPrivate,
@@ -316,6 +317,7 @@ interface KeyRowProps {
 
 function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
   const [busy, setBusy] = useState<null | 'default' | 'delete' | 'download'>(null)
+  const [attaching, setAttaching] = useState(false)
 
   const downloadKey = async () => {
     setBusy('download')
@@ -408,6 +410,16 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
               <span>{busy === 'download' ? 'FETCHING…' : 'DOWNLOAD'}</span>
             </button>
           )}
+          {!sshKey.has_private_key && (
+            <button
+              type="button"
+              onClick={() => setAttaching((v) => !v)}
+              disabled={busy !== null}
+              className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50"
+            >
+              {attaching ? 'CANCEL' : '+ PRIVATE KEY'}
+            </button>
+          )}
           {!sshKey.is_default && (
             <button
               type="button"
@@ -428,6 +440,90 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
           </button>
         </div>
       </div>
+
+      {attaching && !sshKey.has_private_key && (
+        <AttachPrivateKeyForm
+          keyId={sshKey.id}
+          onClose={() => setAttaching(false)}
+          onAttached={() => {
+            setAttaching(false)
+            onChanged()
+          }}
+          onError={onError}
+        />
+      )}
     </Card>
+  )
+}
+
+interface AttachPrivateKeyFormProps {
+  keyId: number
+  onClose: () => void
+  onAttached: () => void
+  onError: (msg: string) => void
+}
+
+function AttachPrivateKeyForm({ keyId, onClose, onAttached, onError }: AttachPrivateKeyFormProps) {
+  const [privKey, setPrivKey] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [localErr, setLocalErr] = useState<string | null>(null)
+
+  const submit = async () => {
+    const trimmed = privKey.trim()
+    if (!trimmed) return
+    setSubmitting(true)
+    setLocalErr(null)
+    try {
+      await attachPrivateKey(keyId, trimmed)
+      onAttached()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // Surface validation/conflict errors inline next to the form so the
+      // user can correct without losing what they pasted; bubble unexpected
+      // errors to the page-level banner.
+      if (/match|already|private/i.test(msg)) {
+        setLocalErr(msg)
+      } else {
+        onError(msg)
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mt-5 pt-5 border-t border-dashed border-line">
+      <label className="text-[13px] text-ink">
+        <span className="font-semibold">Attach private key</span>{' '}
+        <span className="text-ink-3 font-normal">(PEM or OpenSSH format) — must match the stored public key</span>
+      </label>
+      <div className="flex items-stretch gap-3 mt-2">
+        <div className="flex-1 min-w-0">
+          <Textarea
+            monospace
+            placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…'}
+            value={privKey}
+            onChange={(e) => setPrivKey(e.target.value)}
+          />
+        </div>
+        <KeyFileUpload
+          maxBytes={64 * 1024}
+          sizeError="File too large — private keys are typically under 4 KB."
+          validate={validatePrivateKey}
+          onLoad={setPrivKey}
+        />
+      </div>
+      {localErr && (
+        <p className="text-[11px] text-bad mt-2">{localErr}</p>
+      )}
+      <div className="flex justify-end gap-2.5 mt-4">
+        <Button variant="ghost" onClick={onClose} disabled={submitting}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={!privKey.trim() || submitting}>
+          {submitting ? 'Attaching…' : 'Attach'}
+        </Button>
+      </div>
+    </div>
   )
 }

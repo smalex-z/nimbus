@@ -145,6 +145,32 @@ func (h *Keys) PrivateKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AttachPrivateKey handles POST /api/keys/{id}/private-key. Body:
+// `{"private_key":"<PEM/OpenSSH>"}`. Used to vault a private half on a
+// public-only key after the fact.
+func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	if req.PrivateKey == "" {
+		response.BadRequest(w, "private_key is required")
+		return
+	}
+	if err := h.svc.AttachPrivateKey(r.Context(), id, req.PrivateKey); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.NoContent(w)
+}
+
 // SetDefault handles POST /api/keys/{id}/default.
 func (h *Keys) SetDefault(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)

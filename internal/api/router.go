@@ -79,6 +79,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/{id}", keys.Get)
 			r.Delete("/{id}", keys.Delete)
 			r.Get("/{id}/private-key", keys.PrivateKey)
+			r.Post("/{id}/private-key", keys.AttachPrivateKey)
 			r.Post("/{id}/default", keys.SetDefault)
 		})
 
