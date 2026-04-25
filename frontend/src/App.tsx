@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from '@/context/AuthContext'
 import Background from '@/components/Background'
 import Layout from '@/components/Layout'
 import RequireAuth from '@/components/RequireAuth'
+import RequireVerified from '@/components/RequireVerified'
 import Admin from '@/pages/Admin'
 import Keys from '@/pages/Keys'
 import Provision from '@/pages/Provision'
@@ -14,9 +15,21 @@ import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
 import Setup from '@/pages/Setup'
+import Verify from '@/pages/Verify'
+import { useAuth } from '@/hooks/useAuth'
 import { getSetupStatus } from '@/api/client'
 
 type AppState = 'loading' | 'setup' | 'ready'
+
+// VerifyGate keeps verified users (and admins) out of the verify page —
+// they have nothing to do there.
+function VerifyGate() {
+  const { user, verified, loading } = useAuth()
+  if (loading) return null
+  if (!user) return <Navigate to="/login" replace />
+  if (user.is_admin || verified) return <Navigate to="/" replace />
+  return <Verify />
+}
 
 export default function App() {
   const [state, setState] = useState<AppState>('loading')
@@ -51,19 +64,29 @@ export default function App() {
           <Route path="/signup" element={<SignUp />} />
           <Route path="/auth/callback" element={<OAuthCallback />} />
           <Route
+            path="/verify"
+            element={
+              <RequireAuth>
+                <VerifyGate />
+              </RequireAuth>
+            }
+          />
+          <Route
             path="/*"
             element={
               <RequireAuth>
-                <Layout>
-                  <Routes>
-                    <Route path="/" element={<Provision />} />
-                    <Route path="/vms" element={<MyVMs />} />
-                    <Route path="/keys" element={<Keys />} />
-                    <Route path="/nodes" element={<Nodes />} />
-                    <Route path="/settings" element={<Settings />} />
-                    <Route path="/admin" element={<Admin />} />
-                  </Routes>
-                </Layout>
+                <RequireVerified>
+                  <Layout>
+                    <Routes>
+                      <Route path="/" element={<Provision />} />
+                      <Route path="/vms" element={<MyVMs />} />
+                      <Route path="/keys" element={<Keys />} />
+                      <Route path="/nodes" element={<Nodes />} />
+                      <Route path="/settings" element={<Settings />} />
+                      <Route path="/admin" element={<Admin />} />
+                    </Routes>
+                  </Layout>
+                </RequireVerified>
               </RequireAuth>
             }
           />
