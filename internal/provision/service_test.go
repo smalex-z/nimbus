@@ -199,6 +199,14 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	if !strings.HasPrefix(cfg.SSHKeys, "ssh-ed25519 ") {
 		t.Errorf("SetCloudInit got non-ed25519 public key: %q", cfg.SSHKeys)
 	}
+	// Cloned VMs inherit the template's resources (1 core / 1024 MiB), so the
+	// tier's CPU/memory must be applied via the same /config call.
+	if cfg.Cores != 2 {
+		t.Errorf("SetCloudInit Cores = %d, want 2 (medium)", cfg.Cores)
+	}
+	if cfg.Memory != 2048 {
+		t.Errorf("SetCloudInit Memory = %d, want 2048 (medium)", cfg.Memory)
+	}
 }
 
 func TestProvision_WaitForIPTimeout_SoftSuccess(t *testing.T) {

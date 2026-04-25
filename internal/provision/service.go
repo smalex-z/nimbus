@@ -169,6 +169,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.cfg.GatewayIP),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
+		Cores:        tier.CPU,
+		Memory:       int(tier.MemMB),
 	}
 	if err := s.px.SetCloudInit(ctx, target, newVMID, cloudInit); err != nil {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
