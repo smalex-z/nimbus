@@ -93,14 +93,6 @@ func NewRouter(d Deps) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(requireVerified(d.Auth))
 
-				r.Get("/nodes", nodes.List)
-				r.Get("/ips", ips.List)
-				r.Get("/cluster/vms", cluster.ListVMs)
-				r.Get("/cluster/stats", cluster.Stats)
-
-				r.With(middleware.Timeout(60*time.Second)).
-					Post("/ips/reconcile", ips.Reconcile)
-
 				r.Route("/vms", func(r chi.Router) {
 					r.Use(middleware.Timeout(180 * time.Second))
 					r.Get("/", vms.List)
@@ -119,9 +111,22 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{id}/default", keys.SetDefault)
 				})
 
-				r.Route("/admin", func(r chi.Router) {
-					r.Get("/bootstrap-status", bs.BootstrapStatus)
-					r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
+				// Cluster-wide read endpoints + bootstrap are admin-only —
+				// they back the Admin page, which only admins can navigate to.
+				r.Group(func(r chi.Router) {
+					r.Use(requireAdmin)
+
+					r.Get("/nodes", nodes.List)
+					r.Get("/ips", ips.List)
+					r.Get("/cluster/vms", cluster.ListVMs)
+					r.Get("/cluster/stats", cluster.Stats)
+					r.With(middleware.Timeout(60*time.Second)).
+						Post("/ips/reconcile", ips.Reconcile)
+
+					r.Route("/admin", func(r chi.Router) {
+						r.Get("/bootstrap-status", bs.BootstrapStatus)
+						r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
+					})
 				})
 			})
 		})

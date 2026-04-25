@@ -13,8 +13,11 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'Provision', path: '/' },
   { label: 'My machines', path: '/vms' },
   { label: 'Keys', path: '/keys' },
-  { label: 'Nodes', path: '/nodes' },
+]
+
+const adminNavItems: Array<{ label: string; path: string }> = [
   { label: 'Admin', path: '/admin' },
+  { label: 'Authentication', path: '/settings' },
 ]
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
@@ -62,9 +65,10 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                 </NavLink>
               ))}
 
-              {user?.is_admin && (
+              {user?.is_admin && adminNavItems.map((item) => (
                 <NavLink
-                  to="/settings"
+                  key={item.path}
+                  to={item.path}
                   className={({ isActive }) =>
                     `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
                       isActive
@@ -73,9 +77,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     }`
                   }
                 >
-                  Authentication
+                  {item.label}
                 </NavLink>
-              )}
+              ))}
 
               <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
 
