@@ -19,6 +19,7 @@ import (
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/install"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
@@ -38,6 +39,13 @@ func main() {
 		if err := runBootstrap(os.Args[2:]); err != nil {
 			log.Fatalf("bootstrap failed: %v", err)
 		}
+		return
+	}
+
+	// `nimbus install [--upgrade]` installs the binary to /opt/nimbus, writes
+	// the systemd unit, and starts the service. Re-execs via sudo when not root.
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		install.Run(os.Args[2:])
 		return
 	}
 

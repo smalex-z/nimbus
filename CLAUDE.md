@@ -78,7 +78,7 @@ internal/
   ctxutil/              request-context helpers (current user, …)
   build/                build-time version info (ldflags)
 frontend/               React 18 + TS + Vite + Tailwind SPA
-scripts/                build.sh, dev.sh, install.sh
+scripts/                build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 .github/workflows/      build, test, lint, release
 ```
 

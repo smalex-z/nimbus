@@ -56,16 +56,16 @@ on a PVE host and defaults to `https://localhost:8006`:
 # 1. Build the binary (cross-compile for the host arch)
 ./scripts/build.sh
 
-# 2. Run the install wizard — prompts for token, IP pool, gateway
-sudo ./scripts/install.sh
+# 2. Install as a systemd service (re-execs with sudo if needed)
+sudo ./nimbus install
 
-# 3. Open http://<host-ip>:8080 from any machine on your LAN
+# 3. Open http://<host-ip>:8080 to complete setup in the web wizard
 ```
 
 ### Install on a guest VM
 
-Same wizard, just answer the `PROXMOX_HOST` prompt with a cluster node IP:
-`https://192.168.0.167:8006`.
+Same flow — the web wizard prompts for `PROXMOX_HOST`; point it at a cluster
+node, e.g. `https://192.168.0.167:8006`.
 
 ### Local development
 
@@ -173,7 +173,7 @@ nimbus/
 │   ├── db/                     # GORM models
 │   ├── config/                 # Env-based configuration with .env loader
 │   └── errors/                 # Typed error sentinels
-├── scripts/                    # build.sh, dev.sh, install.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
+├── scripts/                    # build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 └── .github/workflows/          # test.yml, lint.yml, build.yml, release.yml
 ```
 
