@@ -32,9 +32,13 @@ type GPU struct {
 	nimbusBaseURL string
 	// gpuConfigApplier is invoked after a successful pairing register so
 	// the live provision.Service picks up the new base_url + model without
-	// a Nimbus restart. Nil is allowed (handler still works; provision
-	// flow refreshes on next startup).
-	gpuConfigApplier func(baseURL, model string)
+	// a Nimbus restart. The third arg is a fully-resolved nimbusGPUAPI
+	// URL (e.g. https://nimbus.example.com/api/gpu) — Register derives it
+	// from the request host (proven reachable by the GX10) so a misconfigured
+	// APP_URL doesn't poison the bootstrap config. Pass "" to fall back
+	// to whatever default the applier wires up (used by Unpair).
+	// Nil applier is allowed.
+	gpuConfigApplier func(baseURL, model, nimbusGPUAPI string)
 }
 
 // NewGPU wires the handler.
@@ -44,7 +48,7 @@ func NewGPU(svc *gpu.Service, auth *service.AuthService, nimbusBaseURL string) *
 
 // WithGPUConfigApplier installs the post-register callback. Builder-style so
 // router wiring stays a single fluent expression.
-func (h *GPU) WithGPUConfigApplier(fn func(baseURL, model string)) *GPU {
+func (h *GPU) WithGPUConfigApplier(fn func(baseURL, model, nimbusGPUAPI string)) *GPU {
 	h.gpuConfigApplier = fn
 	return h
 }
@@ -306,7 +310,7 @@ func (h *GPU) Unpair(w http.ResponseWriter, r *http.Request) {
 	if h.gpuConfigApplier != nil {
 		// Empty strings → provision flow falls through the gpuCfg.BaseURL
 		// guard and skips the GPU bootstrap on subsequent VMs.
-		h.gpuConfigApplier("", "")
+		h.gpuConfigApplier("", "", "")
 	}
 	response.Success(w, unpairView{
 		CancelledJobs: n,
@@ -484,11 +488,20 @@ func (h *GPU) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Push the fresh config to anything that holds a live copy
-	// (provision.Service for cloud-init env injection).
+	// (provision.Service for cloud-init env injection). Derive
+	// nimbusGPUAPI from the request host — the GX10 just successfully
+	// reached us at r.Host, so it's proven-routable. Sidesteps a
+	// misconfigured APP_URL (which would default to localhost:5173 on
+	// fresh installs and poison the bootstrap config).
 	if h.gpuConfigApplier != nil {
 		settings, err := h.auth.GetGPUSettings()
 		if err == nil {
-			h.gpuConfigApplier(settings.BaseURL, settings.InferenceModel)
+			scheme := "http"
+			if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+				scheme = "https"
+			}
+			nimbusGPUAPI := scheme + "://" + r.Host + "/api/gpu"
+			h.gpuConfigApplier(settings.BaseURL, settings.InferenceModel, nimbusGPUAPI)
 		}
 	}
 	response.Success(w, gpuRegisterResponse{
