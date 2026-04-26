@@ -51,6 +51,16 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Provision-time tunnel is SSH-only — there's no public subdomain in
+	// play (Gopher allocates a port on the gateway instead), but its API
+	// still needs a unique tunnel identifier. Default to the VM hostname,
+	// which is already validated unique upstream and shaped like a DNS
+	// label, so the operator never has to think about it.
+	subdomain := req.Subdomain
+	if req.PublicTunnel && subdomain == "" {
+		subdomain = req.Hostname
+	}
+
 	res, err := h.svc.Provision(r.Context(), provision.Request{
 		Hostname:     req.Hostname,
 		Tier:         req.Tier,
@@ -60,7 +70,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		SSHPrivKey:   req.SSHPrivKey,
 		GenerateKey:  req.GenerateKey,
 		PublicTunnel: req.PublicTunnel,
-		Subdomain:    req.Subdomain,
+		Subdomain:    subdomain,
 		TunnelPort:   req.TunnelPort,
 	})
 	if err != nil {
