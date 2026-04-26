@@ -11,6 +11,7 @@ import GopherTunnels from '@/pages/GopherTunnels'
 import Keys from '@/pages/Keys'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
+import S3 from '@/pages/S3'
 import Settings from '@/pages/Settings'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
@@ -84,6 +85,7 @@ export default function App() {
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
                       <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
+                      <Route path="/s3" element={<RequireAdmin><S3 /></RequireAdmin>} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>

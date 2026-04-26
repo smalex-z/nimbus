@@ -76,6 +76,8 @@ type ProxmoxClient interface {
 	SetVMDescription(ctx context.Context, node string, vmid int, description string) error
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
+	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	DeleteVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 }
 
@@ -933,3 +935,48 @@ func redactKey(k string) string {
 
 // Compile-time assertion that the real *proxmox.Client satisfies our interface.
 var _ ProxmoxClient = (*proxmox.Client)(nil)
+
+// DestroyVM tears down a VM by VMID: stops it (if running), waits for the
+// stop task, deletes it, waits for the destroy task, and releases its IP
+// from the pool. Used by the s3storage tear-down path; safe to call from
+// any caller that holds the (node, vmid) tuple.
+//
+// Errors during stop are logged but not fatal — Proxmox's qmstop is a
+// hard kill, so even a "VM already stopped" outcome is acceptable, and
+// the destroy that follows will surface any real problem. The IP release
+// uses Background context so a cancelled caller still returns the
+// reservation.
+func (s *Service) DestroyVM(ctx context.Context, node string, vmid int, ip string) error {
+	stopTask, stopErr := s.px.StopVM(ctx, node, vmid)
+	if stopErr != nil {
+		// "stopped already" / "not running" / "VM gone" all surface here;
+		// treat as soft and proceed to the delete (which is also tolerant
+		// of a missing VM).
+		log.Printf("destroy %d: stop returned %v (continuing)", vmid, stopErr)
+	} else if stopTask != "" {
+		if err := s.px.WaitForTask(ctx, node, stopTask, s.cfg.PollInterval); err != nil {
+			log.Printf("destroy %d: wait stop task: %v (continuing)", vmid, err)
+		}
+	}
+
+	delTask, err := s.px.DeleteVM(ctx, node, vmid)
+	if err != nil && !errors.Is(err, proxmox.ErrNotFound) {
+		// VM truly missing → not an error; an admin destroyed it manually
+		// and we just need to reconcile our bookkeeping. Anything else is
+		// a real failure.
+		return fmt.Errorf("delete vm %d on %s: %w", vmid, node, err)
+	}
+	if delTask != "" {
+		if err := s.px.WaitForTask(ctx, node, delTask, s.cfg.PollInterval); err != nil {
+			return fmt.Errorf("wait destroy task for vm %d: %w", vmid, err)
+		}
+	}
+
+	if ip != "" {
+		// Background context: a cancelled caller must still get its IP back.
+		if err := s.pool.Release(context.Background(), ip); err != nil {
+			log.Printf("destroy %d: release ip %s: %v", vmid, ip, err)
+		}
+	}
+	return nil
+}

@@ -523,6 +523,58 @@ func (c *Client) StartVM(ctx context.Context, node string, vmid int) (string, er
 	return taskID, nil
 }
 
+// StopVM forcibly powers off a VM (qemu stop, not graceful shutdown). Returns
+// the task UPID. Use this before DeleteVM — Proxmox refuses to destroy a
+// running VM. Returns ErrNotFound when the VMID is already gone (Proxmox
+// returns 500 with "does not exist", normalized here).
+func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", url.PathEscape(node), vmid)
+	err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID)
+	if err != nil {
+		if isVMNotFound(err) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return taskID, nil
+}
+
+// DeleteVM destroys a VM and its disks. The VM must be stopped — pair with
+// StopVM + WaitForTask. Returns the task UPID. Setting purge=1 also removes
+// the VM from any HA configurations and replication jobs. Returns ErrNotFound
+// when the VMID has already been removed (Proxmox returns 500 with "does
+// not exist" rather than a clean 404, same gotcha as GetVMConfig).
+func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	params := url.Values{}
+	params.Set("purge", "1")
+	params.Set("destroy-unreferenced-disks", "1")
+	path := fmt.Sprintf("/nodes/%s/qemu/%d", url.PathEscape(node), vmid)
+	err := c.do(ctx, http.MethodDelete, path, params, &taskID)
+	if err != nil {
+		if isVMNotFound(err) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return taskID, nil
+}
+
+// isVMNotFound reports whether err is the "VM does not exist" outcome —
+// either a real 404 or Proxmox's odd "500 with body 'does not exist'"
+// response. Used to normalize Stop/Delete idempotency.
+func isVMNotFound(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
+		return true
+	}
+	return false
+}
+
 // agentResult is what the guest-agent endpoint actually returns: a wrapper
 // around an array of NetworkInterface records.
 type agentResult struct {
