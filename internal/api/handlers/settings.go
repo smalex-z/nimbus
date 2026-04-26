@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -64,4 +65,166 @@ func (s *Settings) SaveOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, map[string]string{"message": "OAuth settings saved"})
+}
+
+type accessCodeView struct {
+	AccessCode string `json:"access_code"`
+	Version    int    `json:"version"`
+}
+
+// GetAccessCode handles GET /api/settings/access-code (admin only).
+// Returns the raw 8-digit code so the admin UI can reveal it on demand.
+func (s *Settings) GetAccessCode(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load access code")
+		return
+	}
+	response.Success(w, accessCodeView{
+		AccessCode: settings.AccessCode,
+		Version:    settings.AccessCodeVersion,
+	})
+}
+
+type authorizedDomainsView struct {
+	Domains []string `json:"domains"`
+}
+
+type saveAuthorizedDomainsRequest struct {
+	Domains []string `json:"domains"`
+}
+
+// GetAuthorizedGoogleDomains handles GET /api/settings/google-domains (admin only).
+func (s *Settings) GetAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load authorized domains")
+		return
+	}
+	domains := []string{}
+	for _, d := range strings.Split(settings.AuthorizedGoogleDomains, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			domains = append(domains, d)
+		}
+	}
+	response.Success(w, authorizedDomainsView{Domains: domains})
+}
+
+// SaveAuthorizedGoogleDomains handles PUT /api/settings/google-domains (admin only).
+func (s *Settings) SaveAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
+	var req saveAuthorizedDomainsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := s.auth.SaveAuthorizedGoogleDomains(req.Domains); err != nil {
+		response.InternalError(w, "failed to save authorized domains")
+		return
+	}
+	s.GetAuthorizedGoogleDomains(w, r)
+}
+
+type authorizedOrgsView struct {
+	Orgs []string `json:"orgs"`
+}
+
+type saveAuthorizedOrgsRequest struct {
+	Orgs []string `json:"orgs"`
+}
+
+// GetAuthorizedGitHubOrgs handles GET /api/settings/github-orgs (admin only).
+func (s *Settings) GetAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load authorized orgs")
+		return
+	}
+	orgs := []string{}
+	for _, o := range strings.Split(settings.AuthorizedGitHubOrgs, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			orgs = append(orgs, o)
+		}
+	}
+	response.Success(w, authorizedOrgsView{Orgs: orgs})
+}
+
+// SaveAuthorizedGitHubOrgs handles PUT /api/settings/github-orgs (admin only).
+func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
+	var req saveAuthorizedOrgsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := s.auth.SaveAuthorizedGitHubOrgs(req.Orgs); err != nil {
+		response.InternalError(w, "failed to save authorized orgs")
+		return
+	}
+	s.GetAuthorizedGitHubOrgs(w, r)
+}
+
+type gopherSettingsView struct {
+	APIURL     string `json:"api_url"`
+	Configured bool   `json:"configured"`
+}
+
+// GetGopher handles GET /api/settings/gopher (admin only). The API key is
+// never returned; the SPA only needs to know whether it's set.
+func (s *Settings) GetGopher(w http.ResponseWriter, _ *http.Request) {
+	settings, err := s.auth.GetGopherSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load Gopher settings")
+		return
+	}
+	response.Success(w, gopherSettingsView{
+		APIURL:     settings.APIURL,
+		Configured: settings.APIURL != "" && settings.APIKey != "",
+	})
+}
+
+type saveGopherRequest struct {
+	APIURL string `json:"api_url"`
+	APIKey string `json:"api_key"`
+}
+
+// SaveGopher handles PUT /api/settings/gopher (admin only). Persists the
+// values; takes effect on next restart (live tunnel-client refresh lives on
+// the gopher feature branch and isn't wired here yet).
+func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
+	var req saveGopherRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	url := strings.TrimSpace(req.APIURL)
+	key := strings.TrimSpace(req.APIKey)
+	if err := s.auth.SaveGopherSettings(db.GopherSettings{APIURL: url, APIKey: key}); err != nil {
+		response.InternalError(w, "failed to save Gopher settings")
+		return
+	}
+	settings, err := s.auth.GetGopherSettings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+	response.Success(w, gopherSettingsView{
+		APIURL:     settings.APIURL,
+		Configured: settings.APIURL != "" && settings.APIKey != "",
+	})
+}
+
+// RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
+// Issues a fresh code and bumps the version, invalidating every non-admin
+// user's prior verification.
+func (s *Settings) RegenerateAccessCode(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.RegenerateAccessCode()
+	if err != nil {
+		response.InternalError(w, "failed to regenerate access code")
+		return
+	}
+	response.Success(w, accessCodeView{
+		AccessCode: settings.AccessCode,
+		Version:    settings.AccessCodeVersion,
+	})
 }

@@ -28,6 +28,8 @@ interface NetworkFields {
   nameserver: string
   searchDomain: string
   port: string
+  gopherApiUrl: string
+  gopherApiKey: string
 }
 
 interface AdminFields {
@@ -50,6 +52,8 @@ export default function Setup() {
     nameserver: '',
     searchDomain: '',
     port: '',
+    gopherApiUrl: '',
+    gopherApiKey: '',
   })
   const [admin, setAdmin] = useState<AdminFields>({ name: '', email: '', password: '' })
   const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
@@ -127,6 +131,8 @@ export default function Setup() {
     if (network.nameserver) req.nameserver = network.nameserver
     if (network.searchDomain) req.search_domain = network.searchDomain
     if (network.port) req.port = network.port
+    if (network.gopherApiUrl) req.gopher_api_url = network.gopherApiUrl
+    if (network.gopherApiKey) req.gopher_api_key = network.gopherApiKey
     try {
       await saveSetupConfig(req)
       setStep('restarting')
@@ -172,7 +178,11 @@ export default function Setup() {
         </div>
       </div>
 
-      <main className="flex-1 max-w-[720px] mx-auto w-full px-8 py-12 animate-fadeIn">
+      <main
+        className={`flex-1 mx-auto w-full px-8 py-12 animate-fadeIn ${
+          step === 'admin' ? 'max-w-[1080px]' : 'max-w-[720px]'
+        }`}
+      >
         {/* Step indicator */}
         <div className="flex items-center gap-3 mb-10 flex-wrap">
           {wizardSteps.map((s, i) => (
@@ -195,27 +205,9 @@ export default function Setup() {
               >
                 {s.label}
               </span>
-              <div className="w-8 h-px bg-line-2" />
+              {i < wizardSteps.length - 1 && <div className="w-8 h-px bg-line-2" />}
             </div>
           ))}
-
-          {/* Future steps — visible but locked */}
-          <div className="flex items-center gap-3">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              5
-            </div>
-            <span className="text-sm font-medium text-ink-3">Gopher</span>
-            <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
-              optional · soon
-            </span>
-          </div>
-          <div className="w-8 h-px bg-line-2" />
-          <div className="flex items-center gap-3">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              6
-            </div>
-            <span className="text-sm font-medium text-ink-3">Templates</span>
-          </div>
         </div>
 
         {step === 'proxmox' && (
@@ -563,6 +555,30 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
       <Card className="p-8 flex flex-col gap-5">
         <div className="grid grid-cols-2 gap-4">
           <Input
+            label="Gopher API URL"
+            placeholder="https://gopher.example.com"
+            value={fields.gopherApiUrl}
+            onChange={(e) => onChange('gopherApiUrl', e.target.value)}
+            hint="Optional reverse-tunnel gateway used to expose VMs at public hostnames. Leave blank to skip."
+          />
+          <Input
+            label="Gopher API key"
+            type="password"
+            placeholder="Paste your Gopher API key"
+            value={fields.gopherApiKey}
+            onChange={(e) => onChange('gopherApiKey', e.target.value)}
+            hint="Editable later from the Authentication page if you skip it now."
+          />
+        </div>
+        <Input
+          label="HTTP port"
+          placeholder="8080"
+          value={fields.port}
+          onChange={(e) => onChange('port', e.target.value)}
+          hint="Port this Nimbus server listens on. Change if 8080 is already taken on this host."
+        />
+        <div className="grid grid-cols-2 gap-4">
+          <Input
             label="Nameserver"
             placeholder="1.1.1.1 8.8.8.8"
             value={fields.nameserver}
@@ -577,13 +593,6 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
             hint="Appended to unqualified hostnames inside VMs (e.g. 'local' so 'myhost' resolves as 'myhost.local')."
           />
         </div>
-        <Input
-          label="HTTP port"
-          placeholder="8080"
-          value={fields.port}
-          onChange={(e) => onChange('port', e.target.value)}
-          hint="Port this Nimbus server listens on. Change if 8080 is already taken on this host."
-        />
       </Card>
 
       {missing && (
@@ -633,37 +642,45 @@ function AdminStep({ fields, onChange, onBack, onNext }: AdminStepProps) {
         setup is complete.
       </p>
 
-      <Card className="p-8 flex flex-col gap-5">
-        <Input
-          label="Name"
-          placeholder="Your name"
-          value={fields.name}
-          onChange={(e) => onChange('name', e.target.value)}
-        />
-        <Input
-          label="Email"
-          type="email"
-          placeholder="admin@example.com"
-          value={fields.email}
-          onChange={(e) => onChange('email', e.target.value)}
-        />
-        <Input
-          label="Password"
-          type="password"
-          placeholder="At least 8 characters"
-          value={fields.password}
-          onChange={(e) => onChange('password', e.target.value)}
-          error={passwordTooShort ? 'Password must be at least 8 characters.' : undefined}
-        />
-        <Input
-          label="Confirm password"
-          type="password"
-          placeholder="Re-enter your password"
-          value={confirmPassword}
-          onChange={(e) => setConfirmPassword(e.target.value)}
-          error={passwordMismatch ? 'Passwords do not match.' : undefined}
-        />
-      </Card>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+        <div className="lg:col-span-2">
+          <Card className="p-8 flex flex-col gap-5">
+            <Input
+              label="Name"
+              placeholder="Your name"
+              value={fields.name}
+              onChange={(e) => onChange('name', e.target.value)}
+            />
+            <Input
+              label="Email"
+              type="email"
+              placeholder="admin@example.com"
+              value={fields.email}
+              onChange={(e) => onChange('email', e.target.value)}
+            />
+            <Input
+              label="Password"
+              type="password"
+              placeholder="At least 8 characters"
+              value={fields.password}
+              onChange={(e) => onChange('password', e.target.value)}
+              error={passwordTooShort ? 'Password must be at least 8 characters.' : undefined}
+            />
+            <Input
+              label="Confirm password"
+              type="password"
+              placeholder="Re-enter your password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              error={passwordMismatch ? 'Passwords do not match.' : undefined}
+            />
+          </Card>
+        </div>
+
+        <div className="lg:col-span-1">
+          <AccessCodePreviewPanel />
+        </div>
+      </div>
 
       <div className="flex justify-between mt-6">
         <Button variant="ghost" onClick={onBack}>
@@ -673,6 +690,78 @@ function AdminStep({ fields, onChange, onBack, onNext }: AdminStepProps) {
           Next: Review →
         </Button>
       </div>
+    </div>
+  )
+}
+
+// AccessCodePreviewPanel mirrors the AccessCodePanel on the Authentication
+// settings page. The actual code is auto-generated server-side once the
+// admin row is created (no DB exists in setup mode), so this is purely
+// informational — it shows the same shape and explains what the code is for.
+function AccessCodePreviewPanel() {
+  return (
+    <div
+      className="glass"
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>Access code</span>
+        <span
+          className="n-pill"
+          style={{
+            color: 'var(--ink-mute)',
+            background: 'rgba(20,18,28,0.04)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          preview
+        </span>
+      </div>
+
+      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+        Once your admin account is created, Nimbus auto-generates an 8-digit
+        access code tied to it. Non-admin users must enter this code after
+        signing in to reach the console.
+      </p>
+
+      <div
+        style={{
+          padding: '14px 16px',
+          background: 'rgba(20,18,28,0.04)',
+          border: '1px solid var(--line)',
+          borderRadius: 10,
+          fontFamily: 'Geist Mono, monospace',
+          fontSize: 20,
+          letterSpacing: '0.28em',
+          color: 'var(--ink)',
+          textAlign: 'center',
+        }}
+      >
+        ••••••••
+      </div>
+
+      <ul
+        style={{
+          margin: 0,
+          paddingLeft: 18,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          fontSize: 13,
+          color: 'var(--ink-body)',
+          lineHeight: 1.55,
+        }}
+      >
+        <li>Required for any user who isn't an admin to access the console.</li>
+        <li>
+          Bypassed for users signing in through Google OAuth from an authorized
+          domain, or GitHub OAuth from an authorized organization.
+        </li>
+        <li>
+          Viewable, copyable, and regeneratable from the
+          {' '}<strong>Authentication</strong> page after setup completes.
+        </li>
+      </ul>
     </div>
   )
 }
