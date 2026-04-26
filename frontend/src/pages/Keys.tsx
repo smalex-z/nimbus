@@ -96,6 +96,9 @@ export default function Keys() {
             sshKey={k}
             currentUserId={user?.id}
             onChanged={refresh}
+            onPromoted={(id) =>
+              setKeys((prev) => prev.map((row) => ({ ...row, is_default: row.id === id })))
+            }
             onError={(msg) => setError(msg)}
           />
         ))}
@@ -316,10 +319,11 @@ interface KeyRowProps {
   sshKey: SSHKey
   currentUserId: number | undefined
   onChanged: () => void
+  onPromoted: (id: number) => void
   onError: (msg: string) => void
 }
 
-function KeyRow({ sshKey, currentUserId, onChanged, onError }: KeyRowProps) {
+function KeyRow({ sshKey, currentUserId, onChanged, onPromoted, onError }: KeyRowProps) {
   const [busy, setBusy] = useState<null | 'default' | 'delete' | 'download'>(null)
   const [attaching, setAttaching] = useState(false)
   // Defense in depth: server-side filter already restricts the list to the
@@ -352,7 +356,9 @@ function KeyRow({ sshKey, currentUserId, onChanged, onError }: KeyRowProps) {
     setBusy('default')
     try {
       await setDefaultKey(sshKey.id)
-      onChanged()
+      // Update the badge in place — the row will re-sort to the top on the
+      // next page visit, but jumping mid-interaction is jarring.
+      onPromoted(sshKey.id)
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -428,14 +434,28 @@ function KeyRow({ sshKey, currentUserId, onChanged, onError }: KeyRowProps) {
               {attaching ? 'CANCEL' : '+ PRIVATE KEY'}
             </button>
           )}
-          {isMine && !sshKey.is_default && (
+          {isMine && (
             <button
               type="button"
-              onClick={promote}
+              onClick={sshKey.is_default ? undefined : promote}
               disabled={busy !== null}
-              className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50"
+              aria-pressed={sshKey.is_default}
+              className={
+                sshKey.is_default
+                  ? 'inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(45,125,90,0.3)] bg-[rgba(45,125,90,0.12)] text-good cursor-default'
+                  : 'inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50 cursor-pointer'
+              }
             >
-              {busy === 'default' ? 'SETTING…' : 'MAKE DEFAULT'}
+              {sshKey.is_default ? (
+                <>
+                  <span aria-hidden>✓</span>
+                  <span>DEFAULT</span>
+                </>
+              ) : busy === 'default' ? (
+                'SETTING…'
+              ) : (
+                'MAKE DEFAULT'
+              )}
             </button>
           )}
           {isMine && (

@@ -169,15 +169,37 @@ func (s *Service) ListVMTunnels(ctx context.Context, vmID uint) ([]tunnel.Tunnel
 	return s.tunnels.ListTunnelsForMachine(ctx, vm.TunnelID)
 }
 
+// VMTunnelRequest is the input to CreateVMTunnel — a thin pass-through to
+// the Gopher CreateTunnelRequest with the machine_id derived from the VM.
+// Bundled into a struct (vs. positional args) so adding new fields like
+// transport/bot-protection doesn't ripple through call sites.
+type VMTunnelRequest struct {
+	TargetPort           int
+	Subdomain            string
+	Transport            string // "tcp" or "udp"; blank → "tcp"
+	Private              bool
+	NoTLS                bool
+	BotProtectionEnabled bool
+	BotProtectionTTL     int
+	BotProtectionAllowIP string
+	TLSSkipVerify        bool
+}
+
 // CreateVMTunnel registers a per-port tunnel on this VM's Gopher machine.
-// targetPort must be 1-65535; subdomain is optional (Gopher derives one from
-// the machine name when blank). Returns the created tunnel record.
-func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int, subdomain string) (*tunnel.Tunnel, error) {
+// TargetPort must be 1-65535; Subdomain is optional (Gopher derives one
+// from the machine name when blank for TCP, ignores it for UDP). Returns
+// the created tunnel record — note Gopher coerces some fields server-side
+// (e.g. clears bot_protection on UDP tunnels), so the response is the
+// source of truth, not the request.
+func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, req VMTunnelRequest) (*tunnel.Tunnel, error) {
 	if s.tunnels == nil {
 		return nil, errors.New("gopher tunnel integration is not configured")
 	}
-	if targetPort < 1 || targetPort > 65535 {
+	if req.TargetPort < 1 || req.TargetPort > 65535 {
 		return nil, &internalerrors.ValidationError{Field: "target_port", Message: "must be 1-65535"}
+	}
+	if req.Transport != "" && req.Transport != "tcp" && req.Transport != "udp" {
+		return nil, &internalerrors.ValidationError{Field: "transport", Message: "must be \"tcp\" or \"udp\""}
 	}
 	vm, err := s.Get(ctx, vmID)
 	if err != nil {
@@ -190,9 +212,16 @@ func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int,
 		}
 	}
 	return s.tunnels.CreateTunnel(ctx, tunnel.CreateTunnelRequest{
-		MachineID:  vm.TunnelID,
-		TargetPort: targetPort,
-		Subdomain:  strings.TrimSpace(subdomain),
+		MachineID:            vm.TunnelID,
+		TargetPort:           req.TargetPort,
+		Subdomain:            strings.TrimSpace(req.Subdomain),
+		Transport:            req.Transport,
+		Private:              req.Private,
+		NoTLS:                req.NoTLS,
+		BotProtectionEnabled: req.BotProtectionEnabled,
+		BotProtectionTTL:     req.BotProtectionTTL,
+		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		TLSSkipVerify:        req.TLSSkipVerify,
 	})
 }
 

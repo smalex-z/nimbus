@@ -103,7 +103,13 @@ export async function listVMs(): Promise<VM[]> {
 }
 
 export async function listClusterVMs(): Promise<ClusterVM[]> {
-  const { data } = await api.get<ClusterVM[]>('/cluster/vms')
+  // /cluster/vms walks every VM on every online node and probes each one's
+  // qemu-guest-agent for OS info — a cold cache (e.g. fresh after a binary
+  // restart) can push the response past the default 10s axios cap. The
+  // backend now fans out per-VM enrichment, but we still give it a longer
+  // budget for the first pass; subsequent polls hit the warm cache and
+  // return in <100ms.
+  const { data } = await api.get<ClusterVM[]>('/cluster/vms', { timeout: 45_000 })
   return data
 }
 
@@ -253,6 +259,16 @@ export interface VMTunnel {
   subdomain?: string
   target_ip?: string
   target_port: number
+  // Gopher fills these on create + read so the UI shows the actual stored
+  // state, not just what was requested (UDP / no-subdomain coerce some).
+  transport?: 'tcp' | 'udp'
+  private?: boolean
+  no_tls?: boolean
+  server_port?: number
+  bot_protection_enabled?: boolean
+  bot_protection_ttl?: number
+  bot_protection_allow_ip?: string
+  tls_skip_verify?: boolean
   tunnel_url?: string
   error?: string
   created_at?: string
@@ -261,6 +277,13 @@ export interface VMTunnel {
 export interface CreateVMTunnelRequest {
   target_port: number
   subdomain?: string
+  transport?: 'tcp' | 'udp'
+  private?: boolean
+  no_tls?: boolean
+  bot_protection_enabled?: boolean
+  bot_protection_ttl?: number
+  bot_protection_allow_ip?: string
+  tls_skip_verify?: boolean
 }
 
 export async function listVMTunnels(vmId: number): Promise<VMTunnel[]> {

@@ -35,6 +35,13 @@ import (
 // not stampeding the Proxmox API on a cluster with many nodes.
 const listClusterIPsConcurrency = 8
 
+// perNodeVMConcurrency caps the number of per-VM enrichment goroutines a
+// single node walk fans out during GetClusterVMDetails. Most of the per-VM
+// work is HTTP roundtrips to Proxmox (config + agent), so 8 in flight per
+// node turns a 50-VM serial chain (~15s on cold cache) into ~2s without
+// pushing pveproxy into rate-limit territory.
+const perNodeVMConcurrency = 8
+
 // Client is a Proxmox API client bound to one cluster endpoint and one token.
 // Safe for concurrent use.
 type Client struct {
@@ -1061,61 +1068,100 @@ func (c *Client) GetClusterVMDetails(ctx context.Context) ([]ClusterVMDetail, er
 // config (ipconfig0, tags, ostype) and an agent IP fallback. A single bad VMID
 // config does not drop the whole node — the failed entry is returned with
 // whatever fields we managed to populate.
+//
+// Per-VM enrichment runs concurrently up to perNodeVMConcurrency. Each VM's
+// work is independent (separate Proxmox endpoints), so serialising them was
+// the dashboard's main 15s cold-cache bottleneck.
 func (c *Client) collectNodeDetails(ctx context.Context, node string) ([]ClusterVMDetail, error) {
 	vms, err := c.ListVMs(ctx, node)
 	if err != nil {
 		return nil, fmt.Errorf("list vms: %w", err)
 	}
-	out := make([]ClusterVMDetail, 0, len(vms))
-	for _, vm := range vms {
+
+	results := make([]ClusterVMDetail, len(vms))
+	keep := make([]bool, len(vms))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, perNodeVMConcurrency)
+	for i, vm := range vms {
 		if vm.Template != 0 {
 			continue
 		}
-		detail := ClusterVMDetail{
-			VMID:   vm.VMID,
-			Node:   node,
-			Name:   vm.Name,
-			Status: vm.Status,
-		}
-		cfg, err := c.GetVMConfig(ctx, node, vm.VMID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				continue
+		i, vm := i, vm
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			detail, ok := c.enrichVMDetail(ctx, node, vm)
+			if !ok {
+				return
 			}
-			out = append(out, detail)
-			continue
+			results[i] = detail
+			keep[i] = true
+		}()
+	}
+	wg.Wait()
+
+	// Compact in original VM order so the result is deterministic across
+	// runs (otherwise admins see the table reshuffle on every poll).
+	out := make([]ClusterVMDetail, 0, len(vms))
+	for i := range results {
+		if keep[i] {
+			out = append(out, results[i])
 		}
-		if raw, _ := cfg["tags"].(string); raw != "" {
-			detail.Tags = SplitTags(raw)
-		}
-		if desc, _ := cfg["description"].(string); desc != "" {
-			detail.Description = desc
-		}
-		if ostype, _ := cfg["ostype"].(string); ostype != "" {
-			detail.OSType = ostype
-		}
-		if raw, _ := cfg["ipconfig0"].(string); raw != "" {
-			if ip, ok := ParseIPConfig0(raw); ok {
-				detail.IP = ip
-				detail.IPSource = "ipconfig0"
-			}
-		}
-		// Fall back to qemu-guest-agent when the VM is running and lacks a
-		// parseable static IP (typical for externally-created VMs).
-		if detail.IP == "" && vm.Status == "running" {
-			if ip := c.firstAgentIPv4(ctx, node, vm.VMID); ip != "" {
-				detail.IP = ip
-				detail.IPSource = "agent"
-			}
-		}
-		// Best-effort enriched OS info from the agent. Cached 24h on hit,
-		// 5min on miss — see osInfoCache. Stopped VMs skip the probe.
-		if vm.Status == "running" {
-			detail.OS = c.GetAgentOSInfoCached(ctx, node, vm.VMID)
-		}
-		out = append(out, detail)
 	}
 	return out, nil
+}
+
+// enrichVMDetail performs the per-VM enrichment work for collectNodeDetails:
+// fetch config (tags / description / ostype / ipconfig0), fall back to the
+// guest agent for IP discovery, and cache OS info. Returns (detail, true)
+// when the VM should be included in the response; (_, false) when the VM
+// has gone missing on the node since ListVMs returned (cluster race).
+func (c *Client) enrichVMDetail(ctx context.Context, node string, vm VMStatus) (ClusterVMDetail, bool) {
+	detail := ClusterVMDetail{
+		VMID:   vm.VMID,
+		Node:   node,
+		Name:   vm.Name,
+		Status: vm.Status,
+	}
+	cfg, err := c.GetVMConfig(ctx, node, vm.VMID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return detail, false
+		}
+		return detail, true
+	}
+	if raw, _ := cfg["tags"].(string); raw != "" {
+		detail.Tags = SplitTags(raw)
+	}
+	if desc, _ := cfg["description"].(string); desc != "" {
+		detail.Description = desc
+	}
+	if ostype, _ := cfg["ostype"].(string); ostype != "" {
+		detail.OSType = ostype
+	}
+	if raw, _ := cfg["ipconfig0"].(string); raw != "" {
+		if ip, ok := ParseIPConfig0(raw); ok {
+			detail.IP = ip
+			detail.IPSource = "ipconfig0"
+		}
+	}
+	// Fall back to qemu-guest-agent when the VM is running and lacks a
+	// parseable static IP (typical for externally-created VMs).
+	if detail.IP == "" && vm.Status == "running" {
+		if ip := c.firstAgentIPv4(ctx, node, vm.VMID); ip != "" {
+			detail.IP = ip
+			detail.IPSource = "agent"
+		}
+	}
+	// Best-effort enriched OS info from the agent. Cached 24h on hit,
+	// 5min on miss — see osInfoCache. Stopped VMs skip the probe.
+	if vm.Status == "running" {
+		detail.OS = c.GetAgentOSInfoCached(ctx, node, vm.VMID)
+	}
+	return detail, true
 }
 
 // firstAgentIPv4 returns the first non-loopback IPv4 reported by the guest
