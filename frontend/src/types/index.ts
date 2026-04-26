@@ -133,18 +133,43 @@ export interface ClusterStats {
 
 export type ClusterVMStatus = 'running' | 'stopped' | 'paused'
 
+export type VMSource = 'local' | 'foreign' | 'external'
+
 export interface ClusterVM {
   vmid: number
   name: string
   node: string
   status: ClusterVMStatus
+  source: VMSource
   nimbus_managed: boolean
+  // id is the Nimbus DB row id; present only for local-source VMs. Used by
+  // the admin SSH modal to call the per-VM private-key download endpoint.
+  id?: number
+  // key_name is the SSH key file name; present only for local-source VMs
+  // that were provisioned with a vault-stored key.
+  key_name?: string
   hostname?: string
   ip?: string
-  tier?: TierName
-  os_template?: OSTemplate
+  // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)
+  // or "agent" (qemu-guest-agent fallback). Empty when the IP came from the
+  // local Nimbus DB.
+  ip_source?: string
+  // tier is one of TierName for Nimbus-managed VMs, or "custom" for external.
+  tier?: TierName | 'custom'
+  // os_template is a known OSTemplate for Nimbus-managed VMs, or a raw
+  // Proxmox ostype hint (e.g. "l26", "win10") for external VMs.
+  os_template?: OSTemplate | string
   username?: string
   created_at?: string
+  // Best-effort qemu-guest-agent OS info. Empty when the agent is unavailable
+  // or the VM is stopped. Cached server-side for 24h since OS rarely changes
+  // on a running VM.
+  os_id?: string         // "ubuntu" / "debian" / "mswindows" / …
+  os_pretty?: string     // "Ubuntu 22.04.3 LTS"
+  os_version?: string    // "22.04.3 LTS (Jammy Jellyfish)"
+  os_version_id?: string // "22.04"
+  os_kernel?: string     // "5.15.0-91-generic"
+  os_machine?: string    // "x86_64"
 }
 
 export interface IPAllocation {
