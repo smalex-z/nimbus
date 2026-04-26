@@ -334,6 +334,7 @@ var allowedScripts = map[string]bool{
 	"install-inference.sh": true,
 	"install-worker.sh":    true,
 	"gx10-worker":          true, // ARM64 binary; Worker downloads it
+	"demo-mnist.py":        true, // Phase 4 smoke-test; safe to expose, no secrets
 }
 
 func (h *ScriptHandler) Serve(w http.ResponseWriter, r *http.Request) {
