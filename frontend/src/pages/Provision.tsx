@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  provisionVM,
+  provisionVMStreaming,
+  ProvisionError,
   getBootstrapStatus,
   bootstrapTemplates,
   listKeys,
@@ -25,6 +26,7 @@ import {
   OS_OPTIONS,
   type OSTemplate,
   type ProvisionResult,
+  type ProvisionStep,
   type SSHKey,
   TIERS,
   type TierName,
@@ -63,6 +65,11 @@ export default function Provision() {
   const [form, setForm] = useState<FormState>(DEFAULT_FORM)
   const [result, setResult] = useState<ProvisionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errorStep, setErrorStep] = useState<ProvisionStep | undefined>()
+  // currentStep is the most recently *completed* phase; the UI lights up
+  // checkmarks up to and including it, and shows the next phase as active.
+  // Undefined means "nothing completed yet" — first phase is active.
+  const [currentStep, setCurrentStep] = useState<ProvisionStep | undefined>()
 
   const [bootstrapped, setBootstrapped] = useState<boolean | null>(null)
   const [bootstrapRunning, setBootstrapRunning] = useState(false)
@@ -148,49 +155,66 @@ export default function Provision() {
     setForm(DEFAULT_FORM)
     setResult(null)
     setError(null)
+    setErrorStep(undefined)
+    setCurrentStep(undefined)
     setView('form')
   }
 
   const submit = async () => {
     setError(null)
+    setErrorStep(undefined)
+    setCurrentStep(undefined)
     setView('loading')
     try {
       const trimmedPriv = form.keyMode === 'byo' ? form.privKey.trim() : ''
-      const res = await provisionVM({
-        hostname: form.hostname,
-        tier: form.tier,
-        os_template: form.os,
-        ssh_key_id:
-          form.keyMode === 'saved' && form.savedKeyId !== null
-            ? form.savedKeyId
-            : undefined,
-        ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
-        ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
-        generate_key: form.keyMode === 'gen' ? true : undefined,
-        public_tunnel: form.publicTunnel ? true : undefined,
-        // No subdomain — provision-time tunnels are SSH only and Gopher
-        // allocates a port on the gateway. Backend defaults the tunnel
-        // identifier to the VM hostname so admins don't need to think
-        // about it. HTTP tunnels (which DO use subdomains via wildcard
-        // DNS) are added later from the machine page.
-      })
+      const res = await provisionVMStreaming(
+        {
+          hostname: form.hostname,
+          tier: form.tier,
+          os_template: form.os,
+          ssh_key_id:
+            form.keyMode === 'saved' && form.savedKeyId !== null
+              ? form.savedKeyId
+              : undefined,
+          ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
+          ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
+          generate_key: form.keyMode === 'gen' ? true : undefined,
+          public_tunnel: form.publicTunnel ? true : undefined,
+          // No subdomain — provision-time tunnels are SSH only and Gopher
+          // allocates a port on the gateway. Backend defaults the tunnel
+          // identifier to the VM hostname so admins don't need to think
+          // about it. HTTP tunnels (which DO use subdomains via wildcard
+          // DNS) are added later from the machine page.
+        },
+        (evt) => setCurrentStep(evt.step),
+      )
       setResult(res)
       setView('result')
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error'
-      setError(msg)
+      if (err instanceof ProvisionError) {
+        setError(err.message)
+        setErrorStep(err.failedStep)
+      } else {
+        setError(err instanceof Error ? err.message : 'unknown error')
+      }
       setView('error')
     }
   }
 
   if (view === 'loading') {
-    return <LoadingView hostname={form.hostname} />
+    return <LoadingView hostname={form.hostname} currentStep={currentStep} />
   }
   if (view === 'result' && result) {
     return <ResultView result={result} onReset={reset} />
   }
   if (view === 'error') {
-    return <ErrorView error={error ?? 'unknown'} onRetry={() => setView('form')} />
+    return (
+      <ErrorView
+        error={error ?? 'unknown'}
+        failedStep={errorStep}
+        onRetry={() => setView('form')}
+      />
+    )
   }
 
   return (
@@ -640,30 +664,61 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 
 interface LoadingViewProps {
   hostname: string
+  currentStep: ProvisionStep | undefined
 }
 
-// Soft thresholds (seconds) that drive the perceived progression of the
-// checklist. The backend call is synchronous with no progress stream, so these
-// are heuristic — calibrated to the typical 30–60s end-to-end provision time.
-// The final step stays "active" until the request resolves, however long that
-// takes.
-const PROVISION_STAGES: { label: string; until: number }[] = [
-  { label: 'Validating request & allocating IP', until: 3 },
-  { label: 'Cloning golden template', until: 18 },
-  { label: 'Applying cloud-init & resizing disk', until: 25 },
-  { label: 'Booting & waiting for guest agent', until: Infinity },
+// Phases shown in the checklist. Each one corresponds to a `step` ID the
+// backend emits over the NDJSON stream — checkmarks light up because the
+// step *finished*, not because N seconds passed. Order matches the
+// backend's emit order; do not reorder without updating the service.
+const PROVISION_PHASES: { step: ProvisionStep; label: string }[] = [
+  { step: 'reserve_ip', label: 'Reserving IP & selecting node' },
+  { step: 'clone_template', label: 'Cloning golden template' },
+  { step: 'configure_vm', label: 'Configuring cloud-init & disk' },
+  { step: 'start_vm', label: 'Starting VM' },
+  { step: 'wait_guest_agent', label: 'Waiting for guest agent' },
 ]
 
-function LoadingView({ hostname }: LoadingViewProps) {
+// After this many seconds in the guest-agent phase, surface a hint that
+// it's normal — first-boot agent installs can legitimately take 1–2 min.
+const GUEST_AGENT_HINT_AFTER_SEC = 30
+
+function LoadingView({ hostname, currentStep }: LoadingViewProps) {
   const [elapsed, setElapsed] = useState(0)
+  // Track when each phase became active so we can show a phase-specific
+  // sub-hint after a threshold (e.g. guest agent taking >30s is fine but
+  // worth flagging so the user knows nothing is stuck).
+  const [phaseStartedAt, setPhaseStartedAt] = useState<number>(0)
+  const [activePhase, setActivePhase] = useState<ProvisionStep>('reserve_ip')
+
   useEffect(() => {
     const t = setInterval(() => setElapsed((e) => e + 1), 1000)
     return () => clearInterval(t)
   }, [])
 
-  const activeIndex = PROVISION_STAGES.findIndex((s) => elapsed < s.until)
+  // The active phase is the one *after* the last completed step.
+  useEffect(() => {
+    const next = nextPhase(currentStep)
+    setActivePhase((prev) => {
+      if (prev !== next) setPhaseStartedAt(elapsed)
+      return next
+    })
+    // Intentionally not depending on `elapsed` — we only want the phase-start
+    // marker to update when the phase itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep])
+
+  const completedIndex = currentStep
+    ? PROVISION_PHASES.findIndex((p) => p.step === currentStep)
+    : -1
+  const activeIndex = Math.min(completedIndex + 1, PROVISION_PHASES.length - 1)
+  const allDone = currentStep === 'wait_guest_agent'
 
   const fmt = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`)
+
+  const inAgentWait = activePhase === 'wait_guest_agent' && !allDone
+  const showAgentHint =
+    inAgentWait && elapsed - phaseStartedAt >= GUEST_AGENT_HINT_AFTER_SEC
 
   return (
     <div className="grid place-items-center min-h-[calc(100vh-160px)]">
@@ -682,15 +737,33 @@ function LoadingView({ hostname }: LoadingViewProps) {
         <div className="mt-4 font-mono text-2xl text-ink tabular-nums">{fmt(elapsed)}</div>
 
         <div className="mt-7 text-left border-t border-line">
-          {PROVISION_STAGES.map((stage, i) => {
-            const status: ProvisionStepProps['status'] =
-              i < activeIndex ? 'done' : i === activeIndex ? 'active' : 'pending'
-            return <ProvisionStep key={stage.label} label={stage.label} status={status} />
+          {PROVISION_PHASES.map((phase, i) => {
+            const status: ProvisionStepProps['status'] = allDone
+              ? 'done'
+              : i <= completedIndex
+                ? 'done'
+                : i === activeIndex
+                  ? 'active'
+                  : 'pending'
+            return <ProvisionStep key={phase.step} label={phase.label} status={status} />
           })}
         </div>
+
+        {showAgentHint && (
+          <p className="mt-5 text-xs text-ink-3 leading-relaxed">
+            Still waiting — first-boot guest-agent setup can take up to 2 min.
+            Nothing is stuck.
+          </p>
+        )}
       </Card>
     </div>
   )
+}
+
+function nextPhase(completed: ProvisionStep | undefined): ProvisionStep {
+  if (!completed) return PROVISION_PHASES[0].step
+  const i = PROVISION_PHASES.findIndex((p) => p.step === completed)
+  return PROVISION_PHASES[Math.min(i + 1, PROVISION_PHASES.length - 1)].step
 }
 
 interface ProvisionStepProps {
@@ -711,7 +784,20 @@ function ProvisionStep({ label, status, meta }: ProvisionStepProps) {
           status === 'pending' ? 'border-ink-3' : 'border-ink'
         } ${status === 'done' ? 'bg-ink' : ''}`}
       >
-        {status === 'done' && <span className="text-white text-[10px] font-bold">✓</span>}
+        {status === 'done' && (
+          <svg
+            viewBox="0 0 12 12"
+            className="w-[10px] h-[10px] text-white"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="2.5,6.5 5,9 9.5,3.5" />
+          </svg>
+        )}
         {status === 'active' && (
           <span className="absolute inset-[3px] rounded-full bg-ink animate-blink" />
         )}
@@ -967,15 +1053,21 @@ function PrivateKeyDownload({ keyName, privateKey }: PrivateKeyDownloadProps) {
 
 interface ErrorViewProps {
   error: string
+  failedStep?: ProvisionStep
   onRetry: () => void
 }
 
-function ErrorView({ error, onRetry }: ErrorViewProps) {
+function ErrorView({ error, failedStep, onRetry }: ErrorViewProps) {
+  const failedLabel = failedStep
+    ? PROVISION_PHASES.find((p) => p.step === failedStep)?.label
+    : undefined
   return (
     <div className="grid place-items-center min-h-[calc(100vh-160px)]">
       <Card className="w-full max-w-[520px] p-11 text-center">
         <div className="eyebrow text-bad">Provision failed</div>
-        <h2 className="text-3xl mt-1">Something went wrong.</h2>
+        <h2 className="text-3xl mt-1">
+          {failedLabel ? `Failed during "${failedLabel}".` : 'Something went wrong.'}
+        </h2>
         <pre className="mt-6 p-4 rounded-[10px] bg-[rgba(184,58,58,0.06)] text-bad text-xs text-left whitespace-pre-wrap break-words">
           {error}
         </pre>

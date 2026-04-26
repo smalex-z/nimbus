@@ -7,8 +7,10 @@ import type {
   HealthResponse,
   IPAllocation,
   NodeView,
+  ProvisionProgress,
   ProvisionRequest,
   ProvisionResult,
+  ProvisionStep,
   SSHKey,
   VM,
 } from '@/types'
@@ -17,18 +19,6 @@ import type {
 const api: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 10000,
-  withCredentials: true,
-  headers: { 'Content-Type': 'application/json' },
-})
-
-// Provisioning is a long-running call: template clone + cloud-init + boot +
-// agent ready (~30-60s), and when a Gopher tunnel is requested the SSH
-// bootstrap on the VM can wait on dpkg locks for another 1-3min during
-// early-boot cloud-init contention. 6 min covers worst-case end-to-end with
-// some headroom; matches the server-side route timeout.
-const provisionClient: AxiosInstance = axios.create({
-  baseURL: '/api',
-  timeout: 6 * 60 * 1000,
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -90,7 +80,6 @@ const unwrap = (instance: AxiosInstance, redirectOn401 = false) => {
 }
 
 unwrap(api, true)
-unwrap(provisionClient)
 unwrap(bootstrapClient)
 
 export async function getHealth(): Promise<HealthResponse> {
@@ -123,9 +112,120 @@ export async function getClusterStats(): Promise<ClusterStats> {
   return data
 }
 
-export async function provisionVM(req: ProvisionRequest): Promise<ProvisionResult> {
-  const { data } = await provisionClient.post<ProvisionResult>('/vms', req)
-  return data
+export class ProvisionError extends Error {
+  code: 'validation' | 'conflict' | 'not_found' | 'internal' | 'network'
+  failedStep?: ProvisionStep
+
+  constructor(
+    message: string,
+    code: ProvisionError['code'],
+    failedStep?: ProvisionStep,
+  ) {
+    super(message)
+    this.name = 'ProvisionError'
+    this.code = code
+    this.failedStep = failedStep
+  }
+}
+
+// provisionVMStreaming POSTs to /api/vms and reads the NDJSON response
+// stream, invoking onProgress as each backend phase completes. Resolves with
+// the final ProvisionResult or rejects with a ProvisionError naming the
+// step that failed (when known).
+export async function provisionVMStreaming(
+  req: ProvisionRequest,
+  onProgress: (evt: ProvisionProgress) => void,
+  signal?: AbortSignal,
+): Promise<ProvisionResult> {
+  const resp = await fetch('/api/vms', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify(req),
+    signal,
+  })
+
+  // Pre-stream errors (validation, auth, etc.) come back as the regular
+  // {success,error} JSON envelope with a 4xx status. Unwrap them here.
+  if (!resp.ok) {
+    let message = `request failed (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (body?.error) message = body.error
+    } catch {
+      // body wasn't JSON — fall through with the generic message
+    }
+    const code: ProvisionError['code'] =
+      resp.status === 400 ? 'validation'
+        : resp.status === 404 ? 'not_found'
+          : resp.status === 503 ? 'conflict'
+            : 'internal'
+    throw new ProvisionError(message, code)
+  }
+
+  if (!resp.body) {
+    throw new ProvisionError('server returned no body', 'network')
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let lastProgress: ProvisionStep | undefined
+  let done = false
+
+  while (!done) {
+    const chunk = await reader.read()
+    done = chunk.done
+    if (chunk.value) buffer += decoder.decode(chunk.value, { stream: true })
+
+    // Flush every complete line we've buffered.
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      nl = buffer.indexOf('\n')
+      if (!line) continue
+
+      let evt: { type?: string; step?: ProvisionStep; label?: string; data?: ProvisionResult; code?: ProvisionError['code']; message?: string }
+      try {
+        evt = JSON.parse(line)
+      } catch {
+        continue // ignore malformed line, keep streaming
+      }
+
+      if (evt.type === 'progress' && evt.step && evt.label) {
+        lastProgress = evt.step
+        onProgress({ step: evt.step, label: evt.label })
+      } else if (evt.type === 'result' && evt.data) {
+        return evt.data
+      } else if (evt.type === 'error') {
+        throw new ProvisionError(
+          evt.message ?? 'provision failed',
+          evt.code ?? 'internal',
+          // The error implicates the *next* step after the last completed
+          // progress event — that's the one we were attempting when it failed.
+          nextStepAfter(lastProgress),
+        )
+      }
+    }
+  }
+
+  // Stream ended without a terminal event — treat as a network error.
+  throw new ProvisionError('provision stream ended without a result', 'network')
+}
+
+const STEP_ORDER: ProvisionStep[] = [
+  'reserve_ip',
+  'clone_template',
+  'configure_vm',
+  'start_vm',
+  'wait_guest_agent',
+]
+
+function nextStepAfter(step: ProvisionStep | undefined): ProvisionStep {
+  if (!step) return STEP_ORDER[0]
+  const i = STEP_ORDER.indexOf(step)
+  return STEP_ORDER[Math.min(i + 1, STEP_ORDER.length - 1)]
 }
 
 export interface VMPrivateKey {
