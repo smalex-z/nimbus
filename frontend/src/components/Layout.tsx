@@ -1,7 +1,7 @@
-import { ReactNode } from 'react'
-import { Link, NavLink } from 'react-router-dom'
+import { ReactNode, useEffect, useState } from 'react'
+import { Link, NavLink, useLocation } from 'react-router-dom'
 import nimbusLogo from '@/assets/Nimbus_Logo.png'
-import api from '@/api/client'
+import api, { getS3Storage } from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
 
@@ -27,6 +27,32 @@ const controlPanelItemClass = ({ isActive }: { isActive: boolean }) =>
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
   const { user } = useAuth()
+  const location = useLocation()
+  // Whether an S3 storage row exists (any status). Promotes the S3 link
+  // from the Control Panel dropdown to a top-level navbar item — the
+  // page is only useful day-to-day after the storage VM is deployed.
+  // Refetched on route change so the navbar updates as soon as the user
+  // navigates away from /s3 post-deploy or post-delete.
+  const [s3Deployed, setS3Deployed] = useState(false)
+
+  useEffect(() => {
+    if (!user?.is_admin) {
+      setS3Deployed(false)
+      return
+    }
+    let cancelled = false
+    getS3Storage()
+      .then((row) => {
+        if (!cancelled) setS3Deployed(row !== null)
+      })
+      .catch(() => {
+        // Network blip or transient 500 — leave the navbar where it
+        // was. Errors are not user-actionable from the navbar.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [user?.is_admin, location.pathname])
 
   const handleSignOut = async () => {
     try {
@@ -64,6 +90,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
+              {user?.is_admin && s3Deployed && (
+                <NavLink to="/s3" className={navLinkClass}>
+                  S3
+                </NavLink>
+              )}
               {!user?.is_admin && (
                 <NavLink to="/keys" className={navLinkClass}>
                   Keys
@@ -95,6 +126,13 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Gopher Tunnels
                   </NavLink>
+                  {/* When S3 is deployed the link is promoted to a top-level
+                      navbar item; hiding the dropdown entry avoids duplication. */}
+                  {!s3Deployed && (
+                    <NavLink to="/s3" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                      S3 Storage
+                    </NavLink>
+                  )}
                   <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Keys
                   </NavLink>
