@@ -3,24 +3,27 @@ import { Link, NavLink } from 'react-router-dom'
 import nimbusLogo from '@/assets/Nimbus_Logo.png'
 import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
+import NavDropdown from '@/components/ui/NavDropdown'
 
 interface LayoutProps {
   children: ReactNode
   showNav?: boolean
 }
 
-const navItems: Array<{ label: string; path: string }> = [
-  { label: 'Provision', path: '/' },
-  { label: 'My machines', path: '/vms' },
-  { label: 'Keys', path: '/keys' },
-]
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
+    isActive
+      ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+      : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+  }`
 
-// Admin-only tabs render before the regular nav so Dashboard (where admins
-// land after sign-in) sits at the far left.
-const adminNavItems: Array<{ label: string; path: string }> = [
-  { label: 'Dashboard', path: '/admin' },
-  { label: 'Authentication', path: '/settings' },
-]
+// Smaller, indented items shown under the Control Panel section header.
+const controlPanelItemClass = ({ isActive }: { isActive: boolean }) =>
+  `block w-full pl-5 pr-3 py-1 text-xs no-underline transition-colors text-left cursor-pointer ${
+    isActive
+      ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+      : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+  }`
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
   const { user } = useAuth()
@@ -50,58 +53,76 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
             </Link>
 
             <div className="flex gap-1 items-center">
-              {user?.is_admin && adminNavItems.map((item) => (
-                <NavLink
-                  key={item.path}
-                  to={item.path}
-                  className={({ isActive }) =>
-                    `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
-                      isActive
-                        ? 'bg-[rgba(27,23,38,0.08)] text-ink'
-                        : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
-                    }`
-                  }
-                >
-                  {item.label}
+              {user?.is_admin && (
+                <NavLink to="/admin" className={navLinkClass}>
+                  Dashboard
                 </NavLink>
-              ))}
-
-              {navItems.map((item) => (
-                <NavLink
-                  key={item.path}
-                  to={item.path}
-                  end={item.path === '/'}
-                  className={({ isActive }) =>
-                    `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
-                      isActive
-                        ? 'bg-[rgba(27,23,38,0.08)] text-ink'
-                        : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
-                    }`
-                  }
-                >
-                  {item.label}
+              )}
+              <NavLink to="/" end className={navLinkClass}>
+                Provision
+              </NavLink>
+              <NavLink to="/vms" className={navLinkClass}>
+                My machines
+              </NavLink>
+              {!user?.is_admin && (
+                <NavLink to="/keys" className={navLinkClass}>
+                  Keys
                 </NavLink>
-              ))}
-
-              <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
-
-              {user && (
-                <span className="px-2.5 py-2 text-sm text-ink-2 font-mono flex items-center gap-1.5">
-                  {user.name}
-                  {user.is_admin && (
-                    <span className="text-[10px] font-semibold tracking-wider uppercase font-sans text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded">
-                      admin
-                    </span>
-                  )}
-                </span>
               )}
 
-              <button
-                onClick={handleSignOut}
-                className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors"
-              >
-                Sign out
-              </button>
+              {user && <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />}
+
+              {user?.is_admin ? (
+                <NavDropdown
+                  placement="bottom-end"
+                  triggerClassName="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors flex items-center gap-1.5 cursor-pointer"
+                  trigger={
+                    <>
+                      <span className="font-mono">{user.name}</span>
+                      <span className="text-[10px] font-semibold tracking-wider uppercase font-sans text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded">
+                        admin
+                      </span>
+                      <span className="text-xl text-ink-2 leading-none ml-0.5" aria-hidden="true">▾</span>
+                    </>
+                  }
+                >
+                  <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-ink-3 font-semibold">
+                    Control Panel
+                  </div>
+                  <NavLink to="/settings" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Authentication
+                  </NavLink>
+                  <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Gopher Tunnels
+                  </NavLink>
+                  <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Keys
+                  </NavLink>
+
+                  <div className="my-1 border-t border-line" />
+
+                  <button
+                    type="button"
+                    onClick={handleSignOut}
+                    style={{ cursor: 'pointer' }}
+                    className="block w-full px-3 py-1.5 text-sm text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors text-left cursor-pointer"
+                  >
+                    Sign out
+                  </button>
+                </NavDropdown>
+              ) : user ? (
+                <>
+                  <span className="px-2.5 py-2 text-sm text-ink-2 font-mono">
+                    {user.name}
+                  </span>
+                  <button
+                    onClick={handleSignOut}
+                    className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors"
+                  >
+                    Sign out
+                  </button>
+                </>
+              ) : null}
             </div>
           </div>
         </nav>
