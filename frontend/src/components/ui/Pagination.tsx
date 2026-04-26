@@ -1,9 +1,8 @@
 import Button from './Button'
 
-// PAGE_SIZE_OPTIONS is the default ladder offered by the page-size dropdown.
-// 25 is the default elsewhere — small enough that a /24 IP pool or a typical
-// cluster's VM list fits in a couple of pages, large enough that nobody is
-// constantly clicking next.
+// PAGE_SIZE_OPTIONS is the ladder offered by the page-size dropdown.
+// Callers default to 10 — keeps the table compact at first load; users can
+// step up the dropdown when they need more rows on screen.
 export const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const
 
 interface PaginationProps {
