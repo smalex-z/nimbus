@@ -434,6 +434,31 @@ func (c *Client) SetVMDescription(ctx context.Context, node string, vmid int, de
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }
 
+// GetClusterTagStyle reads the `tag-style` property from /cluster/options.
+// Returns the empty string when the option is unset on the cluster (which
+// is the Proxmox default — every tag gets a hash-derived random color).
+//
+// Requires `Sys.Audit` on `/`. Errors propagate; the caller decides whether
+// a missing option is a hard failure.
+func (c *Client) GetClusterTagStyle(ctx context.Context) (string, error) {
+	var opts map[string]any
+	if err := c.do(ctx, http.MethodGet, "/cluster/options", nil, &opts); err != nil {
+		return "", err
+	}
+	raw, _ := opts["tag-style"].(string)
+	return raw, nil
+}
+
+// SetClusterTagStyle writes the `tag-style` property on /cluster/options,
+// replacing any prior value. Requires `Sys.Modify` on `/` — a token without
+// it gets a 403, which the caller should treat as "operator hasn't granted
+// us permission to set tag colors" and degrade gracefully.
+func (c *Client) SetClusterTagStyle(ctx context.Context, tagStyle string) error {
+	params := url.Values{}
+	params.Set("tag-style", tagStyle)
+	return c.do(ctx, http.MethodPut, "/cluster/options", params, nil)
+}
+
 // ResizeDisk grows a disk on a stopped VM. size is the Proxmox-style delta —
 // "+10G" adds 10 gigabytes.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
