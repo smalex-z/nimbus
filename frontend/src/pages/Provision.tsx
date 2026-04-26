@@ -30,12 +30,6 @@ import {
 type ViewState = 'form' | 'loading' | 'result' | 'error'
 type KeyMode = 'saved' | 'byo' | 'gen'
 
-const SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
-
-function isValidSubdomain(s: string): boolean {
-  return SUBDOMAIN_RE.test(s.trim())
-}
-
 const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 interface FormState {
@@ -47,7 +41,6 @@ interface FormState {
   pubKey: string
   privKey: string
   publicTunnel: boolean
-  subdomain: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -59,7 +52,6 @@ const DEFAULT_FORM: FormState = {
   pubKey: '',
   privKey: '',
   publicTunnel: false,
-  subdomain: '',
 }
 
 export default function Provision() {
@@ -142,7 +134,6 @@ export default function Provision() {
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
     if (form.keyMode === 'saved' && form.savedKeyId === null) return false
-    if (form.publicTunnel && !isValidSubdomain(form.subdomain)) return false
     return true
   }, [form])
 
@@ -173,12 +164,11 @@ export default function Provision() {
         ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
         generate_key: form.keyMode === 'gen' ? true : undefined,
         public_tunnel: form.publicTunnel ? true : undefined,
-        subdomain:
-          form.publicTunnel && form.subdomain.trim()
-            ? form.subdomain.trim()
-            : undefined,
-        // Provision-time tunnels are SSH only — backend defaults target_port
-        // to 22. Other ports get their own tunnels added post-provision.
+        // No subdomain — provision-time tunnels are SSH only and Gopher
+        // allocates a port on the gateway. Backend defaults the tunnel
+        // identifier to the VM hostname so admins don't need to think
+        // about it. HTTP tunnels (which DO use subdomains via wildcard
+        // DNS) are added later from the machine page.
       })
       setResult(res)
       setView('result')
@@ -557,38 +547,26 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
           <div className="flex-1">
             <div className="text-sm font-medium">Expose SSH publicly</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Bootstraps a Gopher reverse tunnel to this VM's port 22 so you
-              can SSH in from anywhere. Other services can be exposed later
-              from the machine page.
+              Bootstraps a Gopher reverse tunnel to this VM's port 22. Gopher
+              allocates a public port at the gateway — SSH lands at{' '}
+              <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
+              Subdomains are an HTTP-tunnel concept and don't apply here;
+              expose web services later from the machine page.
             </div>
             {!tunnelInfo?.enabled && (
               <div className="text-xs text-warn mt-1.5">
-                Tunnel integration not configured. Set{' '}
-                <span className="font-mono">GOPHER_API_URL</span> and{' '}
-                <span className="font-mono">GOPHER_API_KEY</span> on the server,
-                then restart, to enable.
+                Tunnel integration not configured. An admin can wire it up
+                from{' '}
+                <Link to="/settings" className="underline">Settings → Gopher tunnels</Link>.
               </div>
             )}
           </div>
         </label>
-        {form.publicTunnel && tunnelInfo?.enabled && (
-          <div className="mt-2 flex flex-col gap-2">
-            <Input
-              label="Subdomain"
-              placeholder="my-project"
-              value={form.subdomain}
-              onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
-              error={
-                form.subdomain && !isValidSubdomain(form.subdomain)
-                  ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
-                  : undefined
-              }
-              hint={
-                isValidSubdomain(form.subdomain) && tunnelInfo.host
-                  ? `Will route through ${form.subdomain}.${tunnelInfo.host} — Gopher assigns the public port after the tunnel comes up.`
-                  : `Will route through <subdomain>.${tunnelInfo.host || 'gopher'} — public port assigned by Gopher post-provision.`
-              }
-            />
+        {form.publicTunnel && tunnelInfo?.enabled && tunnelInfo.host && (
+          <div className="text-xs text-ink-3 mt-1.5 leading-relaxed">
+            After the VM boots, SSH will be reachable at{' '}
+            <span className="font-mono text-ink">{tunnelInfo.host}:&lt;port&gt;</span>.
+            Gopher assigns the port — it'll show on the result screen.
           </div>
         )}
       </div>
@@ -604,11 +582,7 @@ interface SummaryProps {
 }
 
 function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
-  const tunnelLabel = (() => {
-    if (!form.publicTunnel) return 'no'
-    if (!isValidSubdomain(form.subdomain)) return '—'
-    return `${form.subdomain}.… → ssh`
-  })()
+  const tunnelLabel = form.publicTunnel ? 'ssh' : 'no'
   const sshLabel = (() => {
     if (form.keyMode === 'gen') return 'generate (vaulted)'
     if (form.keyMode === 'saved') {
