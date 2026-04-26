@@ -368,6 +368,9 @@ surface a clear `decode data for POST /api/v1/tunnels: ...` error.
 | `RESERVATION_TTL_SECONDS` | 600 | Stale-reservation cutoff (10 min) |
 | `VERIFY_CACHE_TTL_SECONDS` | 5 | How long `ListClusterIPs` snapshot is reused for `VerifyFree` |
 | `VACATE_MISS_THRESHOLD` | 3 | Consecutive missing reconciles before auto-vacating an allocated row |
+| `NIMBUS_VM_DISK_STORAGE` | `local-lvm` | Proxmox storage pool the disk gate checks for free space; empty disables the disk gate (scorer reverts to mem+cpu) |
+| `NIMBUS_MEM_BUFFER_MIB` | 256 | RAM headroom required above the tier's request — avoids packing a node to literal zero free |
+| `NIMBUS_CPU_LOAD_FACTOR` | 0.5 | Share of a fresh VM's vCPUs the soft score assumes consumed (range 0.25–1.0) |
 
 When tuning, remember: lower `VERIFY_CACHE_TTL_SECONDS` tightens the race window
 at the cost of more Proxmox API calls; higher `VACATE_MISS_THRESHOLD` tolerates

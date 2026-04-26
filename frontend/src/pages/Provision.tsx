@@ -9,6 +9,7 @@ import {
   type BootstrapResult,
   type TunnelInfo,
 } from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -55,6 +56,7 @@ const DEFAULT_FORM: FormState = {
 }
 
 export default function Provision() {
+  const { user } = useAuth()
   const [view, setView] = useState<ViewState>('form')
   const [form, setForm] = useState<FormState>(DEFAULT_FORM)
   const [result, setResult] = useState<ProvisionResult | null>(null)
@@ -207,7 +209,9 @@ export default function Provision() {
         </div>
       )}
 
-      {bootstrapped === false && (
+      {bootstrapped === false && !user?.is_admin && <BootstrapPending />}
+
+      {bootstrapped === false && user?.is_admin && (
         <BootstrapGate
           running={bootstrapRunning}
           result={bootstrapResult}
@@ -358,6 +362,22 @@ function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGa
             {result ? 'Retry →' : 'Set up templates →'}
           </Button>
         </div>
+      </Card>
+    </div>
+  )
+}
+
+function BootstrapPending() {
+  return (
+    <div className="mt-8">
+      <Card className="p-9">
+        <div className="eyebrow">Setup pending</div>
+        <h3 className="text-2xl mt-1 mb-3">Admin access required</h3>
+        <p className="text-base text-ink-2 leading-relaxed">
+          Cluster templates haven't been set up yet. Ask your admin to finish
+          bootstrapping the OS templates — once that's done, you'll be able to
+          provision a VM here.
+        </p>
       </Card>
     </div>
   )

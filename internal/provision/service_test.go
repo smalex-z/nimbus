@@ -38,16 +38,17 @@ func realPubKey(t *testing.T) string {
 // a function field the test can override to inject behavior; defaults return
 // success with empty data.
 type fakePVE struct {
-	getNodes       func(context.Context) ([]proxmox.Node, error)
-	listVMs        func(context.Context, string) ([]proxmox.VMStatus, error)
-	templateExists func(context.Context, string, int) (bool, error)
-	nextVMID       func(context.Context) (int, error)
-	cloneVM        func(context.Context, string, string, int, int, string) (string, error)
-	waitForTask    func(context.Context, string, string, time.Duration) error
-	setCloudInit   func(context.Context, string, int, proxmox.CloudInitConfig) error
-	resizeDisk     func(context.Context, string, int, string, string) error
-	startVM        func(context.Context, string, int) (string, error)
-	getAgentIfaces func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
+	getNodes          func(context.Context) ([]proxmox.Node, error)
+	getClusterVMs     func(context.Context) ([]proxmox.ClusterVM, error)
+	getClusterStorage func(context.Context) ([]proxmox.ClusterStorage, error)
+	templateExists    func(context.Context, string, int) (bool, error)
+	nextVMID          func(context.Context) (int, error)
+	cloneVM           func(context.Context, string, string, int, int, string) (string, error)
+	waitForTask       func(context.Context, string, string, time.Duration) error
+	setCloudInit      func(context.Context, string, int, proxmox.CloudInitConfig) error
+	resizeDisk        func(context.Context, string, int, string, string) error
+	startVM           func(context.Context, string, int) (string, error)
+	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 
 	cloneCalls     atomic.Int32
 	cloudInitCalls atomic.Int32
@@ -57,8 +58,11 @@ type fakePVE struct {
 func (f *fakePVE) GetNodes(ctx context.Context) ([]proxmox.Node, error) {
 	return f.getNodes(ctx)
 }
-func (f *fakePVE) ListVMs(ctx context.Context, n string) ([]proxmox.VMStatus, error) {
-	return f.listVMs(ctx, n)
+func (f *fakePVE) GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error) {
+	return f.getClusterVMs(ctx)
+}
+func (f *fakePVE) GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error) {
+	return f.getClusterStorage(ctx)
 }
 func (f *fakePVE) TemplateExists(ctx context.Context, n string, vmid int) (bool, error) {
 	return f.templateExists(ctx, n, vmid)
@@ -99,7 +103,10 @@ func happyFakePVE(t *testing.T) *fakePVE {
 				{Name: "alpha", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
 			}, nil
 		},
-		listVMs:        func(_ context.Context, _ string) ([]proxmox.VMStatus, error) { return nil, nil },
+		getClusterVMs: func(_ context.Context) ([]proxmox.ClusterVM, error) { return nil, nil },
+		getClusterStorage: func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+			return nil, nil
+		},
 		templateExists: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		nextVMID:       func(_ context.Context) (int, error) { return 200, nil },
 		cloneVM: func(_ context.Context, _, _ string, _, _ int, _ string) (string, error) {
@@ -379,8 +386,8 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 	fake := happyFakePVE(t)
 	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
 		return []proxmox.Node{
-			{Name: "alpha", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30},
-			{Name: "bravo", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30},
+			{Name: "alpha", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30, MaxCPU: 8},
+			{Name: "bravo", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30, MaxCPU: 8},
 		}, nil
 	}
 	captured := atomic.Pointer[string]{}
@@ -845,6 +852,201 @@ func TestProvision_VerifyErrorTreatedAsUnsafe(t *testing.T) {
 	// Should have advanced to 10.0.0.2 since the first verify "failed unsafe".
 	if res.IP != "10.0.0.2" {
 		t.Errorf("IP = %s, want 10.0.0.2 after transient verify error", res.IP)
+	}
+}
+
+// pickNodeFakePVE is a fake wired only for pickNode-style tests. The
+// orchestrated Provision path is exercised elsewhere; these tests focus on
+// the cluster-snapshot + scoring contract.
+func pickNodeFakePVE(t *testing.T) *fakePVE {
+	t.Helper()
+	f := happyFakePVE(t)
+	// Two-node cluster, both online and capacious.
+	f.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30, MaxCPU: 8, CPU: 0.1},
+			{Name: "bravo", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30, MaxCPU: 8, CPU: 0.1},
+		}, nil
+	}
+	return f
+}
+
+func newTestServiceWithCfg(t *testing.T, fake *fakePVE, cfg provision.Config) (*provision.Service, *ippool.Pool, *db.DB) {
+	t.Helper()
+	_, pool, database := newTestService(t, fake)
+	// Add bravo's templates with unique VMIDs so both nodes can host the OS.
+	bravoVMID := 9100
+	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+		if err := database.Create(&db.NodeTemplate{Node: "bravo", OS: os, VMID: bravoVMID}).Error; err != nil {
+			t.Fatalf("seed bravo template: %v", err)
+		}
+		bravoVMID++
+	}
+	cipher, err := secrets.New(make([]byte, secrets.KeyLen))
+	if err != nil {
+		t.Fatalf("secrets.New: %v", err)
+	}
+	keysSvc := sshkeys.New(database.DB, cipher)
+	return provision.New(fake, pool, database.DB, cipher, keysSvc, cfg), pool, database
+}
+
+func TestPickNode_DiskGateRejectsFullPool(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// alpha's local-lvm is full; bravo has plenty of room. Medium tier needs 30 GiB.
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "local-lvm", Node: "alpha", Total: 100 << 30, Used: 99 << 30, Shared: 0},
+			{Storage: "local-lvm", Node: "bravo", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+		}, nil
+	}
+	captured := atomic.Pointer[string]{}
+	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
+		t := target
+		captured.Store(&t)
+		return "UPID", nil
+	}
+
+	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "local-lvm",
+	})
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "disk-test-vm",
+		Tier:       "medium",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got := captured.Load()
+	if got == nil || *got != "bravo" {
+		t.Errorf("CloneVM target = %v, want bravo (alpha's disk too full)", got)
+	}
+}
+
+func TestPickNode_SharedStorageDedupes(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// Shared Ceph pool: appears once per node with identical capacity. The
+	// scorer must dedupe and stamp the same StorageInfo onto every node — and
+	// the medium tier (30 GiB) fits comfortably in the 200 GiB free pool.
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "ceph-pool", Node: "alpha", Total: 1 << 40, Used: 824 << 30, Shared: 1},
+			{Storage: "ceph-pool", Node: "bravo", Total: 1 << 40, Used: 824 << 30, Shared: 1},
+		}, nil
+	}
+
+	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "ceph-pool",
+	})
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "shared-vm",
+		Tier:       "medium",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+}
+
+func TestPickNode_StoppedVMsBlockPlacement(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// alpha looks idle live, but is hosting two stopped 7 GiB VMs (14 GiB
+	// committed). bravo is empty. Asking for medium (2 GiB) on a 16 GiB node
+	// would fit by live RAM but not by commitment — alpha should be rejected
+	// and bravo chosen.
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{
+			{VMID: 100, Node: "alpha", Status: "stopped", MaxMem: 7 << 30},
+			{VMID: 101, Node: "alpha", Status: "stopped", MaxMem: 7 << 30},
+		}, nil
+	}
+	captured := atomic.Pointer[string]{}
+	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
+		tt := target
+		captured.Store(&tt)
+		return "UPID", nil
+	}
+
+	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+	})
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "committed-vm",
+		Tier:       "large",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got := captured.Load()
+	if got == nil || *got != "bravo" {
+		t.Errorf("CloneVM target = %v, want bravo (alpha overcommitted by stopped VMs)", got)
+	}
+}
+
+func TestPickNode_RejectionMessageListsAllNodes(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// alpha excluded; bravo offline.
+	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", MaxMem: 16 << 30, Mem: 1 << 30, MaxCPU: 8},
+			{Name: "bravo", Status: "offline", MaxMem: 16 << 30, MaxCPU: 8},
+		}, nil
+	}
+
+	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		ExcludedNodes:    []string{"alpha"},
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+	})
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "noplace-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	})
+	var conflict *internalerrors.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ConflictError, got %T: %v", err, err)
+	}
+	if !strings.Contains(conflict.Error(), "alpha=excluded") {
+		t.Errorf("expected 'alpha=excluded' in error, got: %s", conflict.Error())
+	}
+	if !strings.Contains(conflict.Error(), "bravo=offline") {
+		t.Errorf("expected 'bravo=offline' in error, got: %s", conflict.Error())
 	}
 }
 
