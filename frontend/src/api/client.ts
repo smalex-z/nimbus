@@ -50,17 +50,37 @@ const unwrap = (instance: AxiosInstance, redirectOn401 = false) => {
       return response
     },
     (error) => {
+      const url: string = error.config?.url ?? ''
       if (redirectOn401) {
-        const url: string = error.config?.url ?? ''
         if (
           error.response?.status === 401 &&
           !url.includes('/auth/') &&
-          !url.includes('/me')
+          !url.includes('/me') &&
+          !url.includes('/access-code/')
         ) {
           window.location.href = '/login'
         }
       }
-      const message = error.response?.data?.error ?? error.message ?? 'unknown error'
+      const errMsg = error.response?.data?.error
+      // Server signals "non-admin user is no longer verified against the
+      // current access code" with a 403 + this sentinel error string. Stash
+      // the request the user was trying to make so the verify page can
+      // resume it after the user enters the new code.
+      if (
+        error.response?.status === 403 &&
+        errMsg === 'access_code_required' &&
+        !url.includes('/access-code/')
+      ) {
+        try {
+          sessionStorage.setItem('nimbus_resume_path', window.location.pathname + window.location.search)
+        } catch {
+          // sessionStorage may be unavailable (private mode); not fatal.
+        }
+        if (window.location.pathname !== '/verify') {
+          window.location.href = '/verify?stale=1'
+        }
+      }
+      const message = errMsg ?? error.message ?? 'unknown error'
       return Promise.reject(new Error(message))
     },
   )
@@ -174,6 +194,8 @@ export interface SaveConfigRequest {
   nameserver?: string
   search_domain?: string
   port?: string
+  gopher_api_url?: string
+  gopher_api_key?: string
 }
 
 export async function getSetupStatus(): Promise<SetupStatus> {
@@ -261,6 +283,85 @@ export async function saveOAuthSettings(
   req: SaveOAuthSettingsRequest,
 ): Promise<{ message: string }> {
   const { data } = await api.put<{ message: string }>('/settings/oauth', req)
+  return data
+}
+
+export interface AccessCodeView {
+  access_code: string
+  version: number
+}
+
+export async function getAccessCode(): Promise<AccessCodeView> {
+  const { data } = await api.get<AccessCodeView>('/settings/access-code')
+  return data
+}
+
+export async function regenerateAccessCode(): Promise<AccessCodeView> {
+  const { data } = await api.post<AccessCodeView>('/settings/access-code/regenerate', {})
+  return data
+}
+
+export async function getAccessCodeStatus(): Promise<{ verified: boolean }> {
+  const { data } = await api.get<{ verified: boolean }>('/access-code/status')
+  return data
+}
+
+export async function verifyAccessCode(code: string): Promise<{ verified: boolean }> {
+  const { data } = await api.post<{ verified: boolean }>('/access-code/verify', { code })
+  return data
+}
+
+export interface AuthorizedDomainsView {
+  domains: string[]
+}
+
+export async function getAuthorizedGoogleDomains(): Promise<AuthorizedDomainsView> {
+  const { data } = await api.get<AuthorizedDomainsView>('/settings/google-domains')
+  return data
+}
+
+export async function saveAuthorizedGoogleDomains(
+  domains: string[],
+): Promise<AuthorizedDomainsView> {
+  const { data } = await api.put<AuthorizedDomainsView>('/settings/google-domains', { domains })
+  return data
+}
+
+export interface AuthorizedOrgsView {
+  orgs: string[]
+}
+
+export async function getAuthorizedGitHubOrgs(): Promise<AuthorizedOrgsView> {
+  const { data } = await api.get<AuthorizedOrgsView>('/settings/github-orgs')
+  return data
+}
+
+export async function saveAuthorizedGitHubOrgs(
+  orgs: string[],
+): Promise<AuthorizedOrgsView> {
+  const { data } = await api.put<AuthorizedOrgsView>('/settings/github-orgs', { orgs })
+  return data
+}
+
+export interface GopherSettingsView {
+  api_url: string
+  configured: boolean
+}
+
+export interface SaveGopherSettingsRequest {
+  api_url?: string
+  api_key?: string
+}
+
+export async function getGopherSettings(): Promise<GopherSettingsView> {
+  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
+  return data
+}
+
+export async function saveGopherSettings(
+  req: SaveGopherSettingsRequest,
+): Promise<GopherSettingsView> {
+  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
   return data
 }
 
