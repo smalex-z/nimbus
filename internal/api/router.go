@@ -18,6 +18,7 @@ import (
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
+	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
@@ -25,20 +26,21 @@ import (
 
 // Deps bundles the dependencies the router needs.
 type Deps struct {
-	Auth       *service.AuthService
-	Provision  *provision.Service
-	Bootstrap  *bootstrap.Service
-	Keys       *sshkeys.Service
-	Pool       *ippool.Pool
-	Reconciler *ippool.Reconciler
-	Proxmox    *proxmox.Client
-	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
-	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
-	S3         *s3storage.Service
-	GPU        *gpu.Service // optional: nil disables /api/gpu/* routes
-	GX10Assets fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
-	Config     *config.Config
-	Restart    func()
+	Auth          *service.AuthService
+	Provision     *provision.Service
+	Bootstrap     *bootstrap.Service
+	Keys          *sshkeys.Service
+	Pool          *ippool.Pool
+	Reconciler    *ippool.Reconciler
+	Proxmox       *proxmox.Client
+	Tunnels       *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
+	TunnelURL     string         // configured Gopher URL; surfaced via /api/tunnels/info
+	SelfBootstrap *selftunnel.Service
+	S3            *s3storage.Service
+	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
+	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
+	Config        *config.Config
+	Restart       func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -61,11 +63,15 @@ func NewRouter(d Deps) http.Handler {
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler)
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
-	settings := handlers.NewSettings(d.Auth).
+	settingsBuilder := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
 		WithNimbusAppURL(d.Config.AppURL)
+	if d.SelfBootstrap != nil {
+		settingsBuilder = settingsBuilder.WithSelfBootstrap(d.SelfBootstrap)
+	}
+	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
 
 	var gpuHandler *handlers.GPU
@@ -181,6 +187,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/github-orgs", settings.SaveAuthorizedGitHubOrgs)
 				r.Get("/settings/gopher", settings.GetGopher)
 				r.Put("/settings/gopher", settings.SaveGopher)
+				r.Get("/settings/gopher/self-bootstrap", settings.SelfBootstrapStatus)
+				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
 				r.Get("/tunnels", tunnels.List)
 
 				// S3 storage (singleton MinIO VM) — admin-only.

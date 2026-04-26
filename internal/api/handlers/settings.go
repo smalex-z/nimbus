@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -34,13 +35,26 @@ type GPUConfigApplier interface {
 	SetGPUBootstrapConfig(provision.GPUBootstrapConfig)
 }
 
+// SelfBootstrap is implemented by selftunnel.Service. SaveGopher fires
+// Start in a goroutine after a successful credential save, and the
+// /self-bootstrap status/start endpoints proxy to it.
+//
+// SetGopherClient takes the concrete *tunnel.Client to avoid an interface
+// re-declaration that selftunnel.Service wouldn't satisfy by name.
+type SelfBootstrap interface {
+	Start(ctx context.Context) error
+	Status() (db.GopherSettings, error)
+	SetGopherClient(c *tunnel.Client)
+}
+
 // Settings handles admin-only configuration endpoints.
 type Settings struct {
-	auth         *service.AuthService
-	appliers     []TunnelClientApplier
-	tunnels      TunnelInfoSetter
-	gpuAppliers  []GPUConfigApplier
-	nimbusAppURL string // captured at construction so SaveGPU can build NimbusGPUAPI URL
+	auth          *service.AuthService
+	appliers      []TunnelClientApplier
+	tunnels       TunnelInfoSetter
+	gpuAppliers   []GPUConfigApplier
+	nimbusAppURL  string // captured at construction so SaveGPU can build NimbusGPUAPI URL
+	selfBootstrap SelfBootstrap
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -73,6 +87,14 @@ func (s *Settings) WithGPUAppliers(a ...GPUConfigApplier) *Settings {
 // caller.
 func (s *Settings) WithNimbusAppURL(u string) *Settings {
 	s.nimbusAppURL = u
+	return s
+}
+
+// WithSelfBootstrap wires the selftunnel.Service so SaveGopher can kick
+// off the self-bootstrap automatically + the modal endpoints have
+// something to talk to.
+func (s *Settings) WithSelfBootstrap(b SelfBootstrap) *Settings {
+	s.selfBootstrap = b
 	return s
 }
 
@@ -286,6 +308,20 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	if s.tunnels != nil {
 		s.tunnels.SetClient(client, settings.APIURL)
 	}
+	if s.selfBootstrap != nil {
+		s.selfBootstrap.SetGopherClient(client)
+	}
+
+	// Kick off the self-bootstrap when we now have a usable Gopher client.
+	// Errors here are non-fatal for the save itself — the modal will poll
+	// /self-bootstrap and surface whatever happens.
+	if client != nil && s.selfBootstrap != nil {
+		if err := s.selfBootstrap.Start(r.Context()); err != nil {
+			// Log via the response — no separate logger threaded in here.
+			// Non-fatal: the save itself still succeeded.
+			_ = err
+		}
+	}
 
 	response.Success(w, gopherSettingsView{
 		APIURL:     settings.APIURL,
@@ -375,6 +411,46 @@ func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 // (Worker-token regeneration is gone — operators don't see the token.
 // Re-pairing via Settings → Add GX10 produces a fresh worker token as
 // part of the handshake.)
+
+type selfBootstrapStatusView struct {
+	State     string `json:"state"`
+	Error     string `json:"error,omitempty"`
+	TunnelURL string `json:"tunnel_url,omitempty"`
+}
+
+// SelfBootstrapStatus handles GET /api/settings/gopher/self-bootstrap —
+// the Settings modal polls this to render the phase indicator.
+func (s *Settings) SelfBootstrapStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.selfBootstrap == nil {
+		response.Success(w, selfBootstrapStatusView{State: ""})
+		return
+	}
+	state, err := s.selfBootstrap.Status()
+	if err != nil {
+		response.InternalError(w, "failed to load bootstrap status")
+		return
+	}
+	response.Success(w, selfBootstrapStatusView{
+		State:     state.CloudBootstrapState,
+		Error:     state.CloudBootstrapError,
+		TunnelURL: state.CloudTunnelURL,
+	})
+}
+
+// SelfBootstrapStart handles POST /api/settings/gopher/self-bootstrap —
+// retry hook for the modal's "Try again" button after a failure. SaveGopher
+// invokes this path automatically; this endpoint exists for explicit retry.
+func (s *Settings) SelfBootstrapStart(w http.ResponseWriter, r *http.Request) {
+	if s.selfBootstrap == nil {
+		response.BadRequest(w, "self-bootstrap requires Gopher to be configured")
+		return
+	}
+	if err := s.selfBootstrap.Start(r.Context()); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"state": "started"})
+}
 
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
 // Issues a fresh code and bumps the version, invalidating every non-admin

@@ -407,7 +407,9 @@ func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
 
 // SaveGopherSettings persists Gopher credentials. Empty fields are treated as
 // "preserve existing" so the UI can rotate just the API key without
-// re-entering the URL (and vice versa).
+// re-entering the URL (and vice versa). Only the URL/key columns are
+// touched; CloudTunnel* fields are owned by selftunnel.Service and managed
+// separately via SaveCloudTunnelState.
 func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	existing, err := s.GetGopherSettings()
 	if err != nil {
@@ -419,8 +421,27 @@ func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	if next.APIKey == "" {
 		next.APIKey = existing.APIKey
 	}
-	next.ID = 1
-	return s.db.Save(&next).Error
+	return s.db.Model(&db.GopherSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"api_url": next.APIURL,
+		"api_key": next.APIKey,
+	}).Error
+}
+
+// SaveCloudTunnelState updates only the self-bootstrap columns on the
+// GopherSettings row. Used by selftunnel.Service to persist progress
+// (machine_id, tunnel_id, URL, state, error) without racing
+// SaveGopherSettings on the credentials columns.
+func (s *AuthService) SaveCloudTunnelState(state db.GopherSettings) error {
+	if _, err := s.GetGopherSettings(); err != nil {
+		return err
+	}
+	return s.db.Model(&db.GopherSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"cloud_machine_id":      state.CloudMachineID,
+		"cloud_tunnel_id":       state.CloudTunnelID,
+		"cloud_tunnel_url":      state.CloudTunnelURL,
+		"cloud_bootstrap_state": state.CloudBootstrapState,
+		"cloud_bootstrap_error": state.CloudBootstrapError,
+	}).Error
 }
 
 // GetGPUSettings returns the GX10 / GPU plane settings, creating an empty

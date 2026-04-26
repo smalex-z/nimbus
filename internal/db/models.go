@@ -60,10 +60,41 @@ type OAuthSettings struct {
 
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single
 // row (ID=1) is used. Empty APIURL means tunnel integration is disabled.
+//
+// CloudTunnel* fields hold the state of the Nimbus self-bootstrap — the
+// reverse tunnel that exposes Nimbus's own dashboard at cloud.<domain>
+// once Gopher is configured. Populated by selftunnel.Service in the
+// background after the admin saves Gopher creds; the Settings UI polls
+// CloudBootstrapState for progress.
 type GopherSettings struct {
 	ID     uint   `gorm:"primaryKey"`
 	APIURL string `gorm:"default:''"`
 	APIKey string `gorm:"default:''"`
+
+	// CloudMachineID is the Gopher ExternalMachine.ID for the Nimbus host
+	// itself. Set as soon as POST /api/v1/machines returns; cleared on
+	// teardown. Used for cleanup (DELETE /machines/:id) and for resuming
+	// bootstrap when CloudTunnelID is empty but CloudMachineID is set.
+	CloudMachineID string `gorm:"default:''"`
+	// CloudTunnelID is the Gopher tunnel record exposing Nimbus's HTTP
+	// port at cloud.<domain>. Set once the tunnel is active.
+	CloudTunnelID string `gorm:"default:''"`
+	// CloudTunnelURL is the public URL the Settings modal redirects to
+	// once the tunnel is active (e.g., "https://cloud.altsuite.co").
+	CloudTunnelURL string `gorm:"default:''"`
+	// CloudBootstrapState is the self-bootstrap state machine:
+	//   ""               — never attempted (or torn down)
+	//   "registering"    — POST /machines in flight
+	//   "installing"     — running curl|bash on the Nimbus host
+	//   "waiting_connect"— machine registered, polling for status=connected
+	//   "creating_tunnel"— machine connected, POST /tunnels in flight
+	//   "active"         — tunnel up, CloudTunnelURL populated
+	//   "failed"         — see CloudBootstrapError
+	CloudBootstrapState string `gorm:"default:''"`
+	// CloudBootstrapError carries the last failure reason. Cleared on a
+	// successful run; surfaced verbatim in the Settings modal so the
+	// operator can act on it.
+	CloudBootstrapError string `gorm:"default:''"`
 }
 
 // GPUSettings stores the GX10 (or single-host GPU) plane configuration. Only
