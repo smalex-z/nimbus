@@ -5,6 +5,7 @@ import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
 import StatusBadge from '@/components/ui/StatusBadge'
+import { buildSSHCommand, parseTunnelURL } from '@/lib/format'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
@@ -72,9 +73,11 @@ export default function MyVMs() {
 }
 
 function VMRow({ vm }: { vm: VM }) {
-  const sshCommand = vm.key_name
-    ? `ssh -i ~/.ssh/${vm.key_name} ${vm.username}@${vm.ip}`
-    : `ssh ${vm.username}@${vm.ip}`
+  const sshCommand = buildSSHCommand(vm.username, vm.ip, vm.key_name)
+  const tunnel = vm.tunnel_url ? parseTunnelURL(vm.tunnel_url) : undefined
+  const publicSSHCommand = tunnel
+    ? buildSSHCommand(vm.username, tunnel.host, vm.key_name, tunnel.port)
+    : undefined
 
   return (
     <Card className="p-5">
@@ -85,22 +88,19 @@ function VMRow({ vm }: { vm: VM }) {
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
           {vm.tunnel_url && (
-            <a
-              href={vm.tunnel_url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-block font-mono text-[11px] text-good underline mt-1 truncate max-w-full"
-              title={vm.tunnel_url}
-            >
+            <div className="font-mono text-[11px] text-good mt-1 truncate" title={vm.tunnel_url}>
               🌐 {vm.tunnel_url}
-            </a>
+            </div>
           )}
         </div>
         <span className="font-mono text-[11px] px-2.5 py-1 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider justify-self-start sm:justify-self-auto">
           {vm.tier}
         </span>
         <StatusBadge status={vm.status} />
-        <CopyButton value={sshCommand} label="COPY SSH" />
+        <div className="flex gap-1.5">
+          <CopyButton value={sshCommand} label={publicSSHCommand ? 'LAN' : 'COPY SSH'} />
+          {publicSSHCommand && <CopyButton value={publicSSHCommand} label="PUBLIC" />}
+        </div>
         {vm.key_name && <DownloadKeyButton vmId={vm.ID} />}
       </div>
     </Card>
