@@ -4,15 +4,13 @@ import {
   getAccessCode,
   getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
-  getGopherSettings,
   getOAuthSettings,
   regenerateAccessCode,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
-  saveGopherSettings,
   saveOAuthSettings,
 } from '@/api/client'
-import type { AccessCodeView, GopherSettingsView, OAuthSettingsView } from '@/api/client'
+import type { AccessCodeView, OAuthSettingsView } from '@/api/client'
 
 interface ProviderPanelProps {
   name: string
@@ -22,6 +20,7 @@ interface ProviderPanelProps {
   instructionsUrl: string
   instructionsLabel: string
   onSave: (clientId: string, clientSecret: string) => Promise<unknown>
+  children?: React.ReactNode
 }
 
 function ProviderPanel({
@@ -32,6 +31,7 @@ function ProviderPanel({
   instructionsUrl,
   instructionsLabel,
   onSave,
+  children,
 }: ProviderPanelProps) {
   const [clientId, setClientId] = useState(initialClientId)
   const [clientSecret, setClientSecret] = useState('')
@@ -147,6 +147,12 @@ function ProviderPanel({
           )}
         </div>
       </form>
+
+      {children && (
+        <div style={{ paddingTop: 18, borderTop: '1px solid var(--line)' }}>
+          {children}
+        </div>
+      )}
     </div>
   )
 }
@@ -349,7 +355,8 @@ function SetupNotes({ title, children }: { title: string; children: React.ReactN
   )
 }
 
-function GoogleDomainsPanel() {
+function GoogleDomainsSection() {
+  const [open, setOpen] = useState(false)
   const [domains, setDomains] = useState<string[]>([])
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(true)
@@ -395,139 +402,156 @@ function GoogleDomainsPanel() {
   }
 
   return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <summary
+        style={{
+          cursor: 'pointer',
+          listStyle: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          userSelect: 'none',
+          padding: '4px 0',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ color: 'var(--ink)', opacity: 0.7 }}>
-            <GoogleIcon size={18} />
-          </span>
-          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>
             Authorized Google domains
+          </span>
+          <span
+            className="n-pill"
+            style={{
+              color: 'var(--ink-mute)',
+              background: 'rgba(20,18,28,0.04)',
+              border: '1px solid var(--line)',
+            }}
+          >
+            {domains.length} domain{domains.length === 1 ? '' : 's'}
           </span>
         </div>
         <span
-          className="n-pill"
-          style={{
-            color: 'var(--ink-mute)',
-            background: 'rgba(20,18,28,0.04)',
-            border: '1px solid var(--line)',
-          }}
+          aria-hidden="true"
+          style={{ fontSize: 16, color: 'var(--ink-mute)', lineHeight: 1 }}
         >
-          {domains.length} domain{domains.length === 1 ? '' : 's'}
+          {open ? '▾' : '▸'}
         </span>
-      </div>
+      </summary>
 
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Google OAuth sign-ins from any of these domains skip the access code
-        entirely. New Google accounts whose email domain is <em>not</em> on
-        this list are blocked at sign-up. Leaving the list empty disables the
-        bypass — every Google sign-in still requires the access code.
-      </p>
+      <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          Google OAuth sign-ins from any of these domains skip the access code
+          entirely. New Google accounts whose email domain is <em>not</em> on
+          this list are blocked at sign-up. Leaving the list empty disables the
+          bypass — every Google sign-in still requires the access code.
+        </p>
 
-      <SetupNotes title="Setup notes">
-        <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <li>
-            Enter a bare domain — e.g. <code className="n-mono">acm.ucla.edu</code>, <code className="n-mono">example.com</code>.
-            A leading <code className="n-mono">@</code> is stripped automatically.
-          </li>
-          <li>
-            The bypass is dynamic: adding or removing a domain takes effect
-            on the user's very next request. A user already in the console
-            on a removed domain is sent back to the verify form.
-          </li>
-          <li>
-            For Google Workspace, this checks the email domain returned by
-            Google's <code className="n-mono">/userinfo</code> endpoint —
-            personal <code className="n-mono">@gmail.com</code> accounts and
-            domain-aliased addresses are matched on the <em>literal</em>
-            domain Google returns.
-          </li>
-        </ul>
-      </SetupNotes>
+        <SetupNotes title="Setup notes">
+          <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <li>
+              Enter a bare domain — e.g. <code className="n-mono">acm.ucla.edu</code>, <code className="n-mono">example.com</code>.
+              A leading <code className="n-mono">@</code> is stripped automatically.
+            </li>
+            <li>
+              The bypass is dynamic: adding or removing a domain takes effect
+              on the user's very next request. A user already in the console
+              on a removed domain is sent back to the verify form.
+            </li>
+            <li>
+              For Google Workspace, this checks the email domain returned by
+              Google's <code className="n-mono">/userinfo</code> endpoint —
+              personal <code className="n-mono">@gmail.com</code> accounts and
+              domain-aliased addresses are matched on the <em>literal</em>
+              domain Google returns.
+            </li>
+          </ul>
+        </SetupNotes>
 
-      {loading ? (
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
-      ) : (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {domains.length === 0 && (
-            <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
-              No domains authorized.
-            </span>
-          )}
-          {domains.map((d) => (
-            <span
-              key={d}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 6px 6px 12px',
-                borderRadius: 999,
-                background: 'rgba(248,175,130,0.12)',
-                border: '1px solid rgba(248,175,130,0.4)',
-                fontSize: 13,
-                color: '#9a5c2e',
-                fontFamily: 'Geist Mono, monospace',
-              }}
-            >
-              {d}
-              <button
-                type="button"
-                aria-label={`Remove ${d}`}
-                onClick={() => removeDomain(d)}
+        {loading ? (
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {domains.length === 0 && (
+              <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
+                No domains authorized.
+              </span>
+            )}
+            {domains.map((d) => (
+              <span
+                key={d}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  border: 'none',
-                  background: 'rgba(154,92,46,0.1)',
+                  gap: 8,
+                  padding: '6px 6px 6px 12px',
+                  borderRadius: 999,
+                  background: 'rgba(248,175,130,0.12)',
+                  border: '1px solid rgba(248,175,130,0.4)',
+                  fontSize: 13,
                   color: '#9a5c2e',
-                  cursor: 'pointer',
-                  fontSize: 14,
-                  lineHeight: 1,
-                  padding: 0,
+                  fontFamily: 'Geist Mono, monospace',
                 }}
               >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+                {d}
+                <button
+                  type="button"
+                  aria-label={`Remove ${d}`}
+                  onClick={() => removeDomain(d)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    border: 'none',
+                    background: 'rgba(154,92,46,0.1)',
+                    color: '#9a5c2e',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    lineHeight: 1,
+                    padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          void addDomain()
-        }}
-        style={{ display: 'flex', gap: 8 }}
-      >
-        <input
-          className="n-input"
-          type="text"
-          placeholder="example.com"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          style={{ flex: 1 }}
-        />
-        <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
-          Add
-        </button>
-      </form>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void addDomain()
+          }}
+          style={{ display: 'flex', gap: 8 }}
+        >
+          <input
+            className="n-input"
+            type="text"
+            placeholder="example.com"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
+            Add
+          </button>
+        </form>
 
-      {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-      {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
-    </div>
+        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+        {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+      </div>
+    </details>
   )
 }
 
-function GitHubOrgsPanel() {
+function GitHubOrgsSection() {
+  const [open, setOpen] = useState(false)
   const [orgs, setOrgs] = useState<string[]>([])
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(true)
@@ -574,197 +598,26 @@ function GitHubOrgsPanel() {
   }
 
   return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <summary
+        style={{
+          cursor: 'pointer',
+          listStyle: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          userSelect: 'none',
+          padding: '4px 0',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ color: 'var(--ink)', opacity: 0.7 }}>
-            <GithubIcon size={18} />
-          </span>
-          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>
             Authorized GitHub organizations
           </span>
-        </div>
-        <span
-          className="n-pill"
-          style={{
-            color: 'var(--ink-mute)',
-            background: 'rgba(20,18,28,0.04)',
-            border: '1px solid var(--line)',
-          }}
-        >
-          {orgs.length} org{orgs.length === 1 ? '' : 's'}
-        </span>
-      </div>
-
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        GitHub OAuth sign-ins from members of any of these organizations skip
-        the access code entirely. Sign-ins from accounts <em>not</em> in any
-        listed org are blocked at the GitHub callback. Leaving the list empty
-        disables the bypass — every GitHub sign-in still requires the access
-        code.
-      </p>
-
-      <SetupNotes title="Setup notes">
-        <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <li>
-            Enter the org's GitHub login — e.g. <code className="n-mono">acm-ucla</code>,
-            not the display name. Find it in the org URL:{' '}
-            <code className="n-mono">github.com/&lt;login&gt;</code>.
-          </li>
-          <li>
-            Org membership is captured at each GitHub login, including
-            private memberships (we request the <code className="n-mono">read:org</code> scope).
-          </li>
-          <li>
-            <strong>Org SSO orgs</strong> (most enterprise GitHub orgs)
-            require the Nimbus OAuth app to be authorized at the org level.
-            The org owner must approve the app on the org's
-            "Third-party access" page — until then, member queries from the
-            Nimbus app will return empty for that org.
-          </li>
-          <li>
-            User snapshots refresh on every GitHub login, so a user newly
-            added to an authorized org just needs to sign in once via GitHub
-            to gain bypass.
-          </li>
-        </ul>
-      </SetupNotes>
-
-      {loading ? (
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
-      ) : (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {orgs.length === 0 && (
-            <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
-              No organizations authorized.
-            </span>
-          )}
-          {orgs.map((o) => (
-            <span
-              key={o}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 6px 6px 12px',
-                borderRadius: 999,
-                background: 'rgba(27,23,38,0.06)',
-                border: '1px solid var(--line)',
-                fontSize: 13,
-                color: 'var(--ink)',
-                fontFamily: 'Geist Mono, monospace',
-              }}
-            >
-              {o}
-              <button
-                type="button"
-                aria-label={`Remove ${o}`}
-                onClick={() => removeOrg(o)}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  border: 'none',
-                  background: 'rgba(20,18,28,0.08)',
-                  color: 'var(--ink)',
-                  cursor: 'pointer',
-                  fontSize: 14,
-                  lineHeight: 1,
-                  padding: 0,
-                }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          void addOrg()
-        }}
-        style={{ display: 'flex', gap: 8 }}
-      >
-        <input
-          className="n-input"
-          type="text"
-          placeholder="acm-ucla"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          style={{ flex: 1 }}
-        />
-        <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
-          Add
-        </button>
-      </form>
-
-      {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-      {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
-    </div>
-  )
-}
-
-function GopherPanel() {
-  const [settings, setSettings] = useState<GopherSettingsView | null>(null)
-  const [apiURL, setAPIURL] = useState('')
-  const [apiKey, setAPIKey] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    getGopherSettings()
-      .then((s) => {
-        setSettings(s)
-        setAPIURL(s.api_url)
-      })
-      .catch(() => setError('Failed to load Gopher settings'))
-  }, [])
-
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    setSaved(false)
-    try {
-      setSaving(true)
-      const next = await saveGopherSettings({ api_url: apiURL, api_key: apiKey })
-      setSettings(next)
-      setAPIURL(next.api_url)
-      setAPIKey('')
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2500)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const configured = settings?.configured ?? false
-
-  return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-          Gopher tunnels
-        </span>
-        {configured ? (
-          <span className="n-pill n-pill-ok">
-            <span className="n-pill-dot" />
-            configured
-          </span>
-        ) : (
           <span
             className="n-pill"
             style={{
@@ -773,63 +626,129 @@ function GopherPanel() {
               border: '1px solid var(--line)',
             }}
           >
-            not configured
+            {orgs.length} org{orgs.length === 1 ? '' : 's'}
           </span>
-        )}
-      </div>
-
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Gopher is the reverse-tunnel gateway used to expose VMs at public
-        hostnames. Provide the API URL + key and Nimbus can request tunnels at
-        provision time. Leave both blank to disable tunneling.
-      </p>
-
-      <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div className="n-field">
-          <label className="n-label" htmlFor="gopher-api-url">API URL</label>
-          <input
-            id="gopher-api-url"
-            className="n-input"
-            type="text"
-            placeholder="https://gopher.example.com"
-            value={apiURL}
-            onChange={(e) => setAPIURL(e.target.value)}
-          />
         </div>
-        <div className="n-field">
-          <label className="n-label" htmlFor="gopher-api-key">
-            API key
-            {configured && (
-              <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--ink-mute)', fontWeight: 400 }}>
-                (leave blank to keep existing)
+        <span
+          aria-hidden="true"
+          style={{ fontSize: 16, color: 'var(--ink-mute)', lineHeight: 1 }}
+        >
+          {open ? '▾' : '▸'}
+        </span>
+      </summary>
+
+      <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          GitHub OAuth sign-ins from members of any of these organizations skip
+          the access code entirely. Sign-ins from accounts <em>not</em> in any
+          listed org are blocked at the GitHub callback. Leaving the list empty
+          disables the bypass — every GitHub sign-in still requires the access
+          code.
+        </p>
+
+        <SetupNotes title="Setup notes">
+          <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <li>
+              Enter the org's GitHub login — e.g. <code className="n-mono">acm-ucla</code>,
+              not the display name. Find it in the org URL:{' '}
+              <code className="n-mono">github.com/&lt;login&gt;</code>.
+            </li>
+            <li>
+              Org membership is captured at each GitHub login, including
+              private memberships (we request the <code className="n-mono">read:org</code> scope).
+            </li>
+            <li>
+              <strong>Org SSO orgs</strong> (most enterprise GitHub orgs)
+              require the Nimbus OAuth app to be authorized at the org level.
+              The org owner must approve the app on the org's
+              "Third-party access" page — until then, member queries from the
+              Nimbus app will return empty for that org.
+            </li>
+            <li>
+              User snapshots refresh on every GitHub login, so a user newly
+              added to an authorized org just needs to sign in once via GitHub
+              to gain bypass.
+            </li>
+          </ul>
+        </SetupNotes>
+
+        {loading ? (
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {orgs.length === 0 && (
+              <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
+                No organizations authorized.
               </span>
             )}
-          </label>
+            {orgs.map((o) => (
+              <span
+                key={o}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 6px 6px 12px',
+                  borderRadius: 999,
+                  background: 'rgba(27,23,38,0.06)',
+                  border: '1px solid var(--line)',
+                  fontSize: 13,
+                  color: 'var(--ink)',
+                  fontFamily: 'Geist Mono, monospace',
+                }}
+              >
+                {o}
+                <button
+                  type="button"
+                  aria-label={`Remove ${o}`}
+                  onClick={() => removeOrg(o)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    border: 'none',
+                    background: 'rgba(20,18,28,0.08)',
+                    color: 'var(--ink)',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    lineHeight: 1,
+                    padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void addOrg()
+          }}
+          style={{ display: 'flex', gap: 8 }}
+        >
           <input
-            id="gopher-api-key"
             className="n-input"
-            type="password"
-            placeholder={configured ? '••••••••' : 'Paste your Gopher API key'}
-            value={apiKey}
-            onChange={(e) => setAPIKey(e.target.value)}
+            type="text"
+            placeholder="acm-ucla"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            style={{ flex: 1 }}
           />
-        </div>
+          <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
+            Add
+          </button>
+        </form>
 
         {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            type="submit"
-            className="n-btn n-btn-primary"
-            disabled={saving}
-            style={{ minWidth: 100 }}
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
-        </div>
-      </form>
-    </div>
+        {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+      </div>
+    </details>
   )
 }
 
@@ -883,16 +802,6 @@ export default function Settings() {
           {settings && (
             <>
               <ProviderPanel
-                name="GitHub"
-                icon={<GithubIcon size={20} />}
-                clientId={settings.github_client_id}
-                configured={settings.github_configured}
-                instructionsUrl="https://github.com/settings/applications/new"
-                instructionsLabel="github.com/settings/applications/new"
-                onSave={handleSaveGitHub}
-              />
-              <GitHubOrgsPanel />
-              <ProviderPanel
                 name="Google"
                 icon={<GoogleIcon size={20} />}
                 clientId={settings.google_client_id}
@@ -900,9 +809,20 @@ export default function Settings() {
                 instructionsUrl="https://console.cloud.google.com/apis/credentials"
                 instructionsLabel="Google Cloud Console"
                 onSave={handleSaveGoogle}
-              />
-              <GoogleDomainsPanel />
-              <GopherPanel />
+              >
+                <GoogleDomainsSection />
+              </ProviderPanel>
+              <ProviderPanel
+                name="GitHub"
+                icon={<GithubIcon size={20} />}
+                clientId={settings.github_client_id}
+                configured={settings.github_configured}
+                instructionsUrl="https://github.com/settings/applications/new"
+                instructionsLabel="github.com/settings/applications/new"
+                onSave={handleSaveGitHub}
+              >
+                <GitHubOrgsSection />
+              </ProviderPanel>
             </>
           )}
         </div>

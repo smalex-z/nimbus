@@ -7,6 +7,7 @@ import RequireAdmin from '@/components/RequireAdmin'
 import RequireAuth from '@/components/RequireAuth'
 import RequireVerified from '@/components/RequireVerified'
 import Admin from '@/pages/Admin'
+import GopherTunnels from '@/pages/GopherTunnels'
 import Keys from '@/pages/Keys'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
@@ -82,6 +83,7 @@ export default function App() {
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
+                      <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>
