@@ -34,11 +34,13 @@ import (
 	"time"
 )
 
-// Status values returned by Gopher for both machines and tunnels.
+// Status values returned by Gopher. Machines transition pending → connected →
+// failed; tunnels are active|failed (synchronous create).
 const (
-	StatusPending = "pending"
-	StatusActive  = "active"
-	StatusFailed  = "failed"
+	StatusPending   = "pending"
+	StatusConnected = "connected"
+	StatusActive    = "active"
+	StatusFailed    = "failed"
 )
 
 // Client wraps the Gopher external API.
@@ -77,9 +79,11 @@ func New(baseURL, apiKey string, timeout time.Duration) (*Client, error) {
 // Machine is the canonical Gopher object — a host that runs the rathole
 // client. Field names match Gopher's JSON. BootstrapURL is set on creation
 // (one-shot, used by `curl … | sh` to link the VM). Once Status flips to
-// "active", Gopher populates the public-SSH connection details (host/port);
-// the exact field names there are inferred from the design doc and the
-// response shape will be confirmed on the first real provision.
+// "connected", the machine's reverse tunnel is established; with
+// PublicSSH=true, Gopher exposes SSH at the gateway. The exact response
+// fields for host/port are inferred from the design — the live API today
+// returns only {id, status, public_ssh, bootstrap_url, error, created_at},
+// so callers must derive host:port from settings until Gopher exposes them.
 type Machine struct {
 	ID            string `json:"id"`
 	Status        string `json:"status"`
