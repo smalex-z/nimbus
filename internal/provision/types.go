@@ -29,11 +29,11 @@ type Request struct {
 	Subdomain    string
 	TunnelPort   int
 
-	// SkipGPUBootstrap, when true, opts the VM out of the GPU env-var
-	// injection step (default off — GPU env is delivered to every VM when
-	// the GPU plane is configured cluster-wide). Useful for VMs that should
-	// have nothing to do with the inference server / job queue.
-	SkipGPUBootstrap bool
+	// EnableGPU opts the VM into the GPU env-var injection step. Default
+	// off — most VMs have nothing to do with the inference server / job
+	// queue, so we don't bake `OPENAI_BASE_URL` and the `gx10` CLI into
+	// every guest. Ignored when the GPU plane isn't configured cluster-wide.
+	EnableGPU bool
 }
 
 // Result is the value returned to the user after a successful provision.
