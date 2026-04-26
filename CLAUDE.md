@@ -252,40 +252,113 @@ These three packages co-evolve. After any non-trivial edit:
 
 ## Gopher tunnel integration (Phase 2)
 
-Optional. Set `GOPHER_API_URL` + `GOPHER_API_KEY` to enable. When `GOPHER_API_URL`
-is empty `tunnel.New` returns `(nil, nil)` and `provision.Service` silently
-ignores `public_tunnel` fields on incoming requests.
+Gopher is ACM@UCLA's reverse-tunnel gateway (rathole + Caddy). Nimbus uses its
+external API to expose VMs at public hostnames. The integration is optional —
+when no credentials are configured, every tunnel code path silently no-ops.
 
-**Provision-time tunnels are SSH only by design.** The form exposes a single
-"Expose SSH publicly" checkbox + subdomain input — `target_port` defaults to
-22 server-side. The intent is to get SSH reachable before layering app
-traffic on top; multi-port tunnels for HTTP/custom services will be added
-through a separate post-provision surface. `provision.Request.TunnelPort`
-still exists so scripts/tests can override, but the API and UI lock to 22.
-The SPA fetches `GET /api/tunnels/info` (returns `{enabled, host}`) at form
-load so it can preview `<subdomain>.<host>` without hardcoding the Gopher
-domain.
+### Configuration source of truth: the DB, not env vars
 
-Provision flow with tunnel enabled:
+Credentials live in `db.GopherSettings` (singleton, ID=1). Admins manage them
+from **Settings → Gopher tunnels**; saving rebuilds the live `tunnel.Client`
+and pushes it to every registered consumer (`provision.Service` via
+`SetTunnelClient`, the admin tunnels handler via `SetClient`) — **no restart
+required**.
 
-1. **Local validation**: subdomain syntax checked before IP reserve.
-2. **After Reserve + Verify**: register with Gopher (target_ip = reserved IP,
-   target_port = 80). HTTP 409 → `ValidationError(field=subdomain)` with the IP
-   released by the deferred Release. Other errors → log + soft-fail
-   (`tunnel_error` set, VM still provisioned). On success: defer-delete
-   triggered on any later failure.
-3. **After WaitForIP**: if the VM is reachable (no warning), Nimbus SSHes in
-   with the resolved private key and runs `curl -fsSL <bootstrap_url> | sh`.
-   On soft-success (VM unreachable from Nimbus), the bootstrap is **skipped**
-   and `tunnel_error` carries the manual recovery command.
-4. **Poll** Gopher GET /tunnels/:id every 3 s for up to 60 s. Active → `tunnel_url`
-   on Result + persisted on the VM row. Otherwise → `tunnel_error` set, tunnel
-   left registered for the user to retry.
+Backwards compat: on startup, if the DB row is empty AND `GOPHER_API_URL` /
+`GOPHER_API_KEY` env vars are set, `main.go` seeds the DB once and logs the
+migration. After that, env vars are ignored. Old `.env`-based deployments
+continue to work without operator intervention.
+
+Plumbing the live-reload uses two small interfaces in
+`internal/api/handlers/settings.go`:
+
+```go
+type TunnelClientApplier interface { SetTunnelClient(*tunnel.Client) }
+type TunnelInfoSetter   interface { SetClient(c *tunnel.Client, apiURL string) }
+```
+
+`Settings.WithTunnelAppliers(...)` and `WithTunnelInfoSetter(...)` register
+them at construction time in the router.
+
+### Provision-time tunnels are SSH-only by design
+
+One checkbox on the Provision form: **Expose SSH publicly**. No subdomain
+input, no port input, no surprises.
+
+- `target_port` defaults to 22 server-side. `provision.Request.TunnelPort`
+  remains for scripts/tests but the UI/API don't surface it.
+- `subdomain` is **not** an SSH concept (subdomains are HTTP-only via
+  wildcard DNS at the gateway) — Gopher's API still wants a tunnel
+  identifier, so the handler defaults `Subdomain` to the VM `Hostname`
+  when omitted. The operator never types it.
+- Multi-port HTTP tunnels for app traffic on the VM will be a separate
+  post-provision surface. Provision = SSH-up, period.
+
+### Routing-host preview (`/api/tunnels/info`)
+
+`GET /api/tunnels/info` is public (no auth) and returns `{enabled, host}`
+where `host` is the **routable hostname Gopher will expose SSH on**:
+
+- Compares DNS for the apex domain (e.g. `altsuite.co`) against the API
+  host (e.g. `router.altsuite.co`).
+- If they resolve to the same IP, the apex doubles as the gateway →
+  return apex (shorter, friendlier).
+- If they diverge — operator runs personal site on the apex — return the
+  API host.
+- Any DNS failure → fall back to the API host. Better long-but-correct
+  than misleading.
+
+Apex extraction is naive: strip the leftmost label. Fine for
+`router.example.com` deployments; would need a public-suffix list to
+handle `example.co.uk` correctly. Live confirmed via `LookupHost` against
+`router.altsuite.co` and `altsuite.co` (same IP).
+
+The SSH lands at `<host>:<port>` where the port is **assigned by Gopher
+post-provision**. Result screen shows whatever Gopher returns as
+`tunnel_url`.
+
+### Provision flow with tunnel enabled
+
+1. **Pre-flight**: subdomain syntax checked locally (cheap reject, even
+   though we usually default the value).
+2. **After Reserve + Verify**: register with Gopher
+   (`target_ip = reserved IP, target_port = 22`). HTTP 409 →
+   `ValidationError(field=subdomain)` with the IP released by the
+   deferred Release. Other errors → log + soft-fail (`tunnel_error` set,
+   VM still provisioned). On success: defer-delete armed for any later
+   failure.
+3. **After WaitForIP**: if the VM is reachable (no warning), Nimbus SSHes
+   in with the resolved private key and runs
+   `curl -fsSL <bootstrap_url> | sh`. Dial+handshake retries 3× with 5 s
+   back-off; the remote command itself is single-shot. On soft-success
+   (VM unreachable from Nimbus), the bootstrap is **skipped** and
+   `tunnel_error` carries the manual recovery command.
+4. **Poll** Gopher `GET /tunnels/:id` every 3 s for up to 60 s. Active →
+   `tunnel_url` on Result + persisted on the VM row. Otherwise →
+   `tunnel_error` set, tunnel **left registered** for the user to retry
+   manually.
 5. **VM-side never fails for tunnel reasons** — design §10 invariant.
 
-The bootstrap step needs a private key. If only a public key is in the SSHKey
-row (the user imported a pubkey-only entry, or attached one later), the
-bootstrap is skipped with `tunnel_error="private half not available"`.
+The bootstrap step needs a private key. If only a public key is in the
+linked SSHKey row (user imported a pubkey-only entry, or attached one
+later), the bootstrap is skipped with
+`tunnel_error="private half not available"`.
+
+### Gopher API envelope
+
+Gopher wraps every response in `{success, data, error}`. List endpoints
+nest pagination inside data: `{items, limit, offset, total}`. The decoder
+in `internal/tunnel/client.go` handles both — confirmed against
+`https://router.altsuite.co` (envelope shape verified, paginated list
+unwrapped correctly, 404 surfaces the envelope's `error` field). 409 on
+POST is mapped to the typed `ErrSubdomainTaken`. 404 on DELETE is treated
+as success (idempotent retry).
+
+The Tunnel object's specific JSON field names (`id`, `subdomain`, `status`,
+`url`, `bootstrap_url`, `target_ip`, `target_port`) come from the design doc
+and **have not been verified against a real POST** as of this writing — the
+first live provision exercises them. If a name diverges, the decoder will
+surface a clear `decode data for POST /api/v1/tunnels: ...` error.
 
 ## Configuration knobs added in this branch
 
