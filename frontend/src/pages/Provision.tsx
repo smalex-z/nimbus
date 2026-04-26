@@ -538,47 +538,60 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
         )}
       </div>
 
-      {tunnelInfo?.enabled && (
-        <div className="flex flex-col gap-2">
-          <label className="text-[13px] font-medium text-ink">Public access</label>
-          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
-            <input
-              type="checkbox"
-              checked={form.publicTunnel}
-              onChange={(e) => updateForm('publicTunnel', e.target.checked)}
-              className="mt-0.5 w-4 h-4 accent-ink"
-            />
-            <div className="flex-1">
-              <div className="text-sm font-medium">Expose SSH publicly</div>
-              <div className="text-xs text-ink-3 mt-0.5">
-                Bootstraps a Gopher reverse tunnel to this VM's port 22 so you
-                can SSH in from anywhere. Other services can be exposed later
-                from the machine page.
+      <div className="flex flex-col gap-2">
+        <label className="text-[13px] font-medium text-ink">Public access</label>
+        <label
+          className={`flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
+            tunnelInfo?.enabled
+              ? 'cursor-pointer hover:border-ink/40'
+              : 'cursor-not-allowed opacity-60'
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={form.publicTunnel}
+            onChange={(e) => updateForm('publicTunnel', e.target.checked)}
+            disabled={!tunnelInfo?.enabled}
+            className="mt-0.5 w-4 h-4 accent-ink disabled:cursor-not-allowed"
+          />
+          <div className="flex-1">
+            <div className="text-sm font-medium">Expose SSH publicly</div>
+            <div className="text-xs text-ink-3 mt-0.5">
+              Bootstraps a Gopher reverse tunnel to this VM's port 22 so you
+              can SSH in from anywhere. Other services can be exposed later
+              from the machine page.
+            </div>
+            {!tunnelInfo?.enabled && (
+              <div className="text-xs text-warn mt-1.5">
+                Tunnel integration not configured. Set{' '}
+                <span className="font-mono">GOPHER_API_URL</span> and{' '}
+                <span className="font-mono">GOPHER_API_KEY</span> on the server,
+                then restart, to enable.
               </div>
-            </div>
-          </label>
-          {form.publicTunnel && (
-            <div className="mt-2 flex flex-col gap-2">
-              <Input
-                label="Subdomain"
-                placeholder="my-project"
-                value={form.subdomain}
-                onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
-                error={
-                  form.subdomain && !isValidSubdomain(form.subdomain)
-                    ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
-                    : undefined
-                }
-                hint={
-                  isValidSubdomain(form.subdomain) && tunnelInfo?.host
-                    ? `Will route through ${form.subdomain}.${tunnelInfo.host} — Gopher assigns the public port after the tunnel comes up.`
-                    : `Will route through <subdomain>.${tunnelInfo?.host ?? 'gopher'} — public port assigned by Gopher post-provision.`
-                }
-              />
-            </div>
-          )}
-        </div>
-      )}
+            )}
+          </div>
+        </label>
+        {form.publicTunnel && tunnelInfo?.enabled && (
+          <div className="mt-2 flex flex-col gap-2">
+            <Input
+              label="Subdomain"
+              placeholder="my-project"
+              value={form.subdomain}
+              onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
+              error={
+                form.subdomain && !isValidSubdomain(form.subdomain)
+                  ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
+                  : undefined
+              }
+              hint={
+                isValidSubdomain(form.subdomain) && tunnelInfo.host
+                  ? `Will route through ${form.subdomain}.${tunnelInfo.host} — Gopher assigns the public port after the tunnel comes up.`
+                  : `Will route through <subdomain>.${tunnelInfo.host || 'gopher'} — public port assigned by Gopher post-provision.`
+              }
+            />
+          </div>
+        )}
+      </div>
     </div>
   )
 }

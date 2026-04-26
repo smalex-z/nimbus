@@ -211,6 +211,34 @@ func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
 	return s.db.Save(&next).Error
 }
 
+// GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
+// default empty row on first call.
+func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
+	var settings db.GopherSettings
+	err := s.db.FirstOrCreate(&settings, db.GopherSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveGopherSettings persists Gopher credentials. Empty fields are treated as
+// "preserve existing" so the UI can rotate just the API key without
+// re-entering the URL (and vice versa). Both fields cleared on the wire still
+// blanks them out — the handler is responsible for distinguishing
+// "unchanged" from "explicitly cleared" if it cares.
+func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
+	existing, err := s.GetGopherSettings()
+	if err != nil {
+		return err
+	}
+	if next.APIURL == "" {
+		next.APIURL = existing.APIURL
+	}
+	if next.APIKey == "" {
+		next.APIKey = existing.APIKey
+	}
+	next.ID = 1
+	return s.db.Save(&next).Error
+}
+
 // RegisterFirstAdmin creates the first admin account. Returns ErrUsersExist if
 // any user already exists — only valid for the initial setup wizard.
 func (s *AuthService) RegisterFirstAdmin(p RegisterParams) (*UserView, error) {

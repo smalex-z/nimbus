@@ -102,7 +102,7 @@ func main() {
 	}
 
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.OAuthSettings{},
+		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{},
 		ippool.Model(),
 	)
@@ -188,14 +188,34 @@ func main() {
 	})
 	provSvc.SetIPVerifier(reconciler)
 
-	// Optional Gopher tunnel client. nil when GOPHER_API_URL is unset — the
-	// service then silently skips tunnel work even if the request asks for it.
-	tunnelClient, err := tunnel.New(cfg.GopherAPIURL, cfg.GopherAPIKey, 15*time.Second)
+	// Resolve Gopher settings. The DB row is the source of truth (admin can
+	// edit it live from the Settings page); env vars are a one-shot seed for
+	// existing deployments that configured Gopher before the Settings UI
+	// existed. If the DB has values, they win and the env vars are ignored.
+	gopherSettings, err := authSvc.GetGopherSettings()
+	if err != nil {
+		log.Fatalf("failed to load Gopher settings: %v", err)
+	}
+	if gopherSettings.APIURL == "" && gopherSettings.APIKey == "" &&
+		(cfg.GopherAPIURL != "" || cfg.GopherAPIKey != "") {
+		if err := authSvc.SaveGopherSettings(db.GopherSettings{
+			APIURL: cfg.GopherAPIURL,
+			APIKey: cfg.GopherAPIKey,
+		}); err != nil {
+			log.Printf("warning: failed to seed Gopher settings from env: %v", err)
+		} else {
+			log.Printf("seeded Gopher settings from env vars (one-time migration)")
+			gopherSettings.APIURL = cfg.GopherAPIURL
+			gopherSettings.APIKey = cfg.GopherAPIKey
+		}
+	}
+
+	tunnelClient, err := tunnel.New(gopherSettings.APIURL, gopherSettings.APIKey, 15*time.Second)
 	if err != nil {
 		log.Fatalf("failed to init tunnel client: %v", err)
 	}
 	if tunnelClient != nil {
-		log.Printf("gopher tunnel integration enabled (url=%s)", cfg.GopherAPIURL)
+		log.Printf("gopher tunnel integration enabled (url=%s)", gopherSettings.APIURL)
 		provSvc.SetTunnelClient(tunnelClient)
 	}
 
@@ -224,6 +244,7 @@ func main() {
 		Reconciler: reconciler,
 		Proxmox:    pveClient,
 		Tunnels:    tunnelClient,
+		TunnelURL:  gopherSettings.APIURL,
 		Config:     cfg,
 		Restart:    restartSelf,
 	})
