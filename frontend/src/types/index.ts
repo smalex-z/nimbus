@@ -133,6 +133,12 @@ export interface ClusterVM {
   status: ClusterVMStatus
   source: VMSource
   nimbus_managed: boolean
+  // id is the Nimbus DB row id; present only for local-source VMs. Used by
+  // the admin SSH modal to call the per-VM private-key download endpoint.
+  id?: number
+  // key_name is the SSH key file name; present only for local-source VMs
+  // that were provisioned with a vault-stored key.
+  key_name?: string
   hostname?: string
   ip?: string
   // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)
