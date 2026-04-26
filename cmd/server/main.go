@@ -190,6 +190,17 @@ func main() {
 	})
 	provSvc.SetIPVerifier(reconciler)
 
+	// Backfill Nimbus marker tags onto VMs provisioned by older builds that
+	// didn't tag on creation. Idempotent and best-effort — failures are logged
+	// but don't abort startup.
+	tagBackfillCtx, tagBackfillCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if n, err := provSvc.BackfillTags(tagBackfillCtx); err != nil {
+		log.Printf("warning: tag backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("backfill: stamped nimbus tags onto %d VM(s)", n)
+	}
+	tagBackfillCancel()
+
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 	})

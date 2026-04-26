@@ -352,6 +352,19 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }
 
+// SetVMTags writes the given tag list to a VM's `tags` config field, replacing
+// any prior value. Pass an empty slice to clear all tags. Tags are sent as a
+// `;`-separated string per Proxmox's wire format.
+//
+// Callers that need to preserve user-applied tags should read existing tags
+// first (via GetVMConfig) and pass the merged list in.
+func (c *Client) SetVMTags(ctx context.Context, node string, vmid int, tags []string) error {
+	params := url.Values{}
+	params.Set("tags", JoinTags(tags))
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
 // ResizeDisk grows a disk on a stopped VM. size is the Proxmox-style delta —
 // "+10G" adds 10 gigabytes.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
@@ -745,6 +758,136 @@ func (c *Client) ListClusterIPs(ctx context.Context) ([]ClusterIP, error) {
 		return out, errors.Join(errs...)
 	}
 	return out, nil
+}
+
+// GetClusterVMDetails walks every online node and returns a per-VM snapshot
+// enriched with IP (cloud-init `ipconfig0`, falling back to qemu-guest-agent),
+// raw tags, and `ostype`. Templates are excluded.
+//
+// This is the data source for the admin cluster-VM view. It is intentionally
+// separate from ListClusterIPs (which the IP-pool reconciler depends on) so
+// failures in this richer walk can't poison the IP-allocation truth source.
+//
+// Per-node walks run concurrently up to listClusterIPsConcurrency. Per-VM
+// agent probes are best-effort: a VM whose agent is disabled or unreachable
+// produces an entry with IP="" rather than failing the walk.
+func (c *Client) GetClusterVMDetails(ctx context.Context) ([]ClusterVMDetail, error) {
+	nodes, err := c.GetNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+
+	var (
+		mu   sync.Mutex
+		out  []ClusterVMDetail
+		errs []error
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, listClusterIPsConcurrency)
+	)
+
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		nodeName := n.Name
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			details, err := c.collectNodeDetails(ctx, nodeName)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("node %s: %w", nodeName, err))
+			}
+			out = append(out, details...)
+		}()
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return out, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+// collectNodeDetails enriches every non-template VM on one node with its
+// config (ipconfig0, tags, ostype) and an agent IP fallback. A single bad VMID
+// config does not drop the whole node — the failed entry is returned with
+// whatever fields we managed to populate.
+func (c *Client) collectNodeDetails(ctx context.Context, node string) ([]ClusterVMDetail, error) {
+	vms, err := c.ListVMs(ctx, node)
+	if err != nil {
+		return nil, fmt.Errorf("list vms: %w", err)
+	}
+	out := make([]ClusterVMDetail, 0, len(vms))
+	for _, vm := range vms {
+		if vm.Template != 0 {
+			continue
+		}
+		detail := ClusterVMDetail{
+			VMID:   vm.VMID,
+			Node:   node,
+			Name:   vm.Name,
+			Status: vm.Status,
+		}
+		cfg, err := c.GetVMConfig(ctx, node, vm.VMID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			out = append(out, detail)
+			continue
+		}
+		if raw, _ := cfg["tags"].(string); raw != "" {
+			detail.Tags = SplitTags(raw)
+		}
+		if ostype, _ := cfg["ostype"].(string); ostype != "" {
+			detail.OSType = ostype
+		}
+		if raw, _ := cfg["ipconfig0"].(string); raw != "" {
+			if ip, ok := ParseIPConfig0(raw); ok {
+				detail.IP = ip
+				detail.IPSource = "ipconfig0"
+			}
+		}
+		// Fall back to qemu-guest-agent when the VM is running and lacks a
+		// parseable static IP (typical for externally-created VMs).
+		if detail.IP == "" && vm.Status == "running" {
+			if ip := c.firstAgentIPv4(ctx, node, vm.VMID); ip != "" {
+				detail.IP = ip
+				detail.IPSource = "agent"
+			}
+		}
+		out = append(out, detail)
+	}
+	return out, nil
+}
+
+// firstAgentIPv4 returns the first non-loopback IPv4 reported by the guest
+// agent, or "" on any error / no usable address. Best-effort — the agent
+// returns 500 on VMs without it installed/running, which we silently skip.
+func (c *Client) firstAgentIPv4(ctx context.Context, node string, vmid int) string {
+	ifaces, err := c.GetAgentInterfaces(ctx, node, vmid)
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Name == "lo" {
+			continue
+		}
+		for _, addr := range iface.IPAddresses {
+			if addr.IPAddressType != "ipv4" {
+				continue
+			}
+			if addr.IPAddress == "" || strings.HasPrefix(addr.IPAddress, "127.") {
+				continue
+			}
+			return addr.IPAddress
+		}
+	}
+	return ""
 }
 
 // collectNodeIPs lists VMs on a single node and parses each one's ipconfig0.

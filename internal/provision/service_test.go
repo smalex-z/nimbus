@@ -38,11 +38,13 @@ type fakePVE struct {
 	getNodes          func(context.Context) ([]proxmox.Node, error)
 	getClusterVMs     func(context.Context) ([]proxmox.ClusterVM, error)
 	getClusterStorage func(context.Context) ([]proxmox.ClusterStorage, error)
+	getVMConfig       func(context.Context, string, int) (map[string]any, error)
 	templateExists    func(context.Context, string, int) (bool, error)
 	nextVMID          func(context.Context) (int, error)
 	cloneVM           func(context.Context, string, string, int, int, string) (string, error)
 	waitForTask       func(context.Context, string, string, time.Duration) error
 	setCloudInit      func(context.Context, string, int, proxmox.CloudInitConfig) error
+	setVMTags         func(context.Context, string, int, []string) error
 	resizeDisk        func(context.Context, string, int, string, string) error
 	startVM           func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
@@ -60,6 +62,12 @@ func (f *fakePVE) GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error
 }
 func (f *fakePVE) GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error) {
 	return f.getClusterStorage(ctx)
+}
+func (f *fakePVE) GetVMConfig(ctx context.Context, n string, vmid int) (map[string]any, error) {
+	if f.getVMConfig == nil {
+		return map[string]any{}, nil
+	}
+	return f.getVMConfig(ctx, n, vmid)
 }
 func (f *fakePVE) TemplateExists(ctx context.Context, n string, vmid int) (bool, error) {
 	return f.templateExists(ctx, n, vmid)
@@ -79,6 +87,12 @@ func (f *fakePVE) SetCloudInit(ctx context.Context, n string, vmid int, cfg prox
 	c := cfg
 	f.cloudInitArgs.Store(&c)
 	return f.setCloudInit(ctx, n, vmid, cfg)
+}
+func (f *fakePVE) SetVMTags(ctx context.Context, n string, vmid int, tags []string) error {
+	if f.setVMTags == nil {
+		return nil
+	}
+	return f.setVMTags(ctx, n, vmid, tags)
 }
 func (f *fakePVE) ResizeDisk(ctx context.Context, n string, vmid int, d, s string) error {
 	return f.resizeDisk(ctx, n, vmid, d, s)

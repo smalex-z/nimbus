@@ -1,16 +1,20 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/ctxutil"
+	"nimbus/internal/ippool"
 	"nimbus/internal/oauth"
 	"nimbus/internal/service"
 )
@@ -20,15 +24,43 @@ const (
 	oauthStateCookie  = "nimbus_oauth_state"
 )
 
-// Auth handles authentication endpoints.
-type Auth struct {
-	auth   *service.AuthService
-	appURL string
+// loginReconciler is the small interface the Auth handler uses to kick a
+// post-login reconcile. *ippool.Reconciler satisfies it; nil is allowed.
+type loginReconciler interface {
+	Reconcile(ctx context.Context) (ippool.Report, error)
 }
 
-// NewAuth creates a new Auth handler. appURL is used for the Google OAuth redirect URI.
-func NewAuth(auth *service.AuthService, appURL string) *Auth {
-	return &Auth{auth: auth, appURL: appURL}
+// Auth handles authentication endpoints.
+type Auth struct {
+	auth       *service.AuthService
+	appURL     string
+	reconciler loginReconciler
+}
+
+// NewAuth creates a new Auth handler. appURL is used for the Google OAuth
+// redirect URI. reconciler may be nil — when set, a successful login kicks an
+// async reconcile so the IP pool catches up with cross-instance changes
+// without the user waiting on background-loop cadence.
+func NewAuth(auth *service.AuthService, appURL string, reconciler loginReconciler) *Auth {
+	return &Auth{auth: auth, appURL: appURL, reconciler: reconciler}
+}
+
+// kickReconcile launches a background reconcile, decoupled from the request
+// context so it survives the response. Caller should fire-and-forget.
+func (a *Auth) kickReconcile() {
+	if a.reconciler == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if rep, err := a.reconciler.Reconcile(ctx); err != nil {
+			log.Printf("post-login reconcile failed: %v", err)
+		} else if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
+			log.Printf("post-login reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
+				len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+		}
+	}()
 }
 
 // githubProvider loads GitHub OAuth credentials from the DB on each call.
@@ -169,6 +201,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSessionCookie(w, sessionID)
+	a.kickReconcile()
 	response.Success(w, user)
 }
 
@@ -271,6 +304,7 @@ func (a *Auth) oauthCallback(provider oauth.Provider, providerName string) http.
 		}
 
 		setSessionCookie(w, sessionID)
+		a.kickReconcile()
 
 		q := url.Values{}
 		q.Set("provider", providerName)
