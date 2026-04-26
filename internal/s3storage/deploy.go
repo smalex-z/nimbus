@@ -17,9 +17,14 @@ import (
 // Provisioner is the subset of *provision.Service the deploy orchestrator
 // needs. Defined here per the "accept interfaces" idiom — the s3storage
 // package doesn't take a hard dependency on provision's full surface.
+//
+// AdminDelete is the post-merge full-teardown call: stops the VM, destroys
+// it on Proxmox, releases the IP, and hard-deletes the vms row. Takes the
+// Nimbus-side VM row ID, not the Proxmox VMID — callers look up the row
+// via s.db before calling this.
 type Provisioner interface {
 	Provision(ctx context.Context, req provision.Request, progress provision.ProgressReporter) (*provision.Result, error)
-	DestroyVM(ctx context.Context, node string, vmid int, ip string) error
+	AdminDelete(ctx context.Context, id uint) error
 }
 
 // DeployParams captures the fields the user controls on the /s3 page.
@@ -106,12 +111,14 @@ func (s *Service) Deploy(ctx context.Context, prov Provisioner, p DeployParams, 
 	// to hold these so DELETE /api/s3/storage can find the VM to tear
 	// down (and release its IP).
 	if err := s.db.Model(&db.S3Storage{}).Where("id = ?", row.ID).Updates(map[string]any{
-		"vmid": res.VMID,
-		"node": res.Node,
-		"ip":   res.IP,
+		"vm_row_id": res.ID,
+		"vmid":      res.VMID,
+		"node":      res.Node,
+		"ip":        res.IP,
 	}).Error; err != nil {
 		// Best-effort tear-down: we created a VM we can't book-keep.
-		_ = prov.DestroyVM(context.Background(), res.Node, res.VMID, res.IP)
+		// AdminDelete needs the Nimbus-side row ID; res.ID carries it.
+		_ = prov.AdminDelete(context.Background(), res.ID)
 		_ = s.Delete()
 		return nil, nil, fmt.Errorf("persist vm metadata: %w", err)
 	}

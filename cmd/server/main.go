@@ -273,6 +273,31 @@ func main() {
 	}
 	tagBackfillCancel()
 
+	// Assign legacy VMs (owner_id IS NULL, provisioned before per-user
+	// ownership tracking) to the lowest-ID admin so they show up on someone's
+	// My Machines and become deletable through the standard UI flow.
+	// Idempotent and best-effort — instances still in setup (no admin yet)
+	// no-op and re-run safely on the next startup.
+	ownerBackfillCtx, ownerBackfillCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if n, err := provSvc.BackfillOwnership(ownerBackfillCtx); err != nil {
+		log.Printf("warning: vm ownership backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("backfill: assigned %d legacy VM(s) to first admin", n)
+	}
+	ownerBackfillCancel()
+
+	// Same backfill for ssh_keys: legacy rows (created before ownership
+	// tracking, or migrated from VMs that had NULL owner_id) get bound to
+	// the lowest-ID admin so the Keys page shows them on that admin's account
+	// rather than universally to every user.
+	keysOwnerCtx, keysOwnerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if n, err := keysSvc.BackfillOwnership(keysOwnerCtx); err != nil {
+		log.Printf("warning: ssh-keys ownership backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("backfill: assigned %d legacy ssh key(s) to first admin", n)
+	}
+	keysOwnerCancel()
+
 	// Pin the `nimbus` tag chip to a neutral color so the Proxmox dashboard
 	// doesn't render it in a hash-derived random hue. Idempotent: re-runs
 	// are no-ops once the cluster's tag-style already has the override.

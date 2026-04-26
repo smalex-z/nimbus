@@ -148,10 +148,13 @@ func (h *S3) DeleteStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// VMID=0 means deploy failed before Provision returned; nothing to
-	// tear down on Proxmox, just clear the row.
-	if row.VMID > 0 {
-		if err := h.prov.DestroyVM(r.Context(), row.Node, row.VMID, row.IP); err != nil {
+	// VMRowID==nil means deploy failed before Provision returned; the VM
+	// (if any) was already cleaned up by Provision's own unwind, so we
+	// just need to clear the s3_storage row. When the row id is set, the
+	// shared admin delete handles stop → destroy → IP release → vms-row
+	// purge in one call.
+	if row.VMRowID != nil {
+		if err := h.prov.AdminDelete(r.Context(), *row.VMRowID); err != nil {
 			_ = h.svc.MarkError("destroy failed: " + err.Error())
 			response.InternalError(w, "destroy vm: "+err.Error())
 			return

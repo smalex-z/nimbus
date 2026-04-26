@@ -14,12 +14,14 @@ import Input from '@/components/ui/Input'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import RadioCard from '@/components/ui/RadioCard'
 import Textarea from '@/components/ui/Textarea'
+import { useAuth } from '@/hooks/useAuth'
 import type { SSHKey } from '@/types'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 
 type Mode = 'gen' | 'import'
 
 export default function Keys() {
+  const { user } = useAuth()
   const [keys, setKeys] = useState<SSHKey[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -92,6 +94,7 @@ export default function Keys() {
           <KeyRow
             key={k.id}
             sshKey={k}
+            currentUserId={user?.id}
             onChanged={refresh}
             onPromoted={(id) =>
               setKeys((prev) => prev.map((row) => ({ ...row, is_default: row.id === id })))
@@ -314,14 +317,19 @@ function FreshlyGeneratedKey({ keyName, privateKey, onDismiss }: FreshlyGenerate
 
 interface KeyRowProps {
   sshKey: SSHKey
+  currentUserId: number | undefined
   onChanged: () => void
   onPromoted: (id: number) => void
   onError: (msg: string) => void
 }
 
-function KeyRow({ sshKey, onChanged, onPromoted, onError }: KeyRowProps) {
+function KeyRow({ sshKey, currentUserId, onChanged, onPromoted, onError }: KeyRowProps) {
   const [busy, setBusy] = useState<null | 'default' | 'delete' | 'download'>(null)
   const [attaching, setAttaching] = useState(false)
+  // Defense in depth: server-side filter already restricts the list to the
+  // caller's own keys, but if the data is ever inconsistent, hide actions on
+  // rows the user doesn't own.
+  const isMine = currentUserId !== undefined && sshKey.owner_id === currentUserId
 
   const downloadKey = async () => {
     setBusy('download')
@@ -405,7 +413,7 @@ function KeyRow({ sshKey, onChanged, onPromoted, onError }: KeyRowProps) {
 
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <CopyButton value={sshKey.public_key} label="COPY PUB" />
-          {sshKey.has_private_key && (
+          {isMine && sshKey.has_private_key && (
             <button
               type="button"
               onClick={downloadKey}
@@ -416,7 +424,7 @@ function KeyRow({ sshKey, onChanged, onPromoted, onError }: KeyRowProps) {
               <span>{busy === 'download' ? 'FETCHING…' : 'DOWNLOAD'}</span>
             </button>
           )}
-          {!sshKey.has_private_key && (
+          {isMine && !sshKey.has_private_key && (
             <button
               type="button"
               onClick={() => setAttaching((v) => !v)}
@@ -426,36 +434,40 @@ function KeyRow({ sshKey, onChanged, onPromoted, onError }: KeyRowProps) {
               {attaching ? 'CANCEL' : '+ PRIVATE KEY'}
             </button>
           )}
-          <button
-            type="button"
-            onClick={sshKey.is_default ? undefined : promote}
-            disabled={busy !== null}
-            aria-pressed={sshKey.is_default}
-            className={
-              sshKey.is_default
-                ? 'inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(45,125,90,0.3)] bg-[rgba(45,125,90,0.12)] text-good cursor-default'
-                : 'inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50 cursor-pointer'
-            }
-          >
-            {sshKey.is_default ? (
-              <>
-                <span aria-hidden>✓</span>
-                <span>DEFAULT</span>
-              </>
-            ) : busy === 'default' ? (
-              'SETTING…'
-            ) : (
-              'MAKE DEFAULT'
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={remove}
-            disabled={busy !== null}
-            className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(184,58,58,0.25)] bg-[rgba(184,58,58,0.04)] text-bad hover:bg-[rgba(184,58,58,0.1)] transition-colors disabled:opacity-50"
-          >
-            {busy === 'delete' ? 'DELETING…' : 'DELETE'}
-          </button>
+          {isMine && (
+            <button
+              type="button"
+              onClick={sshKey.is_default ? undefined : promote}
+              disabled={busy !== null}
+              aria-pressed={sshKey.is_default}
+              className={
+                sshKey.is_default
+                  ? 'inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(45,125,90,0.3)] bg-[rgba(45,125,90,0.12)] text-good cursor-default'
+                  : 'inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50 cursor-pointer'
+              }
+            >
+              {sshKey.is_default ? (
+                <>
+                  <span aria-hidden>✓</span>
+                  <span>DEFAULT</span>
+                </>
+              ) : busy === 'default' ? (
+                'SETTING…'
+              ) : (
+                'MAKE DEFAULT'
+              )}
+            </button>
+          )}
+          {isMine && (
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy !== null}
+              className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(184,58,58,0.25)] bg-[rgba(184,58,58,0.04)] text-bad hover:bg-[rgba(184,58,58,0.1)] transition-colors disabled:opacity-50"
+            >
+              {busy === 'delete' ? 'DELETING…' : 'DELETE'}
+            </button>
+          )}
         </div>
       </div>
 

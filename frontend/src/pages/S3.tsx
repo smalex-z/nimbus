@@ -8,6 +8,7 @@ import {
   listS3Buckets,
 } from '@/api/client'
 import type { S3Bucket, S3DeployProgress, S3StorageView } from '@/api/client'
+import DeleteS3Confirm from '@/components/ui/DeleteS3Confirm'
 
 // Phase-3 admin page. The page has two states:
 //  1. No storage yet → render <DeployPanel/>: disk-size slider + button.
@@ -188,22 +189,7 @@ function DeployPanel({ onDeployed }: { onDeployed: (s: S3StorageView) => void })
 
 function StatusPanel({ storage, onDelete }: { storage: S3StorageView; onDelete: () => void }) {
   const [showCreds, setShowCreds] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const handleDelete = async () => {
-    if (!confirm('Tear down the MinIO VM? All buckets and data will be lost.')) return
-    setError(null)
-    setDeleting(true)
-    try {
-      await deleteS3Storage()
-      onDelete()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed')
-    } finally {
-      setDeleting(false)
-    }
-  }
+  const [confirming, setConfirming] = useState(false)
 
   return (
     <div
@@ -256,19 +242,29 @@ function StatusPanel({ storage, onDelete }: { storage: S3StorageView; onDelete: 
 
       <div className="n-divider" />
 
-      {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-
       <div style={{ display: 'flex', gap: 12 }}>
         <button
           type="button"
           className="n-btn"
-          onClick={handleDelete}
-          disabled={deleting || storage.status === 'deleting'}
+          onClick={() => setConfirming(true)}
+          disabled={storage.status === 'deleting'}
           style={{ color: 'var(--err)', borderColor: 'var(--err)' }}
         >
-          {deleting ? 'Deleting…' : 'Delete storage'}
+          Delete storage
         </button>
       </div>
+
+      {confirming && (
+        <DeleteS3Confirm
+          storage={storage}
+          onConfirm={() => deleteS3Storage()}
+          onCancel={() => setConfirming(false)}
+          onDeleted={() => {
+            setConfirming(false)
+            onDelete()
+          }}
+        />
+      )}
     </div>
   )
 }

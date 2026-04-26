@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { adminDeleteVM, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
+import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import OSIcon from '@/components/ui/OSIcon'
 import Pagination from '@/components/ui/Pagination'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
@@ -27,6 +28,10 @@ interface AdminData {
   vmsLoading: boolean
   statsError: string | null
   vmsError: string | null
+  // removeVM optimistically drops a row from local state after a successful
+  // admin delete, so the table reflects the change immediately instead of
+  // waiting for the next 15s poll.
+  removeVM: (id: number) => void
 }
 
 // pollEachWith fires `fn` immediately, then every `intervalMs`, until the
@@ -103,7 +108,11 @@ function useAdminData(): AdminData {
     () => setVmsLoading(false),
   )
 
-  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError }
+  const removeVM = useCallback((id: number) => {
+    setVMs((prev) => prev.filter((v) => v.id !== id))
+  }, [])
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM }
 }
 
 interface FilterState {
@@ -114,27 +123,21 @@ interface FilterState {
 
 const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
 
+const headerCellClass =
+  'text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap'
+
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
   const filteredVMs = useMemo(() => {
-    // Stable sort: node ascending, then VMID ascending within a node.
-    // /api/cluster/vms returns rows in whatever order Proxmox walks its
-    // nodes, which jumbles the table on every poll. A deterministic order
-    // keeps the row positions fixed across the 15s refresh cycle.
-    return vms
-      .filter((vm) => {
-        if (filters.node && vm.node !== filters.node) return false
-        if (filters.status && vm.status !== filters.status) return false
-        if (filters.tier && vm.tier !== filters.tier) return false
-        return true
-      })
-      .sort((a, b) => {
-        const byNode = a.node.localeCompare(b.node)
-        return byNode !== 0 ? byNode : a.vmid - b.vmid
-      })
+    return vms.filter((vm) => {
+      if (filters.node && vm.node !== filters.node) return false
+      if (filters.status && vm.status !== filters.status) return false
+      if (filters.tier && vm.tier !== filters.tier) return false
+      return true
+    })
   }, [vms, filters])
 
   const stats = useMemo(() => {
@@ -247,6 +250,7 @@ export default function Admin() {
               onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
               hasFilters={hasFilters}
               onClearFilters={clearFilters}
+              onVMDeleted={removeVM}
             />
           )}
 
@@ -535,6 +539,70 @@ function SourceLabel({ source }: { source: VMSource }) {
   }
 }
 
+// Small inline icons for the per-row action buttons. Kept inline (not a
+// shared component) because they're styled exactly for the 14×14 button
+// slot and don't carry over anywhere else in the app.
+function TerminalIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <path d="M4 6l2.5 2L4 10" />
+      <path d="M8.5 10.5h3.5" />
+    </svg>
+  )
+}
+
+function NetworkIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r="6" />
+      <ellipse cx="8" cy="8" rx="3" ry="6" />
+      <path d="M2 8h12" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 4h10" />
+      <path d="M6 4V2.75A.75.75 0 0 1 6.75 2h2.5a.75.75 0 0 1 .75.75V4" />
+      <path d="M4.5 4l.75 9a1 1 0 0 0 1 .9h3.5a1 1 0 0 0 1-.9L11.5 4" />
+      <path d="M6.5 7v4M9.5 7v4" />
+    </svg>
+  )
+}
+
 function VMTable({
   vms,
   allVMs,
@@ -544,6 +612,7 @@ function VMTable({
   onFilterChange,
   hasFilters,
   onClearFilters,
+  onVMDeleted,
 }: {
   vms: ClusterVM[]
   allVMs: ClusterVM[]
@@ -553,23 +622,37 @@ function VMTable({
   onFilterChange: (patch: Partial<FilterState>) => void
   hasFilters: boolean
   onClearFilters: () => void
+  onVMDeleted: (id: number) => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
+  const [editTarget, setEditTarget] = useState<ClusterVM | null>(null)
   const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(25)
+  const [pageSize, setPageSize] = useState(10)
+  // VMID column doubles as the sort control. Default desc so the most
+  // recently-provisioned VM (highest VMID) is at the top of the table —
+  // matches what admins usually want to see first after a fresh provision.
+  const [vmidSortDir, setVmidSortDir] = useState<'asc' | 'desc'>('desc')
+
+  const sortedVMs = useMemo(() => {
+    const copy = [...vms]
+    copy.sort((a, b) =>
+      vmidSortDir === 'asc' ? a.vmid - b.vmid : b.vmid - a.vmid,
+    )
+    return copy
+  }, [vms, vmidSortDir])
 
   // Clamp the current page when the filtered set shrinks (filter change,
   // VMs disappearing). Without this you can land on "page 5 of 2" after
   // filtering and the table goes empty.
   useEffect(() => {
-    const maxPage = Math.max(0, Math.ceil(vms.length / pageSize) - 1)
+    const maxPage = Math.max(0, Math.ceil(sortedVMs.length / pageSize) - 1)
     if (page > maxPage) setPage(maxPage)
-  }, [vms.length, pageSize, page])
+  }, [sortedVMs.length, pageSize, page])
 
   const pagedVMs = useMemo(
-    () => vms.slice(page * pageSize, (page + 1) * pageSize),
-    [vms, page, pageSize],
+    () => sortedVMs.slice(page * pageSize, (page + 1) * pageSize),
+    [sortedVMs, page, pageSize],
   )
 
   const selectClass =
@@ -637,13 +720,24 @@ function VMTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line">
-                {['Name', 'VMID', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH'].map((col) => (
-                  <th
-                    key={col}
-                    className="text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap"
+                {['Name'].map((col) => (
+                  <th key={col} className={headerCellClass}>{col}</th>
+                ))}
+                <th className={headerCellClass}>
+                  <button
+                    type="button"
+                    onClick={() => setVmidSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+                    className="inline-flex items-center gap-1.5 hover:text-ink transition-colors uppercase tracking-wider"
+                    title={`Sort by VMID ${vmidSortDir === 'asc' ? 'descending' : 'ascending'}`}
                   >
-                    {col}
-                  </th>
+                    <span>VMID</span>
+                    <span className="text-[9px]" aria-hidden>
+                      {vmidSortDir === 'asc' ? '▲' : '▼'}
+                    </span>
+                  </button>
+                </th>
+                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH', 'Actions'].map((col) => (
+                  <th key={col} className={headerCellClass}>{col}</th>
                 ))}
               </tr>
             </thead>
@@ -698,8 +792,33 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3">
                       {vm.source === 'local' && vm.username && vm.ip ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSshTarget({
+                              hostname: vm.hostname || vm.name,
+                              ip: vm.ip!,
+                              username: vm.username!,
+                              vmid: vm.vmid,
+                              node: vm.node,
+                              dbId: vm.id,
+                              keyName: vm.key_name,
+                              tunnelUrl: vm.tunnel_url,
+                            })
+                          }
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                          title={`SSH details for ${vm.hostname || vm.name}`}
+                          aria-label={`SSH details for ${vm.hostname || vm.name}`}
+                        >
+                          <TerminalIcon />
+                          <span>SSH</span>
+                        </button>
+                      ) : dash}
+                    </td>
+                    <td className="px-4 py-3">
+                      {vm.source === 'local' && vm.id !== undefined ? (
                         <div className="flex gap-1.5">
-                          {vm.tunnel_url && vm.id !== undefined && (
+                          {vm.tunnel_url && (
                             <button
                               type="button"
                               onClick={() =>
@@ -708,31 +827,21 @@ function VMTable({
                                   hostname: vm.hostname || vm.name,
                                 })
                               }
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                              className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
                               title="Manage Gopher tunnels for this VM"
+                              aria-label={`Manage tunnels for ${vm.hostname || vm.name}`}
                             >
-                              <span aria-hidden>🌐</span>
-                              <span>Networks</span>
+                              <NetworkIcon />
                             </button>
                           )}
                           <button
                             type="button"
-                            onClick={() =>
-                              setSshTarget({
-                                hostname: vm.hostname || vm.name,
-                                ip: vm.ip!,
-                                username: vm.username!,
-                                vmid: vm.vmid,
-                                node: vm.node,
-                                dbId: vm.id,
-                                keyName: vm.key_name,
-                                tunnelUrl: vm.tunnel_url,
-                              })
-                            }
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                            onClick={() => setEditTarget(vm)}
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-bad hover:border-bad hover:bg-[rgba(184,58,58,0.06)] transition-colors"
+                            title={`Delete ${vm.hostname || vm.name}`}
+                            aria-label={`Delete ${vm.hostname || vm.name}`}
                           >
-                            <span aria-hidden>↗</span>
-                            <span>SSH</span>
+                            <TrashIcon />
                           </button>
                         </div>
                       ) : dash}
@@ -759,6 +868,24 @@ function VMTable({
           vmId={tunnelsTarget.vmId}
           hostname={tunnelsTarget.hostname}
           onClose={() => setTunnelsTarget(null)}
+        />
+      )}
+      {editTarget && editTarget.id !== undefined && (
+        <DeleteVMConfirm
+          vm={{
+            id: editTarget.id,
+            hostname: editTarget.hostname || editTarget.name,
+            ip: editTarget.ip || '',
+            vmid: editTarget.vmid,
+            node: editTarget.node,
+          }}
+          onConfirm={adminDeleteVM}
+          onCancel={() => setEditTarget(null)}
+          onDeleted={() => {
+            const id = editTarget.id!
+            setEditTarget(null)
+            onVMDeleted(id)
+          }}
         />
       )}
     </div>
@@ -794,7 +921,7 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   const [showFree, setShowFree] = useState(false)
   const [filters, setFilters] = useState<IPFilterState>(EMPTY_IP_FILTERS)
   const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(25)
+  const [pageSize, setPageSize] = useState(10)
 
   const sorted = useMemo(() => {
     return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))

@@ -44,6 +44,7 @@ const (
 //   - --restart unless-stopped so MinIO survives reboots without a
 //     systemd unit.
 //   - /srv/minio is the canonical "service data" mount point.
+//
 // Privileged commands are explicitly sudo-prefixed: cloud images SSH us
 // in as a non-root cloud user (`ubuntu`/`debian`) with passwordless sudo
 // but no docker-group membership. Even after Docker is installed,

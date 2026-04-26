@@ -103,7 +103,13 @@ export async function listVMs(): Promise<VM[]> {
 }
 
 export async function listClusterVMs(): Promise<ClusterVM[]> {
-  const { data } = await api.get<ClusterVM[]>('/cluster/vms')
+  // /cluster/vms walks every VM on every online node and probes each one's
+  // qemu-guest-agent for OS info — a cold cache (e.g. fresh after a binary
+  // restart) can push the response past the default 10s axios cap. The
+  // backend now fans out per-VM enrichment, but we still give it a longer
+  // budget for the first pass; subsequent polls hit the warm cache and
+  // return in <100ms.
+  const { data } = await api.get<ClusterVM[]>('/cluster/vms', { timeout: 45_000 })
   return data
 }
 
@@ -236,6 +242,14 @@ export interface VMPrivateKey {
 export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   const { data } = await api.get<VMPrivateKey>(`/vms/${id}/private-key`)
   return data
+}
+
+export async function deleteVM(id: number): Promise<void> {
+  await api.delete(`/vms/${id}`)
+}
+
+export async function adminDeleteVM(id: number): Promise<void> {
+  await api.delete(`/cluster/vms/${id}`)
 }
 
 export interface VMTunnel {
