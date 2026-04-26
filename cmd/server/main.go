@@ -111,6 +111,15 @@ func main() {
 
 	authSvc := service.NewAuthService(database)
 
+	// Backfill: pre-`is_admin` deployments have users that AutoMigrate left
+	// at default false. If no admin exists, promote the oldest user so a
+	// single-tenant homelab self-heals on the first post-upgrade boot.
+	if promoted, err := authSvc.PromoteFirstUserIfNoAdmin(); err != nil {
+		log.Printf("warning: admin backfill check failed: %v", err)
+	} else if promoted {
+		log.Printf("backfill: promoted oldest user to admin (no admin existed)")
+	}
+
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
 		log.Fatalf("failed to seed IP pool: %v", err)
