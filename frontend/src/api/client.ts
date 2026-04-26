@@ -194,6 +194,8 @@ export interface SaveConfigRequest {
   nameserver?: string
   search_domain?: string
   port?: string
+  gopher_api_url?: string
+  gopher_api_key?: string
 }
 
 export async function getSetupStatus(): Promise<SetupStatus> {
@@ -338,6 +340,28 @@ export async function saveAuthorizedGitHubOrgs(
   orgs: string[],
 ): Promise<AuthorizedOrgsView> {
   const { data } = await api.put<AuthorizedOrgsView>('/settings/github-orgs', { orgs })
+  return data
+}
+
+export interface GopherSettingsView {
+  api_url: string
+  configured: boolean
+}
+
+export interface SaveGopherSettingsRequest {
+  api_url?: string
+  api_key?: string
+}
+
+export async function getGopherSettings(): Promise<GopherSettingsView> {
+  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
+  return data
+}
+
+export async function saveGopherSettings(
+  req: SaveGopherSettingsRequest,
+): Promise<GopherSettingsView> {
+  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
   return data
 }
 

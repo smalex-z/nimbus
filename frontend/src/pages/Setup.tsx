@@ -28,6 +28,8 @@ interface NetworkFields {
   nameserver: string
   searchDomain: string
   port: string
+  gopherApiUrl: string
+  gopherApiKey: string
 }
 
 interface AdminFields {
@@ -50,6 +52,8 @@ export default function Setup() {
     nameserver: '',
     searchDomain: '',
     port: '',
+    gopherApiUrl: '',
+    gopherApiKey: '',
   })
   const [admin, setAdmin] = useState<AdminFields>({ name: '', email: '', password: '' })
   const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
@@ -127,6 +131,8 @@ export default function Setup() {
     if (network.nameserver) req.nameserver = network.nameserver
     if (network.searchDomain) req.search_domain = network.searchDomain
     if (network.port) req.port = network.port
+    if (network.gopherApiUrl) req.gopher_api_url = network.gopherApiUrl
+    if (network.gopherApiKey) req.gopher_api_key = network.gopherApiKey
     try {
       await saveSetupConfig(req)
       setStep('restarting')
@@ -199,27 +205,9 @@ export default function Setup() {
               >
                 {s.label}
               </span>
-              <div className="w-8 h-px bg-line-2" />
+              {i < wizardSteps.length - 1 && <div className="w-8 h-px bg-line-2" />}
             </div>
           ))}
-
-          {/* Future steps — visible but locked */}
-          <div className="flex items-center gap-3">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              5
-            </div>
-            <span className="text-sm font-medium text-ink-3">Gopher</span>
-            <span className="text-[9px] font-mono uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded border border-line-2">
-              optional · soon
-            </span>
-          </div>
-          <div className="w-8 h-px bg-line-2" />
-          <div className="flex items-center gap-3">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-medium bg-[rgba(27,23,38,0.04)] text-ink-3 border border-dashed border-line-2">
-              6
-            </div>
-            <span className="text-sm font-medium text-ink-3">Templates</span>
-          </div>
         </div>
 
         {step === 'proxmox' && (
@@ -567,6 +555,30 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
       <Card className="p-8 flex flex-col gap-5">
         <div className="grid grid-cols-2 gap-4">
           <Input
+            label="Gopher API URL"
+            placeholder="https://gopher.example.com"
+            value={fields.gopherApiUrl}
+            onChange={(e) => onChange('gopherApiUrl', e.target.value)}
+            hint="Optional reverse-tunnel gateway used to expose VMs at public hostnames. Leave blank to skip."
+          />
+          <Input
+            label="Gopher API key"
+            type="password"
+            placeholder="Paste your Gopher API key"
+            value={fields.gopherApiKey}
+            onChange={(e) => onChange('gopherApiKey', e.target.value)}
+            hint="Editable later from the Authentication page if you skip it now."
+          />
+        </div>
+        <Input
+          label="HTTP port"
+          placeholder="8080"
+          value={fields.port}
+          onChange={(e) => onChange('port', e.target.value)}
+          hint="Port this Nimbus server listens on. Change if 8080 is already taken on this host."
+        />
+        <div className="grid grid-cols-2 gap-4">
+          <Input
             label="Nameserver"
             placeholder="1.1.1.1 8.8.8.8"
             value={fields.nameserver}
@@ -581,13 +593,6 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
             hint="Appended to unqualified hostnames inside VMs (e.g. 'local' so 'myhost' resolves as 'myhost.local')."
           />
         </div>
-        <Input
-          label="HTTP port"
-          placeholder="8080"
-          value={fields.port}
-          onChange={(e) => onChange('port', e.target.value)}
-          hint="Port this Nimbus server listens on. Change if 8080 is already taken on this host."
-        />
       </Card>
 
       {missing && (

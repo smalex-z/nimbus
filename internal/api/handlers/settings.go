@@ -164,6 +164,56 @@ func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Reque
 	s.GetAuthorizedGitHubOrgs(w, r)
 }
 
+type gopherSettingsView struct {
+	APIURL     string `json:"api_url"`
+	Configured bool   `json:"configured"`
+}
+
+// GetGopher handles GET /api/settings/gopher (admin only). The API key is
+// never returned; the SPA only needs to know whether it's set.
+func (s *Settings) GetGopher(w http.ResponseWriter, _ *http.Request) {
+	settings, err := s.auth.GetGopherSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load Gopher settings")
+		return
+	}
+	response.Success(w, gopherSettingsView{
+		APIURL:     settings.APIURL,
+		Configured: settings.APIURL != "" && settings.APIKey != "",
+	})
+}
+
+type saveGopherRequest struct {
+	APIURL string `json:"api_url"`
+	APIKey string `json:"api_key"`
+}
+
+// SaveGopher handles PUT /api/settings/gopher (admin only). Persists the
+// values; takes effect on next restart (live tunnel-client refresh lives on
+// the gopher feature branch and isn't wired here yet).
+func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
+	var req saveGopherRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	url := strings.TrimSpace(req.APIURL)
+	key := strings.TrimSpace(req.APIKey)
+	if err := s.auth.SaveGopherSettings(db.GopherSettings{APIURL: url, APIKey: key}); err != nil {
+		response.InternalError(w, "failed to save Gopher settings")
+		return
+	}
+	settings, err := s.auth.GetGopherSettings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+	response.Success(w, gopherSettingsView{
+		APIURL:     settings.APIURL,
+		Configured: settings.APIURL != "" && settings.APIKey != "",
+	})
+}
+
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
 // Issues a fresh code and bumps the version, invalidating every non-admin
 // user's prior verification.
