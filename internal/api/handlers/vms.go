@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
 	"nimbus/internal/provision"
@@ -91,6 +92,16 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Stamp the creator's user ID so the VM shows up in their My Machines and
+	// is the only person who can delete it later. Pre-existing VMs without an
+	// owner remain visible to everyone (see service.List) but immutable
+	// through the Delete endpoint.
+	var ownerID *uint
+	if user := ctxutil.User(r.Context()); user != nil {
+		id := user.ID
+		ownerID = &id
+	}
+
 	res, err := h.svc.Provision(r.Context(), provision.Request{
 		Hostname:     req.Hostname,
 		Tier:         req.Tier,
@@ -102,6 +113,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		PublicTunnel: req.PublicTunnel,
 		Subdomain:    subdomain,
 		TunnelPort:   req.TunnelPort,
+		OwnerID:      ownerID,
 	}, reporter)
 	if err != nil {
 		writeLine(map[string]any{
@@ -138,14 +150,45 @@ func classifyProvisionError(err error) string {
 	}
 }
 
-// List handles GET /api/vms.
+// List handles GET /api/vms — returns the caller's own VMs plus any legacy
+// rows that pre-date owner tracking (see service.List). The same scope
+// applies for both members and admins; cluster-wide views live on the Admin
+// dashboard.
 func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
-	vms, err := h.svc.List(r.Context(), nil)
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	vms, err := h.svc.List(r.Context(), &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
 	response.Success(w, vms)
+}
+
+// Delete handles DELETE /api/vms/{id} — destroys the VM on Proxmox, releases
+// its IP, and removes the local row. Strict ownership: only the user who
+// originally provisioned the VM can delete it. Returns 404 (not 403) for
+// cross-user or legacy (owner_id NULL) rows so we don't disclose existence.
+func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	if err := h.svc.Delete(r.Context(), uint(id), user.ID); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GetPrivateKey handles GET /api/vms/{id}/private-key. Returns
@@ -162,7 +205,12 @@ func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid id")
 		return
 	}
-	keyName, privateKey, err := h.svc.GetPrivateKey(r.Context(), uint(id))
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	keyName, privateKey, err := h.svc.GetPrivateKey(r.Context(), uint(id), &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return

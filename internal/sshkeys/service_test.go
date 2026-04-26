@@ -58,7 +58,7 @@ func TestCreate_GenerateKey_StoresEncryptedPrivate(t *testing.T) {
 	}
 
 	// GetPrivateKey round-trips back to plaintext.
-	name, plain, err := svc.GetPrivateKey(context.Background(), row.ID)
+	name, plain, err := svc.GetPrivateKey(context.Background(), row.ID, nil)
 	if err != nil {
 		t.Fatalf("GetPrivateKey: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestCreate_PublicOnly_NoVaultEntry(t *testing.T) {
 		t.Fatal("expected no vault entry for public-only import")
 	}
 
-	_, _, err = svc.GetPrivateKey(context.Background(), row.ID)
+	_, _, err = svc.GetPrivateKey(context.Background(), row.ID, nil)
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("expected NotFoundError, got %v", err)
@@ -178,10 +178,10 @@ func TestAttachPrivateKey_RoundTrips(t *testing.T) {
 		t.Fatal("expected pub-only key on create")
 	}
 
-	if err := svc.AttachPrivateKey(context.Background(), key.ID, priv); err != nil {
+	if err := svc.AttachPrivateKey(context.Background(), key.ID, priv, nil); err != nil {
 		t.Fatalf("AttachPrivateKey: %v", err)
 	}
-	_, got, err := svc.GetPrivateKey(context.Background(), key.ID)
+	_, got, err := svc.GetPrivateKey(context.Background(), key.ID, nil)
 	if err != nil {
 		t.Fatalf("GetPrivateKey: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestAttachPrivateKey_AlreadyVaulted_Conflict(t *testing.T) {
 	}
 	_, priv, _ := sshkeys.GenerateEd25519()
 
-	err = svc.AttachPrivateKey(context.Background(), key.ID, priv)
+	err = svc.AttachPrivateKey(context.Background(), key.ID, priv, nil)
 	var ce *internalerrors.ConflictError
 	if !errors.As(err, &ce) {
 		t.Fatalf("expected ConflictError, got %v", err)
@@ -223,7 +223,7 @@ func TestAttachPrivateKey_Mismatched_Rejected(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	err = svc.AttachPrivateKey(context.Background(), key.ID, privB)
+	err = svc.AttachPrivateKey(context.Background(), key.ID, privB, nil)
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError, got %v", err)
@@ -238,7 +238,7 @@ func TestAttachPrivateKey_UnknownID_NotFound(t *testing.T) {
 	svc, _ := newTestService(t)
 
 	_, priv, _ := sshkeys.GenerateEd25519()
-	err := svc.AttachPrivateKey(context.Background(), 999, priv)
+	err := svc.AttachPrivateKey(context.Background(), 999, priv, nil)
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("expected NotFoundError, got %v", err)
@@ -256,7 +256,7 @@ func TestSetDefault_OnlyOneAtATime(t *testing.T) {
 		t.Fatal("a should be default after Create(SetDefault=true)")
 	}
 
-	if err := svc.SetDefault(context.Background(), b.ID); err != nil {
+	if err := svc.SetDefault(context.Background(), b.ID, nil); err != nil {
 		t.Fatalf("SetDefault(b): %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestDelete_ClearsVMReferences(t *testing.T) {
 		t.Fatalf("seed vm: %v", err)
 	}
 
-	if err := svc.Delete(context.Background(), key.ID); err != nil {
+	if err := svc.Delete(context.Background(), key.ID, nil); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func TestDelete_ClearsVMReferences(t *testing.T) {
 		t.Errorf("VM.SSHKeyID = %v, want nil after key delete", *loaded.SSHKeyID)
 	}
 
-	_, err := svc.Get(context.Background(), key.ID)
+	_, err := svc.Get(context.Background(), key.ID, nil)
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Errorf("expected key to be gone, got err=%v", err)
@@ -360,4 +360,145 @@ func TestCreate_FingerprintIsStable(t *testing.T) {
 	if !strings.HasPrefix(a.Fingerprint, "SHA256:") {
 		t.Errorf("fingerprint missing SHA256: prefix: %q", a.Fingerprint)
 	}
+}
+
+// newTestServiceWithUsers extends newTestService by also migrating the User
+// schema, used by the ownership tests below.
+func newTestServiceWithUsers(t *testing.T) (*sshkeys.Service, *db.DB) {
+	t.Helper()
+	svc, database := newTestService(t)
+	if err := database.AutoMigrate(&db.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	return svc, database
+}
+
+func TestBackfillOwnership(t *testing.T) {
+	t.Parallel()
+	svc, database := newTestServiceWithUsers(t)
+
+	admin := db.User{Name: "Brendan", Email: "a@x", IsAdmin: true}
+	if err := database.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	member := db.User{Name: "Member", Email: "m@x", IsAdmin: false}
+	if err := database.Create(&member).Error; err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	admin2 := db.User{Name: "OtherAdmin", Email: "b@x", IsAdmin: true}
+	if err := database.Create(&admin2).Error; err != nil {
+		t.Fatalf("create admin2: %v", err)
+	}
+
+	pub, _, err := sshkeys.GenerateEd25519()
+	if err != nil {
+		t.Fatalf("generate pubkey: %v", err)
+	}
+
+	memberID := member.ID
+	legacy1 := db.SSHKey{Name: "legacy1", PublicKey: pub, Source: "imported"}
+	legacy2 := db.SSHKey{Name: "legacy2", PublicKey: pub, Source: "imported"}
+	owned := db.SSHKey{Name: "owned", PublicKey: pub, Source: "imported", OwnerID: &memberID}
+	for _, k := range []*db.SSHKey{&legacy1, &legacy2, &owned} {
+		if err := database.Create(k).Error; err != nil {
+			t.Fatalf("seed key: %v", err)
+		}
+	}
+
+	n, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("first run rows affected: got %d, want 2", n)
+	}
+
+	var l1, l2, o db.SSHKey
+	database.First(&l1, legacy1.ID)
+	database.First(&l2, legacy2.ID)
+	database.First(&o, owned.ID)
+	if l1.OwnerID == nil || *l1.OwnerID != admin.ID {
+		t.Errorf("legacy1 owner: got %v, want %d", l1.OwnerID, admin.ID)
+	}
+	if l2.OwnerID == nil || *l2.OwnerID != admin.ID {
+		t.Errorf("legacy2 owner: got %v, want %d", l2.OwnerID, admin.ID)
+	}
+	if o.OwnerID == nil || *o.OwnerID != memberID {
+		t.Errorf("owned key clobbered: got %v, want %d", o.OwnerID, memberID)
+	}
+
+	n2, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership second run: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second run rows affected: got %d, want 0", n2)
+	}
+}
+
+func TestBackfillOwnership_NoAdminYet(t *testing.T) {
+	t.Parallel()
+	svc, database := newTestServiceWithUsers(t)
+	pub, _, err := sshkeys.GenerateEd25519()
+	if err != nil {
+		t.Fatalf("generate pubkey: %v", err)
+	}
+	legacy := db.SSHKey{Name: "legacy", PublicKey: pub, Source: "imported"}
+	if err := database.Create(&legacy).Error; err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	n, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rows affected without admin: got %d, want 0", n)
+	}
+}
+
+// TestServiceOwnerGate covers the cross-user 404 on every gated method. The
+// nil-requesterID bypass is already exercised by the rest of this file (every
+// other test passes nil), so we focus on the non-nil-mismatch branch here.
+func TestServiceOwnerGate(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+
+	pub, priv, err := sshkeys.GenerateEd25519()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	ownerA := uint(7)
+	row, err := svc.Create(context.Background(), sshkeys.CreateRequest{
+		Name:      "owned-by-a",
+		PublicKey: pub,
+		OwnerID:   &ownerA,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	otherID := uint(99)
+	expectNotFound := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Errorf("%s: expected NotFound, got nil", name)
+			return
+		}
+		var nf *internalerrors.NotFoundError
+		if !errors.As(err, &nf) {
+			t.Errorf("%s: expected NotFoundError, got %T (%v)", name, err, err)
+		}
+	}
+
+	_, err = svc.Get(context.Background(), row.ID, &otherID)
+	expectNotFound(t, "Get", err)
+	_, _, err = svc.GetPrivateKey(context.Background(), row.ID, &otherID)
+	expectNotFound(t, "GetPrivateKey", err)
+	err = svc.SetDefault(context.Background(), row.ID, &otherID)
+	expectNotFound(t, "SetDefault", err)
+	err = svc.AttachPrivateKey(context.Background(), row.ID, priv, &otherID)
+	expectNotFound(t, "AttachPrivateKey", err)
+	err = svc.Delete(context.Background(), row.ID, &otherID)
+	expectNotFound(t, "Delete", err)
 }

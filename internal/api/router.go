@@ -147,6 +147,7 @@ func NewRouter(d Deps) http.Handler {
 					r.With(middleware.Timeout(6*time.Minute)).Post("/", vms.Create)
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
+					r.Delete("/{id}", vms.Delete)
 					// Per-port tunnels on top of the VM's Gopher machine —
 					// the post-provision Networks surface.
 					r.Get("/{id}/tunnels", vms.ListTunnels)

@@ -168,8 +168,25 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.SSHKey, error) 
 	return keys, nil
 }
 
-// Get returns one key by ID.
-func (s *Service) Get(ctx context.Context, id uint) (*db.SSHKey, error) {
+// assertOwner returns NotFound when requesterID is non-nil and the row's
+// owner doesn't match. nil requesterID skips the check — used by trusted
+// internal callers (the provisioner already authorizes at its entry point).
+//
+// We return NotFound rather than Forbidden so the API doesn't disclose
+// which IDs exist on other users' accounts.
+func assertOwner(row *db.SSHKey, requesterID *uint) error {
+	if requesterID == nil {
+		return nil
+	}
+	if row.OwnerID == nil || *row.OwnerID != *requesterID {
+		return &internalerrors.NotFoundError{Resource: "ssh_key", ID: fmt.Sprintf("%d", row.ID)}
+	}
+	return nil
+}
+
+// Get returns one key by ID, optionally restricted to a requester's owned
+// rows. Pass nil for requesterID to bypass the ownership check (internal use).
+func (s *Service) Get(ctx context.Context, id uint, requesterID *uint) (*db.SSHKey, error) {
 	var row db.SSHKey
 	if err := s.db.WithContext(ctx).First(&row, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -177,12 +194,16 @@ func (s *Service) Get(ctx context.Context, id uint) (*db.SSHKey, error) {
 		}
 		return nil, fmt.Errorf("get ssh key %d: %w", id, err)
 	}
+	if err := assertOwner(&row, requesterID); err != nil {
+		return nil, err
+	}
 	return &row, nil
 }
 
-// GetPrivateKey returns the decrypted private half of a key.
-func (s *Service) GetPrivateKey(ctx context.Context, id uint) (name, privateKey string, err error) {
-	row, err := s.Get(ctx, id)
+// GetPrivateKey returns the decrypted private half of a key. requesterID
+// follows the same rules as Get.
+func (s *Service) GetPrivateKey(ctx context.Context, id uint, requesterID *uint) (name, privateKey string, err error) {
+	row, err := s.Get(ctx, id, requesterID)
 	if err != nil {
 		return "", "", err
 	}
@@ -201,8 +222,8 @@ func (s *Service) GetPrivateKey(ctx context.Context, id uint) (name, privateKey 
 
 // Delete removes the key. The associated VM rows have their ssh_key_id set to
 // NULL via a manual update (we don't rely on GORM's cascade since SQLite +
-// soft-deletes complicate things).
-func (s *Service) Delete(ctx context.Context, id uint) error {
+// soft-deletes complicate things). requesterID enforces ownership.
+func (s *Service) Delete(ctx context.Context, id uint, requesterID *uint) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row db.SSHKey
 		if err := tx.First(&row, id).Error; err != nil {
@@ -210,6 +231,9 @@ func (s *Service) Delete(ctx context.Context, id uint) error {
 				return &internalerrors.NotFoundError{Resource: "ssh_key", ID: fmt.Sprintf("%d", id)}
 			}
 			return fmt.Errorf("get ssh key %d: %w", id, err)
+		}
+		if err := assertOwner(&row, requesterID); err != nil {
+			return err
 		}
 		if err := tx.Model(&db.VM{}).Where("ssh_key_id = ?", id).Update("ssh_key_id", nil).Error; err != nil {
 			return fmt.Errorf("clear ssh_key_id refs: %w", err)
@@ -223,8 +247,8 @@ func (s *Service) Delete(ctx context.Context, id uint) error {
 
 // AttachPrivateKey vaults a private half on a public-only key. Rejects when a
 // private half already exists or the keypair doesn't match — the user must
-// delete and re-add to replace.
-func (s *Service) AttachPrivateKey(ctx context.Context, id uint, privateKey string) error {
+// delete and re-add to replace. requesterID enforces ownership.
+func (s *Service) AttachPrivateKey(ctx context.Context, id uint, privateKey string, requesterID *uint) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row db.SSHKey
 		if err := tx.First(&row, id).Error; err != nil {
@@ -232,6 +256,9 @@ func (s *Service) AttachPrivateKey(ctx context.Context, id uint, privateKey stri
 				return &internalerrors.NotFoundError{Resource: "ssh_key", ID: fmt.Sprintf("%d", id)}
 			}
 			return fmt.Errorf("get ssh key %d: %w", id, err)
+		}
+		if err := assertOwner(&row, requesterID); err != nil {
+			return err
 		}
 		if row.HasPrivateKey() {
 			return &internalerrors.ConflictError{
@@ -259,8 +286,8 @@ func (s *Service) AttachPrivateKey(ctx context.Context, id uint, privateKey stri
 }
 
 // SetDefault marks the named key as default for its owner, atomically clearing
-// any prior default.
-func (s *Service) SetDefault(ctx context.Context, id uint) error {
+// any prior default. requesterID enforces ownership.
+func (s *Service) SetDefault(ctx context.Context, id uint, requesterID *uint) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row db.SSHKey
 		if err := tx.First(&row, id).Error; err != nil {
@@ -269,8 +296,42 @@ func (s *Service) SetDefault(ctx context.Context, id uint) error {
 			}
 			return fmt.Errorf("get ssh key %d: %w", id, err)
 		}
+		if err := assertOwner(&row, requesterID); err != nil {
+			return err
+		}
 		return setDefaultTx(tx, id, row.OwnerID)
 	})
+}
+
+// BackfillOwnership assigns every ssh_keys row with NULL owner_id to the
+// lowest-ID admin on the instance. Mirrors the VM backfill — pre-ownership
+// keys (provisioned before this feature shipped, or migrated from the legacy
+// per-VM vault when those VMs themselves had NULL owners) become bound to
+// the original setup admin so they appear on someone's Keys page.
+//
+// Idempotent: re-running after every row already has an owner is a no-op.
+// Returns 0 (no error) when there's no admin yet — typical for an instance
+// still in setup.
+func (s *Service) BackfillOwnership(ctx context.Context) (int64, error) {
+	var admin db.User
+	err := s.db.WithContext(ctx).
+		Where("is_admin = ?", true).
+		Order("id ASC").
+		First(&admin).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("find first admin: %w", err)
+	}
+
+	res := s.db.WithContext(ctx).Model(&db.SSHKey{}).
+		Where("owner_id IS NULL").
+		Update("owner_id", admin.ID)
+	if res.Error != nil {
+		return 0, fmt.Errorf("backfill owner_id: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 // GetDefault returns the default key for the given owner, or NotFoundError
