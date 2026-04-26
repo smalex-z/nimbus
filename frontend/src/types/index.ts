@@ -148,6 +148,9 @@ export interface ClusterVM {
   // key_name is the SSH key file name; present only for local-source VMs
   // that were provisioned with a vault-stored key.
   key_name?: string
+  // tunnel_url is "host:port" when the VM has an established Gopher SSH
+  // tunnel. Present only for local-source VMs.
+  tunnel_url?: string
   hostname?: string
   ip?: string
   // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)

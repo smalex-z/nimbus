@@ -566,6 +566,7 @@ function VMTable({
                               node: vm.node,
                               dbId: vm.id,
                               keyName: vm.key_name,
+                              tunnelUrl: vm.tunnel_url,
                             })
                           }
                           className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
