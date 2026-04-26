@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -510,20 +510,21 @@ func defaultIfZero(n, fallback int) int {
 	return n
 }
 
-// ScriptHandler serves a static file from the gx10 scripts dir. The file
-// is embedded at compile time via the cmd/server frontend embed; we mount
-// a separate FS from disk so operators can iterate without recompiling
-// during development.
+// ScriptHandler serves a static file from the embedded gx10 asset bundle.
+// Assets are baked into the binary via //go:embed in cmd/server/main.go
+// (populated by `make gx10-bundle` before build) so the deployed Nimbus
+// is self-contained and doesn't depend on the source tree being present
+// next to the running binary.
 //
-// We accept a filename whitelist to avoid path-traversal: only the two
-// known install scripts are servable.
+// We accept a filename whitelist to avoid path-traversal: only the
+// known install assets are servable.
 type ScriptHandler struct {
-	scriptDir string
+	assets fs.FS
 }
 
 // NewScriptHandler returns a handler for GET /api/gpu/scripts/{name}.
-func NewScriptHandler(scriptDir string) *ScriptHandler {
-	return &ScriptHandler{scriptDir: scriptDir}
+func NewScriptHandler(assets fs.FS) *ScriptHandler {
+	return &ScriptHandler{assets: assets}
 }
 
 var allowedScripts = map[string]bool{
@@ -539,8 +540,13 @@ func (h *ScriptHandler) Serve(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path := h.scriptDir + "/" + name
-	f, err := openScript(path)
+	if h.assets == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// The embed FS preserves the directory layout — the bundle was staged
+	// at cmd/server/gx10-assets/, so within the embed it's "gx10-assets/<name>".
+	f, err := h.assets.Open("gx10-assets/" + name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -639,10 +645,4 @@ func parseUintParam(r *http.Request, name string) (uint, error) {
 		return 0, err
 	}
 	return uint(n), nil
-}
-
-// openScript opens a script file for serving. Pulled out so tests can inject
-// a fake FS later if needed; for now it's just os.Open.
-func openScript(path string) (io.ReadCloser, error) {
-	return os.Open(path) //nolint:gosec // path comes from a closed allowlist (allowedScripts)
 }
