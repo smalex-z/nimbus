@@ -131,6 +131,77 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, vm)
 }
 
+// ListTunnels handles GET /api/vms/{id}/tunnels — every Gopher per-port
+// tunnel attached to this VM. Returns an empty array for VMs without a
+// Gopher machine record (and for tunnel-disabled deployments).
+func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseVMID(w, r)
+	if !ok {
+		return
+	}
+	tunnels, err := h.svc.ListVMTunnels(r.Context(), id)
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, tunnels)
+}
+
+type createTunnelRequest struct {
+	TargetPort int    `json:"target_port"`
+	Subdomain  string `json:"subdomain,omitempty"`
+}
+
+// CreateTunnel handles POST /api/vms/{id}/tunnels — registers a per-port
+// tunnel on this VM's Gopher machine. Body: {target_port, subdomain?}.
+func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseVMID(w, r)
+	if !ok {
+		return
+	}
+	var req createTunnelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	t, err := h.svc.CreateVMTunnel(r.Context(), id, req.TargetPort, req.Subdomain)
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Created(w, t)
+}
+
+// DeleteTunnel handles DELETE /api/vms/{id}/tunnels/{tunnelId}.
+func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseVMID(w, r)
+	if !ok {
+		return
+	}
+	tunnelID := chi.URLParam(r, "tunnelId")
+	if tunnelID == "" {
+		response.BadRequest(w, "missing tunnelId")
+		return
+	}
+	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, map[string]string{"message": "tunnel deleted"})
+}
+
+// parseVMID extracts and validates the {id} URL param common to the
+// per-VM endpoints. Writes a 400 and returns ok=false on failure.
+func parseVMID(w http.ResponseWriter, r *http.Request) (uint, bool) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return 0, false
+	}
+	return uint(id), true
+}
+
 func validateCreate(req createVMRequest) error {
 	if !hostnameRE.MatchString(req.Hostname) {
 		return &internalerrors.ValidationError{

@@ -866,7 +866,19 @@ function GopherTunnelBox({ host, port, sshCommand }: GopherTunnelBoxProps) {
         reach this machine from anywhere — no LAN required.
       </p>
       <div className="grid grid-cols-1 gap-3 mt-4">
-        <CredCell label="Public endpoint" value={endpoint} fullWidth />
+        <div className="p-3.5 rounded-[10px] bg-white/85 border border-line">
+          <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-1.5">
+            Routing
+          </div>
+          <div className="font-mono text-sm text-ink break-all flex items-center gap-2 flex-wrap">
+            <span>{endpoint}</span>
+            <span className="text-ink-3" aria-hidden>→</span>
+            <span>localhost:22</span>
+            <span className="font-mono text-[10px] uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+              SSH
+            </span>
+          </div>
+        </div>
         <CredCell label="SSH (public)" value={sshCommand} fullWidth />
       </div>
     </div>

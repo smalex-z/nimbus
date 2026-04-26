@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"nimbus/internal/db"
+	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/tunnel"
 )
 
@@ -148,6 +149,75 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		return nil
 	}
 	return fmt.Errorf("ssh connect failed after %d attempts: %w", tunnelBootstrapMaxAttempts, lastErr)
+}
+
+// ── Per-port tunnel CRUD (post-provision "Networks" surface) ────────────────
+
+// ListVMTunnels returns every Gopher per-port tunnel attached to this VM.
+// Returns an empty slice when the VM has no Gopher machine record (i.e.
+// public_tunnel was not requested at provision time, or registration failed).
+func (s *Service) ListVMTunnels(ctx context.Context, vmID uint) ([]tunnel.Tunnel, error) {
+	vm, err := s.Get(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	if vm.TunnelID == "" || s.tunnels == nil {
+		return []tunnel.Tunnel{}, nil
+	}
+	return s.tunnels.ListTunnelsForMachine(ctx, vm.TunnelID)
+}
+
+// CreateVMTunnel registers a per-port tunnel on this VM's Gopher machine.
+// targetPort must be 1-65535; subdomain is optional (Gopher derives one from
+// the machine name when blank). Returns the created tunnel record.
+func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int, subdomain string) (*tunnel.Tunnel, error) {
+	if s.tunnels == nil {
+		return nil, errors.New("gopher tunnel integration is not configured")
+	}
+	if targetPort < 1 || targetPort > 65535 {
+		return nil, &internalerrors.ValidationError{Field: "target_port", Message: "must be 1-65535"}
+	}
+	vm, err := s.Get(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	if vm.TunnelID == "" {
+		return nil, &internalerrors.ValidationError{
+			Field:   "vm",
+			Message: "this VM is not connected to Gopher — re-provision with the public-SSH toggle to enable tunnels",
+		}
+	}
+	return s.tunnels.CreateTunnel(ctx, tunnel.CreateTunnelRequest{
+		MachineID:  vm.TunnelID,
+		TargetPort: targetPort,
+		Subdomain:  strings.TrimSpace(subdomain),
+	})
+}
+
+// DeleteVMTunnel removes a per-port tunnel. The tunnelID must belong to the
+// named VM's Gopher machine — we filter by machine_id before deleting so a
+// caller can't tear down another VM's tunnel by guessing IDs.
+func (s *Service) DeleteVMTunnel(ctx context.Context, vmID uint, tunnelID string) error {
+	if s.tunnels == nil {
+		return errors.New("gopher tunnel integration is not configured")
+	}
+	vm, err := s.Get(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	if vm.TunnelID == "" {
+		return &internalerrors.NotFoundError{Resource: "tunnel", ID: tunnelID}
+	}
+	tunnels, err := s.tunnels.ListTunnelsForMachine(ctx, vm.TunnelID)
+	if err != nil {
+		return err
+	}
+	for _, t := range tunnels {
+		if t.ID == tunnelID {
+			return s.tunnels.DeleteTunnel(ctx, tunnelID)
+		}
+	}
+	return &internalerrors.NotFoundError{Resource: "tunnel", ID: tunnelID}
 }
 
 // truncateOutput keeps the first half + last half of s when it exceeds max,
