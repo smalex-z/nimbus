@@ -41,6 +41,63 @@ type Client struct {
 	host    string // e.g. https://hppve.uclaacm.com:8006
 	authHdr string // "PVEAPIToken=user@realm!tokenname=secret"
 	http    *http.Client
+
+	// osInfoCache memoizes guest-get-osinfo results across calls so the admin
+	// view (which polls every 15s) doesn't repeatedly hit every running VM's
+	// agent. OS details rarely change on a running VM — a 24h TTL is fine.
+	// Negative entries (agent unreachable) get a much shorter TTL so freshly
+	// booted VMs surface their info promptly.
+	osInfoCache *osInfoCache
+}
+
+// osInfoCache caches qemu-guest-agent osinfo by (node, vmid). Positive entries
+// live for osInfoTTLPositive; negative ("agent unreachable") entries live for
+// osInfoTTLNegative so a VM that just got the agent up is rediscovered within
+// minutes. Safe for concurrent use.
+type osInfoCache struct {
+	mu      sync.Mutex
+	entries map[osInfoKey]osInfoEntry
+}
+
+type osInfoKey struct {
+	node string
+	vmid int
+}
+
+type osInfoEntry struct {
+	info      *OSInfo // nil for negative entries
+	expiresAt time.Time
+}
+
+const (
+	osInfoTTLPositive = 24 * time.Hour
+	osInfoTTLNegative = 5 * time.Minute
+)
+
+func newOSInfoCache() *osInfoCache {
+	return &osInfoCache{entries: make(map[osInfoKey]osInfoEntry)}
+}
+
+// get returns (info, hit). hit=true means the cache had a non-stale entry —
+// info may still be nil (negative cache for agentless VMs).
+func (c *osInfoCache) get(node string, vmid int, now time.Time) (*OSInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[osInfoKey{node, vmid}]
+	if !ok || now.After(e.expiresAt) {
+		return nil, false
+	}
+	return e.info, true
+}
+
+func (c *osInfoCache) put(node string, vmid int, info *OSInfo, now time.Time) {
+	ttl := osInfoTTLPositive
+	if info == nil {
+		ttl = osInfoTTLNegative
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[osInfoKey{node, vmid}] = osInfoEntry{info: info, expiresAt: now.Add(ttl)}
 }
 
 // New constructs a Client. host should be a fully-qualified URL including
@@ -62,6 +119,7 @@ func New(host, tokenID, secret string, timeout time.Duration) *Client {
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 			},
 		},
+		osInfoCache: newOSInfoCache(),
 	}
 }
 
@@ -352,6 +410,55 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }
 
+// SetVMTags writes the given tag list to a VM's `tags` config field, replacing
+// any prior value. Pass an empty slice to clear all tags. Tags are sent as a
+// `;`-separated string per Proxmox's wire format.
+//
+// Callers that need to preserve user-applied tags should read existing tags
+// first (via GetVMConfig) and pass the merged list in.
+func (c *Client) SetVMTags(ctx context.Context, node string, vmid int, tags []string) error {
+	params := url.Values{}
+	params.Set("tags", JoinTags(tags))
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
+// SetVMDescription writes a VM's `description` field, replacing the prior
+// value verbatim. Pass an empty string to clear. Like tags, callers that
+// need to preserve user-written prose should read existing first (via
+// GetVMConfig) and pass the merged body in.
+func (c *Client) SetVMDescription(ctx context.Context, node string, vmid int, description string) error {
+	params := url.Values{}
+	params.Set("description", description)
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
+// GetClusterTagStyle reads the `tag-style` property from /cluster/options.
+// Returns the empty string when the option is unset on the cluster (which
+// is the Proxmox default — every tag gets a hash-derived random color).
+//
+// Requires `Sys.Audit` on `/`. Errors propagate; the caller decides whether
+// a missing option is a hard failure.
+func (c *Client) GetClusterTagStyle(ctx context.Context) (string, error) {
+	var opts map[string]any
+	if err := c.do(ctx, http.MethodGet, "/cluster/options", nil, &opts); err != nil {
+		return "", err
+	}
+	raw, _ := opts["tag-style"].(string)
+	return raw, nil
+}
+
+// SetClusterTagStyle writes the `tag-style` property on /cluster/options,
+// replacing any prior value. Requires `Sys.Modify` on `/` — a token without
+// it gets a 403, which the caller should treat as "operator hasn't granted
+// us permission to set tag colors" and degrade gracefully.
+func (c *Client) SetClusterTagStyle(ctx context.Context, tagStyle string) error {
+	params := url.Values{}
+	params.Set("tag-style", tagStyle)
+	return c.do(ctx, http.MethodPut, "/cluster/options", params, nil)
+}
+
 // ResizeDisk grows a disk on a stopped VM. size is the Proxmox-style delta —
 // "+10G" adds 10 gigabytes.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
@@ -389,6 +496,45 @@ func (c *Client) GetAgentInterfaces(ctx context.Context, node string, vmid int) 
 		return nil, err
 	}
 	return res.Result, nil
+}
+
+// agentOSInfoResult wraps the qemu-guest-agent's get-osinfo response, which
+// nests the actual record under a `result` key.
+type agentOSInfoResult struct {
+	Result OSInfo `json:"result"`
+}
+
+// GetAgentOSInfo reads guest-get-osinfo from the qemu-guest-agent. Same
+// caveats as GetAgentInterfaces — returns 500 when the agent is unavailable.
+// Callers should treat any error as "info not available right now".
+func (c *Client) GetAgentOSInfo(ctx context.Context, node string, vmid int) (*OSInfo, error) {
+	var res agentOSInfoResult
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/agent/get-osinfo", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodGet, path, nil, &res); err != nil {
+		return nil, err
+	}
+	return &res.Result, nil
+}
+
+// GetAgentOSInfoCached returns the qemu-guest-agent osinfo for a VM, served
+// from a 24h TTL cache. Cache misses fall through to GetAgentOSInfo; agent
+// failures are negatively cached for 5 minutes so a freshly booted VM gets
+// rediscovered without re-probing every poll cycle.
+//
+// A nil return means the agent didn't yield usable info (still cached).
+// Callers should treat that as "no enriched OS data available".
+func (c *Client) GetAgentOSInfoCached(ctx context.Context, node string, vmid int) *OSInfo {
+	now := time.Now()
+	if info, hit := c.osInfoCache.get(node, vmid, now); hit {
+		return info
+	}
+	info, err := c.GetAgentOSInfo(ctx, node, vmid)
+	if err != nil || info == nil || info.ID == "" {
+		c.osInfoCache.put(node, vmid, nil, now)
+		return nil
+	}
+	c.osInfoCache.put(node, vmid, info, now)
+	return info
 }
 
 // GetClusterStorage returns every storage entry visible at the cluster level.
@@ -745,6 +891,144 @@ func (c *Client) ListClusterIPs(ctx context.Context) ([]ClusterIP, error) {
 		return out, errors.Join(errs...)
 	}
 	return out, nil
+}
+
+// GetClusterVMDetails walks every online node and returns a per-VM snapshot
+// enriched with IP (cloud-init `ipconfig0`, falling back to qemu-guest-agent),
+// raw tags, and `ostype`. Templates are excluded.
+//
+// This is the data source for the admin cluster-VM view. It is intentionally
+// separate from ListClusterIPs (which the IP-pool reconciler depends on) so
+// failures in this richer walk can't poison the IP-allocation truth source.
+//
+// Per-node walks run concurrently up to listClusterIPsConcurrency. Per-VM
+// agent probes are best-effort: a VM whose agent is disabled or unreachable
+// produces an entry with IP="" rather than failing the walk.
+func (c *Client) GetClusterVMDetails(ctx context.Context) ([]ClusterVMDetail, error) {
+	nodes, err := c.GetNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+
+	var (
+		mu   sync.Mutex
+		out  []ClusterVMDetail
+		errs []error
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, listClusterIPsConcurrency)
+	)
+
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		nodeName := n.Name
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			details, err := c.collectNodeDetails(ctx, nodeName)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("node %s: %w", nodeName, err))
+			}
+			out = append(out, details...)
+		}()
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return out, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+// collectNodeDetails enriches every non-template VM on one node with its
+// config (ipconfig0, tags, ostype) and an agent IP fallback. A single bad VMID
+// config does not drop the whole node — the failed entry is returned with
+// whatever fields we managed to populate.
+func (c *Client) collectNodeDetails(ctx context.Context, node string) ([]ClusterVMDetail, error) {
+	vms, err := c.ListVMs(ctx, node)
+	if err != nil {
+		return nil, fmt.Errorf("list vms: %w", err)
+	}
+	out := make([]ClusterVMDetail, 0, len(vms))
+	for _, vm := range vms {
+		if vm.Template != 0 {
+			continue
+		}
+		detail := ClusterVMDetail{
+			VMID:   vm.VMID,
+			Node:   node,
+			Name:   vm.Name,
+			Status: vm.Status,
+		}
+		cfg, err := c.GetVMConfig(ctx, node, vm.VMID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			out = append(out, detail)
+			continue
+		}
+		if raw, _ := cfg["tags"].(string); raw != "" {
+			detail.Tags = SplitTags(raw)
+		}
+		if desc, _ := cfg["description"].(string); desc != "" {
+			detail.Description = desc
+		}
+		if ostype, _ := cfg["ostype"].(string); ostype != "" {
+			detail.OSType = ostype
+		}
+		if raw, _ := cfg["ipconfig0"].(string); raw != "" {
+			if ip, ok := ParseIPConfig0(raw); ok {
+				detail.IP = ip
+				detail.IPSource = "ipconfig0"
+			}
+		}
+		// Fall back to qemu-guest-agent when the VM is running and lacks a
+		// parseable static IP (typical for externally-created VMs).
+		if detail.IP == "" && vm.Status == "running" {
+			if ip := c.firstAgentIPv4(ctx, node, vm.VMID); ip != "" {
+				detail.IP = ip
+				detail.IPSource = "agent"
+			}
+		}
+		// Best-effort enriched OS info from the agent. Cached 24h on hit,
+		// 5min on miss — see osInfoCache. Stopped VMs skip the probe.
+		if vm.Status == "running" {
+			detail.OS = c.GetAgentOSInfoCached(ctx, node, vm.VMID)
+		}
+		out = append(out, detail)
+	}
+	return out, nil
+}
+
+// firstAgentIPv4 returns the first non-loopback IPv4 reported by the guest
+// agent, or "" on any error / no usable address. Best-effort — the agent
+// returns 500 on VMs without it installed/running, which we silently skip.
+func (c *Client) firstAgentIPv4(ctx context.Context, node string, vmid int) string {
+	ifaces, err := c.GetAgentInterfaces(ctx, node, vmid)
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Name == "lo" {
+			continue
+		}
+		for _, addr := range iface.IPAddresses {
+			if addr.IPAddressType != "ipv4" {
+				continue
+			}
+			if addr.IPAddress == "" || strings.HasPrefix(addr.IPAddress, "127.") {
+				continue
+			}
+			return addr.IPAddress
+		}
+	}
+	return ""
 }
 
 // collectNodeIPs lists VMs on a single node and parses each one's ipconfig0.
