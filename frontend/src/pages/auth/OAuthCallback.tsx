@@ -40,12 +40,14 @@ const PROVIDERS: Record<ProviderName, ProviderConfig> = {
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
-  invalid_state:   'OAuth state mismatch — possible CSRF attempt. Please try again.',
-  access_denied:   'Authorization was cancelled.',
-  exchange_failed: 'Failed to exchange the authorization code.',
-  user_failed:     'Could not retrieve your account details.',
-  session_failed:  'Account verified, but session creation failed. Please try again.',
-  missing_code:    'Authorization code was missing from the callback.',
+  invalid_state:         'OAuth state mismatch — possible CSRF attempt. Please try again.',
+  access_denied:         'Authorization was cancelled.',
+  exchange_failed:       'Failed to exchange the authorization code.',
+  user_failed:           'Could not retrieve your account details.',
+  session_failed:        'Account verified, but session creation failed. Please try again.',
+  missing_code:          'Authorization code was missing from the callback.',
+  domain_not_authorized: 'Your email domain is not authorized for sign-up. Contact your administrator to request access.',
+  org_not_authorized:    'Your GitHub account is not a member of an authorized organization. Contact your administrator to request access.',
 }
 
 export default function OAuthCallback() {

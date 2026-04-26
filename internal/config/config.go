@@ -138,6 +138,13 @@ type EnvValues struct {
 	Nameserver         string
 	SearchDomain       string
 	Port               string
+	// Optional Gopher tunnel credentials — collected from the wizard's
+	// "optional" section. Empty when the operator hasn't configured them.
+	// Seeded into db.GopherSettings on first boot (see main.go); after that,
+	// the DB is the source of truth and admins can rotate from the
+	// Authentication page.
+	GopherAPIURL string
+	GopherAPIKey string
 }
 
 // EnvFilePath returns the path where the runtime config should be written.
@@ -166,10 +173,13 @@ func WriteEnvFile(path string, v EnvValues) error {
 			"GATEWAY_IP=%s\n"+
 			"NAMESERVER=%s\n"+
 			"SEARCH_DOMAIN=%s\n"+
-			"PORT=%s\n",
+			"PORT=%s\n"+
+			"GOPHER_API_URL=%s\n"+
+			"GOPHER_API_KEY=%s\n",
 		v.ProxmoxHost, v.ProxmoxTokenID, v.ProxmoxTokenSecret,
 		v.IPPoolStart, v.IPPoolEnd, v.GatewayIP,
 		v.Nameserver, v.SearchDomain, v.Port,
+		v.GopherAPIURL, v.GopherAPIKey,
 	)
 	return os.WriteFile(path, []byte(content), 0600)
 }
