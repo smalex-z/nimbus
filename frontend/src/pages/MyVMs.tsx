@@ -5,6 +5,7 @@ import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
+import TunnelsModal from '@/components/ui/TunnelsModal'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
@@ -73,6 +74,8 @@ export default function MyVMs() {
 
 function VMRow({ vm }: { vm: VM }) {
   const [sshOpen, setSshOpen] = useState(false)
+  const [tunnelsOpen, setTunnelsOpen] = useState(false)
+  const hasTunnel = Boolean(vm.tunnel_url)
 
   return (
     <Card className="p-5">
@@ -92,14 +95,27 @@ function VMRow({ vm }: { vm: VM }) {
           {vm.tier}
         </span>
         <StatusBadge status={vm.status} />
-        <button
-          type="button"
-          onClick={() => setSshOpen(true)}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-        >
-          <span aria-hidden>↗</span>
-          <span>SSH</span>
-        </button>
+        <div className="flex gap-1.5">
+          {hasTunnel && (
+            <button
+              type="button"
+              onClick={() => setTunnelsOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+              title="Manage Gopher tunnels for this VM"
+            >
+              <span aria-hidden>🌐</span>
+              <span>Networks</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setSshOpen(true)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+          >
+            <span aria-hidden>↗</span>
+            <span>SSH</span>
+          </button>
+        </div>
       </div>
       {sshOpen && (
         <SSHDetailsModal
@@ -114,6 +130,13 @@ function VMRow({ vm }: { vm: VM }) {
             tunnelUrl: vm.tunnel_url,
           }}
           onClose={() => setSshOpen(false)}
+        />
+      )}
+      {tunnelsOpen && (
+        <TunnelsModal
+          vmId={vm.ID}
+          hostname={vm.hostname}
+          onClose={() => setTunnelsOpen(false)}
         />
       )}
     </Card>

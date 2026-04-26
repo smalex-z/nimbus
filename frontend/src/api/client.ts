@@ -138,6 +138,40 @@ export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   return data
 }
 
+export interface VMTunnel {
+  id: string
+  machine_id: string
+  status?: string
+  subdomain?: string
+  target_ip?: string
+  target_port: number
+  tunnel_url?: string
+  error?: string
+  created_at?: string
+}
+
+export interface CreateVMTunnelRequest {
+  target_port: number
+  subdomain?: string
+}
+
+export async function listVMTunnels(vmId: number): Promise<VMTunnel[]> {
+  const { data } = await api.get<VMTunnel[]>(`/vms/${vmId}/tunnels`)
+  return data
+}
+
+export async function createVMTunnel(
+  vmId: number,
+  req: CreateVMTunnelRequest,
+): Promise<VMTunnel> {
+  const { data } = await api.post<VMTunnel>(`/vms/${vmId}/tunnels`, req)
+  return data
+}
+
+export async function deleteVMTunnel(vmId: number, tunnelId: string): Promise<void> {
+  await api.delete(`/vms/${vmId}/tunnels/${encodeURIComponent(tunnelId)}`)
+}
+
 export async function listKeys(): Promise<SSHKey[]> {
   const { data } = await api.get<SSHKey[]>('/keys')
   return data

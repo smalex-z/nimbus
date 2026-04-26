@@ -5,6 +5,7 @@ import Card from '@/components/ui/Card'
 import OSIcon from '@/components/ui/OSIcon'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
+import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
@@ -532,6 +533,7 @@ function VMTable({
   onClearFilters: () => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
+  const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
   const selectClass =
     'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
 
@@ -658,25 +660,43 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3">
                       {vm.source === 'local' && vm.username && vm.ip ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSshTarget({
-                              hostname: vm.hostname || vm.name,
-                              ip: vm.ip!,
-                              username: vm.username!,
-                              vmid: vm.vmid,
-                              node: vm.node,
-                              dbId: vm.id,
-                              keyName: vm.key_name,
-                              tunnelUrl: vm.tunnel_url,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                        >
-                          <span aria-hidden>↗</span>
-                          <span>SSH</span>
-                        </button>
+                        <div className="flex gap-1.5">
+                          {vm.tunnel_url && vm.id !== undefined && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setTunnelsTarget({
+                                  vmId: vm.id!,
+                                  hostname: vm.hostname || vm.name,
+                                })
+                              }
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                              title="Manage Gopher tunnels for this VM"
+                            >
+                              <span aria-hidden>🌐</span>
+                              <span>Networks</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSshTarget({
+                                hostname: vm.hostname || vm.name,
+                                ip: vm.ip!,
+                                username: vm.username!,
+                                vmid: vm.vmid,
+                                node: vm.node,
+                                dbId: vm.id,
+                                keyName: vm.key_name,
+                                tunnelUrl: vm.tunnel_url,
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                          >
+                            <span aria-hidden>↗</span>
+                            <span>SSH</span>
+                          </button>
+                        </div>
                       ) : dash}
                     </td>
                   </tr>
@@ -688,6 +708,13 @@ function VMTable({
       )}
       {sshTarget && (
         <SSHDetailsModal target={sshTarget} onClose={() => setSshTarget(null)} />
+      )}
+      {tunnelsTarget && (
+        <TunnelsModal
+          vmId={tunnelsTarget.vmId}
+          hostname={tunnelsTarget.hostname}
+          onClose={() => setTunnelsTarget(null)}
+        />
       )}
     </div>
   )

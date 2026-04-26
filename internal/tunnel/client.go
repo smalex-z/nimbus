@@ -146,22 +146,27 @@ func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
 
 // ── Tunnels ───────────────────────────────────────────────────────────────────
 
-// Tunnel is an additional port exposure on an existing active machine. Used
-// for HTTP/custom services beyond SSH. Created post-provision via the
-// machine page UI (not yet built — provision-time exposure is SSH-only).
+// Tunnel is an additional port exposure on an existing connected machine.
+// Used for HTTP/custom services beyond SSH (which is exposed via the
+// public_ssh flag on the Machine itself, not a tunnel record).
 type Tunnel struct {
 	ID         string `json:"id"`
 	MachineID  string `json:"machine_id"`
-	TargetPort int    `json:"target_port"`
 	Status     string `json:"status,omitempty"`
-	URL        string `json:"url,omitempty"`
+	Subdomain  string `json:"subdomain,omitempty"`
+	TargetIP   string `json:"target_ip,omitempty"`
+	TargetPort int    `json:"target_port"`
+	TunnelURL  string `json:"tunnel_url,omitempty"`
+	Error      string `json:"error,omitempty"`
 	CreatedAt  string `json:"created_at,omitempty"`
 }
 
-// CreateTunnelRequest is the body of POST /api/v1/tunnels.
+// CreateTunnelRequest is the body of POST /api/v1/tunnels. Subdomain is
+// optional — Gopher derives one from the machine name when blank.
 type CreateTunnelRequest struct {
 	MachineID  string `json:"machine_id"`
 	TargetPort int    `json:"target_port"`
+	Subdomain  string `json:"subdomain,omitempty"`
 }
 
 // CreateTunnel adds a port exposure to an active machine. Returns an error
@@ -194,6 +199,25 @@ func (c *Client) ListTunnels(ctx context.Context) ([]Tunnel, error) {
 		return nil, err
 	}
 	return page.Items, nil
+}
+
+// ListTunnelsForMachine fetches every tunnel and filters down to those
+// attached to the named machine. Gopher's external API doesn't expose a
+// per-machine query parameter, so we filter client-side. The first page is
+// adequate for the usual handful-of-tunnels-per-machine case; if a single
+// machine ever sprouts >50 tunnels this would silently truncate.
+func (c *Client) ListTunnelsForMachine(ctx context.Context, machineID string) ([]Tunnel, error) {
+	all, err := c.ListTunnels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Tunnel, 0, len(all))
+	for _, t := range all {
+		if t.MachineID == machineID {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────

@@ -215,8 +215,8 @@ func TestCreateTunnel_HappyPath(t *testing.T) {
 		capturedBody = string(body)
 		writeOK(t, w, tunnel.Tunnel{
 			ID: "t-1", MachineID: "m-1", TargetPort: 8080,
-			Status: tunnel.StatusActive,
-			URL:    "https://something.altsuite.co",
+			Status:    tunnel.StatusActive,
+			TunnelURL: "https://something.altsuite.co",
 		})
 	})
 	got, err := c.CreateTunnel(context.Background(), tunnel.CreateTunnelRequest{
@@ -225,7 +225,7 @@ func TestCreateTunnel_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTunnel: %v", err)
 	}
-	if got.URL == "" || got.MachineID != "m-1" {
+	if got.TunnelURL == "" || got.MachineID != "m-1" {
 		t.Errorf("got %+v", got)
 	}
 	if !strings.Contains(capturedBody, `"machine_id":"m-1"`) ||
