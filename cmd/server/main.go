@@ -19,6 +19,7 @@ import (
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/install"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
@@ -38,6 +39,13 @@ func main() {
 		if err := runBootstrap(os.Args[2:]); err != nil {
 			log.Fatalf("bootstrap failed: %v", err)
 		}
+		return
+	}
+
+	// `nimbus install [--upgrade]` installs the binary to /opt/nimbus, writes
+	// the systemd unit, and starts the service. Re-execs via sudo when not root.
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		install.Run(os.Args[2:])
 		return
 	}
 
@@ -103,6 +111,15 @@ func main() {
 
 	authSvc := service.NewAuthService(database)
 
+	// Backfill: pre-`is_admin` deployments have users that AutoMigrate left
+	// at default false. If no admin exists, promote the oldest user so a
+	// single-tenant homelab self-heals on the first post-upgrade boot.
+	if promoted, err := authSvc.PromoteFirstUserIfNoAdmin(); err != nil {
+		log.Printf("warning: admin backfill check failed: %v", err)
+	} else if promoted {
+		log.Printf("backfill: promoted oldest user to admin (no admin existed)")
+	}
+
 	pool := ippool.New(database.DB)
 	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
 		log.Fatalf("failed to seed IP pool: %v", err)
@@ -167,6 +184,9 @@ func main() {
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
+		VMDiskStorage:    cfg.VMDiskStorage,
+		MemBufferMiB:     cfg.MemBufferMiB,
+		CPULoadFactor:    cfg.CPULoadFactor,
 	})
 	provSvc.SetIPVerifier(reconciler)
 

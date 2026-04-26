@@ -582,6 +582,38 @@ func (s *AuthService) IsAdminClaimed() (bool, error) {
 	return count > 0, err
 }
 
+// PromoteFirstUserIfNoAdmin promotes the oldest user (lowest ID) to admin
+// when no admin currently exists. Idempotent — returns (promoted, err).
+//
+// Why this exists: when `is_admin` was added to the User struct, AutoMigrate
+// added the column with default false. Pre-existing rows therefore became
+// non-admin members. HasAnyUsers() still returns true so the setup wizard
+// doesn't prompt for admin creation either, leaving the system in a state
+// where every user is locked out of admin features. This backfill runs at
+// startup (so `nimbus install --upgrade` triggers it via main()) and
+// recovers single-tenant homelab installs without operator intervention.
+func (s *AuthService) PromoteFirstUserIfNoAdmin() (bool, error) {
+	var adminCount int64
+	if err := s.db.Model(&db.User{}).Where("is_admin = ?", true).Count(&adminCount).Error; err != nil {
+		return false, err
+	}
+	if adminCount > 0 {
+		return false, nil
+	}
+	var first db.User
+	err := s.db.Order("id ASC").First(&first).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil // fresh install — setup wizard handles admin creation
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := s.db.Model(&db.User{}).Where("id = ?", first.ID).Update("is_admin", true).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ClaimAdmin promotes the given user to admin. Returns ErrAdminAlreadyClaimed
 // if any admin already exists.
 func (s *AuthService) ClaimAdmin(userID uint) error {

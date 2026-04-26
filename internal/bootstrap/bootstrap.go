@@ -46,7 +46,7 @@ const (
 type ProxmoxClient interface {
 	GetNodes(ctx context.Context) ([]proxmox.Node, error)
 	TemplateExists(ctx context.Context, node string, vmid int) (bool, error)
-	NextVMID(ctx context.Context) (int, error)
+	NextVMIDFrom(ctx context.Context, minVMID int) (int, error)
 	EnsureStorageContent(ctx context.Context, storage, contentType string) error
 	StorageHasFile(ctx context.Context, node, storage, contentType, filename string) (bool, error)
 	DownloadStorageURL(ctx context.Context, node, storage, contentType, url, filename string) (string, error)
@@ -64,10 +64,12 @@ const importContentType = "import"
 // Config holds the deployment-specific knobs. All values have sensible
 // defaults so a bare Config{} works on a stock Proxmox install.
 //
-// TemplateBaseVMID is now only used as a hint / floor for `NextVMID` callers
-// — the actual VMIDs assigned to templates are whatever Proxmox returns from
-// `cluster/nextid` at bootstrap time. This avoids the cluster-wide-unique
-// VMID conflict that the old "base + offset" scheme hit.
+// TemplateBaseVMID is the floor for template VMID assignment. Templates are
+// allocated as the lowest free cluster-wide VMID at or above this value, so
+// they stay segregated from user-VM VMIDs (which start at Proxmox's default
+// floor of 100). The old "base + offset" scheme — one fixed VMID per OS — was
+// dropped because Proxmox requires cluster-wide-unique VMIDs, so it could not
+// support more than one node.
 type Config struct {
 	TemplateBaseVMID int
 	DiskStorage      string
@@ -84,10 +86,10 @@ type Service struct {
 	db  *gorm.DB
 	cfg Config
 
-	// nextVMIDMu serializes the NextVMID → CreateVMWithImport pair across
+	// nextVMIDMu serializes the NextVMIDFrom → CreateVMWithImport pair across
 	// all bootstrap goroutines. Without it, two parallel goroutines on
-	// different nodes can both query NextVMID, both get the same value,
-	// and the second create fails with "VM X already exists on node Y".
+	// different nodes can both compute the next free VMID, both get the same
+	// value, and the second create fails with "VM X already exists on node Y".
 	// Same pattern provision uses with cloneMu.
 	nextVMIDMu sync.Mutex
 }
@@ -275,13 +277,13 @@ func (s *Service) bootstrapOne(
 		}
 	}
 
-	// Steps 3+4: get a Proxmox-assigned VMID and immediately create the VM
-	// with it. These two MUST be serialized cluster-wide — if two goroutines
-	// both query NextVMID before either creates, Proxmox can return the
-	// same VMID to both. Once Create succeeds, the VMID is "taken" and the
-	// next caller's NextVMID returns a higher value.
+	// Steps 3+4: get a free VMID at or above TemplateBaseVMID and immediately
+	// create the VM with it. These two MUST be serialized cluster-wide — if
+	// two goroutines both compute the next free VMID before either creates,
+	// they can land on the same value. Once Create succeeds the VMID is
+	// "taken" and the next caller sees a higher value.
 	s.nextVMIDMu.Lock()
-	vmid, err := s.px.NextVMID(ctx)
+	vmid, err := s.px.NextVMIDFrom(ctx, s.cfg.TemplateBaseVMID)
 	if err != nil {
 		s.nextVMIDMu.Unlock()
 		return finish(0, fmt.Sprintf("nextid: %v", err))

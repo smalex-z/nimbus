@@ -46,12 +46,6 @@ Don't add error handling for impossible cases, comments that re-state the code,
 or backwards-compat shims for code that hasn't been released. If you find drift
 in adjacent code, mention it and ask before fixing it in the same PR.
 
-### Plan-mode for non-trivial work
-
-For anything that touches more than ~3 files or changes a public interface, draft a
-plan in `~/.claude/plans/` and use `ExitPlanMode` for approval before editing.
-Trivial fixes (typo, format, single-line patch) don't need this.
-
 ---
 
 ## Project orientation
@@ -84,7 +78,7 @@ internal/
   ctxutil/              request-context helpers (current user, …)
   build/                build-time version info (ldflags)
 frontend/               React 18 + TS + Vite + Tailwind SPA
-scripts/                build.sh, dev.sh, install.sh
+scripts/                build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 .github/workflows/      build, test, lint, release
 ```
 
@@ -193,6 +187,40 @@ These are easy to violate by accident — push back if a change would erode them
    router is mounted. Don't add code that assumes Proxmox is reachable before
    `IsConfigured()` returns true.
 
+## Schema changes and data backfills
+
+`db.New` runs `gormDB.AutoMigrate(...)` on every server boot, so adding a new
+column to a struct in `internal/db/models.go` is enough to roll the schema
+forward — no SQL migration files. **But existing rows get the column's zero
+value**, which can quietly break things for pre-existing data:
+
+- `is_admin bool default:false` was added later → every old user became a
+  member, leaving deployments with no admin at all (`HasAnyUsers()` returned
+  true so the setup wizard never re-prompted). The fix lives in
+  `service.AuthService.PromoteFirstUserIfNoAdmin()` and runs from `main.go`
+  on every startup. Idempotent — safe to call repeatedly.
+
+When you add a column whose **zero value would mis-classify existing rows**
+(default-deny flags, type discriminators, ownership pointers), pair the
+struct change with a one-shot backfill in the relevant service package and
+call it from `main.go` after `db.New`. Pattern:
+
+```go
+func (s *X) MigrateFooBackfill() (changed bool, err error) { … }   // idempotent
+```
+
+```go
+// in main.go
+if changed, err := svc.MigrateFooBackfill(); err != nil {
+    log.Printf("warning: foo backfill failed: %v", err)
+} else if changed {
+    log.Printf("backfill: …")
+}
+```
+
+`nimbus install --upgrade` replaces the binary and restarts the systemd unit,
+so any backfill in `main()` runs on the first post-upgrade boot for free.
+
 ## Gotchas the codebase already documents (read before editing)
 
 - **Proxmox API is form-encoded, not JSON.** `client.go:do` sets
@@ -229,6 +257,9 @@ These three packages co-evolve. After any non-trivial edit:
 | `RESERVATION_TTL_SECONDS` | 600 | Stale-reservation cutoff (10 min) |
 | `VERIFY_CACHE_TTL_SECONDS` | 5 | How long `ListClusterIPs` snapshot is reused for `VerifyFree` |
 | `VACATE_MISS_THRESHOLD` | 3 | Consecutive missing reconciles before auto-vacating an allocated row |
+| `NIMBUS_VM_DISK_STORAGE` | `local-lvm` | Proxmox storage pool the disk gate checks for free space; empty disables the disk gate (scorer reverts to mem+cpu) |
+| `NIMBUS_MEM_BUFFER_MIB` | 256 | RAM headroom required above the tier's request — avoids packing a node to literal zero free |
+| `NIMBUS_CPU_LOAD_FACTOR` | 0.5 | Share of a fresh VM's vCPUs the soft score assumes consumed (range 0.25–1.0) |
 
 When tuning, remember: lower `VERIFY_CACHE_TTL_SECONDS` tightens the race window
 at the cost of more Proxmox API calls; higher `VACATE_MISS_THRESHOLD` tolerates
