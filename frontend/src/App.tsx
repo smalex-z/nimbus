@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from '@/context/AuthContext'
 import Background from '@/components/Background'
 import Layout from '@/components/Layout'
+import RequireAdmin from '@/components/RequireAdmin'
 import RequireAuth from '@/components/RequireAuth'
 import Admin from '@/pages/Admin'
 import Keys from '@/pages/Keys'
@@ -59,9 +60,30 @@ export default function App() {
                     <Route path="/" element={<Provision />} />
                     <Route path="/vms" element={<MyVMs />} />
                     <Route path="/keys" element={<Keys />} />
-                    <Route path="/nodes" element={<Nodes />} />
-                    <Route path="/settings" element={<Settings />} />
-                    <Route path="/admin" element={<Admin />} />
+                    <Route
+                      path="/nodes"
+                      element={
+                        <RequireAdmin>
+                          <Nodes />
+                        </RequireAdmin>
+                      }
+                    />
+                    <Route
+                      path="/settings"
+                      element={
+                        <RequireAdmin>
+                          <Settings />
+                        </RequireAdmin>
+                      }
+                    />
+                    <Route
+                      path="/admin"
+                      element={
+                        <RequireAdmin>
+                          <Admin />
+                        </RequireAdmin>
+                      }
+                    />
                   </Routes>
                 </Layout>
               </RequireAuth>

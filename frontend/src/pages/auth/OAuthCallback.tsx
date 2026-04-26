@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { useAuth } from '@/hooks/useAuth'
 import { GithubIcon, GoogleIcon, CheckIcon } from '@/components/nimbus'
 
 interface Step {
@@ -50,6 +51,7 @@ const ERROR_MESSAGES: Record<string, string> = {
 export default function OAuthCallback() {
   const [params] = useSearchParams()
   const navigate = useNavigate()
+  const { user } = useAuth()
 
   const error = params.get('error')
   const login = params.get('login') ?? 'you'
@@ -65,9 +67,14 @@ export default function OAuthCallback() {
     steps.forEach((_, i) => {
       timers.push(setTimeout(() => setVisibleCount(i + 1), 350 + i * 420))
     })
-    timers.push(setTimeout(() => navigate('/', { replace: true }), 350 + steps.length * 420 + 600))
+    timers.push(
+      setTimeout(
+        () => navigate(user?.is_admin ? '/admin' : '/', { replace: true }),
+        350 + steps.length * 420 + 600,
+      ),
+    )
     return () => timers.forEach(clearTimeout)
-  }, [error]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [error, user]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const iconBg = providerKey === 'google'
     ? { background: '#fff', border: '1px solid rgba(20,18,28,0.1)', color: 'inherit' }
