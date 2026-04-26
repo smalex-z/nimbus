@@ -723,4 +723,20 @@ export async function mintGPUPairingToken(): Promise<GPUPairingView> {
   return data
 }
 
+export interface GPUUnpairView {
+  cancelled_jobs: number
+  // cleanup_cmd is the shell snippet the operator runs on the GX10 to
+  // stop the systemd units. Nimbus can't reach into the GX10 itself —
+  // the pairing flow is GX10-pulls-from-Nimbus, never the reverse.
+  cleanup_cmd: string
+}
+
+// unpairGX10 wipes the worker token, disables the GPU plane, and bulk-
+// cancels every queued/running job. Returns the cleanup command the
+// operator runs on the GX10 to stop the local systemd units.
+export async function unpairGX10(): Promise<GPUUnpairView> {
+  const { data } = await api.post<GPUUnpairView>('/settings/gpu/unpair')
+  return data
+}
+
 export default api
