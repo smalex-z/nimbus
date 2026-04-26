@@ -204,7 +204,9 @@ func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (boo
 	return false, nil
 }
 
-// NextVMID asks Proxmox for the next free cluster-wide VMID.
+// NextVMID asks Proxmox for the next free cluster-wide VMID, starting from
+// Proxmox's own floor (100). Use NextVMIDFrom when the caller needs to enforce
+// a higher floor (e.g. templates in the 9000+ range).
 func (c *Client) NextVMID(ctx context.Context) (int, error) {
 	var raw string
 	if err := c.do(ctx, http.MethodGet, "/cluster/nextid", nil, &raw); err != nil {
@@ -215,6 +217,41 @@ func (c *Client) NextVMID(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("parse nextid %q: %w", raw, err)
 	}
 	return id, nil
+}
+
+// NextVMIDFrom returns the lowest free cluster-wide VMID at or above minVMID.
+//
+// Proxmox's /cluster/nextid endpoint always starts from 100 and has no
+// "minimum" parameter, so we list every VM in the cluster ourselves and pick
+// the lowest gap >= minVMID. One API call regardless of cluster size.
+//
+// Callers that need cluster-wide-unique VMID assignment in a reserved range
+// (templates land in 9000+ to keep them out of the user-VM range) should use
+// this instead of NextVMID. Callers MUST serialize the
+// NextVMIDFrom → CreateVM pair (e.g. with a mutex) — there's no atomic
+// "reserve" in the Proxmox API.
+func (c *Client) NextVMIDFrom(ctx context.Context, minVMID int) (int, error) {
+	if minVMID < 100 {
+		minVMID = 100
+	}
+	var resources []struct {
+		VMID int `json:"vmid"`
+	}
+	params := url.Values{}
+	params.Set("type", "vm")
+	if err := c.do(ctx, http.MethodGet, "/cluster/resources", params, &resources); err != nil {
+		return 0, fmt.Errorf("list cluster vm resources: %w", err)
+	}
+	taken := make(map[int]bool, len(resources))
+	for _, r := range resources {
+		taken[r.VMID] = true
+	}
+	for id := minVMID; id <= 999_999_999; id++ {
+		if !taken[id] {
+			return id, nil
+		}
+	}
+	return 0, fmt.Errorf("no free VMID at or above %d", minVMID)
 }
 
 // CloneVM clones a template into a new VM on the chosen target node. The
