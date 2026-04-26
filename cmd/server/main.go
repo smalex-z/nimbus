@@ -112,6 +112,23 @@ func main() {
 
 	authSvc := service.NewAuthService(database)
 
+	// Gopher seed: if env vars are set AND the DB row is still empty, copy
+	// env → DB once. After that, the Authentication settings page is the
+	// source of truth (admins can rotate creds without touching .env).
+	if cfg.GopherAPIURL != "" || cfg.GopherAPIKey != "" {
+		if existing, err := authSvc.GetGopherSettings(); err == nil &&
+			existing.APIURL == "" && existing.APIKey == "" {
+			if err := authSvc.SaveGopherSettings(db.GopherSettings{
+				APIURL: cfg.GopherAPIURL,
+				APIKey: cfg.GopherAPIKey,
+			}); err != nil {
+				log.Printf("warning: failed to seed Gopher settings from env: %v", err)
+			} else {
+				log.Printf("seeded Gopher settings from env (one-time migration)")
+			}
+		}
+	}
+
 	// Backfill: pre-`is_admin` deployments have users that AutoMigrate left
 	// at default false. If no admin exists, promote the oldest user so a
 	// single-tenant homelab self-heals on the first post-upgrade boot.

@@ -2,8 +2,10 @@ package service
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -14,11 +16,15 @@ import (
 )
 
 var (
-	ErrEmailTaken          = errors.New("email already registered")
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrSessionNotFound     = errors.New("session not found or expired")
-	ErrAdminAlreadyClaimed = errors.New("admin already claimed")
-	ErrUsersExist          = errors.New("users already exist")
+	ErrEmailTaken           = errors.New("email already registered")
+	ErrInvalidCredentials   = errors.New("invalid credentials")
+	ErrSessionNotFound      = errors.New("session not found or expired")
+	ErrAdminAlreadyClaimed  = errors.New("admin already claimed")
+	ErrUsersExist           = errors.New("users already exist")
+	ErrInvalidAccessCode    = errors.New("invalid access code")
+	ErrAccessCodeNotPresent = errors.New("access code not configured")
+	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
+	ErrOrgNotAuthorized     = errors.New("github org not authorized")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -111,21 +117,211 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 // UpsertOAuthUser finds a user by email or creates one if none exists.
 // Used by OAuth providers where a password hash is not applicable.
 func (s *AuthService) UpsertOAuthUser(name, email string) (*UserView, error) {
+	view, _, err := s.UpsertOAuthUserWithCheck(name, email, nil)
+	return view, err
+}
+
+// UpsertOAuthUserWithCheck behaves like UpsertOAuthUser but invokes
+// allowCreate before creating a brand-new account. Returns
+// ErrDomainNotAuthorized when allowCreate returns false. The bool return
+// indicates whether the user already existed prior to this call.
+func (s *AuthService) UpsertOAuthUserWithCheck(
+	name, email string,
+	allowCreate func(email string) bool,
+) (*UserView, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	name = strings.TrimSpace(name)
 
 	var user db.User
 	err := s.db.Where("email = ?", email).First(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if allowCreate != nil && !allowCreate(email) {
+			return nil, false, ErrDomainNotAuthorized
+		}
 		user = db.User{Name: name, Email: email}
 		if err := s.db.Create(&user).Error; err != nil {
-			return nil, err
+			return nil, false, err
 		}
-	} else if err != nil {
-		return nil, err
+		return userToView(&user), false, nil
 	}
+	if err != nil {
+		return nil, false, err
+	}
+	return userToView(&user), true, nil
+}
 
-	return userToView(&user), nil
+// HasAuthorizedGoogleDomains reports whether the admin has configured at
+// least one authorized Google domain. Used to decide whether the Google
+// OAuth path is gated.
+func (s *AuthService) HasAuthorizedGoogleDomains() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	return len(splitDomains(settings.AuthorizedGoogleDomains)) > 0, nil
+}
+
+// IsGoogleDomainAuthorized reports whether the given email's domain is in the
+// admin-managed authorized-domain list. An empty list disables the bypass and
+// always returns false.
+func (s *AuthService) IsGoogleDomainAuthorized(email string) (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	domains := splitDomains(settings.AuthorizedGoogleDomains)
+	if len(domains) == 0 {
+		return false, nil
+	}
+	domain := emailDomain(email)
+	if domain == "" {
+		return false, nil
+	}
+	for _, d := range domains {
+		if d == domain {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasAuthorizedGitHubOrgs reports whether the admin has configured at least
+// one authorized GitHub org.
+func (s *AuthService) HasAuthorizedGitHubOrgs() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	return len(splitDomains(settings.AuthorizedGitHubOrgs)) > 0, nil
+}
+
+// IsGitHubOrgAuthorized reports whether any of the user's orgs is in the
+// admin-managed authorized-orgs list. Empty admin list always returns false.
+func (s *AuthService) IsGitHubOrgAuthorized(userOrgs []string) (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	authorized := splitDomains(settings.AuthorizedGitHubOrgs)
+	if len(authorized) == 0 || len(userOrgs) == 0 {
+		return false, nil
+	}
+	set := make(map[string]struct{}, len(authorized))
+	for _, a := range authorized {
+		set[strings.ToLower(a)] = struct{}{}
+	}
+	for _, u := range userOrgs {
+		if _, ok := set[strings.ToLower(u)]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SaveAuthorizedGitHubOrgs replaces the authorized-orgs list with the
+// supplied entries (lowercased, trimmed, de-duplicated).
+func (s *AuthService) SaveAuthorizedGitHubOrgs(orgs []string) error {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.AuthorizedGitHubOrgs = joinDomains(normalizeDomains(orgs))
+	return s.db.Save(settings).Error
+}
+
+// UpsertGitHubOAuthUser is the GitHub-specific upsert that also snapshots
+// the user's current org memberships into the user row. Mirrors
+// UpsertOAuthUserWithCheck for the allowCreate semantics.
+func (s *AuthService) UpsertGitHubOAuthUser(
+	name, email string,
+	orgs []string,
+	allowCreate func(orgs []string) bool,
+) (*UserView, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	name = strings.TrimSpace(name)
+	orgsCSV := joinDomains(normalizeDomains(orgs))
+
+	var user db.User
+	err := s.db.Where("email = ?", email).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if allowCreate != nil && !allowCreate(orgs) {
+			return nil, false, ErrOrgNotAuthorized
+		}
+		user = db.User{Name: name, Email: email, GitHubOrgs: orgsCSV}
+		if err := s.db.Create(&user).Error; err != nil {
+			return nil, false, err
+		}
+		return userToView(&user), false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	// Refresh the org snapshot on every login so the bypass tracks the
+	// user's current memberships. Using UpdateColumn with the actual DB
+	// column (git_hub_orgs — GORM splits on each uppercase boundary) avoids
+	// hooks and zero-value skipping; an empty orgsCSV is a legitimate value
+	// when the user has no orgs.
+	if err := s.db.Model(&user).UpdateColumn("git_hub_orgs", orgsCSV).Error; err != nil {
+		return nil, true, err
+	}
+	user.GitHubOrgs = orgsCSV
+	return userToView(&user), true, nil
+}
+
+// SaveAuthorizedGoogleDomains replaces the authorized-domain list with the
+// supplied entries. Each entry is lowercased, trimmed, and de-duplicated; any
+// blank or "@"-prefixed entries are normalized.
+func (s *AuthService) SaveAuthorizedGoogleDomains(domains []string) error {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.AuthorizedGoogleDomains = joinDomains(normalizeDomains(domains))
+	return s.db.Save(settings).Error
+}
+
+func splitDomains(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	parts := strings.Split(joined, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func joinDomains(domains []string) string { return strings.Join(domains, ",") }
+
+func normalizeDomains(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		d = strings.ToLower(strings.TrimSpace(d))
+		d = strings.TrimPrefix(d, "@")
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
+}
+
+func emailDomain(email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return ""
+	}
+	return email[at+1:]
 }
 
 // CreateSession creates a new session for the given user ID and returns the session ID.
@@ -179,12 +375,159 @@ func generateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
+// default empty row on first call.
+func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
+	var settings db.GopherSettings
+	err := s.db.FirstOrCreate(&settings, db.GopherSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveGopherSettings persists Gopher credentials. Empty fields are treated as
+// "preserve existing" so the UI can rotate just the API key without
+// re-entering the URL (and vice versa).
+func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
+	existing, err := s.GetGopherSettings()
+	if err != nil {
+		return err
+	}
+	if next.APIURL == "" {
+		next.APIURL = existing.APIURL
+	}
+	if next.APIKey == "" {
+		next.APIKey = existing.APIKey
+	}
+	next.ID = 1
+	return s.db.Save(&next).Error
+}
+
 // GetOAuthSettings returns the stored OAuth provider credentials.
-// Creates a default empty row on first call.
+// Creates a default empty row on first call. If the row exists but no access
+// code has ever been generated, one is generated lazily so the admin always
+// has a code to share.
 func (s *AuthService) GetOAuthSettings() (*db.OAuthSettings, error) {
 	var settings db.OAuthSettings
-	err := s.db.FirstOrCreate(&settings, db.OAuthSettings{ID: 1}).Error
-	return &settings, err
+	if err := s.db.FirstOrCreate(&settings, db.OAuthSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	if settings.AccessCode == "" {
+		code, err := generateAccessCode()
+		if err != nil {
+			return nil, err
+		}
+		settings.AccessCode = code
+		settings.AccessCodeVersion = 1
+		if err := s.db.Save(&settings).Error; err != nil {
+			return nil, err
+		}
+	}
+	return &settings, nil
+}
+
+// RegenerateAccessCode replaces the stored access code with a fresh one and
+// bumps the version, invalidating every non-admin user's prior verification.
+func (s *AuthService) RegenerateAccessCode() (*db.OAuthSettings, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return nil, err
+	}
+	code, err := generateAccessCode()
+	if err != nil {
+		return nil, err
+	}
+	settings.AccessCode = code
+	settings.AccessCodeVersion++
+	if err := s.db.Save(settings).Error; err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+// VerifyAccessCode checks the supplied code against the stored access code and,
+// on success, marks the user as verified against the current version.
+func (s *AuthService) VerifyAccessCode(userID uint, code string) error {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	if settings.AccessCode == "" {
+		return ErrAccessCodeNotPresent
+	}
+	if strings.TrimSpace(code) != settings.AccessCode {
+		return ErrInvalidAccessCode
+	}
+	return s.db.Model(&db.User{}).
+		Where("id = ?", userID).
+		Update("verified_code_version", settings.AccessCodeVersion).
+		Error
+}
+
+// IsUserVerified returns true when the user has access to the console under
+// the current authentication policy. Admins always pass. For everyone else,
+// access is granted dynamically when the user's email domain is in the
+// admin's current authorized-Google-domains list, OR when the user has
+// explicitly entered the current access code (their stored
+// verified_code_version matches).
+//
+// The domain check is intentionally dynamic and never persisted, so
+// adding/removing a domain takes effect on the very next request.
+func (s *AuthService) IsUserVerified(userID uint) (bool, error) {
+	var user db.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		return false, err
+	}
+	if user.IsAdmin {
+		return true, nil
+	}
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	if domain := emailDomain(user.Email); domain != "" {
+		for _, d := range splitDomains(settings.AuthorizedGoogleDomains) {
+			if d == domain {
+				return true, nil
+			}
+		}
+	}
+	if hasOrgIntersection(user.GitHubOrgs, settings.AuthorizedGitHubOrgs) {
+		return true, nil
+	}
+	return user.VerifiedCodeVersion == settings.AccessCodeVersion && settings.AccessCodeVersion > 0, nil
+}
+
+// hasOrgIntersection returns true when the user's stored org snapshot shares
+// at least one entry with the admin's authorized list. Comparison is
+// case-insensitive (lists are normalized at write time).
+func hasOrgIntersection(userOrgsCSV, authorizedCSV string) bool {
+	user := splitDomains(strings.ToLower(userOrgsCSV))
+	if len(user) == 0 {
+		return false
+	}
+	authorized := splitDomains(strings.ToLower(authorizedCSV))
+	if len(authorized) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(authorized))
+	for _, a := range authorized {
+		set[a] = struct{}{}
+	}
+	for _, u := range user {
+		if _, ok := set[u]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// generateAccessCode produces a uniformly random 8-digit numeric code.
+func generateAccessCode() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	n := binary.BigEndian.Uint64(b[:]) % 100_000_000
+	return fmt.Sprintf("%08d", n), nil
 }
 
 // SaveOAuthSettings persists OAuth provider credentials. Any field left empty
@@ -207,34 +550,12 @@ func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
 	if next.GoogleClientSecret == "" {
 		next.GoogleClientSecret = existing.GoogleClientSecret
 	}
-	next.ID = 1
-	return s.db.Save(&next).Error
-}
-
-// GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
-// default empty row on first call.
-func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
-	var settings db.GopherSettings
-	err := s.db.FirstOrCreate(&settings, db.GopherSettings{ID: 1}).Error
-	return &settings, err
-}
-
-// SaveGopherSettings persists Gopher credentials. Empty fields are treated as
-// "preserve existing" so the UI can rotate just the API key without
-// re-entering the URL (and vice versa). Both fields cleared on the wire still
-// blanks them out — the handler is responsible for distinguishing
-// "unchanged" from "explicitly cleared" if it cares.
-func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
-	existing, err := s.GetGopherSettings()
-	if err != nil {
-		return err
-	}
-	if next.APIURL == "" {
-		next.APIURL = existing.APIURL
-	}
-	if next.APIKey == "" {
-		next.APIKey = existing.APIKey
-	}
+	// Always preserve access code state and authorized lists — OAuth saves
+	// never touch them.
+	next.AccessCode = existing.AccessCode
+	next.AccessCodeVersion = existing.AccessCodeVersion
+	next.AuthorizedGoogleDomains = existing.AuthorizedGoogleDomains
+	next.AuthorizedGitHubOrgs = existing.AuthorizedGitHubOrgs
 	next.ID = 1
 	return s.db.Save(&next).Error
 }
@@ -263,6 +584,11 @@ func (s *AuthService) RegisterFirstAdmin(p RegisterParams) (*UserView, error) {
 		IsAdmin:      true,
 	}
 	if err := s.db.Create(user).Error; err != nil {
+		return nil, err
+	}
+	// Eagerly seed the access code so the admin can view it immediately on
+	// the Authentication settings page.
+	if _, err := s.GetOAuthSettings(); err != nil {
 		return nil, err
 	}
 	return userToView(user), nil
