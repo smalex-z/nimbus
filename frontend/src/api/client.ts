@@ -709,8 +709,17 @@ export async function saveGPUSettings(req: {
   return data
 }
 
-export async function regenerateGPUWorkerToken(): Promise<GPUSettingsView> {
-  const { data } = await api.post<GPUSettingsView>('/settings/gpu/worker-token/regenerate')
+export interface GPUPairingView {
+  token: string
+  expires_in_seconds: number
+  curl: string
+}
+
+// mintGPUPairingToken issues a fresh 5-minute pairing window. Returns a
+// pre-baked `sudo bash <(curl ...)` command for the operator to paste on
+// the GX10. Replaces any active pairing token.
+export async function mintGPUPairingToken(): Promise<GPUPairingView> {
+  const { data } = await api.post<GPUPairingView>('/settings/gpu/pairing')
   return data
 }
 

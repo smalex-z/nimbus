@@ -269,6 +269,7 @@ export interface GPUSettingsView {
   base_url: string
   inference_model: string
   configured: boolean
-  // worker_token is populated only on the regenerate response.
-  worker_token?: string
+  // gx10_hostname is the GX10's self-reported hostname at pairing time.
+  // Empty before the first successful pairing.
+  gx10_hostname?: string
 }

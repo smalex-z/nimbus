@@ -6,8 +6,8 @@ import {
   getAuthorizedGoogleDomains,
   getGPUSettings,
   getOAuthSettings,
+  mintGPUPairingToken,
   regenerateAccessCode,
-  regenerateGPUWorkerToken,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
   saveGPUSettings,
@@ -756,30 +756,47 @@ function GitHubOrgsSection() {
   )
 }
 
-// GPUPanel mirrors GopherPanel's shape but with three configurable fields
-// (enabled, base URL, model) plus a worker-token regenerator.
+// GPUPanel — pairing-first GX10 onboarding.
+//
+// The Add GX10 button mints a 5-min pairing token and hands back a
+// pre-baked `sudo bash <(curl ...)` line. The operator pastes that on the
+// GX10; the install script self-registers, gets a worker token, picks up
+// inference base URL from the GX10's reported IP, and brings up both
+// systemd units.
+//
+// Post-pairing the panel shows what registered (hostname + base URL + model)
+// and lets admins edit base URL / model in case the GX10 has multiple NICs
+// or they want to swap the default vLLM model later. Re-pair by clicking
+// Add GX10 again — the new pairing wipes the prior worker token.
 function GPUPanel() {
   const [settings, setSettings] = useState<GPUSettingsView | null>(null)
-  const [enabled, setEnabled] = useState(false)
   const [baseURL, setBaseURL] = useState('')
   const [model, setModel] = useState('')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [revealedToken, setRevealedToken] = useState<string | null>(null)
-  const [installCmd, setInstallCmd] = useState<string | null>(null)
-  const [installCopied, setInstallCopied] = useState(false)
+  const [pairingCmd, setPairingCmd] = useState<string | null>(null)
+  const [pairingExpiresIn, setPairingExpiresIn] = useState(0)
+  const [pairingCopied, setPairingCopied] = useState(false)
+  const [pairing, setPairing] = useState(false)
 
   useEffect(() => {
     getGPUSettings()
       .then((s) => {
         setSettings(s)
-        setEnabled(s.enabled)
         setBaseURL(s.base_url)
         setModel(s.inference_model)
       })
       .catch(() => setError('Failed to load GPU settings'))
   }, [])
+
+  // Tick down the pairing token's TTL so the operator can see how long
+  // they have left to paste the curl command on the GX10.
+  useEffect(() => {
+    if (pairingExpiresIn <= 0) return
+    const id = setInterval(() => setPairingExpiresIn((n) => Math.max(0, n - 1)), 1_000)
+    return () => clearInterval(id)
+  }, [pairingExpiresIn])
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -788,7 +805,7 @@ function GPUPanel() {
     try {
       setSaving(true)
       const next = await saveGPUSettings({
-        enabled,
+        enabled: settings?.enabled ?? true,
         base_url: baseURL,
         inference_model: model,
       })
@@ -802,20 +819,17 @@ function GPUPanel() {
     }
   }
 
-  const handleRegenerate = async () => {
+  const handleAddGX10 = async () => {
     setError(null)
+    setPairing(true)
     try {
-      const next = await regenerateGPUWorkerToken()
-      setSettings(next)
-      if (next.worker_token) {
-        setRevealedToken(next.worker_token)
-        // Pre-bake an install command the operator can copy onto the GX10.
-        // window.location.origin is the right Nimbus URL from the user's
-        // browser perspective.
-        setInstallCmd(`sudo bash <(curl -fsSL ${window.location.origin}/api/gpu/install.sh)`)
-      }
+      const r = await mintGPUPairingToken()
+      setPairingCmd(r.curl)
+      setPairingExpiresIn(r.expires_in_seconds)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Regenerate failed')
+      setError(err instanceof Error ? err.message : 'Failed to mint pairing token')
+    } finally {
+      setPairing(false)
     }
   }
 
@@ -830,7 +844,7 @@ function GPUPanel() {
         {configured ? (
           <span className="n-pill n-pill-ok">
             <span className="n-pill-dot" />
-            configured
+            paired{settings?.gx10_hostname ? ` · ${settings.gx10_hostname}` : ''}
           </span>
         ) : (
           <span
@@ -841,84 +855,37 @@ function GPUPanel() {
               border: '1px solid var(--line)',
             }}
           >
-            not configured
+            no GX10 paired
           </span>
         )}
       </div>
 
       <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Configure the always-on inference URL Nimbus injects into every VM, and
-        the bearer token the GX10 worker uses to pull jobs from the queue.
+        Click Add GX10 to mint a 5-minute pairing command. SSH into the GX10
+        and paste it — the script registers itself, installs vLLM, and brings
+        up the job worker. No tokens to copy by hand.
       </p>
 
-      <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-          />
-          Enable GPU plane
-        </label>
-
-        <div className="n-field">
-          <label className="n-label" htmlFor="gpu-base-url">Inference base URL</label>
-          <input
-            id="gpu-base-url"
-            className="n-input"
-            type="text"
-            placeholder="http://gx10.lan:8000"
-            value={baseURL}
-            onChange={(e) => setBaseURL(e.target.value)}
-          />
-        </div>
-        <div className="n-field">
-          <label className="n-label" htmlFor="gpu-model">Default model</label>
-          <input
-            id="gpu-model"
-            className="n-input"
-            type="text"
-            placeholder="meta-llama/Llama-3.1-8B-Instruct"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
-        </div>
-
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button
+          type="button"
+          className="n-btn n-btn-primary"
+          onClick={handleAddGX10}
+          disabled={pairing}
+        >
+          {pairing ? 'Generating…' : configured ? 'Re-pair GX10' : 'Add GX10'}
+        </button>
         {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+      </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            type="submit"
-            className="n-btn n-btn-primary"
-            disabled={saving}
-            style={{ minWidth: 100 }}
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
-        </div>
-      </form>
-
-      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-          Worker token
-        </span>
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-          The GX10 worker uses this bearer token to pull jobs from Nimbus.
-          Regenerate to rotate; the new token is shown once, then masked.
-        </p>
-        <div>
-          <button type="button" className="n-btn" onClick={handleRegenerate}>
-            {configured ? 'Regenerate token' : 'Generate token'}
-          </button>
-        </div>
-
-        {revealedToken && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-              Save this token now — it won't be shown again:
-            </span>
+      {pairingCmd && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
+            Run on the GX10 ({pairingExpiresIn > 0 ? `expires in ${formatRemaining(pairingExpiresIn)}` : 'expired — click Add GX10 again'}):
+          </span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
             <code style={{
+              flex: 1,
               padding: '8px 12px',
               background: 'rgba(20,18,28,0.05)',
               border: '1px solid var(--line)',
@@ -926,48 +893,84 @@ function GPUPanel() {
               fontSize: 12,
               fontFamily: 'monospace',
               wordBreak: 'break-all',
-            }}>{revealedToken}</code>
+              opacity: pairingExpiresIn > 0 ? 1 : 0.5,
+            }}>{pairingCmd}</code>
+            <button
+              type="button"
+              className="n-btn"
+              disabled={pairingExpiresIn <= 0}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(pairingCmd)
+                  setPairingCopied(true)
+                  setTimeout(() => setPairingCopied(false), 1500)
+                } catch { /* noop */ }
+              }}
+            >
+              {pairingCopied ? 'Copied' : 'Copy'}
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {installCmd && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-              Install on the GX10
-            </span>
-            <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-              SSH into the GX10 and run:
-            </span>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
-              <code style={{
-                flex: 1,
-                padding: '8px 12px',
-                background: 'rgba(20,18,28,0.05)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                fontSize: 12,
-                fontFamily: 'monospace',
-                wordBreak: 'break-all',
-              }}>{installCmd}</code>
-              <button
-                type="button"
-                className="n-btn"
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(installCmd)
-                    setInstallCopied(true)
-                    setTimeout(() => setInstallCopied(false), 1500)
-                  } catch { /* noop */ }
-                }}
-              >
-                {installCopied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
+      {configured && (
+        <form onSubmit={handleSave} style={{ borderTop: '1px solid var(--line)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+            Live settings
+          </span>
+          <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+            Auto-populated by the pairing handshake. Edit if the GX10 has
+            multiple NICs (override base URL) or you want to swap the
+            default vLLM model.
+          </p>
+
+          <div className="n-field">
+            <label className="n-label" htmlFor="gpu-base-url">Inference base URL</label>
+            <input
+              id="gpu-base-url"
+              className="n-input"
+              type="text"
+              placeholder="http://gx10.lan:8000"
+              value={baseURL}
+              onChange={(e) => setBaseURL(e.target.value)}
+            />
           </div>
-        )}
-      </div>
+          <div className="n-field">
+            <label className="n-label" htmlFor="gpu-model">Default model</label>
+            <input
+              id="gpu-model"
+              className="n-input"
+              type="text"
+              placeholder="microsoft/Phi-3-mini-4k-instruct"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button
+              type="submit"
+              className="n-btn n-btn-primary"
+              disabled={saving}
+              style={{ minWidth: 100 }}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+          </div>
+        </form>
+      )}
     </div>
   )
+}
+
+// formatRemaining renders 0–599 seconds as "Mm Ss" — enough resolution for
+// the operator to see the pairing window winding down.
+function formatRemaining(secs: number): string {
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  if (m > 0) return `${m}m ${s.toString().padStart(2, '0')}s`
+  return `${s}s`
 }
 
 export default function Settings() {

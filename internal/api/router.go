@@ -3,6 +3,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -69,7 +70,18 @@ func NewRouter(d Deps) http.Handler {
 	var gpuHandler *handlers.GPU
 	var gpuScripts *handlers.ScriptHandler
 	if d.GPU != nil {
-		gpuHandler = handlers.NewGPU(d.GPU, d.Auth, d.Config.AppURL)
+		gpuHandler = handlers.NewGPU(d.GPU, d.Auth, d.Config.AppURL).
+			WithGPUConfigApplier(func(baseURL, model string) {
+				// Same payload shape settings.SaveGPU pushes — keeps the
+				// pairing-flow and manual-edit code paths converged.
+				if d.Provision != nil {
+					d.Provision.SetGPUBootstrapConfig(provision.GPUBootstrapConfig{
+						BaseURL:        baseURL,
+						InferenceModel: model,
+						NimbusGPUAPI:   strings.TrimRight(d.Config.AppURL, "/") + "/api/gpu",
+					})
+				}
+			})
 		gpuScripts = handlers.NewScriptHandler(d.GX10ScriptDir)
 	}
 
@@ -98,6 +110,12 @@ func NewRouter(d Deps) http.Handler {
 			// GX10's curl-bootstrap can fetch them. Whitelist enforced
 			// inside the handler so this isn't a path-traversal vector.
 			r.Get("/gpu/scripts/{name}", gpuScripts.Serve)
+			// Pairing handshake: install.sh validates ?token= against the
+			// active pairing window; register exchanges the pairing token
+			// for a permanent worker token. Both public — the pairing
+			// token IS the auth.
+			r.Get("/gpu/install.sh", gpuHandler.InstallScript)
+			r.Post("/gpu/register", gpuHandler.Register)
 		}
 
 		// Auth routes (public)
@@ -179,14 +197,13 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/s3/buckets", s3.CreateBucket)
 				r.Delete("/s3/buckets/{name}", s3.DeleteBucket)
 
-				// GPU plane — admin-only configuration + the install-script
-				// emitter. The job submission/list endpoints are exposed
+				// GPU plane — admin-only configuration + the pairing-token
+				// minter. The job submission/list endpoints are exposed
 				// to all verified users below.
 				if gpuHandler != nil {
 					r.Get("/settings/gpu", settings.GetGPU)
 					r.Put("/settings/gpu", settings.SaveGPU)
-					r.Post("/settings/gpu/worker-token/regenerate", settings.RegenerateGPUWorkerToken)
-					r.Get("/gpu/install.sh", gpuHandler.InstallScript)
+					r.Post("/settings/gpu/pairing", gpuHandler.MintPairing)
 				}
 			})
 

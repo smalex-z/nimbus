@@ -484,6 +484,90 @@ func (s *AuthService) VerifyGPUWorkerToken(presented string) bool {
 	return subtleConstantTimeEq(settings.WorkerToken, presented)
 }
 
+// gpuPairingTTL is how long a freshly-minted pairing token remains valid
+// before MintGPUPairingToken would need to be called again. Five minutes is
+// long enough for the operator to SSH from one window to the GX10 and paste
+// the curl, short enough that a leaked URL is mostly inert.
+const gpuPairingTTL = 5 * time.Minute
+
+// MintGPUPairingToken stamps a fresh pairing token onto the singleton
+// GPUSettings row with a TTL. Returns the token so the caller can embed it
+// in the install URL. Replaces any existing pairing window — only one is
+// active at a time, which matches the single-GX10 design.
+func (s *AuthService) MintGPUPairingToken() (string, error) {
+	tok, err := generateHexToken(24)
+	if err != nil {
+		return "", err
+	}
+	settings, err := s.GetGPUSettings()
+	if err != nil {
+		return "", err
+	}
+	exp := time.Now().UTC().Add(gpuPairingTTL)
+	settings.PairingToken = tok
+	settings.PairingTokenExpiresAt = &exp
+	if err := s.db.Save(settings).Error; err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// VerifyGPUPairingToken returns true when the presented token matches the
+// active pairing token AND has not expired. Constant-time compare against
+// the stored value. Does not consume — call ConsumeGPUPairingToken on
+// successful registration to clear it.
+func (s *AuthService) VerifyGPUPairingToken(presented string) bool {
+	if presented == "" {
+		return false
+	}
+	settings, err := s.GetGPUSettings()
+	if err != nil || settings.PairingToken == "" || settings.PairingTokenExpiresAt == nil {
+		return false
+	}
+	if time.Now().UTC().After(*settings.PairingTokenExpiresAt) {
+		return false
+	}
+	return subtleConstantTimeEq(settings.PairingToken, presented)
+}
+
+// RegisterGPU finalizes the pairing handshake: clears the pairing token,
+// records the GX10's self-reported facts, generates a fresh worker token,
+// flips Enabled=true, and returns the worker token to the caller (the
+// install script writes it into /etc/nimbus-gpu-worker.env).
+//
+// Idempotent on the worker token: if you call RegisterGPU twice with the
+// same valid pairing token… you can't, because the first call clears it.
+// A second register attempt fails verification.
+//
+// `port` is plumbed through so we can stamp the right inference URL —
+// vLLM defaults to 8000 but operators can override at install time.
+func (s *AuthService) RegisterGPU(hostname, ip, model string, port int) (workerToken string, err error) {
+	tok, err := generateHexToken(32)
+	if err != nil {
+		return "", err
+	}
+	settings, err := s.GetGPUSettings()
+	if err != nil {
+		return "", err
+	}
+	if port == 0 {
+		port = 8000
+	}
+	settings.Enabled = true
+	settings.WorkerToken = tok
+	settings.BaseURL = fmt.Sprintf("http://%s:%d", ip, port)
+	if model != "" {
+		settings.InferenceModel = model
+	}
+	settings.GX10Hostname = hostname
+	settings.PairingToken = ""
+	settings.PairingTokenExpiresAt = nil
+	if err := s.db.Save(settings).Error; err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
 // GetOAuthSettings returns the stored OAuth provider credentials.
 // Creates a default empty row on first call. If the row exists but no access
 // code has ever been generated, one is generated lazily so the admin always

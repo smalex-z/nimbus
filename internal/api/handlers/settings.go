@@ -294,14 +294,14 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 }
 
 // gpuSettingsView is what GET /api/settings/gpu returns. The worker token
-// is sent back masked unless explicitly requested via ?reveal=1, so the
-// settings page can display "[CONFIGURED]" without leaking the secret.
+// is never sent back to clients — operators don't see it; pairing produces
+// a fresh one as part of /api/gpu/register.
 type gpuSettingsView struct {
 	Enabled        bool   `json:"enabled"`
 	BaseURL        string `json:"base_url"`
 	InferenceModel string `json:"inference_model"`
 	Configured     bool   `json:"configured"`
-	WorkerToken    string `json:"worker_token,omitempty"` // populated only on regenerate
+	GX10Hostname   string `json:"gx10_hostname,omitempty"` // self-reported at pairing time
 }
 
 // GetGPU handles GET /api/settings/gpu (admin only).
@@ -316,6 +316,7 @@ func (s *Settings) GetGPU(w http.ResponseWriter, _ *http.Request) {
 		BaseURL:        settings.BaseURL,
 		InferenceModel: settings.InferenceModel,
 		Configured:     settings.WorkerToken != "" && settings.BaseURL != "",
+		GX10Hostname:   settings.GX10Hostname,
 	})
 }
 
@@ -367,32 +368,13 @@ func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 		BaseURL:        settings.BaseURL,
 		InferenceModel: settings.InferenceModel,
 		Configured:     settings.WorkerToken != "" && settings.BaseURL != "",
+		GX10Hostname:   settings.GX10Hostname,
 	})
 }
 
-// RegenerateGPUWorkerToken handles POST /api/settings/gpu/worker-token/regenerate
-// (admin only). Returns the freshly minted token in the response — admins
-// must capture it for the GX10 install command. Subsequent GETs of the
-// settings page will not return it.
-func (s *Settings) RegenerateGPUWorkerToken(w http.ResponseWriter, _ *http.Request) {
-	tok, err := s.auth.RegenerateGPUWorkerToken()
-	if err != nil {
-		response.InternalError(w, "failed to regenerate worker token")
-		return
-	}
-	settings, err := s.auth.GetGPUSettings()
-	if err != nil {
-		response.InternalError(w, "regenerated, but failed to reload: "+err.Error())
-		return
-	}
-	response.Success(w, gpuSettingsView{
-		Enabled:        settings.Enabled,
-		BaseURL:        settings.BaseURL,
-		InferenceModel: settings.InferenceModel,
-		Configured:     true,
-		WorkerToken:    tok,
-	})
-}
+// (Worker-token regeneration is gone — operators don't see the token.
+// Re-pairing via Settings → Add GX10 produces a fresh worker token as
+// part of the handshake.)
 
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
 // Issues a fresh code and bumps the version, invalidating every non-admin

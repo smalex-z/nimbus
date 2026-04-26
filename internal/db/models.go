@@ -72,15 +72,24 @@ type GopherSettings struct {
 // jobs API rejects new submissions.
 //
 // WorkerToken is a pre-shared bearer the GX10's worker daemon presents on
-// every /gpu/worker/* call. Regenerating it (Settings page → Regenerate)
-// immediately invalidates the running worker's auth so a compromised token
-// can be cycled without a Nimbus restart.
+// every /gpu/worker/* call. It's generated automatically when the GX10
+// completes pairing (POST /api/gpu/register) — operators never see or
+// touch it directly. Regenerating it cycles the credential without a
+// Nimbus restart, but is rarely needed.
+//
+// PairingToken / PairingTokenExpiresAt back the "Add GX10" flow:
+// admin mints a short-lived (5-min) pairing token, the install script on
+// the GX10 trades it for a worker token via /api/gpu/register. Single use:
+// register clears it. Empty PairingToken means no active pairing window.
 type GPUSettings struct {
-	ID             uint   `gorm:"primaryKey"`
-	Enabled        bool   `gorm:"default:false"`
-	BaseURL        string `gorm:"default:''"` // e.g. http://gx10.lan:8000
-	InferenceModel string `gorm:"default:''"` // e.g. meta-llama/Llama-3.1-8B-Instruct
-	WorkerToken    string `gorm:"default:''"`
+	ID                    uint       `gorm:"primaryKey"`
+	Enabled               bool       `gorm:"default:false"`
+	BaseURL               string     `gorm:"default:''"` // e.g. http://gx10.lan:8000
+	InferenceModel        string     `gorm:"default:''"` // e.g. meta-llama/Llama-3.1-8B-Instruct
+	WorkerToken           string     `gorm:"default:''"`
+	GX10Hostname          string     `gorm:"default:''"` // self-reported hostname at registration time
+	PairingToken          string     `gorm:"default:''"`
+	PairingTokenExpiresAt *time.Time `gorm:"column:pairing_token_expires_at"`
 }
 
 // GPUJob is one queued / running / terminal training job submitted to the

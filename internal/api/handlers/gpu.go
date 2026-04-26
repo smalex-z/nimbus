@@ -30,11 +30,23 @@ type GPU struct {
 	// script so the GX10's worker knows where to phone home. Pulled from
 	// AppURL at construction.
 	nimbusBaseURL string
+	// gpuConfigApplier is invoked after a successful pairing register so
+	// the live provision.Service picks up the new base_url + model without
+	// a Nimbus restart. Nil is allowed (handler still works; provision
+	// flow refreshes on next startup).
+	gpuConfigApplier func(baseURL, model string)
 }
 
 // NewGPU wires the handler.
 func NewGPU(svc *gpu.Service, auth *service.AuthService, nimbusBaseURL string) *GPU {
 	return &GPU{svc: svc, auth: auth, nimbusBaseURL: strings.TrimRight(nimbusBaseURL, "/")}
+}
+
+// WithGPUConfigApplier installs the post-register callback. Builder-style so
+// router wiring stays a single fluent expression.
+func (h *GPU) WithGPUConfigApplier(fn func(baseURL, model string)) *GPU {
+	h.gpuConfigApplier = fn
+	return h
 }
 
 // gpuJobView is the JSON projection of db.GPUJob with timestamps formatted
@@ -250,68 +262,190 @@ func probeInferenceUp(ctx context.Context, baseURL string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// InstallScript handles GET /api/gpu/install.sh. Emits a one-shot bash
-// script that the operator pastes into the GX10's terminal. The script
-// downloads install-inference.sh + install-worker.sh from this Nimbus
-// instance and runs them with the worker token already populated.
-//
-// Endpoint is admin-only because the response embeds a fresh worker token
-// — anyone who can read the response can impersonate the worker.
-func (h *GPU) InstallScript(w http.ResponseWriter, r *http.Request) {
-	settings, err := h.auth.GetGPUSettings()
+// pairingView is what the admin pairing endpoint returns. The curl command
+// is pre-formatted so the SPA renders a copy-paste box rather than asking
+// the operator to assemble the URL themselves.
+type pairingView struct {
+	Token     string `json:"token"`
+	ExpiresIn int    `json:"expires_in_seconds"`
+	Curl      string `json:"curl"`
+}
+
+// MintPairing handles POST /api/settings/gpu/pairing (admin-only). Mints a
+// fresh 5-min pairing token and returns the curl command the operator
+// pastes onto the GX10. Replaces any active pairing token; we only support
+// pairing one GX10 at a time.
+func (h *GPU) MintPairing(w http.ResponseWriter, r *http.Request) {
+	tok, err := h.auth.MintGPUPairingToken()
 	if err != nil {
-		response.InternalError(w, "failed to load gpu settings")
+		response.InternalError(w, "failed to mint pairing token")
 		return
 	}
-	if settings.WorkerToken == "" {
-		response.Error(w, http.StatusPreconditionFailed,
-			"worker token not generated yet — visit Settings → GPU and click Regenerate")
+	base := h.resolveBase(r)
+	curl := fmt.Sprintf(`sudo bash <(curl -fsSL %q)`,
+		base+"/api/gpu/install.sh?token="+tok)
+	response.Success(w, pairingView{
+		Token:     tok,
+		ExpiresIn: 5 * 60,
+		Curl:      curl,
+	})
+}
+
+// InstallScript handles GET /api/gpu/install.sh?token=<pairing>. Public —
+// the pairing token IS the auth. Returns a bash script that, when run on
+// the GX10, posts to /api/gpu/register to exchange the pairing token for a
+// worker token, then runs install-inference.sh + install-worker.sh.
+//
+// The pairing token alone doesn't carry permissions — it can only be
+// consumed once, and only inside its 5-min window. Leaking the URL
+// post-expiry is harmless.
+func (h *GPU) InstallScript(w http.ResponseWriter, r *http.Request) {
+	pairing := r.URL.Query().Get("token")
+	if !h.auth.VerifyGPUPairingToken(pairing) {
+		response.Error(w, http.StatusUnauthorized,
+			"invalid or expired pairing token — admin must click 'Add GX10' in Settings → GPU")
 		return
 	}
-	base := h.nimbusBaseURL
-	if base == "" {
-		// Fall back to the request's own host so the script still works
-		// even when AppURL hasn't been set on a fresh install.
-		scheme := "http"
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-			scheme = "https"
-		}
-		base = scheme + "://" + r.Host
-	}
+	base := h.resolveBase(r)
+	// All four substitutions are: nimbus URL, pairing token, nimbus URL, nimbus URL.
+	// Splitting the format string from the heredoc body keeps the Go-side
+	// template readable.
 	script := fmt.Sprintf(`#!/usr/bin/env bash
-# Nimbus GX10 bootstrap — installs the inference server (vLLM) and the
-# Nimbus job worker as systemd units. Re-run is idempotent.
+# Nimbus GX10 bootstrap — pairs this host with Nimbus, installs vLLM as
+# nimbus-vllm.service, and installs the Nimbus job worker as
+# nimbus-gpu-worker.service. Idempotent.
+#
+# Override before piping if you want different defaults:
+#   GX10_INFERENCE_MODEL=mistralai/Mistral-7B-Instruct-v0.3 sudo bash <(...)
+#   GX10_INFERENCE_PORT=8000
 set -euo pipefail
 
 NIMBUS_URL=%q
-NIMBUS_WORKER_TOKEN=%q
+PAIRING_TOKEN=%q
+
+MODEL="${GX10_INFERENCE_MODEL:-microsoft/Phi-3-mini-4k-instruct}"
+PORT="${GX10_INFERENCE_PORT:-8000}"
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "this script must run as root (try: sudo bash <(curl -fsSL ${NIMBUS_URL}/api/gpu/install.sh))" >&2
+  echo "must run as root (try the same command with sudo)" >&2
   exit 1
 fi
+
+# Detect this host's primary outbound IP — Nimbus uses this as the inference
+# base URL it injects into every VM, so we want the address that's reachable
+# from the cluster LAN. "hostname -I" gives all addresses; the first one is
+# typically the primary, but operators on multi-NIC boxes may want to set
+# GX10_HOST_IP explicitly.
+HOST_IP="${GX10_HOST_IP:-$(hostname -I | awk '{print $1}')}"
+HOSTNAME_REPORTED="$(hostname)"
+
+echo "==> registering with Nimbus (ip=$HOST_IP model=$MODEL)"
+RESP="$(curl -fsSL -X POST "${NIMBUS_URL}/api/gpu/register" \
+  -H 'Content-Type: application/json' \
+  -d "{\"pairing_token\":\"${PAIRING_TOKEN}\",\"hostname\":\"${HOSTNAME_REPORTED}\",\"ip\":\"${HOST_IP}\",\"model\":\"${MODEL}\",\"port\":${PORT}}")"
+WORKER_TOKEN="$(printf '%%s' "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["worker_token"])')"
+if [ -z "$WORKER_TOKEN" ]; then
+  echo "registration failed: $RESP" >&2
+  exit 1
+fi
+echo "==> registered, received worker token"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "==> downloading install-inference.sh"
 curl -fsSL "${NIMBUS_URL}/api/gpu/scripts/install-inference.sh" -o "$TMPDIR/install-inference.sh"
-chmod +x "$TMPDIR/install-inference.sh"
-
 echo "==> downloading install-worker.sh"
 curl -fsSL "${NIMBUS_URL}/api/gpu/scripts/install-worker.sh" -o "$TMPDIR/install-worker.sh"
-chmod +x "$TMPDIR/install-worker.sh"
+chmod +x "$TMPDIR/install-inference.sh" "$TMPDIR/install-worker.sh"
 
-NIMBUS_URL="$NIMBUS_URL" NIMBUS_WORKER_TOKEN="$NIMBUS_WORKER_TOKEN" \
+NIMBUS_URL="$NIMBUS_URL" GX10_INFERENCE_MODEL="$MODEL" GX10_INFERENCE_PORT="$PORT" \
   bash "$TMPDIR/install-inference.sh"
-NIMBUS_URL="$NIMBUS_URL" NIMBUS_WORKER_TOKEN="$NIMBUS_WORKER_TOKEN" \
+NIMBUS_URL="$NIMBUS_URL" NIMBUS_WORKER_TOKEN="$WORKER_TOKEN" \
   bash "$TMPDIR/install-worker.sh"
 
-echo "==> done. systemctl status nimbus-vllm nimbus-gpu-worker"
-`, base, settings.WorkerToken)
+echo ""
+echo "==> done."
+echo "    inference: systemctl status nimbus-vllm"
+echo "    worker:    systemctl status nimbus-gpu-worker"
+echo "    base url:  http://${HOST_IP}:${PORT}/v1"
+`, base, pairing)
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(script))
+}
+
+type gpuRegisterRequest struct {
+	PairingToken string `json:"pairing_token"`
+	Hostname     string `json:"hostname"`
+	IP           string `json:"ip"`
+	Model        string `json:"model"`
+	Port         int    `json:"port"`
+}
+
+type gpuRegisterResponse struct {
+	WorkerToken string `json:"worker_token"`
+	BaseURL     string `json:"base_url"`
+}
+
+// Register handles POST /api/gpu/register (public, pairing-token-auth).
+// Trades a valid pairing token for a fresh worker token, recording the
+// GX10's self-reported IP + model. Single use: a successful register
+// clears the pairing token, so the GX10 effectively "claims" the seat.
+func (h *GPU) Register(w http.ResponseWriter, r *http.Request) {
+	var req gpuRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	if !h.auth.VerifyGPUPairingToken(req.PairingToken) {
+		response.Error(w, http.StatusUnauthorized,
+			"invalid or expired pairing token")
+		return
+	}
+	if req.IP == "" {
+		response.BadRequest(w, "ip is required")
+		return
+	}
+	tok, err := h.auth.RegisterGPU(req.Hostname, req.IP, req.Model, req.Port)
+	if err != nil {
+		response.InternalError(w, "registration failed: "+err.Error())
+		return
+	}
+	// Push the fresh config to anything that holds a live copy
+	// (provision.Service for cloud-init env injection).
+	if h.gpuConfigApplier != nil {
+		settings, err := h.auth.GetGPUSettings()
+		if err == nil {
+			h.gpuConfigApplier(settings.BaseURL, settings.InferenceModel)
+		}
+	}
+	response.Success(w, gpuRegisterResponse{
+		WorkerToken: tok,
+		BaseURL:     fmt.Sprintf("http://%s:%d", req.IP, defaultIfZero(req.Port, 8000)),
+	})
+}
+
+// resolveBase picks the base URL Nimbus knows about, falling back to the
+// inbound request's host when AppURL hasn't been set. Lets the install
+// script work on a freshly-set-up Nimbus where the operator hasn't
+// hardcoded an external URL yet.
+func (h *GPU) resolveBase(r *http.Request) string {
+	if h.nimbusBaseURL != "" {
+		return h.nimbusBaseURL
+	}
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+func defaultIfZero(n, fallback int) int {
+	if n == 0 {
+		return fallback
+	}
+	return n
 }
 
 // ScriptHandler serves a static file from the gx10 scripts dir. The file
