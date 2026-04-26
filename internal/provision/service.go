@@ -457,12 +457,11 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 7c: GPU env bootstrap. Mirrors the tunnel bootstrap pattern but
-	// always-on (default) — when the GPU plane is configured cluster-wide,
-	// every VM gets `OPENAI_BASE_URL` and a `gx10` CLI helper unless the
-	// caller asked to skip. Failures are logged, never block provisioning.
+	// Step 7c: GPU env bootstrap. Opt-in — only fires when the caller asked
+	// for it AND the GPU plane is configured cluster-wide. Failures are
+	// logged, never block provisioning.
 	gpuCfg := s.gpuBootstrapConfig()
-	if !req.SkipGPUBootstrap && gpuCfg.BaseURL != "" && warning == "" {
+	if req.EnableGPU && gpuCfg.BaseURL != "" && warning == "" {
 		privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
 		if perr != nil {
 			log.Printf("gpu bootstrap: cannot bootstrap (no private key available): %v", perr)

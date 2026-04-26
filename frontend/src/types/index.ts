@@ -63,6 +63,7 @@ export interface ProvisionRequest {
   ssh_privkey?: string
   generate_key?: boolean
   public_tunnel?: boolean
+  enable_gpu?: boolean
 }
 
 export interface SSHKey {

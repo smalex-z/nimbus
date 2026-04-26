@@ -7,9 +7,11 @@ import {
   bootstrapTemplates,
   listKeys,
   getTunnelInfo,
+  getGPUInference,
   type BootstrapResult,
   type TunnelInfo,
 } from '@/api/client'
+import type { GPUInferenceStatus } from '@/types'
 import { useAuth } from '@/hooks/useAuth'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
@@ -46,6 +48,7 @@ interface FormState {
   pubKey: string
   privKey: string
   publicTunnel: boolean
+  enableGPU: boolean
 }
 
 const DEFAULT_FORM: FormState = {
@@ -57,6 +60,7 @@ const DEFAULT_FORM: FormState = {
   pubKey: '',
   privKey: '',
   publicTunnel: false,
+  enableGPU: false,
 }
 
 export default function Provision() {
@@ -89,6 +93,15 @@ export default function Provision() {
     getTunnelInfo()
       .then(setTunnelInfo)
       .catch(() => setTunnelInfo({ enabled: false, host: '' }))
+  }, [])
+
+  // GPU plane availability. The "include GX10 access" checkbox only renders
+  // when an admin has paired a GX10 — pre-pairing the option means nothing.
+  const [gpuInfo, setGpuInfo] = useState<GPUInferenceStatus | null>(null)
+  useEffect(() => {
+    getGPUInference()
+      .then(setGpuInfo)
+      .catch(() => setGpuInfo({ enabled: false, status: 'unconfigured' }))
   }, [])
 
   useEffect(() => {
@@ -180,6 +193,7 @@ export default function Provision() {
           ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
           generate_key: form.keyMode === 'gen' ? true : undefined,
           public_tunnel: form.publicTunnel ? true : undefined,
+          enable_gpu: form.enableGPU ? true : undefined,
           // No subdomain — provision-time tunnels are SSH only and Gopher
           // allocates a port on the gateway. Backend defaults the tunnel
           // identifier to the VM hostname so admins don't need to think
@@ -255,6 +269,7 @@ export default function Provision() {
               updateForm={updateForm}
               savedKeys={savedKeys}
               tunnelInfo={tunnelInfo}
+              gpuInfo={gpuInfo}
             />
           </Card>
 
@@ -416,9 +431,10 @@ interface FormBodyProps {
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
   tunnelInfo: TunnelInfo | null
+  gpuInfo: GPUInferenceStatus | null
 }
 
-function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -616,6 +632,29 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
           </div>
         )}
       </div>
+
+      {gpuInfo?.enabled && (
+        <div className="flex flex-col gap-2">
+          <label className="text-[13px] font-medium text-ink">GPU access</label>
+          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+            <input
+              type="checkbox"
+              checked={form.enableGPU}
+              onChange={(e) => updateForm('enableGPU', e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-ink"
+            />
+            <div className="flex-1">
+              <div className="text-sm font-medium">Include GX10 access</div>
+              <div className="text-xs text-ink-3 mt-0.5">
+                Injects <span className="font-mono">OPENAI_BASE_URL</span> and a{' '}
+                <span className="font-mono">gx10</span> CLI helper so this VM can
+                hit the inference server and submit GPU jobs. Off by default —
+                only enable for VMs that actually need it.
+              </div>
+            </div>
+          </label>
+        </div>
+      )}
     </div>
   )
 }
@@ -648,6 +687,7 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="Disk" value={diskLabel} />
         <SummaryRow label="SSH" value={sshLabel} />
         <SummaryRow label="Public SSH" value={tunnelLabel} />
+        {form.enableGPU && <SummaryRow label="GPU" value="GX10 access" />}
       </div>
     </>
   )
