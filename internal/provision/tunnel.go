@@ -169,8 +169,9 @@ func (s *Service) ListVMTunnels(ctx context.Context, vmID uint) ([]tunnel.Tunnel
 
 // CreateVMTunnel registers a per-port tunnel on this VM's Gopher machine.
 // targetPort must be 1-65535; subdomain is optional (Gopher derives one from
-// the machine name when blank). Returns the created tunnel record.
-func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int, subdomain string) (*tunnel.Tunnel, error) {
+// the machine name when blank); private flips the gateway-side bind to
+// 127.0.0.1 (VPS-local only). Returns the created tunnel record.
+func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int, subdomain string, private bool) (*tunnel.Tunnel, error) {
 	if s.tunnels == nil {
 		return nil, errors.New("gopher tunnel integration is not configured")
 	}
@@ -191,6 +192,7 @@ func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, targetPort int,
 		MachineID:  vm.TunnelID,
 		TargetPort: targetPort,
 		Subdomain:  strings.TrimSpace(subdomain),
+		Private:    private,
 	})
 }
 
