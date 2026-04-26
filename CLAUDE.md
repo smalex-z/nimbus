@@ -280,85 +280,93 @@ type TunnelInfoSetter   interface { SetClient(c *tunnel.Client, apiURL string) }
 `Settings.WithTunnelAppliers(...)` and `WithTunnelInfoSetter(...)` register
 them at construction time in the router.
 
-### Provision-time tunnels are SSH-only by design
+### Gopher API model: machines vs tunnels
 
-One checkbox on the Provision form: **Expose SSH publicly**. No subdomain
-input, no port input, no surprises.
+Gopher exposes two related but distinct objects, and confusing them was
+expensive to find out:
 
-- `target_port` defaults to 22 server-side. `provision.Request.TunnelPort`
-  remains for scripts/tests but the UI/API don't surface it.
-- `subdomain` is **not** an SSH concept (subdomains are HTTP-only via
-  wildcard DNS at the gateway) — Gopher's API still wants a tunnel
-  identifier, so the handler defaults `Subdomain` to the VM `Hostname`
-  when omitted. The operator never types it.
-- Multi-port HTTP tunnels for app traffic on the VM will be a separate
-  post-provision surface. Provision = SSH-up, period.
+- **Machine** (`/api/v1/machines`) — a registered host running the rathole
+  client. Created with `{public_ssh: true}` to flip on SSH exposure. The
+  response carries the **bootstrap_url** (one-shot URL the VM runs to link
+  itself). When the VM finishes the bootstrap, the machine flips from
+  `pending` → `active` and Gopher exposes SSH at the gateway on an
+  assigned port.
+
+- **Tunnel** (`/api/v1/tunnels`) — a *per-port* exposure on top of an
+  active machine. Body is `{machine_id, target_port}`. Used to expose
+  HTTP/custom services (port 80, 8080, etc.) on top of a machine that
+  already has its rathole link established. Returns 404 "machine not
+  found" if the machine is still `pending`.
+
+**Provision-time SSH exposure uses the machines API only.** Per-port
+tunnels are a future post-provision surface; we don't touch
+`POST /tunnels` at provision time. The earlier design doc described a
+single-tier model (`POST /tunnels {subdomain, target_ip, target_port}`)
+that doesn't match the live API — we discovered the discrepancy on the
+first real provision (HTTP 400 "machine_id and target_port are required").
+
+### Provision-time exposure UX
+
+One checkbox on the Provision form: **Expose SSH publicly**. No subdomain,
+no port input. The form only has the toggle.
+
+- Subdomains are HTTP-only and aren't accepted by `POST /machines`. The
+  `Request.Subdomain` and `Request.TunnelPort` fields persist on the
+  Go-side type for forward-compat with the post-provision tunnel
+  surface, but the provision flow ignores them.
+- The SSH connection lands at `<host>:<port>` where both are assigned
+  by Gopher when the machine becomes active.
 
 ### Routing-host preview (`/api/tunnels/info`)
 
 `GET /api/tunnels/info` is public (no auth) and returns `{enabled, host}`
-where `host` is the **routable hostname Gopher will expose SSH on**:
+where `host` is the **routable hostname** Gopher will expose SSH on:
 
 - Compares DNS for the apex domain (e.g. `altsuite.co`) against the API
-  host (e.g. `router.altsuite.co`).
-- If they resolve to the same IP, the apex doubles as the gateway →
-  return apex (shorter, friendlier).
-- If they diverge — operator runs personal site on the apex — return the
-  API host.
-- Any DNS failure → fall back to the API host. Better long-but-correct
-  than misleading.
-
-Apex extraction is naive: strip the leftmost label. Fine for
-`router.example.com` deployments; would need a public-suffix list to
-handle `example.co.uk` correctly. Live confirmed via `LookupHost` against
-`router.altsuite.co` and `altsuite.co` (same IP).
-
-The SSH lands at `<host>:<port>` where the port is **assigned by Gopher
-post-provision**. Result screen shows whatever Gopher returns as
-`tunnel_url`.
+  host (e.g. `router.altsuite.co`). If they resolve to the same IP, the
+  apex doubles as the gateway → return apex (shorter, friendlier). If
+  they diverge — operator runs a personal site on the apex — return the
+  API host. Any DNS failure → fall back to the API host.
+- Apex extraction is naive: strip the leftmost label. Fine for
+  `router.example.com` deployments; would need a public-suffix list to
+  handle `example.co.uk` correctly.
 
 ### Provision flow with tunnel enabled
 
-1. **Pre-flight**: subdomain syntax checked locally (cheap reject, even
-   though we usually default the value).
-2. **After Reserve + Verify**: register with Gopher
-   (`target_ip = reserved IP, target_port = 22`). HTTP 409 →
-   `ValidationError(field=subdomain)` with the IP released by the
-   deferred Release. Other errors → log + soft-fail (`tunnel_error` set,
-   VM still provisioned). On success: defer-delete armed for any later
-   failure.
-3. **After WaitForIP**: if the VM is reachable (no warning), Nimbus SSHes
+1. **After Reserve + Verify**: `POST /machines {public_ssh: true}` →
+   `{id, bootstrap_url, status: pending}`. Failures are soft (logged,
+   `tunnel_error` set, VM still provisioned). On success: defer-delete
+   armed for any later failure.
+2. **After WaitForIP**: if the VM is reachable (no warning), Nimbus SSHes
    in with the resolved private key and runs
    `curl -fsSL <bootstrap_url> | sh`. Dial+handshake retries 3× with 5 s
    back-off; the remote command itself is single-shot. On soft-success
    (VM unreachable from Nimbus), the bootstrap is **skipped** and
    `tunnel_error` carries the manual recovery command.
-4. **Poll** Gopher `GET /tunnels/:id` every 3 s for up to 60 s. Active →
-   `tunnel_url` on Result + persisted on the VM row. Otherwise →
-   `tunnel_error` set, tunnel **left registered** for the user to retry
-   manually.
-5. **VM-side never fails for tunnel reasons** — design §10 invariant.
+3. **Poll** `GET /machines/:id` every 3 s for up to 60 s. Status `active`
+   → use `public_ssh_host` + `public_ssh_port` to build the result URL,
+   persist on the VM row. Otherwise → `tunnel_error` set, machine **left
+   registered** so the user can retry the bootstrap manually.
+4. **VM-side never fails for tunnel reasons** — design §10 invariant.
 
 The bootstrap step needs a private key. If only a public key is in the
 linked SSHKey row (user imported a pubkey-only entry, or attached one
 later), the bootstrap is skipped with
 `tunnel_error="private half not available"`.
 
+The exact field names Gopher returns for an *active* machine
+(`public_ssh_host`, `public_ssh_port`) are educated guesses from the
+pending-state shape — only confirmable by completing a real bootstrap.
+If the names diverge, the decoder will quietly populate them as zero,
+and the result-screen URL will be missing/empty until we adjust.
+
 ### Gopher API envelope
 
 Gopher wraps every response in `{success, data, error}`. List endpoints
 nest pagination inside data: `{items, limit, offset, total}`. The decoder
 in `internal/tunnel/client.go` handles both — confirmed against
-`https://router.altsuite.co` (envelope shape verified, paginated list
-unwrapped correctly, 404 surfaces the envelope's `error` field). 409 on
-POST is mapped to the typed `ErrSubdomainTaken`. 404 on DELETE is treated
-as success (idempotent retry).
-
-The Tunnel object's specific JSON field names (`id`, `subdomain`, `status`,
-`url`, `bootstrap_url`, `target_ip`, `target_port`) come from the design doc
-and **have not been verified against a real POST** as of this writing — the
-first live provision exercises them. If a name diverges, the decoder will
-surface a clear `decode data for POST /api/v1/tunnels: ...` error.
+`https://router.altsuite.co`. Errors carry the envelope's `error` field;
+404 on DELETE is treated as success (idempotent retry).
 
 ## Configuration knobs added in this branch
 

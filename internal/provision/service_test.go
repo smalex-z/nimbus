@@ -1078,7 +1078,6 @@ func TestProvision_TunnelDisabled_IgnoresFlag(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-		Subdomain:    "ignored",
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -1086,75 +1085,6 @@ func TestProvision_TunnelDisabled_IgnoresFlag(t *testing.T) {
 	if res.TunnelURL != "" || res.TunnelError != "" {
 		t.Errorf("expected tunnel fields blank when client unset, got url=%q err=%q",
 			res.TunnelURL, res.TunnelError)
-	}
-}
-
-func TestProvision_TunnelInvalidSubdomain_FailsFast(t *testing.T) {
-	t.Parallel()
-	svc, pool, _ := newTestService(t, happyFakePVE(t))
-	tc, calls := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		t.Errorf("Gopher should not be called for invalid subdomain")
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-	svc.SetTunnelClient(tc)
-
-	_, err := svc.Provision(context.Background(), provision.Request{
-		Hostname:     "x",
-		Tier:         "small",
-		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
-		PublicTunnel: true,
-		Subdomain:    "BAD UPPER",
-	})
-	var ve *internalerrors.ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("expected ValidationError, got %v", err)
-	}
-	if ve.Field != "subdomain" {
-		t.Errorf("Field = %q, want subdomain", ve.Field)
-	}
-	if calls.Load() != 0 {
-		t.Errorf("Gopher hit %d times, want 0", calls.Load())
-	}
-	// IP must not have been reserved on this fail-fast path.
-	rows, _ := pool.List(context.Background())
-	for _, r := range rows {
-		if r.Status != ippool.StatusFree {
-			t.Errorf("IP %s should still be free", r.IP)
-		}
-	}
-}
-
-func TestProvision_TunnelSubdomainTaken_409_FailsFast(t *testing.T) {
-	t.Parallel()
-	svc, pool, _ := newTestService(t, happyFakePVE(t))
-	tc, _ := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"subdomain taken"}`))
-	})
-	svc.SetTunnelClient(tc)
-
-	_, err := svc.Provision(context.Background(), provision.Request{
-		Hostname:     "taken-sub",
-		Tier:         "small",
-		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
-		PublicTunnel: true,
-		Subdomain:    "claimed",
-	})
-	var ve *internalerrors.ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("expected ValidationError on 409, got %v", err)
-	}
-	if ve.Field != "subdomain" {
-		t.Errorf("Field = %q, want subdomain", ve.Field)
-	}
-	// IP reservation must be rolled back on fail-fast.
-	rows, _ := pool.List(context.Background())
-	for _, r := range rows {
-		if r.Status != ippool.StatusFree {
-			t.Errorf("IP %s status=%s, want free after 409", r.IP, r.Status)
-		}
 	}
 }
 
@@ -1174,7 +1104,6 @@ func TestProvision_TunnelInfraError_VMStillSucceeds(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-		Subdomain:    "anything",
 	})
 	if err != nil {
 		t.Fatalf("Provision should still succeed despite Gopher 5xx, got %v", err)
@@ -1210,9 +1139,10 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 	tc, _ := newGopherStub(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
-			// Match Gopher's real envelope shape so tunnel.Client decodes ok.
+			// Real Gopher shape: POST /machines returns the new machine in
+			// the envelope. The bootstrap URL lives on the machine.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"t-soft","subdomain":"soft","status":"pending","bootstrap_url":"https://gopher.example.com/bootstrap/abc"}}`))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"m-soft","status":"pending","public_ssh":true,"bootstrap_url":"https://gopher.example.com/bootstrap/abc"}}`))
 		case http.MethodDelete:
 			seenDelete.Store(true)
 			w.Header().Set("Content-Type", "application/json")
@@ -1230,7 +1160,6 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-		Subdomain:    "soft",
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)

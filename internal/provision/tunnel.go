@@ -138,27 +138,27 @@ func dialSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig) (*ssh.Client
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
-// waitTunnelActive polls Gopher until the tunnel is active or the budget is
-// exhausted. Returns the active tunnel on success.
-func (s *Service) waitTunnelActive(ctx context.Context, id string) (*tunnel.Tunnel, error) {
+// waitMachineActive polls Gopher until the machine is active or the budget
+// is exhausted. Returns the active machine on success — its
+// PublicSSHHost/Port carry the routable connection details.
+func (s *Service) waitMachineActive(ctx context.Context, id string) (*tunnel.Machine, error) {
 	deadline := time.Now().Add(tunnelActiveTimeout)
 	t := time.NewTicker(tunnelPollInterval)
 	defer t.Stop()
 
-	// First check is immediate — no point waiting an interval if Gopher
-	// reports active right away (race when bootstrap is fast). Transient
-	// errors fall through to the next tick.
+	// First check is immediate — bootstrap can finish before the first tick
+	// fires. Transient lookup errors fall through to the next tick.
 	for {
-		if got, err := s.tunnels.Get(ctx, id); err == nil {
+		if got, err := s.tunnels.GetMachine(ctx, id); err == nil {
 			switch got.Status {
 			case tunnel.StatusActive:
 				return got, nil
 			case tunnel.StatusFailed:
-				return nil, fmt.Errorf("gopher reported tunnel %s as failed", id)
+				return nil, fmt.Errorf("gopher reported machine %s as failed", id)
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("tunnel %s did not reach active within %s", id, tunnelActiveTimeout)
+			return nil, fmt.Errorf("machine %s did not reach active within %s", id, tunnelActiveTimeout)
 		}
 		select {
 		case <-ctx.Done():

@@ -98,18 +98,18 @@ func apexOf(host string) string {
 	return strings.Join(parts[1:], ".")
 }
 
-// List handles GET /api/tunnels. Mirrors the Gopher external API — Nimbus
-// does not maintain its own tunnel cache; this is a live pass-through so
-// admins always see ground truth. Returns 503 when tunnel support is
-// disabled (operator hasn't set GOPHER_API_URL).
+// List handles GET /api/tunnels. Live pass-through to Gopher — Nimbus
+// doesn't cache. The admin view is *machines* (each is an exposed VM);
+// per-port tunnels-on-top are a future surface. Returns 503 when tunnel
+// support is disabled (operator hasn't configured Gopher).
 func (h *Tunnels) List(w http.ResponseWriter, r *http.Request) {
 	if h.client == nil {
-		response.ServiceUnavailable(w, "tunnel integration disabled (GOPHER_API_URL unset)")
+		response.ServiceUnavailable(w, "tunnel integration disabled (Gopher API URL not configured)")
 		return
 	}
-	rows, err := h.client.List(r.Context())
+	rows, err := h.client.ListMachines(r.Context())
 	if err != nil {
-		response.InternalError(w, "list tunnels: "+err.Error())
+		response.InternalError(w, "list machines: "+err.Error())
 		return
 	}
 	response.Success(w, rows)
