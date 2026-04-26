@@ -276,63 +276,97 @@ func (a *Auth) oauthStart(provider oauth.Provider) http.HandlerFunc {
 	}
 }
 
-// oauthCallback validates state, exchanges the code, upserts the user, issues
-// a session cookie, and redirects to the frontend handshake page.
-func (a *Auth) oauthCallback(provider oauth.Provider, providerName string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		stateCookie, err := r.Cookie(oauthStateCookie)
-		if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-			http.Redirect(w, r, "/auth/callback?error=invalid_state", http.StatusTemporaryRedirect)
-			return
-		}
-		http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
-
-		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			http.Redirect(w, r, "/auth/callback?error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
-			return
-		}
-
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Redirect(w, r, "/auth/callback?error=missing_code", http.StatusTemporaryRedirect)
-			return
-		}
-
-		userInfo, err := provider.Exchange(r.Context(), code)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=exchange_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=user_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		sessionID, err := a.auth.CreateSession(user.ID)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=session_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		setSessionCookie(w, sessionID)
-
-		q := url.Values{}
-		q.Set("provider", providerName)
-		q.Set("login", userInfo.Login)
-		http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
-	}
-}
-
 // --- GitHub OAuth -----------------------------------------------------------
 
 func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.githubProvider())(w, r)
 }
 
+// GitHubCallback wraps the OAuth flow with the authorized-orgs check. New
+// users whose GitHub org memberships don't intersect the admin's authorized
+// list are blocked before any account is created. Every login refreshes the
+// user's stored org snapshot so the dynamic bypass in IsUserVerified always
+// reflects the most recent login's memberships.
 func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.githubProvider(), "github")(w, r)
+	provider := a.githubProvider()
+	if provider == nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	stateCookie, err := r.Cookie(oauthStateCookie)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Redirect(w, r, "/auth/callback?error=invalid_state&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
+
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		http.Redirect(w, r, "/auth/callback?provider=github&error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/auth/callback?error=missing_code&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	userInfo, err := provider.Exchange(r.Context(), code)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Org gate: when the admin has configured ANY authorized orgs, every
+	// GitHub OAuth login is restricted to members of those orgs — including
+	// users that already exist (e.g. created via email/password). They can
+	// still sign in through the password form. Empty list disables the gate.
+	hasGate, err := a.auth.HasAuthorizedGitHubOrgs()
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+	if hasGate {
+		ok, err := a.auth.IsGitHubOrgAuthorized(userInfo.Orgs)
+		if err != nil {
+			http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+		if !ok {
+			// Revoke the just-issued token so the user's next attempt
+			// presents GitHub's consent screen — without this, GitHub
+			// silently re-issues the same authorization to the same
+			// account and the user is stuck on the rejection page.
+			if gh, ok := provider.(*oauth.GitHub); ok {
+				_ = gh.RevokeToken(r.Context(), userInfo.Token)
+			}
+			http.Redirect(w, r, "/auth/callback?error=org_not_authorized&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
+	// allowCreate is intentionally permissive here — the gate above already
+	// rejected unauthorized users when the gate is on. When the gate is off,
+	// new accounts are allowed (and will fall into the access code flow).
+	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.Orgs, nil)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	sessionID, err := a.auth.CreateSession(user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=session_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+
+	q := url.Values{}
+	q.Set("provider", "github")
+	q.Set("login", userInfo.Login)
+	http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
 }
 
 // --- Google OAuth -----------------------------------------------------------

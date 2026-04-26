@@ -125,6 +125,45 @@ func (s *Settings) SaveAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Re
 	s.GetAuthorizedGoogleDomains(w, r)
 }
 
+type authorizedOrgsView struct {
+	Orgs []string `json:"orgs"`
+}
+
+type saveAuthorizedOrgsRequest struct {
+	Orgs []string `json:"orgs"`
+}
+
+// GetAuthorizedGitHubOrgs handles GET /api/settings/github-orgs (admin only).
+func (s *Settings) GetAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load authorized orgs")
+		return
+	}
+	orgs := []string{}
+	for _, o := range strings.Split(settings.AuthorizedGitHubOrgs, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			orgs = append(orgs, o)
+		}
+	}
+	response.Success(w, authorizedOrgsView{Orgs: orgs})
+}
+
+// SaveAuthorizedGitHubOrgs handles PUT /api/settings/github-orgs (admin only).
+func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
+	var req saveAuthorizedOrgsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := s.auth.SaveAuthorizedGitHubOrgs(req.Orgs); err != nil {
+		response.InternalError(w, "failed to save authorized orgs")
+		return
+	}
+	s.GetAuthorizedGitHubOrgs(w, r)
+}
+
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
 // Issues a fresh code and bumps the version, invalidating every non-admin
 // user's prior verification.

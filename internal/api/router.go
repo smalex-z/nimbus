@@ -88,6 +88,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/settings/access-code/regenerate", settings.RegenerateAccessCode)
 				r.Get("/settings/google-domains", settings.GetAuthorizedGoogleDomains)
 				r.Put("/settings/google-domains", settings.SaveAuthorizedGoogleDomains)
+				r.Get("/settings/github-orgs", settings.GetAuthorizedGitHubOrgs)
+				r.Put("/settings/github-orgs", settings.SaveAuthorizedGitHubOrgs)
 			})
 
 			// Resource routes — non-admins must be verified against the

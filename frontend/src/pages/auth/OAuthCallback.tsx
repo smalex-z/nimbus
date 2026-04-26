@@ -46,6 +46,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   session_failed:        'Account verified, but session creation failed. Please try again.',
   missing_code:          'Authorization code was missing from the callback.',
   domain_not_authorized: 'Your email domain is not authorized for sign-up. Contact your administrator to request access.',
+  org_not_authorized:    'Your GitHub account is not a member of an authorized organization. Contact your administrator to request access.',
 }
 
 export default function OAuthCallback() {

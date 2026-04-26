@@ -18,6 +18,12 @@ type User struct {
 	// increments and this user's verification becomes stale, forcing them
 	// back through the verify form on their next action.
 	VerifiedCodeVersion int `gorm:"default:0" json:"-"`
+	// GitHubOrgs is the comma-separated snapshot of GitHub org logins the
+	// user belonged to at their last GitHub OAuth login. Used by the
+	// authorized-orgs bypass: IsUserVerified intersects this against the
+	// admin's current authorized-orgs list dynamically. Empty for users who
+	// have never signed in via GitHub.
+	GitHubOrgs string `gorm:"default:''" json:"-"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.
@@ -46,6 +52,10 @@ type OAuthSettings struct {
 	// bypass is granted and Google sign-ups behave like email/password
 	// (subject to the access code).
 	AuthorizedGoogleDomains string `gorm:"default:''"`
+	// AuthorizedGitHubOrgs is a comma-separated list of lowercased GitHub
+	// org logins. Members of any of these orgs bypass the access code on
+	// GitHub OAuth sign-in. Empty list disables the GitHub bypass.
+	AuthorizedGitHubOrgs string `gorm:"default:''"`
 }
 
 // VM is the canonical record for a provisioned virtual machine.
