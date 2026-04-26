@@ -106,6 +106,20 @@ export interface ProvisionResult {
   warning?: string
 }
 
+// Backend-emitted phase IDs streamed during a provision call. Keep in sync
+// with internal/provision/types.go.
+export type ProvisionStep =
+  | 'reserve_ip'
+  | 'clone_template'
+  | 'configure_vm'
+  | 'start_vm'
+  | 'wait_guest_agent'
+
+export interface ProvisionProgress {
+  step: ProvisionStep
+  label: string
+}
+
 export interface NodeView {
   name: string
   status: 'online' | 'offline' | 'unknown'

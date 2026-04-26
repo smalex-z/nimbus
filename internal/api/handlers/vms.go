@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -37,6 +38,13 @@ type createVMRequest struct {
 }
 
 // Create handles POST /api/vms — the long-running provision call.
+//
+// The response is **newline-delimited JSON** (Content-Type:
+// application/x-ndjson). Each line is one event: a `progress` event as each
+// backend phase finishes, then a single terminal `result` (success) or
+// `error` (failure) line. Validation failures still respond with the
+// regular {success,error} JSON envelope and a 4xx status, since headers
+// haven't been flushed yet at that point.
 func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	var req createVMRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -48,6 +56,28 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	flusher, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w)
+	writeLine := func(v any) {
+		_ = enc.Encode(v) // Encode appends '\n'
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	reporter := func(evt provision.ProgressEvent) {
+		writeLine(map[string]any{
+			"type":  "progress",
+			"step":  evt.Step,
+			"label": evt.Label,
+		})
+	}
+
 	res, err := h.svc.Provision(r.Context(), provision.Request{
 		Hostname:    req.Hostname,
 		Tier:        req.Tier,
@@ -56,12 +86,40 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		SSHPubKey:   req.SSHPubKey,
 		SSHPrivKey:  req.SSHPrivKey,
 		GenerateKey: req.GenerateKey,
-	})
+	}, reporter)
 	if err != nil {
-		response.FromError(w, err)
+		writeLine(map[string]any{
+			"type":    "error",
+			"code":    classifyProvisionError(err),
+			"message": err.Error(),
+		})
 		return
 	}
-	response.Created(w, res)
+	writeLine(map[string]any{
+		"type": "result",
+		"data": res,
+	})
+}
+
+// classifyProvisionError tags the failure for the frontend so it can
+// distinguish user-actionable errors (validation, conflict, not-found)
+// from internal failures.
+func classifyProvisionError(err error) string {
+	var (
+		validation *internalerrors.ValidationError
+		conflict   *internalerrors.ConflictError
+		notFound   *internalerrors.NotFoundError
+	)
+	switch {
+	case errors.As(err, &validation):
+		return "validation"
+	case errors.As(err, &conflict):
+		return "conflict"
+	case errors.As(err, &notFound):
+		return "not_found"
+	default:
+		return "internal"
+	}
 }
 
 // List handles GET /api/vms.

@@ -55,3 +55,26 @@ func (r *Result) String() string {
 	}
 	return formatResult(r)
 }
+
+// Progress step IDs. The handler streams these to the frontend, which keys
+// its checklist off them — keep the IDs stable.
+const (
+	StepReserveIP = "reserve_ip"
+	StepCloneTpl  = "clone_template"
+	StepConfigure = "configure_vm"
+	StepStartVM   = "start_vm"
+	StepWaitAgent = "wait_guest_agent"
+)
+
+// ProgressEvent marks completion of a phase. Emitted by Provision when the
+// step finishes successfully — the next phase is implicitly "in progress"
+// from the moment the previous one closes.
+type ProgressEvent struct {
+	Step  string `json:"step"`
+	Label string `json:"label"`
+}
+
+// ProgressReporter is the optional callback the handler installs on a
+// Provision call to receive ProgressEvents as steps complete. Nil is allowed
+// — the service runs identically without one.
+type ProgressReporter func(ProgressEvent)
