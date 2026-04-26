@@ -219,6 +219,18 @@ func main() {
 	}
 	tagBackfillCancel()
 
+	// Pin the `nimbus` tag chip to a neutral color so the Proxmox dashboard
+	// doesn't render it in a hash-derived random hue. Idempotent: re-runs
+	// are no-ops once the cluster's tag-style already has the override.
+	// Best-effort — a token without Sys.Modify on / gets a 403 here, which
+	// is fine; the operator can either grant the privilege or set the
+	// color manually in Datacenter → Options.
+	tagColorCtx, tagColorCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := ensureNimbusTagColor(tagColorCtx, pveClient); err != nil {
+		log.Printf("warning: nimbus tag color sync skipped: %v", err)
+	}
+	tagColorCancel()
+
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 	})
@@ -348,6 +360,26 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// ensureNimbusTagColor reads the cluster's `tag-style` option, ensures the
+// `nimbus` tag is pinned to Nimbus's neutral grey, and writes it back only
+// when something needs to change. Returns nil on success or no-op; returns
+// the read/write error otherwise so the caller can log and continue.
+func ensureNimbusTagColor(ctx context.Context, px *proxmox.Client) error {
+	current, err := px.GetClusterTagStyle(ctx)
+	if err != nil {
+		return fmt.Errorf("read tag-style: %w", err)
+	}
+	style := proxmox.ParseTagStyle(current)
+	if !style.EnsureNimbusColor(proxmox.NimbusTagBG, proxmox.NimbusTagFG) {
+		return nil
+	}
+	if err := px.SetClusterTagStyle(ctx, style.String()); err != nil {
+		return fmt.Errorf("write tag-style: %w", err)
+	}
+	log.Printf("pinned nimbus tag color in cluster tag-style")
+	return nil
 }
 
 // runReconcileLoop runs reconciler.Reconcile every interval until ctx is
