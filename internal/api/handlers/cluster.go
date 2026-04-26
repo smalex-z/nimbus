@@ -60,6 +60,10 @@ type clusterVMView struct {
 	// KeyName is the SSH key file name, set only for local-source VMs that
 	// were provisioned with a vault-stored key.
 	KeyName string `json:"key_name,omitempty"`
+	// TunnelURL is "host:port" when the VM has an established Gopher SSH
+	// tunnel. Set only for local-source VMs; surfaced so the admin SSH
+	// modal can render the public ssh command alongside the LAN one.
+	TunnelURL string `json:"tunnel_url,omitempty"`
 
 	// OS detail block — best-effort agent osinfo, surfaced to the frontend
 	// so it can render an icon, version label, and a hover popover with
@@ -157,6 +161,7 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 			view.Tier = managed.Tier
 			view.OSTemplate = managed.OSTemplate
 			view.Username = managed.Username
+			view.TunnelURL = managed.TunnelURL
 			view.CreatedAt = managed.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
 			if managed.IP != "" {
 				view.IP = managed.IP
