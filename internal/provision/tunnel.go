@@ -64,7 +64,11 @@ func (s *Service) privateKeyForBootstrap(ctx context.Context, key *db.SSHKey, ju
 // returns nil on success. The dial+handshake is retried — sshd may not be
 // listening immediately after WaitForIP returns. The remote command itself
 // is NOT retried; a failure there is a real script error, not a race.
-func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL string) error {
+//
+// machineName is exported as GOPHER_MACHINE_NAME so the bootstrap script
+// skips its interactive prompt — without a PTY, the script's `/dev/tty`
+// fallback isn't usable.
+func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL, machineName string) error {
 	if bootstrapURL == "" {
 		return errors.New("empty bootstrap URL")
 	}
@@ -105,9 +109,13 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL 
 		}
 		defer session.Close() //nolint:errcheck
 
-		// Single-quote the URL so the shell doesn't interpret special
-		// characters from Gopher's bootstrap path (tokens, query strings).
-		cmd := fmt.Sprintf("curl -fsSL '%s' | sh", strings.ReplaceAll(bootstrapURL, "'", "'\\''"))
+		// Single-quote URL + machine name so the shell doesn't interpret
+		// special characters from Gopher's path (tokens) or the hostname.
+		// Set GOPHER_MACHINE_NAME on the receiving shell — the script reads
+		// it before it would otherwise prompt over /dev/tty (which doesn't
+		// exist on a non-PTY SSH session).
+		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+		cmd := fmt.Sprintf("curl -fsSL %s | GOPHER_MACHINE_NAME=%s sh", quote(bootstrapURL), quote(machineName))
 		out, runErr := session.CombinedOutput(cmd)
 		if runErr != nil {
 			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, strings.TrimSpace(string(out)))
