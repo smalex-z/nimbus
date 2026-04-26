@@ -11,8 +11,9 @@ const (
 
 // Source values describe where the row's allocation state came from.
 const (
-	SourceLocal   = "local"   // claimed by this Nimbus instance via Reserve/MarkAllocated
-	SourceAdopted = "adopted" // observed in Proxmox by the reconciler and adopted into the local cache
+	SourceLocal    = "local"    // claimed by this Nimbus instance via Reserve/MarkAllocated
+	SourceAdopted  = "adopted"  // observed in Proxmox by the reconciler and adopted into the local cache
+	SourceExternal = "external" // detected on the LAN by the netscan loop — not Nimbus-managed and not in Proxmox
 )
 
 // IPAllocation is a single row in the IP pool table. The IP itself is the

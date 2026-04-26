@@ -753,6 +753,9 @@ func TestClient_ListClusterIPs(t *testing.T) {
 				vms = append(vms, fx.listVM)
 			}
 			writeEnvelope(w, vms)
+		case strings.HasSuffix(r.URL.Path, "/lxc") && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/"):
+			// Empty LXC list — these fixtures only cover QEMU VMs.
+			writeEnvelope(w, []proxmox.LXCStatus{})
 		case strings.HasSuffix(r.URL.Path, "/config"):
 			parts := strings.Split(r.URL.Path, "/")
 			node := parts[4]
@@ -810,7 +813,12 @@ func TestClient_ListClusterIPs_PartialNodeFailure(t *testing.T) {
 			writeEnvelope(w, []proxmox.VMStatus{{VMID: 200, Name: "ok-vm", Status: "running"}})
 		case "/api2/json/nodes/good/qemu/200/config":
 			writeEnvelope(w, map[string]any{"ipconfig0": "ip=10.0.0.10/24"})
+		case "/api2/json/nodes/good/lxc":
+			writeEnvelope(w, []proxmox.LXCStatus{})
 		case "/api2/json/nodes/bad/qemu":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errors":"node down"}`))
+		case "/api2/json/nodes/bad/lxc":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"errors":"node down"}`))
 		default:
