@@ -31,6 +31,12 @@ func NewVerifier(s Scanner) *Verifier {
 // matching the IPVerifier contract for "claimed but holder vmid unknown".
 // (true, nil, nil) means the probe didn't see a host; provision can proceed.
 // Errors propagate untouched.
+//
+// We must check whether the SPECIFIC candidate is in the hit list, not just
+// whether the list is non-empty: in Mode=both the scanner pads its result
+// with every entry from /proc/net/arp (a list of every neighbor the host has
+// ever talked to). Without this filter, any non-empty ARP cache would mark
+// every candidate as in-use and provisioning fails for the whole LAN.
 func (v *Verifier) VerifyFree(ctx context.Context, ip string) (bool, *int, error) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -42,8 +48,10 @@ func (v *Verifier) VerifyFree(ctx context.Context, ip string) (bool, *int, error
 	if err != nil {
 		return false, nil, err
 	}
-	if len(hits) > 0 {
-		return false, nil, nil
+	for _, hit := range hits {
+		if hit.Equal(parsed) {
+			return false, nil, nil
+		}
 	}
 	return true, nil, nil
 }
