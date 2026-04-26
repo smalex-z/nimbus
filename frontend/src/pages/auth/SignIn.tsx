@@ -50,8 +50,8 @@ export default function SignIn() {
     setError(null)
     try {
       setLoading(true)
-      await api.post('/auth/login', { email, password })
-      window.location.replace('/')
+      const res = await api.post<{ is_admin: boolean }>('/auth/login', { email, password })
+      window.location.replace(res.data?.is_admin ? '/admin' : '/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
