@@ -133,9 +133,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Use(requireVerified(d.Auth))
 
 				r.Route("/vms", func(r chi.Router) {
-					r.Use(middleware.Timeout(180 * time.Second))
 					r.Get("/", vms.List)
-					r.Post("/", vms.Create)
+					// Provision is the slow path: clone + cloud-init + boot
+					// takes 30-60s on its own, plus an optional Gopher tunnel
+					// bootstrap that can wait on dpkg locks for another
+					// 1-3min during early-boot cloud-init contention.
+					r.With(middleware.Timeout(6*time.Minute)).Post("/", vms.Create)
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 				})

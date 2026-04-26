@@ -14,10 +14,19 @@ import (
 	"nimbus/internal/tunnel"
 )
 
-// tunnelBootstrapSSHTimeout caps each SSH dial+handshake+exec attempt. The
-// `curl … | sh` is fast (rathole binary download + start), but we don't want
-// to sit forever on a hung connection.
-const tunnelBootstrapSSHTimeout = 30 * time.Second
+// tunnelBootstrapDialTimeout bounds the SSH dial + handshake. The VM's sshd
+// is up within seconds of WaitForIP returning; if it takes longer than this,
+// it's a real connectivity problem, not a slow boot.
+const tunnelBootstrapDialTimeout = 30 * time.Second
+
+// tunnelBootstrapExecTimeout bounds the bootstrap command itself. The script
+// downloads the rathole binary, may wait on dpkg locks (cloud-init holds
+// /var/lib/dpkg/lock-frontend during early boot), retries apt installs, and
+// installs/starts a systemd unit. Five minutes covers the realistic upper
+// bound including a couple of dpkg-lock retry cycles. Tighter than this and
+// we kill the SSH session mid-bootstrap, leaving the machine in a stuck
+// pending state on Gopher.
+const tunnelBootstrapExecTimeout = 5 * time.Minute
 
 // tunnelBootstrapMaxAttempts caps how many times we'll retry the connect.
 // WaitForIP confirms the agent reports an IP; sshd may still be a couple of
@@ -90,7 +99,7 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		// against. This is one-time provisioning over the cluster LAN, not a
 		// long-lived SSH client; trust-on-first-use is acceptable here.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
-		Timeout:         tunnelBootstrapSSHTimeout,
+		Timeout:         tunnelBootstrapDialTimeout,
 	}
 
 	var lastErr error
@@ -123,7 +132,16 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		// exist on a non-PTY SSH session).
 		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 		cmd := fmt.Sprintf("curl -fsSL %s | GOPHER_MACHINE_NAME=%s sh", quote(bootstrapURL), quote(machineName))
+
+		// Bound the exec separately from the dial. If the bootstrap genuinely
+		// runs longer than tunnelBootstrapExecTimeout, close the session to
+		// unblock CombinedOutput; the subsequent runErr will surface as
+		// "session closed" with whatever output we captured up to that point.
+		execTimer := time.AfterFunc(tunnelBootstrapExecTimeout, func() {
+			_ = session.Close()
+		})
 		out, runErr := session.CombinedOutput(cmd)
+		execTimer.Stop()
 		if runErr != nil {
 			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, truncateOutput(string(out), maxBootstrapOutputBytes))
 		}
@@ -147,22 +165,31 @@ func truncateOutput(s string, max int) string {
 
 // dialSSH opens a single SSH session to ip:22 with the supplied config,
 // honoring ctx cancellation. Returns a usable *ssh.Client; caller must Close.
+//
+// The connection deadline is only set across dial+handshake, not the full
+// session lifetime — a hard deadline on the underlying conn would kill long
+// command runs (the bootstrap can take minutes once dpkg-lock retries kick
+// in). Once the handshake is done, the deadline is cleared and command-level
+// bounding is the caller's responsibility (see runTunnelBootstrap).
 func dialSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapSSHTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapDialTimeout)
 	defer cancel()
 
-	dialer := &net.Dialer{Timeout: tunnelBootstrapSSHTimeout}
+	dialer := &net.Dialer{Timeout: tunnelBootstrapDialTimeout}
 	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(ip, "22"))
 	if err != nil {
 		return nil, fmt.Errorf("dial %s:22: %w", ip, err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(tunnelBootstrapSSHTimeout))
+	_ = conn.SetDeadline(time.Now().Add(tunnelBootstrapDialTimeout))
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(ip, "22"), cfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake: %w", err)
 	}
+	// Clear the dial-time deadline so the subsequent command exec isn't
+	// killed mid-run.
+	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
