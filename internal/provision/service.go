@@ -660,7 +660,28 @@ func (s *Service) Delete(ctx context.Context, id, requesterID uint) error {
 	if vm.OwnerID == nil || *vm.OwnerID != requesterID {
 		return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
 	}
+	return s.deleteVM(ctx, &vm)
+}
 
+// AdminDelete destroys a VM regardless of who owns it. Same semantics as
+// Delete (stop → Proxmox destroy → release IP → hard-delete row), but no
+// owner gate. Intended for the admin Dashboard cluster view.
+func (s *Service) AdminDelete(ctx context.Context, id uint) error {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return fmt.Errorf("get vm %d: %w", id, err)
+	}
+	return s.deleteVM(ctx, &vm)
+}
+
+// deleteVM holds the shared destroy sequence used by both the user-scoped
+// Delete and the admin-scoped AdminDelete. Order: stop on Proxmox if running,
+// destroy with disk purge, release the IP back to the pool, hard-delete the
+// row. A partial failure leaves the row + IP intact for retry.
+func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	// Best-effort stop. Proxmox returns an error if the VM is already stopped;
 	// that's fine — destroy below will succeed regardless.
 	if vm.Status == "running" {
@@ -690,8 +711,8 @@ func (s *Service) Delete(ctx context.Context, id, requesterID uint) error {
 		}
 	}
 
-	if err := s.db.WithContext(ctx).Unscoped().Delete(&vm).Error; err != nil {
-		return fmt.Errorf("delete vm row %d: %w", id, err)
+	if err := s.db.WithContext(ctx).Unscoped().Delete(vm).Error; err != nil {
+		return fmt.Errorf("delete vm row %d: %w", vm.ID, err)
 	}
 	return nil
 }
