@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
   getAccessCode,
+  getAuthorizedGoogleDomains,
   getOAuthSettings,
   regenerateAccessCode,
+  saveAuthorizedGoogleDomains,
   saveOAuthSettings,
 } from '@/api/client'
 import type { AccessCodeView, OAuthSettingsView } from '@/api/client'
@@ -310,6 +312,163 @@ function AccessCodePanel() {
   )
 }
 
+function GoogleDomainsPanel() {
+  const [domains, setDomains] = useState<string[]>([])
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    getAuthorizedGoogleDomains()
+      .then((res) => setDomains(res.domains))
+      .catch(() => setError('Failed to load authorized domains'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const persist = async (next: string[]) => {
+    setError(null)
+    try {
+      const res = await saveAuthorizedGoogleDomains(next)
+      setDomains(res.domains)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed')
+    }
+  }
+
+  const addDomain = async () => {
+    const cleaned = draft.trim().toLowerCase().replace(/^@/, '')
+    if (!cleaned) return
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(cleaned)) {
+      setError('Enter a valid domain (e.g. example.com)')
+      return
+    }
+    if (domains.includes(cleaned)) {
+      setDraft('')
+      return
+    }
+    setDraft('')
+    await persist([...domains, cleaned])
+  }
+
+  const removeDomain = async (domain: string) => {
+    await persist(domains.filter((d) => d !== domain))
+  }
+
+  return (
+    <div
+      className="glass"
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ color: 'var(--ink)', opacity: 0.7 }}>
+            <GoogleIcon size={18} />
+          </span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+            Authorized Google domains
+          </span>
+        </div>
+        <span
+          className="n-pill"
+          style={{
+            color: 'var(--ink-mute)',
+            background: 'rgba(20,18,28,0.04)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          {domains.length} domain{domains.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+        Google OAuth sign-ins from any of these domains skip the access code
+        entirely. New Google accounts whose email domain is <em>not</em> on
+        this list are blocked at sign-up. Leaving the list empty disables the
+        bypass — every Google sign-in still requires the access code.
+      </p>
+
+      {loading ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {domains.length === 0 && (
+            <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
+              No domains authorized.
+            </span>
+          )}
+          {domains.map((d) => (
+            <span
+              key={d}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 6px 6px 12px',
+                borderRadius: 999,
+                background: 'rgba(248,175,130,0.12)',
+                border: '1px solid rgba(248,175,130,0.4)',
+                fontSize: 13,
+                color: '#9a5c2e',
+                fontFamily: 'Geist Mono, monospace',
+              }}
+            >
+              {d}
+              <button
+                type="button"
+                aria-label={`Remove ${d}`}
+                onClick={() => removeDomain(d)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 20,
+                  height: 20,
+                  borderRadius: '50%',
+                  border: 'none',
+                  background: 'rgba(154,92,46,0.1)',
+                  color: '#9a5c2e',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          void addDomain()
+        }}
+        style={{ display: 'flex', gap: 8 }}
+      >
+        <input
+          className="n-input"
+          type="text"
+          placeholder="example.com"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          style={{ flex: 1 }}
+        />
+        <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
+          Add
+        </button>
+      </form>
+
+      {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+      {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+    </div>
+  )
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -377,6 +536,7 @@ export default function Settings() {
                 instructionsLabel="Google Cloud Console"
                 onSave={handleSaveGoogle}
               />
+              <GoogleDomainsPanel />
             </>
           )}
         </div>
