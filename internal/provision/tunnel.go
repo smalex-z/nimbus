@@ -70,7 +70,9 @@ func (s *Service) privateKeyForBootstrap(ctx context.Context, key *db.SSHKey, ju
 	if !key.HasPrivateKey() {
 		return "", errors.New("private half not available — vault has only the public key")
 	}
-	_, plain, err := s.keys.GetPrivateKey(ctx, key.ID)
+	// Trusted internal flow: tunnel bootstrap runs as part of provisioning,
+	// already authorized at the entry handler. Bypass the ownership gate.
+	_, plain, err := s.keys.GetPrivateKey(ctx, key.ID, nil)
 	if err != nil {
 		return "", fmt.Errorf("decrypt key %d: %w", key.ID, err)
 	}

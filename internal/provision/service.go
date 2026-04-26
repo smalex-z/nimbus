@@ -76,6 +76,8 @@ type ProxmoxClient interface {
 	SetVMDescription(ctx context.Context, node string, vmid int, description string) error
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
+	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 }
 
@@ -545,7 +547,13 @@ func tagsEqual(a, b []string) bool {
 	return true
 }
 
-// List returns persisted VM rows. Phase 1 ignores ownerID and returns all.
+// List returns persisted VM rows. When ownerID is non-nil the result is
+// strictly scoped to rows owned by that user. Passing nil returns every row
+// (used by background reconciliation, not by user-facing endpoints).
+//
+// Legacy rows with owner_id IS NULL are NOT returned to any user — at
+// startup BackfillOwnership reassigns them to the first admin so they
+// surface naturally on that admin's My Machines.
 func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 	var vms []db.VM
 	q := s.db.WithContext(ctx).Order("created_at DESC")
@@ -558,12 +566,47 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 	return vms, nil
 }
 
+// BackfillOwnership assigns every VM with a NULL owner_id to the
+// lowest-ID admin on the instance. Pre-ownership-tracking VMs (provisioned
+// before this feature shipped) get bound to the original setup admin so
+// they appear on someone's My Machines and become deletable through the
+// regular UI flow.
+//
+// Idempotent: re-running after every row already has an owner is a no-op.
+// Returns the number of rows updated, or 0 (with no error) when there's
+// no admin yet — typical for an instance still in the setup wizard.
+func (s *Service) BackfillOwnership(ctx context.Context) (int64, error) {
+	var admin db.User
+	err := s.db.WithContext(ctx).
+		Where("is_admin = ?", true).
+		Order("id ASC").
+		First(&admin).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("find first admin: %w", err)
+	}
+
+	res := s.db.WithContext(ctx).Model(&db.VM{}).
+		Where("owner_id IS NULL").
+		Update("owner_id", admin.ID)
+	if res.Error != nil {
+		return 0, fmt.Errorf("backfill owner_id: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // GetPrivateKey returns the decrypted private key for a VM, if one is
 // available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound
 // when the VM has no linked key, or the linked key has no vaulted private
 // half (e.g. user imported a public-only key, or deleted the key after
 // provision).
-func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateKey string, err error) {
+//
+// requesterID enforces VM ownership — non-nil values must match vm.OwnerID
+// or NotFound is returned (no info leak about other users' VMs). Pass nil
+// for trusted internal callers; the handler always passes the signed-in user.
+func (s *Service) GetPrivateKey(ctx context.Context, id uint, requesterID *uint) (keyName, privateKey string, err error) {
 	var vm db.VM
 	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -571,13 +614,16 @@ func (s *Service) GetPrivateKey(ctx context.Context, id uint) (keyName, privateK
 		}
 		return "", "", fmt.Errorf("get vm %d: %w", id, err)
 	}
+	if requesterID != nil && (vm.OwnerID == nil || *vm.OwnerID != *requesterID) {
+		return "", "", &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+	}
 	if vm.SSHKeyID == nil {
 		return "", "", &internalerrors.NotFoundError{
 			Resource: "private_key",
 			ID:       fmt.Sprintf("vm:%d", id),
 		}
 	}
-	return s.keys.GetPrivateKey(ctx, *vm.SSHKeyID)
+	return s.keys.GetPrivateKey(ctx, *vm.SSHKeyID, requesterID)
 }
 
 // Get returns a single VM by row ID.
@@ -590,6 +636,100 @@ func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
 		return nil, fmt.Errorf("get vm %d: %w", id, err)
 	}
 	return &vm, nil
+}
+
+// Delete tears down a VM end-to-end: stop on Proxmox if running, destroy with
+// disk purge, release the IP back to the pool, and hard-delete the DB row.
+//
+// Authorization is strict: returns NotFound (not Forbidden) when the row
+// either has no owner (legacy / pre-ownership) or belongs to a different
+// user. NotFound — rather than 403 — avoids disclosing existence of other
+// users' VMs and keeps legacy VMs immutable through this code path.
+//
+// Order of operations is Proxmox → IP → DB so a partial failure leaves the
+// row + IP intact and the user can retry. Stop failures are tolerated as
+// long as the destroy itself succeeds (covers the "already stopped" race).
+func (s *Service) Delete(ctx context.Context, id, requesterID uint) error {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if vm.OwnerID == nil || *vm.OwnerID != requesterID {
+		return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+	}
+	return s.deleteVM(ctx, &vm)
+}
+
+// AdminDelete destroys a VM regardless of who owns it. Same semantics as
+// Delete (stop → Proxmox destroy → release IP → hard-delete row), but no
+// owner gate. Intended for the admin Dashboard cluster view.
+func (s *Service) AdminDelete(ctx context.Context, id uint) error {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return fmt.Errorf("get vm %d: %w", id, err)
+	}
+	return s.deleteVM(ctx, &vm)
+}
+
+// deleteVM holds the shared destroy sequence used by both the user-scoped
+// Delete and the admin-scoped AdminDelete. Order: stop on Proxmox if running,
+// destroy with disk purge, release the IP back to the pool, hard-delete the
+// row. A partial failure leaves the row + IP intact for retry.
+func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
+	// Best-effort stop. Proxmox returns an error if the VM is already stopped;
+	// that's fine — destroy below will succeed regardless.
+	if vm.Status == "running" {
+		if upid, err := s.px.StopVM(ctx, vm.Node, vm.VMID); err == nil {
+			_ = s.px.WaitForTask(ctx, vm.Node, upid, s.cfg.PollInterval)
+		} else {
+			log.Printf("delete vm %d: stop failed (continuing to destroy): %v", vm.VMID, err)
+		}
+	}
+
+	// Destroy. If Proxmox says the VM is already gone (the user manually
+	// removed it on the cluster), treat that as success and proceed to clean
+	// up our local state.
+	upid, err := s.px.DestroyVM(ctx, vm.Node, vm.VMID)
+	if err != nil && !isAlreadyGone(err) {
+		return fmt.Errorf("destroy vm on proxmox: %w", err)
+	}
+	if err == nil {
+		if waitErr := s.px.WaitForTask(ctx, vm.Node, upid, s.cfg.PollInterval); waitErr != nil {
+			return fmt.Errorf("wait for destroy task: %w", waitErr)
+		}
+	}
+
+	if vm.IP != "" {
+		if err := s.pool.Release(ctx, vm.IP); err != nil {
+			log.Printf("delete vm %d: release ip %s: %v", vm.VMID, vm.IP, err)
+		}
+	}
+
+	if err := s.db.WithContext(ctx).Unscoped().Delete(vm).Error; err != nil {
+		return fmt.Errorf("delete vm row %d: %w", vm.ID, err)
+	}
+	return nil
+}
+
+// isAlreadyGone reports whether a Proxmox error means the VM no longer exists
+// on the cluster (manually removed, race with another delete, etc.). Proxmox
+// uses 500 with "does not exist" in the body for this case rather than 404,
+// matching the GetVMConfig quirk.
+func isAlreadyGone(err error) bool {
+	if errors.Is(err, proxmox.ErrNotFound) {
+		return true
+	}
+	var httpErr *proxmox.HTTPError
+	if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
+		return true
+	}
+	return false
 }
 
 // verifyAndRetryReserve runs the verify-after-Reserve loop. Given an initial
@@ -662,7 +802,11 @@ func (s *Service) verifyAndRetryReserve(ctx context.Context, initialIP, hostname
 func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, string, error) {
 	switch {
 	case req.SSHKeyID != nil:
-		row, err := s.keys.Get(ctx, *req.SSHKeyID)
+		// Trusted internal flow: the entry handler has already authorized
+		// the requester. Bypass the ownership check via nil so the
+		// provision flow doesn't have to thread requester semantics through
+		// every call site.
+		row, err := s.keys.Get(ctx, *req.SSHKeyID, nil)
 		if err != nil {
 			return nil, "", err
 		}
@@ -678,7 +822,7 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 			return nil, "", err
 		}
 		// Pull the plaintext back out so the API response can show it once.
-		_, priv, err := s.keys.GetPrivateKey(ctx, row.ID)
+		_, priv, err := s.keys.GetPrivateKey(ctx, row.ID, nil)
 		if err != nil {
 			return nil, "", fmt.Errorf("retrieve generated key: %w", err)
 		}
