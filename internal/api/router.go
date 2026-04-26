@@ -29,6 +29,7 @@ type Deps struct {
 	Reconciler *ippool.Reconciler
 	Proxmox    *proxmox.Client
 	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
+	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
 	Config     *config.Config
 	Restart    func()
 }
@@ -52,8 +53,10 @@ func NewRouter(d Deps) http.Handler {
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
-	settings := handlers.NewSettings(d.Auth)
-	tunnels := handlers.NewTunnels(d.Tunnels, d.Config.GopherAPIURL)
+	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
+	settings := handlers.NewSettings(d.Auth).
+		WithTunnelAppliers(d.Provision).
+		WithTunnelInfoSetter(tunnels)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -122,6 +125,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Use(requireAdmin)
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
+				r.Get("/settings/gopher", settings.GetGopher)
+				r.Put("/settings/gopher", settings.SaveGopher)
 				r.Get("/tunnels", tunnels.List)
 			})
 		})

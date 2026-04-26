@@ -32,6 +32,14 @@ type OAuthSettings struct {
 	GoogleClientSecret string `gorm:"default:''"`
 }
 
+// GopherSettings stores the Gopher tunnel-gateway credentials. Only a single
+// row (ID=1) is used. Empty APIURL means tunnel integration is disabled.
+type GopherSettings struct {
+	ID     uint   `gorm:"primaryKey"`
+	APIURL string `gorm:"default:''"`
+	APIKey string `gorm:"default:''"`
+}
+
 // VM is the canonical record for a provisioned virtual machine.
 type VM struct {
 	gorm.Model

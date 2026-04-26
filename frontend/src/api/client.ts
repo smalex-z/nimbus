@@ -148,6 +148,28 @@ export async function getTunnelInfo(): Promise<TunnelInfo> {
   return data
 }
 
+export interface GopherSettingsView {
+  api_url: string
+  configured: boolean
+}
+
+export interface SaveGopherSettingsRequest {
+  api_url?: string
+  api_key?: string
+}
+
+export async function getGopherSettings(): Promise<GopherSettingsView> {
+  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
+  return data
+}
+
+export async function saveGopherSettings(
+  req: SaveGopherSettingsRequest,
+): Promise<GopherSettingsView> {
+  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
+  return data
+}
+
 export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }

@@ -20,6 +20,14 @@ func NewTunnels(c *tunnel.Client, apiURL string) *Tunnels {
 	return &Tunnels{client: c, apiURL: apiURL}
 }
 
+// SetClient swaps in a new tunnel.Client + apiURL. Used when admin saves new
+// Gopher settings on the Settings page so /api/tunnels and /api/tunnels/info
+// reflect the new credentials without a restart.
+func (h *Tunnels) SetClient(c *tunnel.Client, apiURL string) {
+	h.client = c
+	h.apiURL = apiURL
+}
+
 // Info handles GET /api/tunnels/info. Public endpoint used by the SPA to
 // preview where a user's tunnel will land before provisioning. Returns
 // {enabled, host} — the host is derived from GOPHER_API_URL so the SPA can
