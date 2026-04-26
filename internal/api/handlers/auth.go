@@ -227,6 +227,52 @@ func (a *Auth) ListUsers(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, []*service.UserView{user})
 }
 
+// VerifyStatus handles GET /api/access-code/status — returns whether the
+// authenticated user is verified against the current access code version.
+func (a *Auth) VerifyStatus(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	verified, err := a.auth.IsUserVerified(user.ID)
+	if err != nil {
+		response.InternalError(w, "failed to check verification")
+		return
+	}
+	response.Success(w, map[string]bool{"verified": verified})
+}
+
+type verifyAccessCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// VerifyAccessCode handles POST /api/access-code/verify — checks the supplied
+// code against the current access code and, on success, marks the user as
+// verified.
+func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var req verifyAccessCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	err := a.auth.VerifyAccessCode(user.ID, req.Code)
+	if errors.Is(err, service.ErrInvalidAccessCode) {
+		response.Error(w, http.StatusUnauthorized, "Invalid access code")
+		return
+	}
+	if err != nil {
+		response.InternalError(w, "failed to verify access code")
+		return
+	}
+	response.Success(w, map[string]bool{"verified": true})
+}
+
 // Logout handles POST /api/auth/logout.
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
@@ -263,64 +309,98 @@ func (a *Auth) oauthStart(provider oauth.Provider) http.HandlerFunc {
 	}
 }
 
-// oauthCallback validates state, exchanges the code, upserts the user, issues
-// a session cookie, and redirects to the frontend handshake page.
-func (a *Auth) oauthCallback(provider oauth.Provider, providerName string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		stateCookie, err := r.Cookie(oauthStateCookie)
-		if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
-			http.Redirect(w, r, "/auth/callback?error=invalid_state", http.StatusTemporaryRedirect)
-			return
-		}
-		http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
-
-		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			http.Redirect(w, r, "/auth/callback?error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
-			return
-		}
-
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Redirect(w, r, "/auth/callback?error=missing_code", http.StatusTemporaryRedirect)
-			return
-		}
-
-		userInfo, err := provider.Exchange(r.Context(), code)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=exchange_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=user_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		sessionID, err := a.auth.CreateSession(user.ID)
-		if err != nil {
-			http.Redirect(w, r, "/auth/callback?error=session_failed", http.StatusTemporaryRedirect)
-			return
-		}
-
-		setSessionCookie(w, sessionID)
-		a.kickReconcile()
-
-		q := url.Values{}
-		q.Set("provider", providerName)
-		q.Set("login", userInfo.Login)
-		http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
-	}
-}
-
 // --- GitHub OAuth -----------------------------------------------------------
 
 func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.githubProvider())(w, r)
 }
 
+// GitHubCallback wraps the OAuth flow with the authorized-orgs check. New
+// users whose GitHub org memberships don't intersect the admin's authorized
+// list are blocked before any account is created. Every login refreshes the
+// user's stored org snapshot so the dynamic bypass in IsUserVerified always
+// reflects the most recent login's memberships.
 func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.githubProvider(), "github")(w, r)
+	provider := a.githubProvider()
+	if provider == nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	stateCookie, err := r.Cookie(oauthStateCookie)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Redirect(w, r, "/auth/callback?error=invalid_state&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
+
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		http.Redirect(w, r, "/auth/callback?provider=github&error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/auth/callback?error=missing_code&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	userInfo, err := provider.Exchange(r.Context(), code)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Org gate: when the admin has configured ANY authorized orgs, every
+	// GitHub OAuth login is restricted to members of those orgs — including
+	// users that already exist (e.g. created via email/password). They can
+	// still sign in through the password form. Empty list disables the gate.
+	hasGate, err := a.auth.HasAuthorizedGitHubOrgs()
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+	if hasGate {
+		ok, err := a.auth.IsGitHubOrgAuthorized(userInfo.Orgs)
+		if err != nil {
+			http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+		if !ok {
+			// Revoke the just-issued token so the user's next attempt
+			// presents GitHub's consent screen — without this, GitHub
+			// silently re-issues the same authorization to the same
+			// account and the user is stuck on the rejection page.
+			if gh, ok := provider.(*oauth.GitHub); ok {
+				_ = gh.RevokeToken(r.Context(), userInfo.Token)
+			}
+			http.Redirect(w, r, "/auth/callback?error=org_not_authorized&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
+	// allowCreate is intentionally permissive here — the gate above already
+	// rejected unauthorized users when the gate is on. When the gate is off,
+	// new accounts are allowed (and will fall into the access code flow).
+	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.Orgs, nil)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	sessionID, err := a.auth.CreateSession(user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=session_failed&provider=github", http.StatusTemporaryRedirect)
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+	a.kickReconcile()
+
+	q := url.Values{}
+	q.Set("provider", "github")
+	q.Set("login", userInfo.Login)
+	http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
 }
 
 // --- Google OAuth -----------------------------------------------------------
@@ -329,8 +409,87 @@ func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.googleProvider())(w, r)
 }
 
+// GoogleCallback wraps the shared OAuth callback flow with the
+// authorized-domain check. New users whose domain is not on the admin's
+// authorized-domain list are blocked before any account is created;
+// returning users whose domain IS authorized are auto-verified against the
+// current access code version so they bypass the /verify form.
 func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.googleProvider(), "google")(w, r)
+	provider := a.googleProvider()
+	if provider == nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	stateCookie, err := r.Cookie(oauthStateCookie)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Redirect(w, r, "/auth/callback?error=invalid_state&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
+
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		http.Redirect(w, r, "/auth/callback?provider=google&error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/auth/callback?error=missing_code&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	userInfo, err := provider.Exchange(r.Context(), code)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Domain gate: when the admin has configured ANY authorized domains, the
+	// Google OAuth path is restricted to those domains for every login —
+	// including users that already exist (e.g. created via email/password).
+	// They can still sign in through the password form; Google OAuth itself
+	// is the gated path. An empty list means the gate is off.
+	hasGate, err := a.auth.HasAuthorizedGoogleDomains()
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+	if hasGate {
+		ok, err := a.auth.IsGoogleDomainAuthorized(userInfo.Email)
+		if err != nil {
+			http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+		if !ok {
+			http.Redirect(w, r, "/auth/callback?error=domain_not_authorized&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
+	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// No DB write for the domain bypass — IsUserVerified consults the
+	// authorized-domain list dynamically on every request, so the bypass
+	// follows admin changes (add/remove) without lag.
+
+	sessionID, err := a.auth.CreateSession(user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=session_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+	a.kickReconcile()
+
+	q := url.Values{}
+	q.Set("provider", "google")
+	q.Set("login", userInfo.Login)
+	http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
 }
 
 // --- misc -------------------------------------------------------------------
