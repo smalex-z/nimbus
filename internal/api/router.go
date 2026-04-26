@@ -79,9 +79,29 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/access-code/status", auth.VerifyStatus)
 			r.Post("/access-code/verify", auth.VerifyAccessCode)
 
-			// Admin-only routes
+			// Admin-only routes — cluster observability + cluster-wide
+			// configuration. Default users never see these endpoints; the
+			// Admin and Authentication pages are admin-only in the SPA too.
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin)
+
+				r.Get("/nodes", nodes.List)
+				r.Get("/ips", ips.List)
+				r.Get("/cluster/vms", cluster.ListVMs)
+				r.Get("/cluster/stats", cluster.Stats)
+
+				// Reconcile can run a few seconds on a busy cluster
+				// (per-node walks) — give it a longer timeout.
+				r.With(middleware.Timeout(60*time.Second)).
+					Post("/ips/reconcile", ips.Reconcile)
+
+				// Bootstrap status is read-only; bootstrap-templates can
+				// take 10-20 minutes when downloading all 4 OSes across
+				// every online node — give it room.
+				r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+				r.With(middleware.Timeout(30*time.Minute)).
+					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
+
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
 				r.Get("/settings/access-code", settings.GetAccessCode)
@@ -90,10 +110,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/google-domains", settings.SaveAuthorizedGoogleDomains)
 				r.Get("/settings/github-orgs", settings.GetAuthorizedGitHubOrgs)
 				r.Put("/settings/github-orgs", settings.SaveAuthorizedGitHubOrgs)
+				r.Get("/settings/gopher", settings.GetGopher)
+				r.Put("/settings/gopher", settings.SaveGopher)
 			})
 
-			// Resource routes — non-admins must be verified against the
-			// current access code version. Admins always pass.
+			// User-scoped routes — non-admins must be verified against the
+			// current access code version. Admins always pass requireVerified.
 			r.Group(func(r chi.Router) {
 				r.Use(requireVerified(d.Auth))
 
@@ -113,24 +135,6 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}/private-key", keys.PrivateKey)
 					r.Post("/{id}/private-key", keys.AttachPrivateKey)
 					r.Post("/{id}/default", keys.SetDefault)
-				})
-
-				// Cluster-wide read endpoints + bootstrap are admin-only —
-				// they back the Admin page, which only admins can navigate to.
-				r.Group(func(r chi.Router) {
-					r.Use(requireAdmin)
-
-					r.Get("/nodes", nodes.List)
-					r.Get("/ips", ips.List)
-					r.Get("/cluster/vms", cluster.ListVMs)
-					r.Get("/cluster/stats", cluster.Stats)
-					r.With(middleware.Timeout(60*time.Second)).
-						Post("/ips/reconcile", ips.Reconcile)
-
-					r.Route("/admin", func(r chi.Router) {
-						r.Get("/bootstrap-status", bs.BootstrapStatus)
-						r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
-					})
 				})
 			})
 		})

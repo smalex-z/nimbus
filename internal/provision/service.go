@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,7 +63,8 @@ func (noopVerifier) VerifyFree(_ context.Context, _ string) (bool, *int, error) 
 // service trivially testable.
 type ProxmoxClient interface {
 	GetNodes(ctx context.Context) ([]proxmox.Node, error)
-	ListVMs(ctx context.Context, node string) ([]proxmox.VMStatus, error)
+	GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error)
+	GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error)
 	TemplateExists(ctx context.Context, node string, vmid int) (bool, error)
 	NextVMID(ctx context.Context) (int, error)
 	CloneVM(ctx context.Context, sourceNode, targetNode string, templateVMID, newVMID int, name string) (string, error)
@@ -100,6 +102,22 @@ type Config struct {
 	// a source-node URL — by convention, we use the same target node. If
 	// SourceNode is set, it overrides this.
 	SourceNode string
+
+	// VMDiskStorage names the Proxmox storage pool the disk gate checks for
+	// free capacity. Defaults to bootstrap.DefaultDiskStorage ("local-lvm")
+	// when unset. An empty value also disables the disk gate (the scorer
+	// reverts to mem+cpu only).
+	VMDiskStorage string
+
+	// MemBufferMiB is the RAM headroom required above the tier's request.
+	// Default 256. Operators on tight clusters may set 0; on generous
+	// clusters they may raise it for safer packing.
+	MemBufferMiB uint64
+
+	// CPULoadFactor (K) is the share of a fresh VM's vCPUs we assume it
+	// will consume on average — used by the soft-score CPU projection.
+	// Default 0.5. Range typically [0.25, 1.0].
+	CPULoadFactor float64
 }
 
 // Service runs the orchestrated provision flow.
@@ -510,8 +528,10 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 // table), scores the survivors, and returns the winner along with the
 // templateVMID to clone from on that node.
 //
-// The template-presence check is now a single DB query instead of a per-node
-// Proxmox API fan-out — much faster and matches the actual source of truth.
+// Three Proxmox calls run in parallel: GetNodes (capacity + load),
+// GetClusterVMs (per-node VM count and committed RAM), and GetClusterStorage
+// (free disk on the configured VM-disk pool). On rejection the returned
+// ConflictError lists each node's reason for diagnostics.
 func (s *Service) pickNode(
 	ctx context.Context,
 	tier nodescore.Tier,
@@ -537,56 +557,138 @@ func (s *Service) pickNode(
 		templatesPresent[t.Node] = true
 	}
 
-	// Live telemetry: nodes for scoring + per-node VM counts for tie-break.
-	nodes, err := s.px.GetNodes(ctx)
-	if err != nil {
-		return "", 0, fmt.Errorf("get nodes: %w", err)
+	var (
+		nodes        []proxmox.Node
+		clusterVMs   []proxmox.ClusterVM
+		clusterStore []proxmox.ClusterStorage
+		nodesErr     error
+		vmsErr       error
+		storeErr     error
+		wg           sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); nodes, nodesErr = s.px.GetNodes(ctx) }()
+	go func() { defer wg.Done(); clusterVMs, vmsErr = s.px.GetClusterVMs(ctx) }()
+	go func() { defer wg.Done(); clusterStore, storeErr = s.px.GetClusterStorage(ctx) }()
+	wg.Wait()
+	if nodesErr != nil {
+		return "", 0, fmt.Errorf("get nodes: %w", nodesErr)
+	}
+	if vmsErr != nil {
+		return "", 0, fmt.Errorf("get cluster vms: %w", vmsErr)
+	}
+	if storeErr != nil {
+		return "", 0, fmt.Errorf("get cluster storage: %w", storeErr)
 	}
 
-	var (
-		mu       sync.Mutex
-		vmCounts = make(map[string]int)
-		errs     []error
-		wg       sync.WaitGroup
-	)
+	runtime := make(map[string]nodescore.NodeRuntime, len(nodes))
+	for _, vm := range clusterVMs {
+		if vm.Template == 1 {
+			continue
+		}
+		rt := runtime[vm.Node]
+		rt.VMCount++
+		rt.CommittedMemBytes += vm.MaxMem
+		runtime[vm.Node] = rt
+	}
+
+	// StorageByNode is nil when the operator hasn't configured a VM-disk
+	// pool — disables the disk gate per the nodescore contract.
+	var storageByNode map[string]nodescore.StorageInfo
+	if s.cfg.VMDiskStorage != "" {
+		storageByNode = make(map[string]nodescore.StorageInfo, len(nodes))
+		// Shared storage repeats per node with identical capacity; first row
+		// wins, then stamp the same StorageInfo onto every node so the disk
+		// gate sees the same pool everywhere.
+		var sharedInfo *nodescore.StorageInfo
+		for _, st := range clusterStore {
+			if st.Storage != s.cfg.VMDiskStorage {
+				continue
+			}
+			info := nodescore.StorageInfo{TotalBytes: st.Total, UsedBytes: st.Used}
+			if st.Shared == 1 {
+				if sharedInfo == nil {
+					sharedInfo = &info
+				}
+				continue
+			}
+			storageByNode[st.Node] = info
+		}
+		if sharedInfo != nil {
+			for _, n := range nodes {
+				storageByNode[n.Name] = *sharedInfo
+			}
+		}
+	}
+
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
 		scoringNodes = append(scoringNodes, nodescore.Node{
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 		})
-		if n.Status != "online" || !templatesPresent[n.Name] {
-			continue // skip vm-counts for nodes we already know are ineligible
-		}
-		nodeName := n.Name
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			vms, err := s.px.ListVMs(ctx, nodeName)
-
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errs = append(errs, fmt.Errorf("list vms on %s: %w", nodeName, err))
-				return
-			}
-			vmCounts[nodeName] = len(vms)
-		}()
-	}
-	wg.Wait()
-	if len(errs) > 0 {
-		return "", 0, fmt.Errorf("cluster snapshot: %w", errs[0])
 	}
 
-	candidates := nodescore.Eligible(scoringNodes, vmCounts, tier, s.cfg.ExcludedNodes, templatesPresent)
-	pick := nodescore.Pick(candidates)
-	if pick == nil {
+	env := nodescore.Env{
+		Excluded:         s.cfg.ExcludedNodes,
+		TemplatesPresent: templatesPresent,
+		StorageByNode:    storageByNode,
+		MemBufferMiB:     s.cfg.MemBufferMiB,
+		CPULoadFactor:    s.cfg.CPULoadFactor,
+	}
+	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
+	winner, all := nodescore.Pick(decisions)
+	if winner == nil {
+		log.Printf("pickNode: tier=%s os=%s no_winner decisions: %s",
+			tier.Name, osKey, formatDecisions(all))
 		return "", 0, &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s (templates exist on %d node(s) but none meet resource requirements)",
-				tier.Name, osKey, len(templates)),
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s: %s",
+				tier.Name, osKey, formatRejections(all)),
 		}
 	}
-	return pick.Node.Name, templateVMIDByNode[pick.Node.Name], nil
+	log.Printf("pickNode: tier=%s os=%s winner=%s decisions: %s",
+		tier.Name, osKey, winner.Node.Name, formatDecisions(all))
+	return winner.Node.Name, templateVMIDByNode[winner.Node.Name], nil
+}
+
+// formatRejections renders one "node=reason1,reason2" entry per rejected
+// decision — used in the conflict-error message where every entry is a
+// rejection so scores would all be 0 and add no signal.
+func formatRejections(all []nodescore.Decision) string {
+	parts := make([]string, 0, len(all))
+	for _, d := range all {
+		if len(d.Result.Reasons) == 0 {
+			continue
+		}
+		reasons := make([]string, len(d.Result.Reasons))
+		for i, r := range d.Result.Reasons {
+			reasons[i] = string(r)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", d.Node.Name, strings.Join(reasons, ",")))
+	}
+	if len(parts) == 0 {
+		return "(no diagnostics)"
+	}
+	return strings.Join(parts, " ")
+}
+
+// formatDecisions renders one entry per node showing either the score (for
+// accepted candidates) or "0(reason1,reason2)" (for rejected ones). Used in
+// the per-provision log line so operators can see why each node won or lost.
+func formatDecisions(all []nodescore.Decision) string {
+	parts := make([]string, len(all))
+	for i, d := range all {
+		if len(d.Result.Reasons) == 0 {
+			parts[i] = fmt.Sprintf("%s=%.3f", d.Node.Name, d.Result.Score)
+			continue
+		}
+		reasons := make([]string, len(d.Result.Reasons))
+		for j, r := range d.Result.Reasons {
+			reasons[j] = string(r)
+		}
+		parts[i] = fmt.Sprintf("%s=0(%s)", d.Node.Name, strings.Join(reasons, ","))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node string, vmid int, cause error) {
