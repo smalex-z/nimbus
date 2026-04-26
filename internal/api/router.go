@@ -107,6 +107,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
+				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
 				r.Get("/cluster/stats", cluster.Stats)
 
 				// Reconcile can run a few seconds on a busy cluster

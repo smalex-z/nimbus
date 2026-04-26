@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { adminDeleteVM, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
+import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import OSIcon from '@/components/ui/OSIcon'
 import Pagination from '@/components/ui/Pagination'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
@@ -27,6 +28,10 @@ interface AdminData {
   vmsLoading: boolean
   statsError: string | null
   vmsError: string | null
+  // removeVM optimistically drops a row from local state after a successful
+  // admin delete, so the table reflects the change immediately instead of
+  // waiting for the next 15s poll.
+  removeVM: (id: number) => void
 }
 
 // pollEachWith fires `fn` immediately, then every `intervalMs`, until the
@@ -103,7 +108,11 @@ function useAdminData(): AdminData {
     () => setVmsLoading(false),
   )
 
-  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError }
+  const removeVM = useCallback((id: number) => {
+    setVMs((prev) => prev.filter((v) => v.id !== id))
+  }, [])
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM }
 }
 
 interface FilterState {
@@ -115,7 +124,7 @@ interface FilterState {
 const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -247,6 +256,7 @@ export default function Admin() {
               onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
               hasFilters={hasFilters}
               onClearFilters={clearFilters}
+              onVMDeleted={removeVM}
             />
           )}
 
@@ -544,6 +554,7 @@ function VMTable({
   onFilterChange,
   hasFilters,
   onClearFilters,
+  onVMDeleted,
 }: {
   vms: ClusterVM[]
   allVMs: ClusterVM[]
@@ -553,9 +564,11 @@ function VMTable({
   onFilterChange: (patch: Partial<FilterState>) => void
   hasFilters: boolean
   onClearFilters: () => void
+  onVMDeleted: (id: number) => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
+  const [editTarget, setEditTarget] = useState<ClusterVM | null>(null)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(25)
 
@@ -637,7 +650,7 @@ function VMTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line">
-                {['Name', 'VMID', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH'].map((col) => (
+                {['Name', 'VMID', 'Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH', 'Edit'].map((col) => (
                   <th
                     key={col}
                     className="text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap"
@@ -737,6 +750,19 @@ function VMTable({
                         </div>
                       ) : dash}
                     </td>
+                    <td className="px-4 py-3">
+                      {vm.source === 'local' && vm.id !== undefined ? (
+                        <button
+                          type="button"
+                          onClick={() => setEditTarget(vm)}
+                          className="inline-flex items-center justify-center px-2.5 py-1 rounded-md font-mono text-[11px] border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                          title="Edit this VM"
+                          aria-label={`Edit ${vm.hostname || vm.name}`}
+                        >
+                          <span aria-hidden>✎</span>
+                        </button>
+                      ) : dash}
+                    </td>
                   </tr>
                 )
               })}
@@ -759,6 +785,24 @@ function VMTable({
           vmId={tunnelsTarget.vmId}
           hostname={tunnelsTarget.hostname}
           onClose={() => setTunnelsTarget(null)}
+        />
+      )}
+      {editTarget && editTarget.id !== undefined && (
+        <DeleteVMConfirm
+          vm={{
+            id: editTarget.id,
+            hostname: editTarget.hostname || editTarget.name,
+            ip: editTarget.ip || '',
+            vmid: editTarget.vmid,
+            node: editTarget.node,
+          }}
+          onConfirm={adminDeleteVM}
+          onCancel={() => setEditTarget(null)}
+          onDeleted={() => {
+            const id = editTarget.id!
+            setEditTarget(null)
+            onVMDeleted(id)
+          }}
         />
       )}
     </div>

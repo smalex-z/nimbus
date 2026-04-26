@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/ippool"
@@ -1413,5 +1415,71 @@ func TestBackfillOwnership_NoAdminYet(t *testing.T) {
 	}
 	if refreshed.OwnerID != nil {
 		t.Errorf("legacy row mutated despite missing admin: owner_id=%v", refreshed.OwnerID)
+	}
+}
+
+// TestAdminDelete verifies that AdminDelete bypasses the owner check Delete
+// enforces — an admin call succeeds against a VM owned by a different user.
+// Also confirms the destroy / IP-release / row-delete sequence runs.
+func TestAdminDelete(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	var destroyCalls atomic.Int32
+	fake.destroyVM = func(_ context.Context, _ string, _ int) (string, error) {
+		destroyCalls.Add(1)
+		return "task:destroy", nil
+	}
+	svc, pool, database := newTestService(t, fake)
+
+	// Reserve the IP that the seeded VM "holds" so the admin delete has
+	// something to release.
+	ip, err := pool.Reserve(context.Background(), "victim")
+	if err != nil {
+		t.Fatalf("reserve ip: %v", err)
+	}
+
+	// Seed a VM owned by user A (id=42 — newTestService doesn't migrate Users
+	// and no User row is required because AdminDelete doesn't load owners).
+	ownerA := uint(42)
+	vm := db.VM{Hostname: "victim", VMID: 100, IP: ip, Node: "alpha", Status: "stopped", OwnerID: &ownerA}
+	if err := database.Create(&vm).Error; err != nil {
+		t.Fatalf("seed vm: %v", err)
+	}
+
+	if err := svc.AdminDelete(context.Background(), vm.ID); err != nil {
+		t.Fatalf("AdminDelete: %v", err)
+	}
+	if destroyCalls.Load() != 1 {
+		t.Errorf("destroy calls: got %d, want 1", destroyCalls.Load())
+	}
+
+	var ghost db.VM
+	if err := database.Unscoped().First(&ghost, vm.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Errorf("vm row should be hard-deleted, got err=%v", err)
+	}
+
+	// IP should be free again — Reserve on the same hostname returns the same IP.
+	regrabbed, err := pool.Reserve(context.Background(), "victim2")
+	if err != nil {
+		t.Fatalf("reserve after delete: %v", err)
+	}
+	if regrabbed != ip {
+		t.Errorf("ip not released: regrabbed %s, want %s", regrabbed, ip)
+	}
+}
+
+// TestAdminDelete_NotFound confirms AdminDelete returns NotFound for a row
+// that doesn't exist, matching the user-scoped Delete behavior.
+func TestAdminDelete_NotFound(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+
+	err := svc.AdminDelete(context.Background(), 9999)
+	if err == nil {
+		t.Fatalf("AdminDelete on missing row: want error, got nil")
+	}
+	var nf *internalerrors.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Errorf("AdminDelete error: got %T (%v), want *NotFoundError", err, err)
 	}
 }
