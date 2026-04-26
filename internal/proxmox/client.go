@@ -41,6 +41,63 @@ type Client struct {
 	host    string // e.g. https://hppve.uclaacm.com:8006
 	authHdr string // "PVEAPIToken=user@realm!tokenname=secret"
 	http    *http.Client
+
+	// osInfoCache memoizes guest-get-osinfo results across calls so the admin
+	// view (which polls every 15s) doesn't repeatedly hit every running VM's
+	// agent. OS details rarely change on a running VM — a 24h TTL is fine.
+	// Negative entries (agent unreachable) get a much shorter TTL so freshly
+	// booted VMs surface their info promptly.
+	osInfoCache *osInfoCache
+}
+
+// osInfoCache caches qemu-guest-agent osinfo by (node, vmid). Positive entries
+// live for osInfoTTLPositive; negative ("agent unreachable") entries live for
+// osInfoTTLNegative so a VM that just got the agent up is rediscovered within
+// minutes. Safe for concurrent use.
+type osInfoCache struct {
+	mu      sync.Mutex
+	entries map[osInfoKey]osInfoEntry
+}
+
+type osInfoKey struct {
+	node string
+	vmid int
+}
+
+type osInfoEntry struct {
+	info      *OSInfo // nil for negative entries
+	expiresAt time.Time
+}
+
+const (
+	osInfoTTLPositive = 24 * time.Hour
+	osInfoTTLNegative = 5 * time.Minute
+)
+
+func newOSInfoCache() *osInfoCache {
+	return &osInfoCache{entries: make(map[osInfoKey]osInfoEntry)}
+}
+
+// get returns (info, hit). hit=true means the cache had a non-stale entry —
+// info may still be nil (negative cache for agentless VMs).
+func (c *osInfoCache) get(node string, vmid int, now time.Time) (*OSInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[osInfoKey{node, vmid}]
+	if !ok || now.After(e.expiresAt) {
+		return nil, false
+	}
+	return e.info, true
+}
+
+func (c *osInfoCache) put(node string, vmid int, info *OSInfo, now time.Time) {
+	ttl := osInfoTTLPositive
+	if info == nil {
+		ttl = osInfoTTLNegative
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[osInfoKey{node, vmid}] = osInfoEntry{info: info, expiresAt: now.Add(ttl)}
 }
 
 // New constructs a Client. host should be a fully-qualified URL including
@@ -62,6 +119,7 @@ func New(host, tokenID, secret string, timeout time.Duration) *Client {
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 			},
 		},
+		osInfoCache: newOSInfoCache(),
 	}
 }
 
@@ -402,6 +460,45 @@ func (c *Client) GetAgentInterfaces(ctx context.Context, node string, vmid int) 
 		return nil, err
 	}
 	return res.Result, nil
+}
+
+// agentOSInfoResult wraps the qemu-guest-agent's get-osinfo response, which
+// nests the actual record under a `result` key.
+type agentOSInfoResult struct {
+	Result OSInfo `json:"result"`
+}
+
+// GetAgentOSInfo reads guest-get-osinfo from the qemu-guest-agent. Same
+// caveats as GetAgentInterfaces — returns 500 when the agent is unavailable.
+// Callers should treat any error as "info not available right now".
+func (c *Client) GetAgentOSInfo(ctx context.Context, node string, vmid int) (*OSInfo, error) {
+	var res agentOSInfoResult
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/agent/get-osinfo", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodGet, path, nil, &res); err != nil {
+		return nil, err
+	}
+	return &res.Result, nil
+}
+
+// GetAgentOSInfoCached returns the qemu-guest-agent osinfo for a VM, served
+// from a 24h TTL cache. Cache misses fall through to GetAgentOSInfo; agent
+// failures are negatively cached for 5 minutes so a freshly booted VM gets
+// rediscovered without re-probing every poll cycle.
+//
+// A nil return means the agent didn't yield usable info (still cached).
+// Callers should treat that as "no enriched OS data available".
+func (c *Client) GetAgentOSInfoCached(ctx context.Context, node string, vmid int) *OSInfo {
+	now := time.Now()
+	if info, hit := c.osInfoCache.get(node, vmid, now); hit {
+		return info
+	}
+	info, err := c.GetAgentOSInfo(ctx, node, vmid)
+	if err != nil || info == nil || info.ID == "" {
+		c.osInfoCache.put(node, vmid, nil, now)
+		return nil
+	}
+	c.osInfoCache.put(node, vmid, info, now)
+	return info
 }
 
 // GetClusterStorage returns every storage entry visible at the cluster level.
@@ -859,6 +956,11 @@ func (c *Client) collectNodeDetails(ctx context.Context, node string) ([]Cluster
 				detail.IP = ip
 				detail.IPSource = "agent"
 			}
+		}
+		// Best-effort enriched OS info from the agent. Cached 24h on hit,
+		// 5min on miss — see osInfoCache. Stopped VMs skip the probe.
+		if vm.Status == "running" {
+			detail.OS = c.GetAgentOSInfoCached(ctx, node, vm.VMID)
 		}
 		out = append(out, detail)
 	}

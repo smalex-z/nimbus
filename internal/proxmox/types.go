@@ -147,6 +147,22 @@ type ClusterVMDetail struct {
 	IPSource string   // "ipconfig0" | "agent" | "" when IP is empty
 	Tags     []string // raw tags from Proxmox; preserves user-applied entries
 	OSType   string   // raw `ostype` field — "l26", "win10", … "" when unset
+	OS       *OSInfo  // best-effort agent osinfo; nil when unavailable
+}
+
+// OSInfo mirrors the fields returned by qemu-guest-agent's guest-get-osinfo
+// command. Field tags match the wire format. Any subset may be empty when the
+// guest is partial-impl (Windows agents, for example, often skip `kernel-*`).
+type OSInfo struct {
+	ID            string `json:"id"`             // "ubuntu", "debian", "fedora", "mswindows", …
+	Name          string `json:"name"`           // "Ubuntu"
+	PrettyName    string `json:"pretty-name"`    // "Ubuntu 22.04.3 LTS"
+	Version       string `json:"version"`        // "22.04.3 LTS (Jammy Jellyfish)"
+	VersionID     string `json:"version-id"`     // "22.04"
+	KernelRelease string `json:"kernel-release"` // "5.15.0-91-generic"
+	KernelVersion string `json:"kernel-version"` // "#101-Ubuntu SMP …"
+	Machine       string `json:"machine"`        // "x86_64"
+	VariantID     string `json:"variant-id,omitempty"`
 }
 
 // taskStatus is what /nodes/{node}/tasks/{upid}/status returns.
