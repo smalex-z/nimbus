@@ -443,6 +443,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	machineToCleanup = "" // success — keep the machine
 
 	return &Result{
+		ID:            vm.ID,
 		VMID:          newVMID,
 		Hostname:      req.Hostname,
 		IP:            ip,
