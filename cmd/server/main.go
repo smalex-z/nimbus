@@ -27,6 +27,7 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 //go:embed all:frontend/dist
@@ -228,6 +229,37 @@ func main() {
 	// address.
 	provSvc.SetIPVerifier(chainVerifier{reconciler, netscan.NewVerifier(netscan.New(netscanCfg))})
 
+	// Resolve Gopher settings. The DB row is the source of truth (admin can
+	// edit it live from the Settings page); env vars are a one-shot seed for
+	// existing deployments that configured Gopher before the Settings UI
+	// existed. If the DB has values, they win and the env vars are ignored.
+	gopherSettings, err := authSvc.GetGopherSettings()
+	if err != nil {
+		log.Fatalf("failed to load Gopher settings: %v", err)
+	}
+	if gopherSettings.APIURL == "" && gopherSettings.APIKey == "" &&
+		(cfg.GopherAPIURL != "" || cfg.GopherAPIKey != "") {
+		if err := authSvc.SaveGopherSettings(db.GopherSettings{
+			APIURL: cfg.GopherAPIURL,
+			APIKey: cfg.GopherAPIKey,
+		}); err != nil {
+			log.Printf("warning: failed to seed Gopher settings from env: %v", err)
+		} else {
+			log.Printf("seeded Gopher settings from env vars (one-time migration)")
+			gopherSettings.APIURL = cfg.GopherAPIURL
+			gopherSettings.APIKey = cfg.GopherAPIKey
+		}
+	}
+
+	tunnelClient, err := tunnel.New(gopherSettings.APIURL, gopherSettings.APIKey, 15*time.Second)
+	if err != nil {
+		log.Fatalf("failed to init tunnel client: %v", err)
+	}
+	if tunnelClient != nil {
+		log.Printf("gopher tunnel integration enabled (url=%s)", gopherSettings.APIURL)
+		provSvc.SetTunnelClient(tunnelClient)
+	}
+
 	// Backfill Nimbus marker + description metadata onto VMs provisioned by
 	// older builds. Migrates the legacy three-tag scheme down to a single
 	// chip in the Proxmox UI and stamps tier/OS into the description.
@@ -276,6 +308,8 @@ func main() {
 		Pool:       pool,
 		Reconciler: reconciler,
 		Proxmox:    pveClient,
+		Tunnels:    tunnelClient,
+		TunnelURL:  gopherSettings.APIURL,
 		Config:     cfg,
 		Restart:    restartSelf,
 	})

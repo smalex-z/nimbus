@@ -20,6 +20,14 @@ type Request struct {
 	SSHPrivKey  string // optional: BYO callers may stash the private half in Nimbus's vault
 	GenerateKey bool
 	OwnerID     *uint // nil in Phase 1 (no auth)
+
+	// PublicTunnel asks Nimbus to register a Gopher tunnel for the new VM and
+	// expose it at Subdomain.<gopher-zone>. Silently ignored when GOPHER_API_URL
+	// is unset. TunnelPort is the in-VM target port Gopher should forward to;
+	// 0 → 80 (the typical HTTP service port — Gopher does TLS termination).
+	PublicTunnel bool
+	Subdomain    string
+	TunnelPort   int
 }
 
 // Result is the value returned to the user after a successful provision.
@@ -45,6 +53,11 @@ type Result struct {
 	SSHPrivateKey string `json:"ssh_private_key,omitempty"`
 	KeyName       string `json:"key_name,omitempty"`
 	Warning       string `json:"warning,omitempty"`
+
+	// Tunnel fields. TunnelURL is set on success; TunnelError is populated
+	// when registration or bootstrap fails but the VM is fine.
+	TunnelURL   string `json:"tunnel_url,omitempty"`
+	TunnelError string `json:"tunnel_error,omitempty"`
 }
 
 // String returns a log-safe representation of the Result that omits the

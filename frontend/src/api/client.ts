@@ -21,11 +21,14 @@ const api: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-// Provisioning is a long-running call (template clone, cloud-init, boot,
-// agent ready) that can legitimately take 60-180s.
+// Provisioning is a long-running call: template clone + cloud-init + boot +
+// agent ready (~30-60s), and when a Gopher tunnel is requested the SSH
+// bootstrap on the VM can wait on dpkg locks for another 1-3min during
+// early-boot cloud-init contention. 6 min covers worst-case end-to-end with
+// some headroom; matches the server-side route timeout.
 const provisionClient: AxiosInstance = axios.create({
   baseURL: '/api',
-  timeout: 200000,
+  timeout: 6 * 60 * 1000,
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -156,6 +159,38 @@ export async function setDefaultKey(id: number): Promise<void> {
 
 export async function attachPrivateKey(id: number, privateKey: string): Promise<void> {
   await api.post(`/keys/${id}/private-key`, { private_key: privateKey })
+}
+
+export interface TunnelInfo {
+  enabled: boolean
+  host: string
+}
+
+export async function getTunnelInfo(): Promise<TunnelInfo> {
+  const { data } = await api.get<TunnelInfo>('/tunnels/info')
+  return data
+}
+
+export interface GopherSettingsView {
+  api_url: string
+  configured: boolean
+}
+
+export interface SaveGopherSettingsRequest {
+  api_url?: string
+  api_key?: string
+}
+
+export async function getGopherSettings(): Promise<GopherSettingsView> {
+  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
+  return data
+}
+
+export async function saveGopherSettings(
+  req: SaveGopherSettingsRequest,
+): Promise<GopherSettingsView> {
+  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
+  return data
 }
 
 export async function deleteKey(id: number): Promise<void> {
@@ -340,28 +375,6 @@ export async function saveAuthorizedGitHubOrgs(
   orgs: string[],
 ): Promise<AuthorizedOrgsView> {
   const { data } = await api.put<AuthorizedOrgsView>('/settings/github-orgs', { orgs })
-  return data
-}
-
-export interface GopherSettingsView {
-  api_url: string
-  configured: boolean
-}
-
-export interface SaveGopherSettingsRequest {
-  api_url?: string
-  api_key?: string
-}
-
-export async function getGopherSettings(): Promise<GopherSettingsView> {
-  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
-  return data
-}
-
-export async function saveGopherSettings(
-  req: SaveGopherSettingsRequest,
-): Promise<GopherSettingsView> {
-  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
   return data
 }
 

@@ -30,6 +30,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -131,6 +132,7 @@ type Service struct {
 	db       *gorm.DB
 	cipher   *secrets.Cipher // encrypts SSH private keys at rest
 	keys     *sshkeys.Service
+	tunnels  *tunnel.Client // optional Gopher client; nil disables tunnel support
 	cfg      Config
 
 	// guards concurrent provisions from racing on cluster/nextid by
@@ -167,6 +169,13 @@ func (s *Service) SetIPVerifier(v IPVerifier) {
 	if v != nil {
 		s.verifier = v
 	}
+}
+
+// SetTunnelClient installs (or replaces) the Gopher tunnel client. Passing
+// nil disables tunnel support — Provision will silently skip tunnel work
+// regardless of req.PublicTunnel.
+func (s *Service) SetTunnelClient(t *tunnel.Client) {
+	s.tunnels = t
 }
 
 // Provision executes the 9-step flow from design doc §5.2.
@@ -219,6 +228,40 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Step 1c: register a Gopher machine BEFORE the clone. Provision-time
+	// SSH exposure rides on the machine's public_ssh flag (no subdomain, no
+	// target_port — those are for the post-provision tunnel surface). On
+	// any failure here we soft-fail and keep going without a tunnel —
+	// "Gopher failure must not fail the VM provision" (design §10).
+	var (
+		machineObj  *tunnel.Machine
+		tunnelError string
+	)
+	if req.PublicTunnel && s.tunnels != nil {
+		m, terr := s.tunnels.CreateMachine(ctx, tunnel.CreateMachineRequest{PublicSSH: true})
+		if terr != nil {
+			log.Printf("tunnel: register machine failed (continuing without tunnel): %v", terr)
+			tunnelError = "tunnel registration failed: " + terr.Error()
+		} else {
+			machineObj = m
+		}
+	}
+	// Deferred best-effort cleanup. Cleared when we reach the success path so
+	// the machine survives. Mirrors the IP-release pattern.
+	machineToCleanup := ""
+	if machineObj != nil {
+		machineToCleanup = machineObj.ID
+	}
+	defer func() {
+		if machineToCleanup != "" && s.tunnels != nil {
+			delCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.tunnels.DeleteMachine(delCtx, machineToCleanup); err != nil {
+				log.Printf("tunnel: cleanup delete failed for machine %s: %v", machineToCleanup, err)
+			}
+		}
+	}()
 
 	// Step 2: gather cluster snapshot and score, restricted to nodes that
 	// have a template for the requested OS. The per-node templateVMID lookup
@@ -327,6 +370,43 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 
+	// Step 7b: Gopher tunnel bootstrap. If we successfully registered a tunnel
+	// AND WaitForIP confirmed reachability (no warning), SSH in and run the
+	// one-line bootstrap, then poll Gopher for active. Skipped on soft-success
+	// because Nimbus can't reach the VM to bootstrap from there. All failures
+	// are recorded as tunnel_error — the VM provision never fails for tunnel
+	// reasons (design §10).
+	tunnelURL := ""
+	if machineObj != nil {
+		switch {
+		case warning != "":
+			tunnelError = "VM unreachable from Nimbus, can't bootstrap tunnel — " +
+				"machine registered but inactive. Run the bootstrap manually:" +
+				"\n  curl " + machineObj.BootstrapURL + " | sh"
+			// Keep the registered machine — user can finish bootstrap manually.
+		default:
+			privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
+			if perr != nil {
+				log.Printf("tunnel: cannot bootstrap (no private key available): %v", perr)
+				tunnelError = "tunnel bootstrap skipped: " + perr.Error()
+			} else if berr := runTunnelBootstrap(ctx, ip, username, privKey, machineObj.BootstrapURL, req.Hostname); berr != nil {
+				log.Printf("tunnel: bootstrap ssh failed: %v", berr)
+				tunnelError = "tunnel bootstrap failed: " + berr.Error()
+			} else {
+				active, perr := s.waitMachineActive(ctx, machineObj.ID)
+				switch {
+				case perr != nil:
+					log.Printf("tunnel: poll failed: %v", perr)
+					tunnelError = "tunnel did not become active: " + perr.Error()
+				case active.PublicSSHHost != "" && active.PublicSSHPort != 0:
+					tunnelURL = fmt.Sprintf("%s:%d", active.PublicSSHHost, active.PublicSSHPort)
+				default:
+					tunnelError = "machine active but no public SSH host/port returned"
+				}
+			}
+		}
+	}
+
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
 	if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
 		return nil, fmt.Errorf("mark allocated: %w", err)
@@ -350,11 +430,17 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		SSHPubKey:  sshPubKey,
 		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
 	}
+	if machineObj != nil {
+		vm.TunnelID = machineObj.ID
+	}
+	vm.TunnelURL = tunnelURL
+	vm.TunnelError = tunnelError
 	if err := s.db.WithContext(ctx).Create(vm).Error; err != nil {
 		// VM is up but we couldn't write the row — log via the error path. The
 		// IP is already marked allocated so we don't strand it.
 		return nil, fmt.Errorf("persist vm: %w", err)
 	}
+	machineToCleanup = "" // success — keep the machine
 
 	return &Result{
 		VMID:          newVMID,
@@ -367,6 +453,8 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		SSHPrivateKey: sshPrivateKey,
 		KeyName:       keyName,
 		Warning:       warning,
+		TunnelURL:     tunnelURL,
+		TunnelError:   tunnelError,
 	}, nil
 }
 

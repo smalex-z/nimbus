@@ -82,6 +82,11 @@ function VMRow({ vm }: { vm: VM }) {
           <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
+          {vm.tunnel_url && (
+            <div className="font-mono text-[11px] text-good mt-1 truncate" title={vm.tunnel_url}>
+              🌐 {vm.tunnel_url}
+            </div>
+          )}
         </div>
         <span className="font-mono text-[11px] px-2.5 py-1 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider justify-self-start sm:justify-self-auto">
           {vm.tier}
@@ -106,6 +111,7 @@ function VMRow({ vm }: { vm: VM }) {
             node: vm.node,
             dbId: vm.ID,
             keyName: vm.key_name,
+            tunnelUrl: vm.tunnel_url,
           }}
           onClose={() => setSshOpen(false)}
         />
