@@ -138,9 +138,11 @@ func dialSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig) (*ssh.Client
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
-// waitMachineActive polls Gopher until the machine is active or the budget
-// is exhausted. Returns the active machine on success — its
-// PublicSSHHost/Port carry the routable connection details.
+// waitMachineActive polls Gopher until the machine reports connected or the
+// budget is exhausted. (Gopher's external API exposes "connected" as the
+// success state; "active" was an earlier name we still tolerate for safety.)
+// Returns the machine on success — its PublicSSHHost/Port carry the routable
+// connection details when Gopher includes them.
 func (s *Service) waitMachineActive(ctx context.Context, id string) (*tunnel.Machine, error) {
 	deadline := time.Now().Add(tunnelActiveTimeout)
 	t := time.NewTicker(tunnelPollInterval)
@@ -151,14 +153,14 @@ func (s *Service) waitMachineActive(ctx context.Context, id string) (*tunnel.Mac
 	for {
 		if got, err := s.tunnels.GetMachine(ctx, id); err == nil {
 			switch got.Status {
-			case tunnel.StatusActive:
+			case tunnel.StatusConnected, tunnel.StatusActive:
 				return got, nil
 			case tunnel.StatusFailed:
 				return nil, fmt.Errorf("gopher reported machine %s as failed", id)
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("machine %s did not reach active within %s", id, tunnelActiveTimeout)
+			return nil, fmt.Errorf("machine %s did not become connected within %s", id, tunnelActiveTimeout)
 		}
 		select {
 		case <-ctx.Done():
