@@ -175,6 +175,9 @@ func main() {
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
+		VMDiskStorage:    cfg.VMDiskStorage,
+		MemBufferMiB:     cfg.MemBufferMiB,
+		CPULoadFactor:    cfg.CPULoadFactor,
 	})
 	provSvc.SetIPVerifier(reconciler)
 

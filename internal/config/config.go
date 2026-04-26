@@ -49,6 +49,15 @@ type Config struct {
 	VerifyCacheTTLSeconds    int // ListClusterIPs cache reuse     — default 5
 	VacateMissThreshold      int // consecutive missing cycles before auto-vacate — default 3
 
+	// Node-scoring knobs. VMDiskStorage names the Proxmox storage pool the
+	// disk gate checks; an empty value disables the disk gate. MemBufferMiB
+	// adds RAM headroom on top of the tier's request to avoid packing to
+	// zero. CPULoadFactor (K) is the share of a fresh VM's vCPUs the soft
+	// score assumes consumed (0.5 ≈ "half-busy on average").
+	VMDiskStorage string
+	MemBufferMiB  uint64
+	CPULoadFactor float64
+
 	// OAuth
 	AppURL             string
 	GitHubClientID     string
@@ -90,6 +99,10 @@ func Load() (*Config, error) {
 		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
 		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
 		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
+
+		VMDiskStorage: getEnv("NIMBUS_VM_DISK_STORAGE", "local-lvm"),
+		MemBufferMiB:  uint64(getEnvInt("NIMBUS_MEM_BUFFER_MIB", 256)),
+		CPULoadFactor: getEnvFloat("NIMBUS_CPU_LOAD_FACTOR", 0.5),
 
 		AppURL:             getEnv("APP_URL", "http://localhost:5173"),
 		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
@@ -237,6 +250,15 @@ func getEnv(key, fallback string) string {
 func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
 			return n
 		}
 	}
