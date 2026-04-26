@@ -5,19 +5,68 @@ import Card from '@/components/ui/Card'
 import OSIcon from '@/components/ui/OSIcon'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
+import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
-import { formatBytes } from '@/lib/format'
-import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName, VMSource } from '@/types'
+import { formatBytes, formatRelativeTime } from '@/lib/format'
+import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, IPSource, IPStatus, NodeView, TierName, VMSource } from '@/types'
 
 interface AdminData {
   nodes: NodeView[]
   vms: ClusterVM[]
   ips: IPAllocation[]
   clusterStats: ClusterStats | null
-  loading: boolean
-  error: string | null
+  // statsLoading is true while the lightweight overview (nodes, IPs, cluster
+  // stats) is being fetched. vmsLoading is its own flag because /cluster/vms
+  // can be much slower (cold qemu-agent OS-info cache after a restart, etc.)
+  // — splitting the two lets the stats grid render while the VM table is
+  // still spinning.
+  statsLoading: boolean
+  vmsLoading: boolean
+  statsError: string | null
+  vmsError: string | null
+}
+
+// pollEachWith fires `fn` immediately, then every `intervalMs`, until the
+// returned cleanup is invoked. The cleanup is effect-safe: ignores results
+// from in-flight calls. Used twice below — once for the overview triple and
+// once for the heavy /cluster/vms walk.
+function usePoll<T>(
+  fn: () => Promise<T>,
+  intervalMs: number,
+  onResult: (v: T) => void,
+  onError: (e: string) => void,
+  onSettled: () => void,
+) {
+  useEffect(() => {
+    let cancelled = false
+    const tick = () => {
+      fn()
+        .then((v) => {
+          if (!cancelled) {
+            onResult(v)
+            onError('')
+          }
+        })
+        .catch((e: unknown) => {
+          if (!cancelled) onError(e instanceof Error ? e.message : String(e))
+        })
+        .finally(() => {
+          if (!cancelled) onSettled()
+        })
+    }
+    tick()
+    const id = setInterval(tick, intervalMs)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+    // The callback set is stable for the lifetime of the page; deps lint is
+    // disabled here intentionally because including the callbacks would
+    // re-create the interval on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 }
 
 function useAdminData(): AdminData {
@@ -25,38 +74,35 @@ function useAdminData(): AdminData {
   const [vms, setVMs] = useState<ClusterVM[]>([])
   const [ips, setIPs] = useState<IPAllocation[]>([])
   const [clusterStats, setClusterStats] = useState<ClusterStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [statsLoading, setStatsLoading] = useState(true)
+  const [vmsLoading, setVmsLoading] = useState(true)
+  const [statsError, setStatsError] = useState<string | null>(null)
+  const [vmsError, setVmsError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    const fetch = () => {
-      Promise.all([listNodes(), listClusterVMs(), listIPs(), getClusterStats()])
-        .then(([n, v, i, s]) => {
-          if (!cancelled) {
-            setNodes(n)
-            setVMs(v)
-            setIPs(i)
-            setClusterStats(s)
-            setError(null)
-          }
-        })
-        .catch((e: unknown) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        })
-    }
-    fetch()
-    const id = setInterval(fetch, 15_000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
+  // Overview triple — fast endpoints (DB-only or thin Proxmox calls).
+  usePoll(
+    () => Promise.all([listNodes(), listIPs(), getClusterStats()]),
+    15_000,
+    ([n, i, s]) => {
+      setNodes(n)
+      setIPs(i)
+      setClusterStats(s)
+    },
+    (e) => setStatsError(e || null),
+    () => setStatsLoading(false),
+  )
 
-  return { nodes, vms, ips, clusterStats, loading, error }
+  // Heavy walk — qemu-agent probes per running VM. Polls on its own cadence
+  // so a slow response doesn't delay the overview tile rendering.
+  usePoll(
+    () => listClusterVMs(),
+    15_000,
+    (v) => setVMs(v),
+    (e) => setVmsError(e || null),
+    () => setVmsLoading(false),
+  )
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError }
 }
 
 interface FilterState {
@@ -68,17 +114,26 @@ interface FilterState {
 const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, loading, error } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
   const filteredVMs = useMemo(() => {
-    return vms.filter((vm) => {
-      if (filters.node && vm.node !== filters.node) return false
-      if (filters.status && vm.status !== filters.status) return false
-      if (filters.tier && vm.tier !== filters.tier) return false
-      return true
-    })
+    // Stable sort: node ascending, then VMID ascending within a node.
+    // /api/cluster/vms returns rows in whatever order Proxmox walks its
+    // nodes, which jumbles the table on every poll. A deterministic order
+    // keeps the row positions fixed across the 15s refresh cycle.
+    return vms
+      .filter((vm) => {
+        if (filters.node && vm.node !== filters.node) return false
+        if (filters.status && vm.status !== filters.status) return false
+        if (filters.tier && vm.tier !== filters.tier) return false
+        return true
+      })
+      .sort((a, b) => {
+        const byNode = a.node.localeCompare(b.node)
+        return byNode !== 0 ? byNode : a.vmid - b.vmid
+      })
   }, [vms, filters])
 
   const stats = useMemo(() => {
@@ -131,12 +186,14 @@ export default function Admin() {
         </p>
       </div>
 
-      {loading && <p className="mt-8 text-ink-3 font-mono text-sm">Loading…</p>}
-      {error && (
-        <Card className="mt-8 p-6 text-bad text-sm">Failed to load: {error}</Card>
+      {statsLoading && (
+        <p className="mt-8 text-ink-3 font-mono text-sm">Loading overview…</p>
+      )}
+      {statsError && (
+        <Card className="mt-8 p-6 text-bad text-sm">Failed to load overview: {statsError}</Card>
       )}
 
-      {!loading && (
+      {!statsLoading && (
         <>
           <SummaryStats stats={stats} />
 
@@ -150,19 +207,42 @@ export default function Admin() {
           />
 
           <div className="mt-10 mb-2">
-            <div className="eyebrow">{filteredVMs.length} machine{filteredVMs.length === 1 ? '' : 's'}</div>
+            <div className="eyebrow">
+              {vmsLoading
+                ? 'loading machines…'
+                : `${filteredVMs.length} machine${filteredVMs.length === 1 ? '' : 's'}`}
+            </div>
             <h3 className="text-xl">Virtual machines</h3>
           </div>
-          <VMTable
-            vms={filteredVMs}
-            allVMs={vms}
-            allNodes={allNodes}
-            allTiers={allTiers}
-            filters={filters}
-            onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
-            hasFilters={hasFilters}
-            onClearFilters={clearFilters}
-          />
+          {vmsError && (
+            <Card className="mt-2 p-4 text-bad text-sm">
+              Failed to load machine table: {vmsError}
+            </Card>
+          )}
+          {vmsLoading && vms.length === 0 ? (
+            <Card className="mt-2 p-6 text-ink-3 font-mono text-sm">
+              Walking nodes for VM details… this can take a few seconds on the first load after a restart while the qemu-agent OS-info cache is cold.
+            </Card>
+          ) : (
+            <VMTable
+              vms={filteredVMs}
+              allVMs={vms}
+              allNodes={allNodes}
+              allTiers={allTiers}
+              filters={filters}
+              onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
+              hasFilters={hasFilters}
+              onClearFilters={clearFilters}
+            />
+          )}
+
+          <div className="mt-10 mb-2">
+            <div className="eyebrow">
+              {ips.length} address{ips.length === 1 ? '' : 'es'}
+            </div>
+            <h3 className="text-xl">IP pool</h3>
+          </div>
+          <IPTable ips={ips} />
         </>
       )}
     </div>
@@ -461,6 +541,7 @@ function VMTable({
   onClearFilters: () => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
+  const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
   const selectClass =
     'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
 
@@ -587,24 +668,43 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3">
                       {vm.source === 'local' && vm.username && vm.ip ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSshTarget({
-                              hostname: vm.hostname || vm.name,
-                              ip: vm.ip!,
-                              username: vm.username!,
-                              vmid: vm.vmid,
-                              node: vm.node,
-                              dbId: vm.id,
-                              keyName: vm.key_name,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                        >
-                          <span aria-hidden>↗</span>
-                          <span>SSH</span>
-                        </button>
+                        <div className="flex gap-1.5">
+                          {vm.tunnel_url && vm.id !== undefined && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setTunnelsTarget({
+                                  vmId: vm.id!,
+                                  hostname: vm.hostname || vm.name,
+                                })
+                              }
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                              title="Manage Gopher tunnels for this VM"
+                            >
+                              <span aria-hidden>🌐</span>
+                              <span>Networks</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSshTarget({
+                                hostname: vm.hostname || vm.name,
+                                ip: vm.ip!,
+                                username: vm.username!,
+                                vmid: vm.vmid,
+                                node: vm.node,
+                                dbId: vm.id,
+                                keyName: vm.key_name,
+                                tunnelUrl: vm.tunnel_url,
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                          >
+                            <span aria-hidden>↗</span>
+                            <span>SSH</span>
+                          </button>
+                        </div>
                       ) : dash}
                     </td>
                   </tr>
@@ -617,6 +717,240 @@ function VMTable({
       {sshTarget && (
         <SSHDetailsModal target={sshTarget} onClose={() => setSshTarget(null)} />
       )}
+      {tunnelsTarget && (
+        <TunnelsModal
+          vmId={tunnelsTarget.vmId}
+          hostname={tunnelsTarget.hostname}
+          onClose={() => setTunnelsTarget(null)}
+        />
+      )}
     </div>
   )
+}
+
+// ipToOctets converts an IPv4 string to a number suitable for sorting. Returns
+// 0 for unparseable input — those land at the top of the table where they're
+// easy to spot. IPv6 isn't sorted numerically (TODO if it becomes relevant).
+function ipToOctets(ip: string): number {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return 0
+  let n = 0
+  for (const p of parts) {
+    const v = parseInt(p, 10)
+    if (!Number.isFinite(v) || v < 0 || v > 255) return 0
+    n = n * 256 + v
+  }
+  return n
+}
+
+interface IPFilterState {
+  status: IPStatus | null
+  source: IPSource | null
+}
+
+const EMPTY_IP_FILTERS: IPFilterState = { status: null, source: null }
+
+function IPTable({ ips }: { ips: IPAllocation[] }) {
+  // Default-hide free rows. A typical /24 pool has ~240 entries; the
+  // interesting ones are reserved + allocated. Admins flip this on when
+  // they want to see what's still available.
+  const [showFree, setShowFree] = useState(false)
+  const [filters, setFilters] = useState<IPFilterState>(EMPTY_IP_FILTERS)
+
+  const sorted = useMemo(() => {
+    return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))
+  }, [ips])
+
+  const filtered = useMemo(() => {
+    return sorted.filter((row) => {
+      if (!showFree && row.status === 'free') return false
+      if (filters.status && row.status !== filters.status) return false
+      if (filters.source && row.source !== filters.source) return false
+      return true
+    })
+  }, [sorted, showFree, filters])
+
+  const counts = useMemo(() => {
+    let allocated = 0
+    let reserved = 0
+    let external = 0
+    let free = 0
+    for (const row of ips) {
+      switch (row.status) {
+        case 'allocated':
+          allocated++
+          if (row.source === 'external') external++
+          break
+        case 'reserved': reserved++; break
+        case 'free': free++; break
+      }
+    }
+    return { allocated, reserved, external, free }
+  }, [ips])
+
+  const hasFilters = Object.values(filters).some(Boolean) || showFree
+  const clearFilters = () => {
+    setFilters(EMPTY_IP_FILTERS)
+    setShowFree(false)
+  }
+
+  if (ips.length === 0) {
+    return (
+      <Card className="py-16 text-center">
+        <div className="eyebrow">Empty pool</div>
+        <p className="text-sm text-ink-2 mt-2">No IPs are configured in the pool range.</p>
+      </Card>
+    )
+  }
+
+  const selectClass =
+    'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4 items-center">
+        <select
+          className={selectClass}
+          value={filters.status ?? ''}
+          onChange={(e) => setFilters((f) => ({ ...f, status: (e.target.value as IPStatus) || null }))}
+        >
+          <option value="">All statuses</option>
+          <option value="allocated">Allocated</option>
+          <option value="reserved">Reserved</option>
+          <option value="free">Free</option>
+        </select>
+        <select
+          className={selectClass}
+          value={filters.source ?? ''}
+          onChange={(e) => setFilters((f) => ({ ...f, source: (e.target.value as IPSource) || null }))}
+        >
+          <option value="">All sources</option>
+          <option value="local">Nimbus (local)</option>
+          <option value="adopted">Nimbus (foreign)</option>
+          <option value="external">External (LAN)</option>
+        </select>
+        <label className="inline-flex items-center gap-1.5 font-mono text-xs text-ink-2">
+          <input
+            type="checkbox"
+            className="accent-ink"
+            checked={showFree}
+            onChange={(e) => setShowFree(e.target.checked)}
+          />
+          Show free
+        </label>
+        <span className="ml-auto font-mono text-[11px] text-ink-3 uppercase tracking-wider">
+          {counts.allocated} allocated · {counts.reserved} reserved · {counts.external} external · {counts.free} free
+        </span>
+        {hasFilters && (
+          <Button variant="ghost" size="small" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        )}
+      </div>
+
+      {filtered.length === 0 ? (
+        <Card className="py-16 text-center">
+          <div className="eyebrow">No results</div>
+          <p className="text-sm text-ink-2 mt-2">No IPs match the current filters.</p>
+          <Button variant="ghost" size="small" className="mt-4" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        </Card>
+      ) : (
+        <Card className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-line">
+                {['IP', 'Status', 'Source', 'VMID', 'Hostname', 'Last seen'].map((col) => (
+                  <th
+                    key={col}
+                    className="text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((row) => (
+                <IPRow key={row.ip} row={row} />
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+function IPRow({ row }: { row: IPAllocation }) {
+  const dash = <span className="text-ink-3">—</span>
+  const lastSeen = row.last_seen_at || row.allocated_at || row.reserved_at || null
+  return (
+    <tr className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
+      <td className="px-4 py-3 font-mono text-xs text-ink whitespace-nowrap">{row.ip}</td>
+      <td className="px-4 py-3 whitespace-nowrap">
+        <IPStatusBadge status={row.status} />
+      </td>
+      <td className="px-4 py-3 whitespace-nowrap">
+        {row.status === 'free' ? dash : <IPSourceLabel source={row.source} />}
+      </td>
+      <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
+        {row.vmid ?? dash}
+      </td>
+      <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
+        {row.hostname || dash}
+      </td>
+      <td className="px-4 py-3 font-mono text-xs text-ink-3 whitespace-nowrap">
+        {lastSeen ? (
+          <span title={lastSeen}>
+            {formatRelativeTime(lastSeen)}
+            {row.missed_cycles && row.missed_cycles > 0 ? (
+              <span className="ml-1.5 text-warn">
+                · {row.missed_cycles} miss{row.missed_cycles === 1 ? '' : 'es'}
+              </span>
+            ) : null}
+          </span>
+        ) : dash}
+      </td>
+    </tr>
+  )
+}
+
+function IPStatusBadge({ status }: { status: IPStatus }) {
+  const tone = status === 'allocated'
+    ? 'text-good'
+    : status === 'reserved'
+      ? 'text-warn'
+      : 'text-ink-3'
+  return (
+    <span className={`font-mono text-[11px] uppercase tracking-wider ${tone}`}>
+      {status}
+    </span>
+  )
+}
+
+function IPSourceLabel({ source }: { source: IPSource | undefined }) {
+  switch (source) {
+    case 'local':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS
+        </span>
+      )
+    case 'adopted':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        </span>
+      )
+    case 'external':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-2">
+          EXTERNAL
+        </span>
+      )
+    default:
+      return <span className="text-ink-3">—</span>
+  }
 }

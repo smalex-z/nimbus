@@ -222,6 +222,38 @@ func (c *Client) ListVMs(ctx context.Context, node string) ([]VMStatus, error) {
 	return vms, nil
 }
 
+// ListLXCs returns the LXC containers on a single node. Used by the IP
+// reconciler so containers' static IPs are recognized (and not handed out
+// to a new VM that would collide with them).
+func (c *Client) ListLXCs(ctx context.Context, node string) ([]LXCStatus, error) {
+	var cts []LXCStatus
+	path := fmt.Sprintf("/nodes/%s/lxc", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &cts); err != nil {
+		return nil, err
+	}
+	return cts, nil
+}
+
+// GetLXCConfig fetches the raw config map for one LXC container. Same
+// 500-with-"does-not-exist" normalization as GetVMConfig — Proxmox returns
+// 500 (not 404) when the container is missing on the node.
+func (c *Client) GetLXCConfig(ctx context.Context, node string, vmid int) (map[string]any, error) {
+	var cfg vmConfig
+	path := fmt.Sprintf("/nodes/%s/lxc/%d/config", url.PathEscape(node), vmid)
+	err := c.do(ctx, http.MethodGet, path, nil, &cfg)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get lxc config %s/%d: %w", node, vmid, err)
+	}
+	return cfg, nil
+}
+
 // vmConfig is the raw config map returned by Proxmox. We only inspect a few
 // fields so leave it as a generic map.
 type vmConfig map[string]any
@@ -815,6 +847,39 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return v.Version, nil
 }
 
+// ParseLXCNetIP extracts the bare IP from an LXC `netN` config value. The
+// format is comma-separated key=value pairs much like ipconfig0 but with a
+// different vocabulary, e.g.:
+//
+//	"name=eth0,bridge=vmbr0,gw=192.168.0.1,hwaddr=BC:24:11:00:00:00,ip=192.168.0.50/24,type=veth"
+//
+// `ip=dhcp` and `ip=manual` (LXC's "ifupdown handles it") are skipped — the
+// container has no static claim on a specific address. Returns the bare IP
+// (CIDR suffix stripped) when a static IPv4 / IPv6 is present.
+func ParseLXCNetIP(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	for _, part := range strings.Split(s, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 || strings.TrimSpace(kv[0]) != "ip" {
+			continue
+		}
+		v := strings.TrimSpace(kv[1])
+		if v == "" || v == "dhcp" || v == "manual" || v == "auto" {
+			return "", false
+		}
+		if slash := strings.Index(v, "/"); slash >= 0 {
+			v = v[:slash]
+		}
+		if net.ParseIP(v) == nil {
+			return "", false
+		}
+		return v, true
+	}
+	return "", false
+}
+
 // ParseIPConfig0 extracts the bare IP from a Proxmox cloud-init ipconfig0 value.
 // The format is a comma-separated list of key=value pairs; we want the value of
 // the `ip=` key, with any CIDR suffix stripped.
@@ -1043,9 +1108,13 @@ func (c *Client) firstAgentIPv4(ctx context.Context, node string, vmid int) stri
 	return ""
 }
 
-// collectNodeIPs lists VMs on a single node and parses each one's ipconfig0.
-// Returns whatever it managed to collect alongside any non-fatal errors so that
-// a single bad VMID config doesn't drop the whole node.
+// collectNodeIPs lists VMs and LXC containers on a single node, parses each
+// QEMU VM's ipconfig0 and each container's `netN` static IP, and returns
+// the union. Returns whatever it managed to collect alongside any non-fatal
+// errors so a single bad VMID config doesn't drop the whole node.
+//
+// LXC containers share the cluster-wide VMID namespace with QEMU VMs so the
+// caller can treat the result as a flat per-IP slice.
 func (c *Client) collectNodeIPs(ctx context.Context, node string) ([]ClusterIP, error) {
 	vms, err := c.ListVMs(ctx, node)
 	if err != nil {
@@ -1079,6 +1148,48 @@ func (c *Client) collectNodeIPs(ctx context.Context, node string) ([]ClusterIP, 
 			Source:    "ipconfig0",
 			RawConfig: raw,
 		})
+	}
+
+	// LXC containers — same per-node walk but with the netN config parser.
+	// LXC failures are logged via the returned error joined with VM errors;
+	// a missing /lxc endpoint (older Proxmox?) is treated as "no containers"
+	// rather than a hard failure.
+	lxcs, err := c.ListLXCs(ctx, node)
+	if err != nil {
+		// Don't escalate — the caller still gets the QEMU IPs and the error
+		// surfaces in the joined errors.Join chain.
+		return out, fmt.Errorf("list lxc: %w", err)
+	}
+	for _, ct := range lxcs {
+		if ct.Template != 0 {
+			continue
+		}
+		cfg, err := c.GetLXCConfig(ctx, node, ct.VMID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return out, fmt.Errorf("get lxc config vmid=%d: %w", ct.VMID, err)
+		}
+		// Walk net0..net9 — Proxmox supports up to 10 netN per container.
+		for i := 0; i < 10; i++ {
+			raw, _ := cfg[fmt.Sprintf("net%d", i)].(string)
+			if raw == "" {
+				continue
+			}
+			ip, ok := ParseLXCNetIP(raw)
+			if !ok {
+				continue
+			}
+			out = append(out, ClusterIP{
+				IP:        ip,
+				VMID:      ct.VMID,
+				Node:      node,
+				Hostname:  ct.Name,
+				Source:    fmt.Sprintf("lxc-net%d", i),
+				RawConfig: raw,
+			})
+		}
 	}
 	return out, nil
 }

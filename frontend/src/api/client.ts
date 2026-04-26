@@ -238,6 +238,40 @@ export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   return data
 }
 
+export interface VMTunnel {
+  id: string
+  machine_id: string
+  status?: string
+  subdomain?: string
+  target_ip?: string
+  target_port: number
+  tunnel_url?: string
+  error?: string
+  created_at?: string
+}
+
+export interface CreateVMTunnelRequest {
+  target_port: number
+  subdomain?: string
+}
+
+export async function listVMTunnels(vmId: number): Promise<VMTunnel[]> {
+  const { data } = await api.get<VMTunnel[]>(`/vms/${vmId}/tunnels`)
+  return data
+}
+
+export async function createVMTunnel(
+  vmId: number,
+  req: CreateVMTunnelRequest,
+): Promise<VMTunnel> {
+  const { data } = await api.post<VMTunnel>(`/vms/${vmId}/tunnels`, req)
+  return data
+}
+
+export async function deleteVMTunnel(vmId: number, tunnelId: string): Promise<void> {
+  await api.delete(`/vms/${vmId}/tunnels/${encodeURIComponent(tunnelId)}`)
+}
+
 export async function listKeys(): Promise<SSHKey[]> {
   const { data } = await api.get<SSHKey[]>('/keys')
   return data
@@ -259,6 +293,38 @@ export async function setDefaultKey(id: number): Promise<void> {
 
 export async function attachPrivateKey(id: number, privateKey: string): Promise<void> {
   await api.post(`/keys/${id}/private-key`, { private_key: privateKey })
+}
+
+export interface TunnelInfo {
+  enabled: boolean
+  host: string
+}
+
+export async function getTunnelInfo(): Promise<TunnelInfo> {
+  const { data } = await api.get<TunnelInfo>('/tunnels/info')
+  return data
+}
+
+export interface GopherSettingsView {
+  api_url: string
+  configured: boolean
+}
+
+export interface SaveGopherSettingsRequest {
+  api_url?: string
+  api_key?: string
+}
+
+export async function getGopherSettings(): Promise<GopherSettingsView> {
+  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
+  return data
+}
+
+export async function saveGopherSettings(
+  req: SaveGopherSettingsRequest,
+): Promise<GopherSettingsView> {
+  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
+  return data
 }
 
 export async function deleteKey(id: number): Promise<void> {
@@ -443,28 +509,6 @@ export async function saveAuthorizedGitHubOrgs(
   orgs: string[],
 ): Promise<AuthorizedOrgsView> {
   const { data } = await api.put<AuthorizedOrgsView>('/settings/github-orgs', { orgs })
-  return data
-}
-
-export interface GopherSettingsView {
-  api_url: string
-  configured: boolean
-}
-
-export interface SaveGopherSettingsRequest {
-  api_url?: string
-  api_key?: string
-}
-
-export async function getGopherSettings(): Promise<GopherSettingsView> {
-  const { data } = await api.get<GopherSettingsView>('/settings/gopher')
-  return data
-}
-
-export async function saveGopherSettings(
-  req: SaveGopherSettingsRequest,
-): Promise<GopherSettingsView> {
-  const { data } = await api.put<GopherSettingsView>('/settings/gopher', req)
   return data
 }
 

@@ -49,6 +49,9 @@ export interface VM {
   owner_id?: number | null
   key_name?: string
   error_msg?: string
+  tunnel_id?: string
+  tunnel_url?: string
+  tunnel_error?: string
 }
 
 export interface ProvisionRequest {
@@ -59,6 +62,7 @@ export interface ProvisionRequest {
   ssh_pubkey?: string
   ssh_privkey?: string
   generate_key?: boolean
+  public_tunnel?: boolean
 }
 
 export interface SSHKey {
@@ -92,6 +96,9 @@ export interface CreateKeyResponse extends SSHKey {
 }
 
 export interface ProvisionResult {
+  // id is the Nimbus DB row id — used by the result page to wire the
+  // Networks (per-port tunnels) modal without a separate lookup.
+  id: number
   vmid: number
   hostname: string
   ip: string
@@ -104,6 +111,11 @@ export interface ProvisionResult {
   // Non-empty when the VM was created but reachability couldn't be confirmed
   // (usually Nimbus running outside the cluster LAN). Credentials are valid.
   warning?: string
+  // Tunnel fields (Phase 2 — Gopher integration). tunnel_url is set when the
+  // tunnel is active; tunnel_error carries any tunnel-specific failure. VM
+  // success is independent of either.
+  tunnel_url?: string
+  tunnel_error?: string
 }
 
 // Backend-emitted phase IDs streamed during a provision call. Keep in sync
@@ -156,6 +168,9 @@ export interface ClusterVM {
   // key_name is the SSH key file name; present only for local-source VMs
   // that were provisioned with a vault-stored key.
   key_name?: string
+  // tunnel_url is "host:port" when the VM has an established Gopher SSH
+  // tunnel. Present only for local-source VMs.
+  tunnel_url?: string
   hostname?: string
   ip?: string
   // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)
@@ -180,13 +195,24 @@ export interface ClusterVM {
   os_machine?: string    // "x86_64"
 }
 
+// IPSource describes who claimed the IP. Mirrors ippool.Source* in Go:
+//   - "local"    — claimed by this Nimbus instance via Reserve/MarkAllocated
+//   - "adopted"  — observed in Proxmox; another Nimbus instance owns the VM
+//   - "external" — detected on the LAN by netscan; not in Proxmox at all
+export type IPSource = 'local' | 'adopted' | 'external' | ''
+
+export type IPStatus = 'free' | 'reserved' | 'allocated'
+
 export interface IPAllocation {
   ip: string
-  status: 'free' | 'reserved' | 'allocated'
+  status: IPStatus
   vmid?: number | null
   hostname?: string | null
   reserved_at?: string | null
   allocated_at?: string | null
+  last_seen_at?: string | null
+  source?: IPSource
+  missed_cycles?: number
 }
 
 export interface HealthResponse {
