@@ -25,6 +25,26 @@ export function buildSSHCommand(
   return parts.join(' ')
 }
 
+// formatRelativeTime renders an ISO timestamp as a coarse "2m ago"-style
+// string. Coarseness is the point: the IP-pool table refreshes every 15s
+// and the underlying timestamps update on a similar cadence, so anything
+// finer than minutes is just visual jitter. Returns an em-dash for missing
+// or unparseable input so callers can pass through nullable backend fields.
+export function formatRelativeTime(ts: string | null | undefined, now: Date = new Date()): string {
+  if (!ts) return '—'
+  const t = new Date(ts).getTime()
+  if (!Number.isFinite(t)) return '—'
+  const deltaSec = Math.max(0, Math.floor((now.getTime() - t) / 1000))
+  if (deltaSec < 30) return 'just now'
+  if (deltaSec < 60) return `${deltaSec}s ago`
+  const min = Math.floor(deltaSec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const day = Math.floor(hr / 24)
+  return `${day}d ago`
+}
+
 // parseTunnelURL splits a "host:port" string emitted by the Gopher tunnel
 // flow. Returns undefined for empty or malformed input — callers should
 // fall back to showing the raw value.
