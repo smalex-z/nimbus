@@ -257,10 +257,14 @@ func (s *AuthService) UpsertGitHubOAuthUser(
 		return nil, false, err
 	}
 	// Refresh the org snapshot on every login so the bypass tracks the
-	// user's current memberships.
-	if err := s.db.Model(&user).Update("github_orgs", orgsCSV).Error; err != nil {
+	// user's current memberships. Using UpdateColumn with the actual DB
+	// column (git_hub_orgs — GORM splits on each uppercase boundary) avoids
+	// hooks and zero-value skipping; an empty orgsCSV is a legitimate value
+	// when the user has no orgs.
+	if err := s.db.Model(&user).UpdateColumn("git_hub_orgs", orgsCSV).Error; err != nil {
 		return nil, true, err
 	}
+	user.GitHubOrgs = orgsCSV
 	return userToView(&user), true, nil
 }
 
