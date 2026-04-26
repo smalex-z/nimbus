@@ -245,6 +245,16 @@ export interface VMTunnel {
   subdomain?: string
   target_ip?: string
   target_port: number
+  // Gopher fills these on create + read so the UI shows the actual stored
+  // state, not just what was requested (UDP / no-subdomain coerce some).
+  transport?: 'tcp' | 'udp'
+  private?: boolean
+  no_tls?: boolean
+  server_port?: number
+  bot_protection_enabled?: boolean
+  bot_protection_ttl?: number
+  bot_protection_allow_ip?: string
+  tls_skip_verify?: boolean
   tunnel_url?: string
   error?: string
   created_at?: string
@@ -253,7 +263,13 @@ export interface VMTunnel {
 export interface CreateVMTunnelRequest {
   target_port: number
   subdomain?: string
+  transport?: 'tcp' | 'udp'
   private?: boolean
+  no_tls?: boolean
+  bot_protection_enabled?: boolean
+  bot_protection_ttl?: number
+  bot_protection_allow_ip?: string
+  tls_skip_verify?: boolean
 }
 
 export async function listVMTunnels(vmId: number): Promise<VMTunnel[]> {

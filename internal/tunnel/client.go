@@ -156,19 +156,48 @@ type Tunnel struct {
 	Subdomain  string `json:"subdomain,omitempty"`
 	TargetIP   string `json:"target_ip,omitempty"`
 	TargetPort int    `json:"target_port"`
-	TunnelURL  string `json:"tunnel_url,omitempty"`
-	Error      string `json:"error,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
+	// Transport is "tcp" (default) or "udp". UDP tunnels skip Caddy and the
+	// subdomain — they're reached at <gateway>:<server_port>.
+	Transport string `json:"transport,omitempty"`
+	// Private flips the gateway-side bind to 127.0.0.1 (VPS-local).
+	Private bool `json:"private,omitempty"`
+	// NoTLS asks Caddy to serve http:// rather than https://.
+	NoTLS bool `json:"no_tls,omitempty"`
+	// ServerPort is the port Gopher allocated on the gateway; needed for
+	// UDP/port-only tunnels where there's no friendly subdomain URL.
+	ServerPort int `json:"server_port,omitempty"`
+	// Alpha features — bot protection (PoW JS challenge) requires a
+	// subdomain + TCP. Gopher silently coerces these server-side, so the
+	// response reflects the actual stored state, not just what we asked for.
+	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
+	TLSSkipVerify        bool   `json:"tls_skip_verify,omitempty"`
+	TunnelURL            string `json:"tunnel_url,omitempty"`
+	Error                string `json:"error,omitempty"`
+	CreatedAt            string `json:"created_at,omitempty"`
 }
 
 // CreateTunnelRequest is the body of POST /api/v1/tunnels. Subdomain is
-// optional — Gopher derives one from the machine name when blank. Private
-// flips the gateway-side bind from 0.0.0.0 to 127.0.0.1 (VPS-local only).
+// optional — Gopher derives one from the machine name when blank.
 type CreateTunnelRequest struct {
 	MachineID  string `json:"machine_id"`
 	TargetPort int    `json:"target_port"`
 	Subdomain  string `json:"subdomain,omitempty"`
-	Private    bool   `json:"private,omitempty"`
+	// Transport is "tcp" or "udp"; blank defaults to tcp server-side.
+	// UDP tunnels are HTTP-incompatible — Gopher clears subdomain + no_tls
+	// when transport=udp, so a Subdomain you set here may be ignored.
+	Transport string `json:"transport,omitempty"`
+	// Private binds to 127.0.0.1 on the gateway (VPS-local only).
+	Private bool `json:"private,omitempty"`
+	// NoTLS makes Caddy serve plain http://. Ignored for UDP / port-only.
+	NoTLS bool `json:"no_tls,omitempty"`
+	// Alpha: bot-protection settings. Server requires subdomain + TCP and
+	// will silently disable when those aren't met.
+	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
+	TLSSkipVerify        bool   `json:"tls_skip_verify,omitempty"`
 }
 
 // CreateTunnel adds a port exposure to an active machine. Returns an error

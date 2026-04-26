@@ -22,7 +22,9 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
   const [busy, setBusy] = useState(false)
   const [port, setPort] = useState('')
   const [subdomain, setSubdomain] = useState('')
+  const [transport, setTransport] = useState<'tcp' | 'udp'>('tcp')
   const [visibility, setVisibility] = useState<'public' | 'private'>('public')
+  const [botProtection, setBotProtection] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   const load = async () => {
@@ -60,14 +62,23 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
     }
     setBusy(true)
     try {
+      // For UDP, Gopher ignores subdomain + bot_protection server-side;
+      // we still scrub them client-side so the response we display matches
+      // what the user actually configured (less surprising than letting
+      // the server quietly drop fields).
+      const isUDP = transport === 'udp'
       await createVMTunnel(vmId, {
         target_port: portNum,
-        subdomain: subdomain.trim() || undefined,
+        transport,
+        subdomain: !isUDP && subdomain.trim() ? subdomain.trim() : undefined,
         private: visibility === 'private',
+        bot_protection_enabled: !isUDP && botProtection ? true : undefined,
       })
       setPort('')
       setSubdomain('')
+      setTransport('tcp')
       setVisibility('public')
+      setBotProtection(false)
       await load()
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'failed to add tunnel')
@@ -146,44 +157,79 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
         <form onSubmit={onAdd} className="mt-8 pt-6 border-t border-line">
           <div className="text-base font-display font-medium mb-5">Add Tunnel</div>
 
-          <div className="mb-5">
-            <label className="block text-[13px] font-medium text-ink mb-2">
-              Visibility{' '}
-              <span
-                className="text-ink-3 cursor-help"
-                title="Public exposes the tunnel on the gateway's external interface (reachable from anywhere). Private binds to the VPS's loopback only — useful for service-to-service traffic that should never leave the host."
-                aria-label="info"
-              >
-                ⓘ
-              </span>
-            </label>
-            <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={visibility === 'public'}
-                onClick={() => setVisibility('public')}
-                className={`px-4 py-2 text-sm font-medium transition-colors ${
-                  visibility === 'public'
-                    ? 'bg-good text-white'
-                    : 'bg-white/85 text-ink hover:bg-white'
-                }`}
-              >
-                🌐 Public
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={visibility === 'private'}
-                onClick={() => setVisibility('private')}
-                className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
-                  visibility === 'private'
-                    ? 'bg-ink text-white'
-                    : 'bg-white/85 text-ink hover:bg-white'
-                }`}
-              >
-                🔒 Private
-              </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
+            <div>
+              <label className="block text-[13px] font-medium text-ink mb-2">
+                Transport{' '}
+                <span
+                  className="text-ink-3 cursor-help"
+                  title="TCP for HTTP/SSH/most services. UDP for raw datagram services (DNS, gaming, WireGuard) — UDP tunnels skip Caddy and the subdomain."
+                  aria-label="info"
+                >
+                  ⓘ
+                </span>
+              </label>
+              <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={transport === 'tcp'}
+                  onClick={() => setTransport('tcp')}
+                  className={`px-4 py-2 text-sm font-medium transition-colors ${
+                    transport === 'tcp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
+                  }`}
+                >
+                  TCP
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={transport === 'udp'}
+                  onClick={() => setTransport('udp')}
+                  className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
+                    transport === 'udp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
+                  }`}
+                >
+                  UDP
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[13px] font-medium text-ink mb-2">
+                Visibility{' '}
+                <span
+                  className="text-ink-3 cursor-help"
+                  title="Public exposes the tunnel on the gateway's external interface. Private binds to the VPS's loopback only — useful for service-to-service traffic that shouldn't leave the host."
+                  aria-label="info"
+                >
+                  ⓘ
+                </span>
+              </label>
+              <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={visibility === 'public'}
+                  onClick={() => setVisibility('public')}
+                  className={`px-4 py-2 text-sm font-medium transition-colors ${
+                    visibility === 'public' ? 'bg-good text-white' : 'bg-white/85 text-ink hover:bg-white'
+                  }`}
+                >
+                  🌐 Public
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={visibility === 'private'}
+                  onClick={() => setVisibility('private')}
+                  className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
+                    visibility === 'private' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
+                  }`}
+                >
+                  🔒 Private
+                </button>
+              </div>
             </div>
           </div>
 
@@ -194,7 +240,7 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
             </label>
             <div className="flex items-center rounded-[8px] border border-line bg-white/85 focus-within:border-ink">
               <span className="px-3 py-2 font-mono text-sm text-ink-3 border-r border-line bg-[rgba(27,23,38,0.03)]">
-                localhost:
+                {transport === 'udp' ? 'localhost (udp):' : 'localhost:'}
               </span>
               <input
                 type="number"
@@ -209,7 +255,7 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
             </div>
           </div>
 
-          <div className="mb-1">
+          <div className={`mb-5 ${transport === 'udp' ? 'opacity-50' : ''}`}>
             <label className="block text-[13px] font-medium text-ink mb-1">
               Subdomain{' '}
               <span className="text-ink-3 font-normal">
@@ -220,12 +266,45 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
               type="text"
               value={subdomain}
               onChange={(e) => setSubdomain(e.target.value)}
-              placeholder={hostname}
-              className="block w-full px-3 py-2 rounded-[8px] border border-line bg-white/85 font-mono text-sm focus:outline-none focus:border-ink"
+              placeholder={transport === 'udp' ? 'not supported on UDP' : hostname}
+              disabled={transport === 'udp'}
+              className="block w-full px-3 py-2 rounded-[8px] border border-line bg-white/85 font-mono text-sm focus:outline-none focus:border-ink disabled:cursor-not-allowed"
             />
             <p className="mt-1.5 text-[12px] text-ink-3">
-              Leave blank to expose by port only.
+              {transport === 'udp'
+                ? 'UDP tunnels are reachable at <gateway>:<server_port> only — Gopher assigns the port on creation.'
+                : 'Leave blank to expose by port only.'}
             </p>
+          </div>
+
+          <div
+            className={`mb-1 p-3.5 rounded-[10px] border border-dashed border-line bg-[rgba(27,23,38,0.02)] ${
+              transport === 'udp' ? 'opacity-50' : ''
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                id="bot-protection"
+                checked={botProtection}
+                disabled={transport === 'udp'}
+                onChange={(e) => setBotProtection(e.target.checked)}
+                className="mt-1 cursor-pointer disabled:cursor-not-allowed"
+              />
+              <label htmlFor="bot-protection" className="cursor-pointer flex-1">
+                <div className="flex items-center gap-2 text-[13px] font-medium text-ink">
+                  Bot-protection challenge
+                  <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] px-1.5 py-0.5 rounded">
+                    Alpha
+                  </span>
+                </div>
+                <p className="mt-1 text-[12px] text-ink-3 leading-relaxed">
+                  Gates HTTP traffic with a proof-of-work JavaScript challenge before the
+                  request reaches your service. Requires a subdomain (TCP only). Solving the
+                  challenge issues a 24-hour cookie.
+                </p>
+              </label>
+            </div>
           </div>
 
           {submitError && (
@@ -276,10 +355,17 @@ function TunnelRow({ tunnel, busy, onDelete }: TunnelRowProps) {
               display
             )}
           </div>
-          <div className="text-[11px] font-mono text-ink-3 mt-1">
-            → port {tunnel.target_port}
+          <div className="text-[11px] font-mono text-ink-3 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+            <span>→ port {tunnel.target_port}</span>
+            {tunnel.transport && tunnel.transport !== 'tcp' && (
+              <span className="uppercase">· {tunnel.transport}</span>
+            )}
+            {tunnel.private && <span>· private</span>}
+            {tunnel.bot_protection_enabled && (
+              <span className="text-warn">· bot-protected</span>
+            )}
             {tunnel.status && tunnel.status !== 'active' && (
-              <span className={`ml-2 ${isFailed ? 'text-warn' : ''}`}>· {tunnel.status}</span>
+              <span className={isFailed ? 'text-warn' : ''}>· {tunnel.status}</span>
             )}
           </div>
           {tunnel.error && (
