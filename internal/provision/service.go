@@ -373,7 +373,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 			if perr != nil {
 				log.Printf("tunnel: cannot bootstrap (no private key available): %v", perr)
 				tunnelError = "tunnel bootstrap skipped: " + perr.Error()
-			} else if berr := runTunnelBootstrap(ctx, ip, username, privKey, machineObj.BootstrapURL); berr != nil {
+			} else if berr := runTunnelBootstrap(ctx, ip, username, privKey, machineObj.BootstrapURL, req.Hostname); berr != nil {
 				log.Printf("tunnel: bootstrap ssh failed: %v", berr)
 				tunnelError = "tunnel bootstrap failed: " + berr.Error()
 			} else {
