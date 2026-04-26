@@ -107,6 +107,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
+				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
 				r.Get("/cluster/stats", cluster.Stats)
 
 				// Reconcile can run a few seconds on a busy cluster
@@ -147,6 +148,7 @@ func NewRouter(d Deps) http.Handler {
 					r.With(middleware.Timeout(6*time.Minute)).Post("/", vms.Create)
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
+					r.Delete("/{id}", vms.Delete)
 					// Per-port tunnels on top of the VM's Gopher machine —
 					// the post-provision Networks surface.
 					r.Get("/{id}/tunnels", vms.ListTunnels)

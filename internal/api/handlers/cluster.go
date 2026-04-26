@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -200,4 +203,22 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 		out = append(out, view)
 	}
 	response.Success(w, out)
+}
+
+// DeleteVM handles DELETE /api/cluster/vms/{id} — admin-only destroy of a
+// local-source VM by Nimbus DB row id, regardless of who provisioned it.
+// Foreign and external VMs (no DB row) cannot be reached through this
+// endpoint; they return 404.
+func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	if err := h.svc.AdminDelete(r.Context(), uint(id)); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

@@ -530,6 +530,41 @@ func (c *Client) StartVM(ctx context.Context, node string, vmid int) (string, er
 	return taskID, nil
 }
 
+// StopVM forces a VM off (equivalent of pulling the plug). Use this before
+// DestroyVM since Proxmox refuses to delete a running VM. The graceful
+// alternative is `shutdown`, which depends on the guest agent — for the
+// destroy path we want a guaranteed power-down within seconds.
+func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// DestroyVM removes a VM from Proxmox.
+//
+//   - purge=1 also clears job/replication/HA references (otherwise stale
+//     entries get left behind).
+//   - destroy-unreferenced-disks=1 frees attached disks rather than orphaning
+//     them on the storage backend.
+//
+// Caller must ensure the VM is stopped first; Proxmox returns an error if
+// it's still running. Returns the task UPID for caller-side polling.
+func (c *Client) DestroyVM(ctx context.Context, node string, vmid int) (string, error) {
+	params := url.Values{}
+	params.Set("purge", "1")
+	params.Set("destroy-unreferenced-disks", "1")
+
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodDelete, path, params, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
 // agentResult is what the guest-agent endpoint actually returns: a wrapper
 // around an array of NetworkInterface records.
 type agentResult struct {

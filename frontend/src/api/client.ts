@@ -244,6 +244,14 @@ export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   return data
 }
 
+export async function deleteVM(id: number): Promise<void> {
+  await api.delete(`/vms/${id}`)
+}
+
+export async function adminDeleteVM(id: number): Promise<void> {
+  await api.delete(`/cluster/vms/${id}`)
+}
+
 export interface VMTunnel {
   id: string
   machine_id: string
