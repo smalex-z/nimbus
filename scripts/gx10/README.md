@@ -66,8 +66,8 @@ gx10 submit pytorch/pytorch:latest -- python train.py
 
 Both scripts are idempotent. Re-running `install-worker.sh` re-downloads
 the binary (so it picks up worker upgrades from a newer Nimbus) and
-restarts the systemd unit. Re-running `install-inference.sh` upgrades the
-pip-installed vLLM and reloads the service; weights cached under `HF_HOME`
+restarts the systemd unit. Re-running `install-inference.sh` re-pulls the
+vLLM Docker image and restarts the service; weights cached under `HF_HOME`
 survive.
 
 ## Uninstall
@@ -77,8 +77,9 @@ sudo systemctl disable --now nimbus-vllm nimbus-gpu-worker
 sudo rm -f /etc/systemd/system/nimbus-{vllm,gpu-worker}.service
 sudo rm -f /etc/nimbus-gpu-worker.env
 sudo systemctl daemon-reload
-# Optional: leave model weights + venv in place
-sudo rm -rf /opt/vllm /opt/nimbus /var/lib/vllm
+# Optional: leave model weights in place
+sudo rm -rf /opt/nimbus /var/lib/vllm
+sudo docker rmi vllm/vllm-openai:latest 2>/dev/null || true
 ```
 
 ## Tuning
@@ -87,10 +88,20 @@ sudo rm -rf /opt/vllm /opt/nimbus /var/lib/vllm
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GX10_INFERENCE_MODEL` | `meta-llama/Llama-3.1-8B-Instruct` | Any HF repo id. Larger models need more RAM (`max-model-len` etc. via EXTRA_ARGS). |
+| `GX10_INFERENCE_MODEL` | `microsoft/Phi-3-mini-4k-instruct` | Any HF repo id. Larger models need more VRAM. |
 | `GX10_INFERENCE_PORT` | `8000` | |
-| `GX10_INFERENCE_HF_HOME` | `/var/lib/vllm/hf` | Persistent weight cache. |
+| `GX10_INFERENCE_HF_HOME` | `/var/lib/vllm/hf` | Persistent weight cache, mounted into the container. |
+| `GX10_INFERENCE_IMAGE` | `vllm/vllm-openai:latest` | Pin to a tag (e.g. `vllm/vllm-openai:v0.19.1`) for reproducibility. |
+| `GX10_INFERENCE_MAX_MODEL_LEN` | `4096` | Context window. Raise for longer contexts; needs more VRAM for KV cache. |
 | `GX10_INFERENCE_EXTRA_ARGS` | _(empty)_ | Passed verbatim to `vllm serve` (e.g. `--quantization fp8`). |
+
+### Why Docker for vLLM?
+
+Pip-built vLLM wheels target sm_70..sm_90 and link against `libcudart.so.12`,
+which doesn't work on Grace+Blackwell (sm_100, host CUDA 13). The official
+`vllm/vllm-openai` image bundles a Blackwell-compatible CUDA + PyTorch + kernels,
+so we let it own the runtime. Docker + the NVIDIA Container Toolkit are already
+required for the GPU job worker, so this adds no new prerequisites.
 
 `install-worker.sh` accepts:
 
