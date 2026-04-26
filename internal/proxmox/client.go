@@ -423,6 +423,17 @@ func (c *Client) SetVMTags(ctx context.Context, node string, vmid int, tags []st
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }
 
+// SetVMDescription writes a VM's `description` field, replacing the prior
+// value verbatim. Pass an empty string to clear. Like tags, callers that
+// need to preserve user-written prose should read existing first (via
+// GetVMConfig) and pass the merged body in.
+func (c *Client) SetVMDescription(ctx context.Context, node string, vmid int, description string) error {
+	params := url.Values{}
+	params.Set("description", description)
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
 // ResizeDisk grows a disk on a stopped VM. size is the Proxmox-style delta —
 // "+10G" adds 10 gigabytes.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
@@ -939,6 +950,9 @@ func (c *Client) collectNodeDetails(ctx context.Context, node string) ([]Cluster
 		}
 		if raw, _ := cfg["tags"].(string); raw != "" {
 			detail.Tags = SplitTags(raw)
+		}
+		if desc, _ := cfg["description"].(string); desc != "" {
+			detail.Description = desc
 		}
 		if ostype, _ := cfg["ostype"].(string); ostype != "" {
 			detail.OSType = ostype

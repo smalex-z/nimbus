@@ -139,15 +139,16 @@ type ClusterIP struct {
 // back from cloud-init `ipconfig0` to the qemu-guest-agent's first non-loopback
 // IPv4 address; an empty IP means neither source produced one.
 type ClusterVMDetail struct {
-	VMID     int
-	Node     string
-	Name     string
-	Status   string   // "running" / "stopped" / "paused"
-	IP       string   // bare IPv4, "" if undiscoverable
-	IPSource string   // "ipconfig0" | "agent" | "" when IP is empty
-	Tags     []string // raw tags from Proxmox; preserves user-applied entries
-	OSType   string   // raw `ostype` field — "l26", "win10", … "" when unset
-	OS       *OSInfo  // best-effort agent osinfo; nil when unavailable
+	VMID        int
+	Node        string
+	Name        string
+	Status      string   // "running" / "stopped" / "paused"
+	IP          string   // bare IPv4, "" if undiscoverable
+	IPSource    string   // "ipconfig0" | "agent" | "" when IP is empty
+	Tags        []string // raw tags from Proxmox; preserves user-applied entries
+	Description string   // raw description; carries Nimbus tier/OS marker for managed VMs
+	OSType      string   // raw `ostype` field — "l26", "win10", … "" when unset
+	OS          *OSInfo  // best-effort agent osinfo; nil when unavailable
 }
 
 // OSInfo mirrors the fields returned by qemu-guest-agent's guest-get-osinfo

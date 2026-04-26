@@ -45,6 +45,7 @@ type fakePVE struct {
 	waitForTask       func(context.Context, string, string, time.Duration) error
 	setCloudInit      func(context.Context, string, int, proxmox.CloudInitConfig) error
 	setVMTags         func(context.Context, string, int, []string) error
+	setVMDescription  func(context.Context, string, int, string) error
 	resizeDisk        func(context.Context, string, int, string, string) error
 	startVM           func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
@@ -93,6 +94,12 @@ func (f *fakePVE) SetVMTags(ctx context.Context, n string, vmid int, tags []stri
 		return nil
 	}
 	return f.setVMTags(ctx, n, vmid, tags)
+}
+func (f *fakePVE) SetVMDescription(ctx context.Context, n string, vmid int, desc string) error {
+	if f.setVMDescription == nil {
+		return nil
+	}
+	return f.setVMDescription(ctx, n, vmid, desc)
 }
 func (f *fakePVE) ResizeDisk(ctx context.Context, n string, vmid int, d, s string) error {
 	return f.resizeDisk(ctx, n, vmid, d, s)
