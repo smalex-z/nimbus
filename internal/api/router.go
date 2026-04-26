@@ -72,14 +72,21 @@ func NewRouter(d Deps) http.Handler {
 	var gpuScripts *handlers.ScriptHandler
 	if d.GPU != nil {
 		gpuHandler = handlers.NewGPU(d.GPU, d.Auth, d.Config.AppURL).
-			WithGPUConfigApplier(func(baseURL, model string) {
+			WithGPUConfigApplier(func(baseURL, model, nimbusGPUAPI string) {
 				// Same payload shape settings.SaveGPU pushes — keeps the
 				// pairing-flow and manual-edit code paths converged.
+				// nimbusGPUAPI=="" means the caller (e.g. Unpair) didn't
+				// derive one from a request; fall back to AppURL so manual
+				// SaveGPU still works on Nimbus instances with a properly
+				// set APP_URL.
+				if nimbusGPUAPI == "" {
+					nimbusGPUAPI = strings.TrimRight(d.Config.AppURL, "/") + "/api/gpu"
+				}
 				if d.Provision != nil {
 					d.Provision.SetGPUBootstrapConfig(provision.GPUBootstrapConfig{
 						BaseURL:        baseURL,
 						InferenceModel: model,
-						NimbusGPUAPI:   strings.TrimRight(d.Config.AppURL, "/") + "/api/gpu",
+						NimbusGPUAPI:   nimbusGPUAPI,
 					})
 				}
 			})
