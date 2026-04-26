@@ -727,17 +727,21 @@ interface ResultViewProps {
 }
 
 function ResultView({ result, onReset }: ResultViewProps) {
+  const { user } = useAuth()
   const sshCommand = buildSSHCommand(result.username, result.ip, result.key_name)
   const tunnel = result.tunnel_url ? parseTunnelURL(result.tunnel_url) : undefined
   const publicSSHCommand = tunnel
     ? buildSSHCommand(result.username, tunnel.host, result.key_name, tunnel.port)
     : undefined
   const hasWarning = Boolean(result.warning)
+  const hasTunnel = Boolean(publicSSHCommand)
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
     : 'bg-[rgba(45,125,90,0.1)] text-good'
   const dotColorClass = hasWarning ? 'bg-warn' : 'bg-good'
+  const dashboardHref = user?.is_admin ? '/admin' : '/vms'
+  const dashboardLabel = user?.is_admin ? 'Back to dashboard' : 'Back to my machines'
   return (
     <div className="py-5 pb-10">
       <Card className="max-w-[720px] mx-auto p-11">
@@ -764,16 +768,6 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        {result.tunnel_url && (
-          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
-            <span className="text-base">🔐</span>
-            <div>
-              <strong>SSH tunnel live.</strong>{' '}
-              <span className="font-mono break-all">{result.tunnel_url}</span>
-            </div>
-          </div>
-        )}
-
         {result.tunnel_error && (
           <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
             <span className="text-base">⚠</span>
@@ -786,14 +780,23 @@ function ResultView({ result, onReset }: ResultViewProps) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
-          <CredCell label="IP address" value={result.ip} />
+          <CredCell label="Local IP" value={result.ip} />
           <CredCell label="Username" value={result.username} />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
-          <CredCell label="SSH (LAN)" value={sshCommand} fullWidth />
-          {publicSSHCommand && (
-            <CredCell label="SSH (public)" value={publicSSHCommand} fullWidth />
-          )}
+          <CredCell
+            label={hasTunnel ? 'SSH (LAN)' : 'SSH command'}
+            value={sshCommand}
+            fullWidth
+          />
         </div>
+
+        {publicSSHCommand && tunnel && (
+          <GopherTunnelBox
+            host={tunnel.host}
+            port={tunnel.port}
+            sshCommand={publicSSHCommand}
+          />
+        )}
 
         {result.ssh_private_key && (
           <div className="mt-6">
@@ -816,12 +819,56 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        <div className="flex gap-2.5 justify-end mt-9">
-          <Button variant="ghost" onClick={onReset}>
-            Provision another
-          </Button>
+        <div className="flex gap-2.5 justify-end mt-9 flex-wrap">
+          {hasTunnel && (
+            <Button
+              variant="ghost"
+              disabled
+              title="Per-port HTTP/TCP tunnels — coming soon"
+            >
+              Manage tunnels
+            </Button>
+          )}
+          <Link to={dashboardHref}>
+            <Button variant="ghost">{dashboardLabel}</Button>
+          </Link>
+          <Button onClick={onReset}>Provision another</Button>
         </div>
       </Card>
+    </div>
+  )
+}
+
+interface GopherTunnelBoxProps {
+  host: string
+  port: number
+  sshCommand: string
+}
+
+// GopherTunnelBox renders a self-contained section explaining the public
+// tunnel that's been wired up via Gopher (ACM@UCLA's reverse-tunnel gateway).
+// Only shown when the provision actually established the tunnel.
+function GopherTunnelBox({ host, port, sshCommand }: GopherTunnelBoxProps) {
+  const endpoint = `${host}:${port}`
+  return (
+    <div className="mt-7 p-5 rounded-[10px] bg-[rgba(45,125,90,0.06)] border border-[rgba(45,125,90,0.25)]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span className="text-lg" aria-hidden>🌐</span>
+          <span className="font-display text-base font-medium">Gopher tunnel</span>
+        </div>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-good bg-[rgba(45,125,90,0.12)] px-2 py-0.5 rounded">
+          ACTIVE
+        </span>
+      </div>
+      <p className="text-[13px] text-ink-2 mt-2 leading-relaxed">
+        SSH is exposed publicly via the Gopher reverse-tunnel gateway, so you can
+        reach this machine from anywhere — no LAN required.
+      </p>
+      <div className="grid grid-cols-1 gap-3 mt-4">
+        <CredCell label="Public endpoint" value={endpoint} fullWidth />
+        <CredCell label="SSH (public)" value={sshCommand} fullWidth />
+      </div>
     </div>
   )
 }
