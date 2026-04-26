@@ -91,6 +91,8 @@ type saveConfigRequest struct {
 	Nameserver         string `json:"nameserver"`
 	SearchDomain       string `json:"search_domain"`
 	Port               string `json:"port"`
+	GopherAPIURL       string `json:"gopher_api_url"`
+	GopherAPIKey       string `json:"gopher_api_key"`
 }
 
 // Save handles POST /api/setup/save — validates, writes the env file,
@@ -147,6 +149,8 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 		Nameserver:         req.Nameserver,
 		SearchDomain:       req.SearchDomain,
 		Port:               req.Port,
+		GopherAPIURL:       req.GopherAPIURL,
+		GopherAPIKey:       req.GopherAPIKey,
 	}); err != nil {
 		response.InternalError(w, "failed to write config: "+err.Error())
 		return
@@ -162,6 +166,8 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 	_ = os.Setenv("NAMESERVER", req.Nameserver)
 	_ = os.Setenv("SEARCH_DOMAIN", req.SearchDomain)
 	_ = os.Setenv("PORT", req.Port)
+	_ = os.Setenv("GOPHER_API_URL", req.GopherAPIURL)
+	_ = os.Setenv("GOPHER_API_KEY", req.GopherAPIKey)
 
 	response.Success(w, map[string]string{"message": "configuration saved"})
 

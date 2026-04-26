@@ -49,32 +49,13 @@ func NewRouter(d Deps) http.Handler {
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
-	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler)
 	settings := handlers.NewSettings(d.Auth)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
 		r.Get("/setup/status", setup.Status)
 		r.Post("/setup/admin", setup.CreateAdmin)
-
-		// VM provisioning — long-running, gets its own timeout.
-		r.Route("/vms", func(r chi.Router) {
-			r.Use(middleware.Timeout(180 * time.Second))
-			r.Get("/", vms.List)
-			r.Post("/", vms.Create)
-			r.Get("/{id}", vms.Get)
-			r.Get("/{id}/private-key", vms.GetPrivateKey)
-		})
-
-		r.Route("/keys", func(r chi.Router) {
-			r.Get("/", keys.List)
-			r.Post("/", keys.Create)
-			r.Get("/{id}", keys.Get)
-			r.Delete("/{id}", keys.Delete)
-			r.Get("/{id}/private-key", keys.PrivateKey)
-			r.Post("/{id}/private-key", keys.AttachPrivateKey)
-			r.Post("/{id}/default", keys.SetDefault)
-		})
 
 		// Auth routes (public)
 		r.Post("/auth/register", auth.Register)
@@ -93,15 +74,14 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
 
-			// Bootstrap status is a read-only yes/no — both admins and
-			// regular members need it to decide whether the Provision UI
-			// should render the form or wait for an admin to set up
-			// templates. The destructive POST stays admin-only below.
-			r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+			// Access-code endpoints — must be reachable WITHOUT being verified,
+			// so the unverified user can submit their code from the Verify page.
+			r.Get("/access-code/status", auth.VerifyStatus)
+			r.Post("/access-code/verify", auth.VerifyAccessCode)
 
 			// Admin-only routes — cluster observability + cluster-wide
-			// mutations. Default users are restricted to the user-scoped
-			// /vms and /keys surface above.
+			// configuration. Default users never see these endpoints; the
+			// Admin and Authentication pages are admin-only in the SPA too.
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin)
 
@@ -115,14 +95,47 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(60*time.Second)).
 					Post("/ips/reconcile", ips.Reconcile)
 
-				// Template bootstrap can take 10-20 minutes when
-				// downloading all 4 OSes across all online nodes —
-				// give it room.
+				// Bootstrap status is read-only; bootstrap-templates can
+				// take 10-20 minutes when downloading all 4 OSes across
+				// every online node — give it room.
+				r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
 				r.With(middleware.Timeout(30*time.Minute)).
 					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
 
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
+				r.Get("/settings/access-code", settings.GetAccessCode)
+				r.Post("/settings/access-code/regenerate", settings.RegenerateAccessCode)
+				r.Get("/settings/google-domains", settings.GetAuthorizedGoogleDomains)
+				r.Put("/settings/google-domains", settings.SaveAuthorizedGoogleDomains)
+				r.Get("/settings/github-orgs", settings.GetAuthorizedGitHubOrgs)
+				r.Put("/settings/github-orgs", settings.SaveAuthorizedGitHubOrgs)
+				r.Get("/settings/gopher", settings.GetGopher)
+				r.Put("/settings/gopher", settings.SaveGopher)
+			})
+
+			// User-scoped routes — non-admins must be verified against the
+			// current access code version. Admins always pass requireVerified.
+			r.Group(func(r chi.Router) {
+				r.Use(requireVerified(d.Auth))
+
+				r.Route("/vms", func(r chi.Router) {
+					r.Use(middleware.Timeout(180 * time.Second))
+					r.Get("/", vms.List)
+					r.Post("/", vms.Create)
+					r.Get("/{id}", vms.Get)
+					r.Get("/{id}/private-key", vms.GetPrivateKey)
+				})
+
+				r.Route("/keys", func(r chi.Router) {
+					r.Get("/", keys.List)
+					r.Post("/", keys.Create)
+					r.Get("/{id}", keys.Get)
+					r.Delete("/{id}", keys.Delete)
+					r.Get("/{id}/private-key", keys.PrivateKey)
+					r.Post("/{id}/private-key", keys.AttachPrivateKey)
+					r.Post("/{id}/default", keys.SetDefault)
+				})
 			})
 		})
 	})

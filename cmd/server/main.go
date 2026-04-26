@@ -101,7 +101,7 @@ func main() {
 	}
 
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.OAuthSettings{},
+		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{},
 		ippool.Model(),
 	)
@@ -110,6 +110,23 @@ func main() {
 	}
 
 	authSvc := service.NewAuthService(database)
+
+	// Gopher seed: if env vars are set AND the DB row is still empty, copy
+	// env → DB once. After that, the Authentication settings page is the
+	// source of truth (admins can rotate creds without touching .env).
+	if cfg.GopherAPIURL != "" || cfg.GopherAPIKey != "" {
+		if existing, err := authSvc.GetGopherSettings(); err == nil &&
+			existing.APIURL == "" && existing.APIKey == "" {
+			if err := authSvc.SaveGopherSettings(db.GopherSettings{
+				APIURL: cfg.GopherAPIURL,
+				APIKey: cfg.GopherAPIKey,
+			}); err != nil {
+				log.Printf("warning: failed to seed Gopher settings from env: %v", err)
+			} else {
+				log.Printf("seeded Gopher settings from env (one-time migration)")
+			}
+		}
+	}
 
 	// Backfill: pre-`is_admin` deployments have users that AutoMigrate left
 	// at default false. If no admin exists, promote the oldest user so a
@@ -189,6 +206,30 @@ func main() {
 		CPULoadFactor:    cfg.CPULoadFactor,
 	})
 	provSvc.SetIPVerifier(reconciler)
+
+	// Backfill Nimbus marker + description metadata onto VMs provisioned by
+	// older builds. Migrates the legacy three-tag scheme down to a single
+	// chip in the Proxmox UI and stamps tier/OS into the description.
+	// Idempotent and best-effort — failures are logged but don't abort startup.
+	tagBackfillCtx, tagBackfillCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if n, err := provSvc.BackfillNimbusMetadata(tagBackfillCtx); err != nil {
+		log.Printf("warning: tag backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("backfill: migrated nimbus metadata on %d VM(s)", n)
+	}
+	tagBackfillCancel()
+
+	// Pin the `nimbus` tag chip to a neutral color so the Proxmox dashboard
+	// doesn't render it in a hash-derived random hue. Idempotent: re-runs
+	// are no-ops once the cluster's tag-style already has the override.
+	// Best-effort — a token without Sys.Modify on / gets a 403 here, which
+	// is fine; the operator can either grant the privilege or set the
+	// color manually in Datacenter → Options.
+	tagColorCtx, tagColorCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := ensureNimbusTagColor(tagColorCtx, pveClient); err != nil {
+		log.Printf("warning: nimbus tag color sync skipped: %v", err)
+	}
+	tagColorCancel()
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
@@ -319,6 +360,26 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// ensureNimbusTagColor reads the cluster's `tag-style` option, ensures the
+// `nimbus` tag is pinned to Nimbus's neutral grey, and writes it back only
+// when something needs to change. Returns nil on success or no-op; returns
+// the read/write error otherwise so the caller can log and continue.
+func ensureNimbusTagColor(ctx context.Context, px *proxmox.Client) error {
+	current, err := px.GetClusterTagStyle(ctx)
+	if err != nil {
+		return fmt.Errorf("read tag-style: %w", err)
+	}
+	style := proxmox.ParseTagStyle(current)
+	if !style.EnsureNimbusColor(proxmox.NimbusTagBG, proxmox.NimbusTagFG) {
+		return nil
+	}
+	if err := px.SetClusterTagStyle(ctx, style.String()); err != nil {
+		return fmt.Errorf("write tag-style: %w", err)
+	}
+	log.Printf("pinned nimbus tag color in cluster tag-style")
+	return nil
 }
 
 // runReconcileLoop runs reconciler.Reconcile every interval until ctx is

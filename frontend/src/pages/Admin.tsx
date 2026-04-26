@@ -2,11 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import CopyButton from '@/components/ui/CopyButton'
+import OSIcon from '@/components/ui/OSIcon'
+import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
+import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
+import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes } from '@/lib/format'
-import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName } from '@/types'
+import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName, VMSource } from '@/types'
 
 interface AdminData {
   nodes: NodeView[]
@@ -107,8 +110,8 @@ export default function Admin() {
 
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
-    const found = new Set(vms.map((v) => v.tier).filter((t): t is TierName => Boolean(t)))
     const order: TierName[] = ['small', 'medium', 'large', 'xl']
+    const found = new Set(vms.map((v) => v.tier))
     return order.filter((t) => found.has(t))
   }, [vms])
 
@@ -395,6 +398,49 @@ function NodeCard({
   )
 }
 
+// osLabelFor returns the user-facing OS string for a VM row. Priority:
+//   1. Agent osinfo `version-id` ("22.04") prefixed by distro name from agent
+//      `id` — most accurate, available when qemu-guest-agent is running.
+//   2. Nimbus os_template ("ubuntu-22.04" → "Ubuntu 22.04").
+//   3. Raw Proxmox ostype hint (l26/win10) humanized to "Linux"/"Windows 10".
+//   4. Empty when nothing is known — caller renders a dash.
+function osLabelFor(vm: ClusterVM): string {
+  if (vm.os_id && vm.os_version_id) {
+    const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
+    return `${distro} ${vm.os_version_id}`
+  }
+  if (vm.os_pretty) return vm.os_pretty
+  if (vm.os_template) return humanizeOSTemplate(vm.os_template)
+  return ''
+}
+
+function SourceLabel({ source }: { source: VMSource }) {
+  // Three states: local (this Nimbus), foreign (another Nimbus on the same
+  // cluster), external (not Nimbus-provisioned). Foreign and local share the
+  // green tone since both are Nimbus-managed; foreign carries a sub-label so
+  // admins can tell whose instance owns the credentials.
+  switch (source) {
+    case 'local':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS
+        </span>
+      )
+    case 'foreign':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        </span>
+      )
+    default:
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+          EXTERNAL
+        </span>
+      )
+  }
+}
+
 function VMTable({
   vms,
   allVMs,
@@ -414,6 +460,7 @@ function VMTable({
   hasFilters: boolean
   onClearFilters: () => void
 }) {
+  const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const selectClass =
     'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
 
@@ -493,9 +540,18 @@ function VMTable({
               {vms.map((vm) => {
                 const displayName = vm.hostname || vm.name
                 const dash = <span className="text-ink-3">—</span>
+                const osFamily = resolveOSId({
+                  agentId: vm.os_id,
+                  name: vm.name,
+                  template: vm.os_template,
+                  ostype: vm.os_template, // external VMs put raw ostype here
+                })
+                const osLabel = osLabelFor(vm)
                 return (
                   <tr key={`${vm.node}-${vm.vmid}`} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
-                    <td className="px-4 py-3 font-display font-medium whitespace-nowrap">{displayName}</td>
+                    <td className="px-4 py-3 font-display font-medium whitespace-nowrap">
+                      <VMDetailsPopover vm={vm}>{displayName}</VMDetailsPopover>
+                    </td>
                     <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.vmid}</td>
                     <td className="px-4 py-3">
                       <button
@@ -515,20 +571,40 @@ function VMTable({
                         </span>
                       ) : dash}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
-                      {vm.os_template || dash}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {osLabel ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <OSIcon family={osFamily} className="text-ink-2" />
+                          <span className="font-mono text-xs text-ink-2">{osLabel}</span>
+                        </span>
+                      ) : dash}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <StatusBadge status={vm.status} />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
-                      <span className={`font-mono text-[11px] uppercase tracking-wider ${vm.nimbus_managed ? 'text-good' : 'text-ink-3'}`}>
-                        {vm.nimbus_managed ? 'NIMBUS' : 'EXTERNAL'}
-                      </span>
+                      <SourceLabel source={vm.source} />
                     </td>
                     <td className="px-4 py-3">
-                      {vm.nimbus_managed && vm.username && vm.ip ? (
-                        <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
+                      {vm.source === 'local' && vm.username && vm.ip ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSshTarget({
+                              hostname: vm.hostname || vm.name,
+                              ip: vm.ip!,
+                              username: vm.username!,
+                              vmid: vm.vmid,
+                              node: vm.node,
+                              dbId: vm.id,
+                              keyName: vm.key_name,
+                            })
+                          }
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                        >
+                          <span aria-hidden>↗</span>
+                          <span>SSH</span>
+                        </button>
                       ) : dash}
                     </td>
                   </tr>
@@ -537,6 +613,9 @@ function VMTable({
             </tbody>
           </table>
         </Card>
+      )}
+      {sshTarget && (
+        <SSHDetailsModal target={sshTarget} onClose={() => setSshTarget(null)} />
       )}
     </div>
   )
