@@ -14,7 +14,7 @@ const navItems: Array<{ label: string; path: string; adminOnly?: boolean }> = [
   { label: 'My machines', path: '/vms' },
   { label: 'Keys', path: '/keys' },
   { label: 'Nodes', path: '/nodes', adminOnly: true },
-  { label: 'Admin', path: '/admin', adminOnly: true },
+  { label: 'Dashboard', path: '/admin', adminOnly: true },
   { label: 'Settings', path: '/settings', adminOnly: true },
 ]
 

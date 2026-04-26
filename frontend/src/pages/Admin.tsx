@@ -197,9 +197,9 @@ function SummaryStats({ stats }: { stats: StatsShape }) {
       />
       <GaugeStatsCard
         items={[
-          { label: 'CPU', pct: cpuPct, detail: `${stats.usedCores.toFixed(1)} / ${stats.totalCores} cores`, id: 'gauge-cpu' },
-          { label: 'Memory', pct: memPct, detail: `${formatBytes(stats.sumMemUsed)} / ${formatBytes(stats.sumMemTotal)}`, id: 'gauge-memory' },
-          { label: 'Storage', pct: storagePct, detail: `${formatBytes(stats.storageUsed)} / ${formatBytes(stats.storageTotal)}`, id: 'gauge-storage' },
+          { label: 'CPU Usage', pct: cpuPct, detail: `${stats.usedCores.toFixed(1)} / ${stats.totalCores} cores`, id: 'gauge-cpu' },
+          { label: 'Memory Usage', pct: memPct, detail: `${formatBytes(stats.sumMemUsed)} / ${formatBytes(stats.sumMemTotal)}`, id: 'gauge-memory' },
+          { label: 'Storage Usage', pct: storagePct, detail: `${formatBytes(stats.storageUsed)} / ${formatBytes(stats.storageTotal)}`, id: 'gauge-storage' },
         ]}
       />
     </div>
@@ -328,8 +328,15 @@ function NodeCard({
   active: boolean
   onClick: () => void
 }) {
-  const memPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
+  const memUsedPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
+  const memAllocPct = n.mem_total > 0 ? (n.mem_allocated / n.mem_total) * 100 : 0
+  const swapPct = n.swap_total > 0 ? (n.swap_used / n.swap_total) * 100 : 0
   const cpuPct = n.cpu * 100
+  // Swap is sticky — Linux rarely pages cold residuals back in even after
+  // pressure subsides, so most hosts carry KB-scale swap forever. Suppress
+  // the pill below 10 MiB to keep low-pressure cards quiet.
+  const swapping = n.swap_used > 10 * 1024 * 1024
+  const hasSwap = n.swap_total > 0
 
   return (
     <button
@@ -348,15 +355,40 @@ function NodeCard({
               {active && <span className="text-ink ml-2">· filtered</span>}
             </div>
           </div>
-          <StatusBadge status={n.status} />
+          <div className="flex flex-col items-end gap-1.5">
+            <StatusBadge status={n.status} />
+            {swapping && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)]"
+                title="Allocated memory exceeded physical RAM — host is paging to swap."
+              >
+                swap{' '}
+                <span className="normal-case tracking-normal">
+                  +{formatBytes(n.swap_used)}
+                </span>
+              </span>
+            )}
+          </div>
         </div>
-        <div className="mt-5 grid grid-cols-2 gap-5">
+        <div className="mt-5 flex flex-col gap-3">
+          <UsageBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(1)}%`} />
           <UsageBar
-            label="Memory"
-            pct={memPct}
+            label="Memory in use"
+            pct={memUsedPct}
             hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
           />
-          <UsageBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(1)}%`} />
+          <UsageBar
+            label="Memory allocated"
+            pct={memAllocPct}
+            hint={`${formatBytes(n.mem_allocated)} / ${formatBytes(n.mem_total)}`}
+          />
+          {hasSwap && (
+            <UsageBar
+              label="Swap Usage"
+              pct={swapPct}
+              hint={`${formatBytes(n.swap_used)} / ${formatBytes(n.swap_total)}`}
+            />
+          )}
         </div>
       </Card>
     </button>

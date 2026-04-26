@@ -113,6 +113,9 @@ export interface NodeView {
   max_cpu: number
   mem_used: number
   mem_total: number
+  mem_allocated: number
+  swap_used: number
+  swap_total: number
   vm_count: number
   vm_count_total: number
 }

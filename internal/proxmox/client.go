@@ -141,6 +141,18 @@ func (c *Client) GetNodes(ctx context.Context) ([]Node, error) {
 	return nodes, nil
 }
 
+// GetNodeStatus returns the per-node status block. Used to read swap counters
+// (`/nodes` only reports physical memory). Callers fan this out across nodes
+// in parallel.
+func (c *Client) GetNodeStatus(ctx context.Context, node string) (*NodeStatus, error) {
+	var status NodeStatus
+	path := fmt.Sprintf("/nodes/%s/status", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
 // ListVMs returns the QEMU VMs on a single node — used for tie-break VM
 // counts and for confirming a template VMID exists locally.
 func (c *Client) ListVMs(ctx context.Context, node string) ([]VMStatus, error) {
