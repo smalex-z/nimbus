@@ -309,4 +309,20 @@ export async function verifyAccessCode(code: string): Promise<{ verified: boolea
   return data
 }
 
+export interface AuthorizedDomainsView {
+  domains: string[]
+}
+
+export async function getAuthorizedGoogleDomains(): Promise<AuthorizedDomainsView> {
+  const { data } = await api.get<AuthorizedDomainsView>('/settings/google-domains')
+  return data
+}
+
+export async function saveAuthorizedGoogleDomains(
+  domains: string[],
+): Promise<AuthorizedDomainsView> {
+  const { data } = await api.put<AuthorizedDomainsView>('/settings/google-domains', { domains })
+  return data
+}
+
 export default api

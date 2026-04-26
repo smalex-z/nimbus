@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -83,6 +84,45 @@ func (s *Settings) GetAccessCode(w http.ResponseWriter, r *http.Request) {
 		AccessCode: settings.AccessCode,
 		Version:    settings.AccessCodeVersion,
 	})
+}
+
+type authorizedDomainsView struct {
+	Domains []string `json:"domains"`
+}
+
+type saveAuthorizedDomainsRequest struct {
+	Domains []string `json:"domains"`
+}
+
+// GetAuthorizedGoogleDomains handles GET /api/settings/google-domains (admin only).
+func (s *Settings) GetAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load authorized domains")
+		return
+	}
+	domains := []string{}
+	for _, d := range strings.Split(settings.AuthorizedGoogleDomains, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			domains = append(domains, d)
+		}
+	}
+	response.Success(w, authorizedDomainsView{Domains: domains})
+}
+
+// SaveAuthorizedGoogleDomains handles PUT /api/settings/google-domains (admin only).
+func (s *Settings) SaveAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
+	var req saveAuthorizedDomainsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := s.auth.SaveAuthorizedGoogleDomains(req.Domains); err != nil {
+		response.InternalError(w, "failed to save authorized domains")
+		return
+	}
+	s.GetAuthorizedGoogleDomains(w, r)
 }
 
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).

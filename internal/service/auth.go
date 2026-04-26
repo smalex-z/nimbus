@@ -23,6 +23,7 @@ var (
 	ErrUsersExist           = errors.New("users already exist")
 	ErrInvalidAccessCode    = errors.New("invalid access code")
 	ErrAccessCodeNotPresent = errors.New("access code not configured")
+	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -115,21 +116,128 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 // UpsertOAuthUser finds a user by email or creates one if none exists.
 // Used by OAuth providers where a password hash is not applicable.
 func (s *AuthService) UpsertOAuthUser(name, email string) (*UserView, error) {
+	view, _, err := s.UpsertOAuthUserWithCheck(name, email, nil)
+	return view, err
+}
+
+// UpsertOAuthUserWithCheck behaves like UpsertOAuthUser but invokes
+// allowCreate before creating a brand-new account. Returns
+// ErrDomainNotAuthorized when allowCreate returns false. The bool return
+// indicates whether the user already existed prior to this call.
+func (s *AuthService) UpsertOAuthUserWithCheck(
+	name, email string,
+	allowCreate func(email string) bool,
+) (*UserView, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	name = strings.TrimSpace(name)
 
 	var user db.User
 	err := s.db.Where("email = ?", email).First(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if allowCreate != nil && !allowCreate(email) {
+			return nil, false, ErrDomainNotAuthorized
+		}
 		user = db.User{Name: name, Email: email}
 		if err := s.db.Create(&user).Error; err != nil {
-			return nil, err
+			return nil, false, err
 		}
-	} else if err != nil {
-		return nil, err
+		return userToView(&user), false, nil
 	}
+	if err != nil {
+		return nil, false, err
+	}
+	return userToView(&user), true, nil
+}
 
-	return userToView(&user), nil
+// HasAuthorizedGoogleDomains reports whether the admin has configured at
+// least one authorized Google domain. Used to decide whether the Google
+// OAuth path is gated.
+func (s *AuthService) HasAuthorizedGoogleDomains() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	return len(splitDomains(settings.AuthorizedGoogleDomains)) > 0, nil
+}
+
+// IsGoogleDomainAuthorized reports whether the given email's domain is in the
+// admin-managed authorized-domain list. An empty list disables the bypass and
+// always returns false.
+func (s *AuthService) IsGoogleDomainAuthorized(email string) (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	domains := splitDomains(settings.AuthorizedGoogleDomains)
+	if len(domains) == 0 {
+		return false, nil
+	}
+	domain := emailDomain(email)
+	if domain == "" {
+		return false, nil
+	}
+	for _, d := range domains {
+		if d == domain {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SaveAuthorizedGoogleDomains replaces the authorized-domain list with the
+// supplied entries. Each entry is lowercased, trimmed, and de-duplicated; any
+// blank or "@"-prefixed entries are normalized.
+func (s *AuthService) SaveAuthorizedGoogleDomains(domains []string) error {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.AuthorizedGoogleDomains = joinDomains(normalizeDomains(domains))
+	return s.db.Save(settings).Error
+}
+
+func splitDomains(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	parts := strings.Split(joined, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func joinDomains(domains []string) string { return strings.Join(domains, ",") }
+
+func normalizeDomains(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		d = strings.ToLower(strings.TrimSpace(d))
+		d = strings.TrimPrefix(d, "@")
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
+}
+
+func emailDomain(email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return ""
+	}
+	return email[at+1:]
 }
 
 // CreateSession creates a new session for the given user ID and returns the session ID.
@@ -244,8 +352,15 @@ func (s *AuthService) VerifyAccessCode(userID uint, code string) error {
 		Error
 }
 
-// IsUserVerified returns true if the user is an admin or their stored
-// verified_code_version matches the current AccessCodeVersion.
+// IsUserVerified returns true when the user has access to the console under
+// the current authentication policy. Admins always pass. For everyone else,
+// access is granted dynamically when the user's email domain is in the
+// admin's current authorized-Google-domains list, OR when the user has
+// explicitly entered the current access code (their stored
+// verified_code_version matches).
+//
+// The domain check is intentionally dynamic and never persisted, so
+// adding/removing a domain takes effect on the very next request.
 func (s *AuthService) IsUserVerified(userID uint) (bool, error) {
 	var user db.User
 	if err := s.db.First(&user, userID).Error; err != nil {
@@ -257,6 +372,13 @@ func (s *AuthService) IsUserVerified(userID uint) (bool, error) {
 	settings, err := s.GetOAuthSettings()
 	if err != nil {
 		return false, err
+	}
+	if domain := emailDomain(user.Email); domain != "" {
+		for _, d := range splitDomains(settings.AuthorizedGoogleDomains) {
+			if d == domain {
+				return true, nil
+			}
+		}
 	}
 	return user.VerifiedCodeVersion == settings.AccessCodeVersion && settings.AccessCodeVersion > 0, nil
 }
@@ -291,9 +413,11 @@ func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
 	if next.GoogleClientSecret == "" {
 		next.GoogleClientSecret = existing.GoogleClientSecret
 	}
-	// Always preserve access code state — OAuth saves never touch it.
+	// Always preserve access code state and authorized-domain list — OAuth
+	// saves never touch them.
 	next.AccessCode = existing.AccessCode
 	next.AccessCodeVersion = existing.AccessCodeVersion
+	next.AuthorizedGoogleDomains = existing.AuthorizedGoogleDomains
 	next.ID = 1
 	return s.db.Save(&next).Error
 }

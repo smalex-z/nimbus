@@ -40,6 +40,12 @@ type OAuthSettings struct {
 	GoogleClientSecret string `gorm:"default:''"`
 	AccessCode         string `gorm:"default:''"`
 	AccessCodeVersion  int    `gorm:"default:0"`
+	// AuthorizedGoogleDomains is a comma-separated list of lowercased email
+	// domains. Google OAuth sign-ins from these domains bypass the access
+	// code requirement and are auto-verified on every login. When empty, no
+	// bypass is granted and Google sign-ups behave like email/password
+	// (subject to the access code).
+	AuthorizedGoogleDomains string `gorm:"default:''"`
 }
 
 // VM is the canonical record for a provisioned virtual machine.

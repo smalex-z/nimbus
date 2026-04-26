@@ -341,8 +341,86 @@ func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.googleProvider())(w, r)
 }
 
+// GoogleCallback wraps the shared OAuth callback flow with the
+// authorized-domain check. New users whose domain is not on the admin's
+// authorized-domain list are blocked before any account is created;
+// returning users whose domain IS authorized are auto-verified against the
+// current access code version so they bypass the /verify form.
 func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	a.oauthCallback(a.googleProvider(), "google")(w, r)
+	provider := a.googleProvider()
+	if provider == nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	stateCookie, err := r.Cookie(oauthStateCookie)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Redirect(w, r, "/auth/callback?error=invalid_state&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: "", Path: "/", MaxAge: -1})
+
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		http.Redirect(w, r, "/auth/callback?provider=google&error="+url.QueryEscape(errParam), http.StatusTemporaryRedirect)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/auth/callback?error=missing_code&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	userInfo, err := provider.Exchange(r.Context(), code)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Domain gate: when the admin has configured ANY authorized domains, the
+	// Google OAuth path is restricted to those domains for every login —
+	// including users that already exist (e.g. created via email/password).
+	// They can still sign in through the password form; Google OAuth itself
+	// is the gated path. An empty list means the gate is off.
+	hasGate, err := a.auth.HasAuthorizedGoogleDomains()
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+	if hasGate {
+		ok, err := a.auth.IsGoogleDomainAuthorized(userInfo.Email)
+		if err != nil {
+			http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+		if !ok {
+			http.Redirect(w, r, "/auth/callback?error=domain_not_authorized&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
+	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	// No DB write for the domain bypass — IsUserVerified consults the
+	// authorized-domain list dynamically on every request, so the bypass
+	// follows admin changes (add/remove) without lag.
+
+	sessionID, err := a.auth.CreateSession(user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/auth/callback?error=session_failed&provider=google", http.StatusTemporaryRedirect)
+		return
+	}
+
+	setSessionCookie(w, sessionID)
+
+	q := url.Values{}
+	q.Set("provider", "google")
+	q.Set("login", userInfo.Login)
+	http.Redirect(w, r, "/auth/callback?"+q.Encode(), http.StatusTemporaryRedirect)
 }
 
 // --- misc -------------------------------------------------------------------
