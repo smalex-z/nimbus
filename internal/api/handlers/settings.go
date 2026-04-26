@@ -351,11 +351,24 @@ func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 	// (provision.Service for cloud-init env injection). Disabled or empty
 	// BaseURL means push a zero config — provision will then skip the
 	// GPU bootstrap step on subsequent VMs.
+	//
+	// nimbusGPUAPI: prefer the request host (the admin's browser just
+	// proved it's reachable) over s.nimbusAppURL — if APP_URL is misconfigured
+	// (defaults to localhost:5173), this prevents poisoning the bootstrap
+	// config with a URL guests can't reach.
 	var bootstrapCfg provision.GPUBootstrapConfig
 	if settings.Enabled && settings.BaseURL != "" {
+		nimbusGPUAPI := strings.TrimRight(s.nimbusAppURL, "/") + "/api/gpu"
+		if r.Host != "" && !looksLikeLocalhost(r.Host) {
+			scheme := "http"
+			if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+				scheme = "https"
+			}
+			nimbusGPUAPI = scheme + "://" + r.Host + "/api/gpu"
+		}
 		bootstrapCfg = provision.GPUBootstrapConfig{
 			BaseURL:        settings.BaseURL,
-			NimbusGPUAPI:   strings.TrimRight(s.nimbusAppURL, "/") + "/api/gpu",
+			NimbusGPUAPI:   nimbusGPUAPI,
 			InferenceModel: settings.InferenceModel,
 		}
 	}
@@ -370,6 +383,26 @@ func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 		Configured:     settings.WorkerToken != "" && settings.BaseURL != "",
 		GX10Hostname:   settings.GX10Hostname,
 	})
+}
+
+// looksLikeLocalhost reports whether the bare host (no scheme, may include
+// port) refers to a loopback address — those are unreachable from VMs and
+// from the GX10, so callers should fall back to AppURL or refuse to bake
+// the host into per-VM bootstraps. Mirrors the URL-shaped helper in
+// provision/gpu_bootstrap.go but takes a "host:port" instead of a URL.
+func looksLikeLocalhost(host string) bool {
+	if host == "" {
+		return true
+	}
+	h := strings.ToLower(host)
+	if i := strings.LastIndex(h, ":"); i >= 0 && !strings.Contains(h[:i], ":") {
+		h = h[:i]
+	}
+	return h == "localhost" ||
+		strings.HasPrefix(h, "127.") ||
+		h == "0.0.0.0" ||
+		h == "::1" ||
+		h == "[::1]"
 }
 
 // (Worker-token regeneration is gone — operators don't see the token.
