@@ -114,6 +114,35 @@ func requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// requireVerified responds 403 with code "access_code_required" when a
+// non-admin user has not verified against the current access code version.
+// Admins always pass. Must be used after requireAuth.
+func requireVerified(authSvc *service.AuthService) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user := ctxutil.User(r.Context())
+			if user == nil {
+				response.Error(w, http.StatusUnauthorized, "Not authenticated")
+				return
+			}
+			if user.IsAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			ok, err := authSvc.IsUserVerified(user.ID)
+			if err != nil {
+				response.InternalError(w, "failed to check verification")
+				return
+			}
+			if !ok {
+				response.Error(w, http.StatusForbidden, "access_code_required")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func rateLimiter(rps float64, burst int) func(http.Handler) http.Handler {
 	limiter := rate.NewLimiter(rate.Limit(rps), burst)
 	return func(next http.Handler) http.Handler {

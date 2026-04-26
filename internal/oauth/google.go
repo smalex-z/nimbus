@@ -24,6 +24,11 @@ func (g *Google) AuthURL(state string) string {
 	v.Set("scope", "openid email profile")
 	v.Set("state", state)
 	v.Set("access_type", "online")
+	// Always present the account chooser so a user who picked a blocked
+	// account on a previous attempt can pick a different one. Without this,
+	// Google silently re-uses the active session and re-issues the same
+	// (still-unauthorized) email.
+	v.Set("prompt", "select_account")
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + v.Encode()
 }
 

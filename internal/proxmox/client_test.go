@@ -370,6 +370,46 @@ func TestClient_NextVMID(t *testing.T) {
 	}
 }
 
+func TestClient_NextVMIDFrom(t *testing.T) {
+	t.Parallel()
+	// Cluster has VMs at 100, 101, 9000, 9002. Lowest free at or above 9000
+	// must be 9001 — not 102 (which is below the floor) or 9003 (which would
+	// imply we counted from the top).
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/cluster/resources" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("type"); got != "vm" {
+			t.Errorf("type query = %q, want vm", got)
+		}
+		writeEnvelope(w, []map[string]any{
+			{"vmid": 100}, {"vmid": 101}, {"vmid": 9000}, {"vmid": 9002},
+		})
+	})
+	id, err := c.NextVMIDFrom(context.Background(), 9000)
+	if err != nil {
+		t.Fatalf("NextVMIDFrom: %v", err)
+	}
+	if id != 9001 {
+		t.Errorf("got %d, want 9001 (lowest free at or above floor)", id)
+	}
+}
+
+func TestClient_NextVMIDFrom_EmptyCluster(t *testing.T) {
+	t.Parallel()
+	// Fresh cluster — should return the floor itself.
+	_, c := newMockPVE(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeEnvelope(w, []map[string]any{})
+	})
+	id, err := c.NextVMIDFrom(context.Background(), 9000)
+	if err != nil {
+		t.Fatalf("NextVMIDFrom: %v", err)
+	}
+	if id != 9000 {
+		t.Errorf("got %d, want 9000 (floor on empty cluster)", id)
+	}
+}
+
 func TestClient_GetStorages(t *testing.T) {
 	t.Parallel()
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {

@@ -149,6 +149,38 @@ type ClusterIP struct {
 	RawConfig string // verbatim ipconfig0 value — retained for debugging
 }
 
+// ClusterVMDetail is the enriched per-VM snapshot the admin view consumes.
+// One row per non-template QEMU VM on every online node. IP discovery falls
+// back from cloud-init `ipconfig0` to the qemu-guest-agent's first non-loopback
+// IPv4 address; an empty IP means neither source produced one.
+type ClusterVMDetail struct {
+	VMID        int
+	Node        string
+	Name        string
+	Status      string   // "running" / "stopped" / "paused"
+	IP          string   // bare IPv4, "" if undiscoverable
+	IPSource    string   // "ipconfig0" | "agent" | "" when IP is empty
+	Tags        []string // raw tags from Proxmox; preserves user-applied entries
+	Description string   // raw description; carries Nimbus tier/OS marker for managed VMs
+	OSType      string   // raw `ostype` field — "l26", "win10", … "" when unset
+	OS          *OSInfo  // best-effort agent osinfo; nil when unavailable
+}
+
+// OSInfo mirrors the fields returned by qemu-guest-agent's guest-get-osinfo
+// command. Field tags match the wire format. Any subset may be empty when the
+// guest is partial-impl (Windows agents, for example, often skip `kernel-*`).
+type OSInfo struct {
+	ID            string `json:"id"`             // "ubuntu", "debian", "fedora", "mswindows", …
+	Name          string `json:"name"`           // "Ubuntu"
+	PrettyName    string `json:"pretty-name"`    // "Ubuntu 22.04.3 LTS"
+	Version       string `json:"version"`        // "22.04.3 LTS (Jammy Jellyfish)"
+	VersionID     string `json:"version-id"`     // "22.04"
+	KernelRelease string `json:"kernel-release"` // "5.15.0-91-generic"
+	KernelVersion string `json:"kernel-version"` // "#101-Ubuntu SMP …"
+	Machine       string `json:"machine"`        // "x86_64"
+	VariantID     string `json:"variant-id,omitempty"`
+}
+
 // taskStatus is what /nodes/{node}/tasks/{upid}/status returns.
 type taskStatus struct {
 	Status     string `json:"status"`     // "running" / "stopped"

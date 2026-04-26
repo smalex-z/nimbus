@@ -9,13 +9,17 @@ interface LayoutProps {
   showNav?: boolean
 }
 
-const navItems: Array<{ label: string; path: string; adminOnly?: boolean }> = [
+const navItems: Array<{ label: string; path: string }> = [
   { label: 'Provision', path: '/' },
   { label: 'My machines', path: '/vms' },
   { label: 'Keys', path: '/keys' },
-  { label: 'Nodes', path: '/nodes', adminOnly: true },
-  { label: 'Dashboard', path: '/admin', adminOnly: true },
-  { label: 'Settings', path: '/settings', adminOnly: true },
+]
+
+// Admin-only tabs render before the regular nav so Dashboard (where admins
+// land after sign-in) sits at the far left.
+const adminNavItems: Array<{ label: string; path: string }> = [
+  { label: 'Dashboard', path: '/admin' },
+  { label: 'Authentication', path: '/settings' },
 ]
 
 export default function Layout({ children, showNav = true }: LayoutProps) {
@@ -46,31 +50,38 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
             </Link>
 
             <div className="flex gap-1 items-center">
-              {navItems
-                .filter((item) => !item.adminOnly || user?.is_admin)
-                .sort((a, b) => {
-                  // Admins land on /admin after sign-in — surface that tab first.
-                  if (!user?.is_admin) return 0
-                  if (a.path === '/admin') return -1
-                  if (b.path === '/admin') return 1
-                  return 0
-                })
-                .map((item) => (
-                  <NavLink
-                    key={item.path}
-                    to={item.path}
-                    end={item.path === '/'}
-                    className={({ isActive }) =>
-                      `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
-                        isActive
-                          ? 'bg-[rgba(27,23,38,0.08)] text-ink'
-                          : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
-                      }`
-                    }
-                  >
-                    {item.label}
-                  </NavLink>
-                ))}
+              {user?.is_admin && adminNavItems.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  className={({ isActive }) =>
+                    `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
+                      isActive
+                        ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+                        : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+                    }`
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+
+              {navItems.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.path === '/'}
+                  className={({ isActive }) =>
+                    `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
+                      isActive
+                        ? 'bg-[rgba(27,23,38,0.08)] text-ink'
+                        : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
+                    }`
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
 
               <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />
 
