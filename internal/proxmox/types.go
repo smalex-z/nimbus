@@ -33,6 +33,23 @@ type ClusterStorage struct {
 	Used    uint64 `json:"disk"`
 }
 
+// ClusterVM is one row from /cluster/resources?type=vm — every VM (running or
+// stopped, plus templates) on every node, with both the configured ceiling
+// (maxmem/maxdisk/maxcpu) and live usage (mem/cpu). The scorer sums MaxMem
+// across non-template rows per node to derive committed RAM, so a node hosting
+// stopped VMs is not treated as having free capacity those VMs would reclaim
+// on restart.
+type ClusterVM struct {
+	VMID     int    `json:"vmid"`
+	Node     string `json:"node"`
+	Name     string `json:"name"`
+	Status   string `json:"status"` // "running" / "stopped"
+	Template int    `json:"template"`
+	MaxMem   uint64 `json:"maxmem"`  // configured RAM (bytes)
+	MaxDisk  uint64 `json:"maxdisk"` // configured disk (bytes)
+	MaxCPU   int    `json:"maxcpu"`  // configured vCPU count
+}
+
 // Storage describes one storage entry on a node, returned by GET /nodes/{n}/storage.
 //
 // The Content field is a comma-separated list (Proxmox sends it as a string) of
