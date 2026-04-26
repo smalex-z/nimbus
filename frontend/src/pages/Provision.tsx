@@ -5,7 +5,9 @@ import {
   getBootstrapStatus,
   bootstrapTemplates,
   listKeys,
+  getTunnelInfo,
   type BootstrapResult,
+  type TunnelInfo,
 } from '@/api/client'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
@@ -34,12 +36,6 @@ function isValidSubdomain(s: string): boolean {
   return SUBDOMAIN_RE.test(s.trim())
 }
 
-function isValidPort(s: string): boolean {
-  if (s.trim() === '') return false
-  const n = Number(s)
-  return Number.isInteger(n) && n >= 1 && n <= 65535
-}
-
 const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 interface FormState {
@@ -52,7 +48,6 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   subdomain: string
-  tunnelPort: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -65,7 +60,6 @@ const DEFAULT_FORM: FormState = {
   privKey: '',
   publicTunnel: false,
   subdomain: '',
-  tunnelPort: '80',
 }
 
 export default function Provision() {
@@ -83,6 +77,16 @@ export default function Provision() {
   // Saved-key inventory. We default the picker to the user's chosen default
   // key when the page loads with at least one saved key.
   const [savedKeys, setSavedKeys] = useState<SSHKey[]>([])
+
+  // Tunnel availability + host preview. When tunnels are disabled (no
+  // GOPHER_API_URL configured) we hide the public-access section entirely
+  // rather than showing a checkbox that does nothing.
+  const [tunnelInfo, setTunnelInfo] = useState<TunnelInfo | null>(null)
+  useEffect(() => {
+    getTunnelInfo()
+      .then(setTunnelInfo)
+      .catch(() => setTunnelInfo({ enabled: false, host: '' }))
+  }, [])
 
   useEffect(() => {
     getBootstrapStatus()
@@ -138,10 +142,7 @@ export default function Provision() {
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
     if (form.keyMode === 'saved' && form.savedKeyId === null) return false
-    if (form.publicTunnel) {
-      if (!isValidSubdomain(form.subdomain)) return false
-      if (!isValidPort(form.tunnelPort)) return false
-    }
+    if (form.publicTunnel && !isValidSubdomain(form.subdomain)) return false
     return true
   }, [form])
 
@@ -176,10 +177,8 @@ export default function Provision() {
           form.publicTunnel && form.subdomain.trim()
             ? form.subdomain.trim()
             : undefined,
-        tunnel_port:
-          form.publicTunnel && isValidPort(form.tunnelPort)
-            ? Number(form.tunnelPort)
-            : undefined,
+        // Provision-time tunnels are SSH only — backend defaults target_port
+        // to 22. Other ports get their own tunnels added post-provision.
       })
       setResult(res)
       setView('result')
@@ -231,7 +230,12 @@ export default function Provision() {
       {bootstrapped === true && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 mt-8">
           <Card className="p-9">
-            <FormBody form={form} updateForm={updateForm} savedKeys={savedKeys} />
+            <FormBody
+              form={form}
+              updateForm={updateForm}
+              savedKeys={savedKeys}
+              tunnelInfo={tunnelInfo}
+            />
           </Card>
 
           <Card className="p-7 self-start lg:sticky lg:top-[100px]">
@@ -375,9 +379,10 @@ interface FormBodyProps {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
+  tunnelInfo: TunnelInfo | null
 }
 
-function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -533,52 +538,47 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
         )}
       </div>
 
-      <div className="flex flex-col gap-2">
-        <label className="text-[13px] font-medium text-ink">Public access</label>
-        <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
-          <input
-            type="checkbox"
-            checked={form.publicTunnel}
-            onChange={(e) => updateForm('publicTunnel', e.target.checked)}
-            className="mt-0.5 w-4 h-4 accent-ink"
-          />
-          <div className="flex-1">
-            <div className="text-sm font-medium">Expose at a public hostname</div>
-            <div className="text-xs text-ink-3 mt-0.5">
-              Routes <span className="font-mono">https://&lt;subdomain&gt;</span> through Gopher to this VM's port 80.
+      {tunnelInfo?.enabled && (
+        <div className="flex flex-col gap-2">
+          <label className="text-[13px] font-medium text-ink">Public access</label>
+          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+            <input
+              type="checkbox"
+              checked={form.publicTunnel}
+              onChange={(e) => updateForm('publicTunnel', e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-ink"
+            />
+            <div className="flex-1">
+              <div className="text-sm font-medium">Expose SSH publicly</div>
+              <div className="text-xs text-ink-3 mt-0.5">
+                Bootstraps a Gopher reverse tunnel to this VM's port 22 so you
+                can SSH in from anywhere. Other services can be exposed later
+                from the machine page.
+              </div>
             </div>
-          </div>
-        </label>
-        {form.publicTunnel && (
-          <div className="mt-2 grid grid-cols-1 sm:grid-cols-[1fr_120px] gap-3">
-            <Input
-              label="Subdomain"
-              placeholder="my-project"
-              value={form.subdomain}
-              onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
-              error={
-                form.subdomain && !isValidSubdomain(form.subdomain)
-                  ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
-                  : undefined
-              }
-              hint="The full URL is shown after provisioning."
-            />
-            <Input
-              label="In-VM port"
-              placeholder="80"
-              inputMode="numeric"
-              value={form.tunnelPort}
-              onChange={(e) => updateForm('tunnelPort', e.target.value.replace(/[^0-9]/g, ''))}
-              error={
-                form.tunnelPort && !isValidPort(form.tunnelPort)
-                  ? '1–65535'
-                  : undefined
-              }
-              hint="Default 80."
-            />
-          </div>
-        )}
-      </div>
+          </label>
+          {form.publicTunnel && (
+            <div className="mt-2 flex flex-col gap-2">
+              <Input
+                label="Subdomain"
+                placeholder="my-project"
+                value={form.subdomain}
+                onChange={(e) => updateForm('subdomain', e.target.value.toLowerCase())}
+                error={
+                  form.subdomain && !isValidSubdomain(form.subdomain)
+                    ? 'Lowercase letters, digits, hyphens. 1–63 chars, no leading or trailing hyphen.'
+                    : undefined
+                }
+                hint={
+                  isValidSubdomain(form.subdomain) && tunnelInfo?.host
+                    ? `Will route through ${form.subdomain}.${tunnelInfo.host} — Gopher assigns the public port after the tunnel comes up.`
+                    : `Will route through <subdomain>.${tunnelInfo?.host ?? 'gopher'} — public port assigned by Gopher post-provision.`
+                }
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -594,8 +594,7 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
   const tunnelLabel = (() => {
     if (!form.publicTunnel) return 'no'
     if (!isValidSubdomain(form.subdomain)) return '—'
-    const port = isValidPort(form.tunnelPort) ? form.tunnelPort : '80'
-    return `${form.subdomain}.… → :${port}`
+    return `${form.subdomain}.… → ssh`
   })()
   const sshLabel = (() => {
     if (form.keyMode === 'gen') return 'generate (vaulted)'
@@ -615,7 +614,7 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="vCPU / RAM" value={tierLabel} />
         <SummaryRow label="Disk" value={diskLabel} />
         <SummaryRow label="SSH" value={sshLabel} />
-        <SummaryRow label="Public tunnel" value={tunnelLabel} />
+        <SummaryRow label="Public SSH" value={tunnelLabel} />
       </div>
     </>
   )
@@ -757,12 +756,10 @@ function ResultView({ result, onReset }: ResultViewProps) {
 
         {result.tunnel_url && (
           <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
-            <span className="text-base">🌐</span>
+            <span className="text-base">🔐</span>
             <div>
-              <strong>Public tunnel live.</strong>{' '}
-              <a href={result.tunnel_url} target="_blank" rel="noreferrer" className="font-mono underline">
-                {result.tunnel_url}
-              </a>
+              <strong>SSH tunnel live.</strong>{' '}
+              <span className="font-mono break-all">{result.tunnel_url}</span>
             </div>
           </div>
         )}
@@ -784,7 +781,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
           <CredCell label="SSH command" value={sshCommand} fullWidth />
           {result.tunnel_url && (
-            <CredCell label="Public URL" value={result.tunnel_url} fullWidth />
+            <CredCell label="Public SSH" value={result.tunnel_url} fullWidth />
           )}
         </div>
 

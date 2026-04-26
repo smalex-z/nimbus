@@ -53,7 +53,7 @@ func NewRouter(d Deps) http.Handler {
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
 	settings := handlers.NewSettings(d.Auth)
-	tunnels := handlers.NewTunnels(d.Tunnels)
+	tunnels := handlers.NewTunnels(d.Tunnels, d.Config.GopherAPIURL)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -64,6 +64,10 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/ips", ips.List)
 		r.Get("/cluster/vms", cluster.ListVMs)
 		r.Get("/cluster/stats", cluster.Stats)
+
+		// Public tunnel preview info — exposes the configured Gopher host (no
+		// secrets) so the SPA can show "<subdomain>.<host>" before submitting.
+		r.Get("/tunnels/info", tunnels.Info)
 
 		// Reconcile can run a few seconds on a busy cluster (per-node walks)
 		// — give it a longer timeout than other read endpoints.

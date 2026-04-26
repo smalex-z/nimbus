@@ -256,6 +256,16 @@ Optional. Set `GOPHER_API_URL` + `GOPHER_API_KEY` to enable. When `GOPHER_API_UR
 is empty `tunnel.New` returns `(nil, nil)` and `provision.Service` silently
 ignores `public_tunnel` fields on incoming requests.
 
+**Provision-time tunnels are SSH only by design.** The form exposes a single
+"Expose SSH publicly" checkbox + subdomain input — `target_port` defaults to
+22 server-side. The intent is to get SSH reachable before layering app
+traffic on top; multi-port tunnels for HTTP/custom services will be added
+through a separate post-provision surface. `provision.Request.TunnelPort`
+still exists so scripts/tests can override, but the API and UI lock to 22.
+The SPA fetches `GET /api/tunnels/info` (returns `{enabled, host}`) at form
+load so it can preview `<subdomain>.<host>` without hardcoding the Gopher
+domain.
+
 Provision flow with tunnel enabled:
 
 1. **Local validation**: subdomain syntax checked before IP reserve.

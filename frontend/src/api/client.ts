@@ -138,6 +138,16 @@ export async function attachPrivateKey(id: number, privateKey: string): Promise<
   await api.post(`/keys/${id}/private-key`, { private_key: privateKey })
 }
 
+export interface TunnelInfo {
+  enabled: boolean
+  host: string
+}
+
+export async function getTunnelInfo(): Promise<TunnelInfo> {
+  const { data } = await api.get<TunnelInfo>('/tunnels/info')
+  return data
+}
+
 export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }
