@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"sync"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -20,20 +19,40 @@ func NewCluster(px *proxmox.Client, svc *provision.Service) *Cluster {
 	return &Cluster{px: px, svc: svc}
 }
 
+// vmSource describes which Nimbus instance (if any) provisioned a VM.
+//   - "local"    — created by this Nimbus instance (in the local DB)
+//   - "foreign"  — created by another Nimbus instance (carries nimbus-* tags)
+//   - "external" — not Nimbus-provisioned (no marker)
+type vmSource string
+
+const (
+	sourceLocal    vmSource = "local"
+	sourceForeign  vmSource = "foreign"
+	sourceExternal vmSource = "external"
+)
+
 type clusterVMView struct {
 	VMID   int    `json:"vmid"`
 	Name   string `json:"name"`
 	Node   string `json:"node"`
 	Status string `json:"status"` // running, stopped, paused
 
-	// Nimbus-managed fields. Zero values when the VM was not created by Nimbus.
-	NimbusManaged bool   `json:"nimbus_managed"`
-	Hostname      string `json:"hostname,omitempty"`
-	IP            string `json:"ip,omitempty"`
-	Tier          string `json:"tier,omitempty"`
-	OSTemplate    string `json:"os_template,omitempty"`
-	Username      string `json:"username,omitempty"`
-	CreatedAt     string `json:"created_at,omitempty"`
+	// Source distinguishes local-Nimbus / foreign-Nimbus / external. The
+	// frontend uses this for the SOURCE column and to gate features that need
+	// local credentials (e.g. SSH copy).
+	Source vmSource `json:"source"`
+
+	// NimbusManaged is true for both local and foreign Nimbus VMs. Retained
+	// for backward compatibility with frontend code that predates Source.
+	NimbusManaged bool `json:"nimbus_managed"`
+
+	IP         string `json:"ip,omitempty"`
+	IPSource   string `json:"ip_source,omitempty"` // ipconfig0 | agent
+	Tier       string `json:"tier,omitempty"`      // small/medium/large/xl, "custom" for external
+	OSTemplate string `json:"os_template,omitempty"`
+	Hostname   string `json:"hostname,omitempty"` // local-only Nimbus hostname
+	Username   string `json:"username,omitempty"` // local-only SSH username
+	CreatedAt  string `json:"created_at,omitempty"`
 }
 
 type clusterStatsView struct {
@@ -67,38 +86,21 @@ func (h *Cluster) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListVMs handles GET /api/cluster/vms — every VM on the cluster, joined with
-// Nimbus DB info where available.
+// Nimbus DB info where available and enriched with Proxmox config (tags,
+// ipconfig0, ostype, optional guest-agent IP fallback).
+//
+// Per-VM data sources, in priority order:
+//  1. Local Nimbus DB row → tier, OS template, hostname, username, IP, created_at.
+//  2. Proxmox tags (nimbus-tier-*, nimbus-os-*) → tier and OS for foreign-Nimbus VMs.
+//  3. Proxmox ostype → best-effort OS hint for external VMs (raw "l26"/"win10"/…).
+//  4. ipconfig0 / qemu-guest-agent → IP for external and foreign-Nimbus VMs.
 func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
-	nodes, err := h.px.GetNodes(r.Context())
+	details, err := h.px.GetClusterVMDetails(r.Context())
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
 
-	// Fan out ListVMs across online nodes.
-	type nodeVMs struct {
-		node string
-		vms  []proxmox.VMStatus
-	}
-	results := make([]nodeVMs, len(nodes))
-	var wg sync.WaitGroup
-	for i, n := range nodes {
-		if n.Status != "online" {
-			continue
-		}
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
-			vms, err := h.px.ListVMs(r.Context(), name)
-			if err != nil {
-				return
-			}
-			results[i] = nodeVMs{node: name, vms: vms}
-		}(i, n.Name)
-	}
-	wg.Wait()
-
-	// Index Nimbus DB VMs by vmid for the join.
 	dbVMs, err := h.svc.List(r.Context(), nil)
 	if err != nil {
 		response.FromError(w, err)
@@ -109,29 +111,52 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 		byVMID[v.VMID] = v
 	}
 
-	out := make([]clusterVMView, 0)
-	for _, nv := range results {
-		for _, vm := range nv.vms {
-			if vm.Template != 0 {
-				continue
-			}
-			view := clusterVMView{
-				VMID:   vm.VMID,
-				Name:   vm.Name,
-				Node:   nv.node,
-				Status: vm.Status,
-			}
-			if managed, ok := byVMID[vm.VMID]; ok {
-				view.NimbusManaged = true
-				view.Hostname = managed.Hostname
+	out := make([]clusterVMView, 0, len(details))
+	for _, d := range details {
+		view := clusterVMView{
+			VMID:     d.VMID,
+			Name:     d.Name,
+			Node:     d.Node,
+			Status:   d.Status,
+			IP:       d.IP,
+			IPSource: d.IPSource,
+		}
+
+		if managed, ok := byVMID[d.VMID]; ok {
+			// Local Nimbus DB row wins for tier/OS/hostname/username/IP.
+			view.Source = sourceLocal
+			view.NimbusManaged = true
+			view.Hostname = managed.Hostname
+			view.Tier = managed.Tier
+			view.OSTemplate = managed.OSTemplate
+			view.Username = managed.Username
+			view.CreatedAt = managed.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+			if managed.IP != "" {
 				view.IP = managed.IP
-				view.Tier = managed.Tier
-				view.OSTemplate = managed.OSTemplate
-				view.Username = managed.Username
-				view.CreatedAt = managed.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+				view.IPSource = "" // DB-sourced; not from cluster walk
 			}
 			out = append(out, view)
+			continue
 		}
+
+		tier, osTemplate, isNimbus := proxmox.ParseNimbusTags(d.Tags)
+		switch {
+		case isNimbus:
+			view.Source = sourceForeign
+			view.NimbusManaged = true
+			view.Tier = tier
+			view.OSTemplate = osTemplate
+		default:
+			view.Source = sourceExternal
+			view.Tier = "custom"
+			// OSTemplate left empty for external — the frontend renders the
+			// raw ostype hint instead via a separate field if needed. For
+			// now, surface a user-friendly fallback when ostype is set.
+			if d.OSType != "" {
+				view.OSTemplate = d.OSType
+			}
+		}
+		out = append(out, view)
 	}
 	response.Success(w, out)
 }

@@ -6,7 +6,7 @@ import CopyButton from '@/components/ui/CopyButton'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
 import { formatBytes } from '@/lib/format'
-import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName } from '@/types'
+import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName, VMSource } from '@/types'
 
 interface AdminData {
   nodes: NodeView[]
@@ -107,8 +107,8 @@ export default function Admin() {
 
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
-    const found = new Set(vms.map((v) => v.tier).filter((t): t is TierName => Boolean(t)))
     const order: TierName[] = ['small', 'medium', 'large', 'xl']
+    const found = new Set(vms.map((v) => v.tier))
     return order.filter((t) => found.has(t))
   }, [vms])
 
@@ -363,6 +363,33 @@ function NodeCard({
   )
 }
 
+function SourceLabel({ source }: { source: VMSource }) {
+  // Three states: local (this Nimbus), foreign (another Nimbus on the same
+  // cluster), external (not Nimbus-provisioned). Foreign and local share the
+  // green tone since both are Nimbus-managed; foreign carries a sub-label so
+  // admins can tell whose instance owns the credentials.
+  switch (source) {
+    case 'local':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS
+        </span>
+      )
+    case 'foreign':
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        </span>
+      )
+    default:
+      return (
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+          EXTERNAL
+        </span>
+      )
+  }
+}
+
 function VMTable({
   vms,
   allVMs,
@@ -490,12 +517,10 @@ function VMTable({
                       <StatusBadge status={vm.status} />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
-                      <span className={`font-mono text-[11px] uppercase tracking-wider ${vm.nimbus_managed ? 'text-good' : 'text-ink-3'}`}>
-                        {vm.nimbus_managed ? 'NIMBUS' : 'EXTERNAL'}
-                      </span>
+                      <SourceLabel source={vm.source} />
                     </td>
                     <td className="px-4 py-3">
-                      {vm.nimbus_managed && vm.username && vm.ip ? (
+                      {vm.source === 'local' && vm.username && vm.ip ? (
                         <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
                       ) : dash}
                     </td>

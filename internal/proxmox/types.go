@@ -134,6 +134,21 @@ type ClusterIP struct {
 	RawConfig string // verbatim ipconfig0 value — retained for debugging
 }
 
+// ClusterVMDetail is the enriched per-VM snapshot the admin view consumes.
+// One row per non-template QEMU VM on every online node. IP discovery falls
+// back from cloud-init `ipconfig0` to the qemu-guest-agent's first non-loopback
+// IPv4 address; an empty IP means neither source produced one.
+type ClusterVMDetail struct {
+	VMID     int
+	Node     string
+	Name     string
+	Status   string   // "running" / "stopped" / "paused"
+	IP       string   // bare IPv4, "" if undiscoverable
+	IPSource string   // "ipconfig0" | "agent" | "" when IP is empty
+	Tags     []string // raw tags from Proxmox; preserves user-applied entries
+	OSType   string   // raw `ostype` field — "l26", "win10", … "" when unset
+}
+
 // taskStatus is what /nodes/{node}/tasks/{upid}/status returns.
 type taskStatus struct {
 	Status     string `json:"status"`     // "running" / "stopped"

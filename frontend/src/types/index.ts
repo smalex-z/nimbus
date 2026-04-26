@@ -124,16 +124,26 @@ export interface ClusterStats {
 
 export type ClusterVMStatus = 'running' | 'stopped' | 'paused'
 
+export type VMSource = 'local' | 'foreign' | 'external'
+
 export interface ClusterVM {
   vmid: number
   name: string
   node: string
   status: ClusterVMStatus
+  source: VMSource
   nimbus_managed: boolean
   hostname?: string
   ip?: string
-  tier?: TierName
-  os_template?: OSTemplate
+  // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)
+  // or "agent" (qemu-guest-agent fallback). Empty when the IP came from the
+  // local Nimbus DB.
+  ip_source?: string
+  // tier is one of TierName for Nimbus-managed VMs, or "custom" for external.
+  tier?: TierName | 'custom'
+  // os_template is a known OSTemplate for Nimbus-managed VMs, or a raw
+  // Proxmox ostype hint (e.g. "l26", "win10") for external VMs.
+  os_template?: OSTemplate | string
   username?: string
   created_at?: string
 }

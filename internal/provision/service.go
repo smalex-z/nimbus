@@ -65,11 +65,13 @@ type ProxmoxClient interface {
 	GetNodes(ctx context.Context) ([]proxmox.Node, error)
 	GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error)
 	GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error)
+	GetVMConfig(ctx context.Context, node string, vmid int) (map[string]any, error)
 	TemplateExists(ctx context.Context, node string, vmid int) (bool, error)
 	NextVMID(ctx context.Context) (int, error)
 	CloneVM(ctx context.Context, sourceNode, targetNode string, templateVMID, newVMID int, name string) (string, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	SetCloudInit(ctx context.Context, node string, vmid int, cfg proxmox.CloudInitConfig) error
+	SetVMTags(ctx context.Context, node string, vmid int, tags []string) error
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
@@ -263,6 +265,16 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
 	}
 
+	// Stamp Nimbus marker tags so other Nimbus instances sharing this Proxmox
+	// cluster recognize this VM as foreign-Nimbus-managed (vs. external) and
+	// can surface its tier/OS in the admin view. Tag failure is non-fatal —
+	// the VM is otherwise complete and a follow-up reconcile/backfill will
+	// retry.
+	tags := proxmox.EncodeNimbusTags(req.Tier, req.OSTemplate)
+	if err := s.px.SetVMTags(ctx, target, newVMID, tags); err != nil {
+		log.Printf("set tags vmid=%d: %v (continuing)", newVMID, err)
+	}
+
 	// Step 5: resize the disk to tier spec. The cloud image ships at a small
 	// size; we *grow* it by the difference. (Proxmox accepts +<n>G deltas.)
 	resizeDelta := tier.DiskGB - 10 // cloud images are typically 10G base
@@ -352,6 +364,63 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		KeyName:       keyName,
 		Warning:       warning,
 	}, nil
+}
+
+// BackfillTags walks every persisted VM row and stamps the Nimbus marker tags
+// onto the corresponding Proxmox VM if they're missing. Idempotent: VMs that
+// already carry the full marker set (nimbus + tier + os) are skipped without
+// an API write.
+//
+// Used at startup to retrofit tags onto VMs provisioned by older Nimbus
+// builds that didn't tag on creation. Returns the number of VMs whose tags
+// were updated. Per-VM failures are logged but do not abort the walk.
+func (s *Service) BackfillTags(ctx context.Context) (int, error) {
+	var vms []db.VM
+	if err := s.db.WithContext(ctx).Find(&vms).Error; err != nil {
+		return 0, fmt.Errorf("list vms: %w", err)
+	}
+	updated := 0
+	for _, vm := range vms {
+		if vm.Tier == "" || vm.OSTemplate == "" || vm.Node == "" || vm.VMID == 0 {
+			continue
+		}
+		cfg, err := s.px.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err != nil {
+			log.Printf("backfill tags: get config vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+			continue
+		}
+		var existing []string
+		if raw, _ := cfg["tags"].(string); raw != "" {
+			existing = proxmox.SplitTags(raw)
+		}
+		want := proxmox.MergeNimbusTags(existing, vm.Tier, vm.OSTemplate)
+		if tagsEqual(existing, want) {
+			continue
+		}
+		if err := s.px.SetVMTags(ctx, vm.Node, vm.VMID, want); err != nil {
+			log.Printf("backfill tags: set vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+			continue
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// tagsEqual compares two tag slices for set equality (order-insensitive).
+func tagsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, t := range a {
+		seen[t] = true
+	}
+	for _, t := range b {
+		if !seen[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // List returns persisted VM rows. Phase 1 ignores ownerID and returns all.
