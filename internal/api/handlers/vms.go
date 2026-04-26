@@ -39,6 +39,7 @@ type createVMRequest struct {
 	PublicTunnel bool   `json:"public_tunnel,omitempty"`
 	Subdomain    string `json:"subdomain,omitempty"`
 	TunnelPort   int    `json:"tunnel_port,omitempty"`
+	EnableGPU    bool   `json:"enable_gpu,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -113,6 +114,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		PublicTunnel: req.PublicTunnel,
 		Subdomain:    subdomain,
 		TunnelPort:   req.TunnelPort,
+		EnableGPU:    req.EnableGPU,
 		OwnerID:      ownerID,
 	}, reporter)
 	if err != nil {
