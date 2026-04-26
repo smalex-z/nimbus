@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import nimbusLogo from '@/assets/Nimbus_Logo.png'
-import api, { getS3Storage } from '@/api/client'
+import api, { getGPUInference, getS3Storage } from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
 
@@ -54,6 +54,24 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
     }
   }, [user?.is_admin, location.pathname])
 
+  // gpuPlaneEnabled gates the top-level "GPU" tab. We only render it once
+  // an admin has paired a GX10 — pre-pairing the tab would lead users to a
+  // page that has nothing to show. Polled lazily so a fresh pairing is
+  // reflected in the nav within a minute without a page refresh.
+  const [gpuPlaneEnabled, setGpuPlaneEnabled] = useState(false)
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
+    const tick = () => {
+      getGPUInference()
+        .then((s) => { if (!cancelled) setGpuPlaneEnabled(s.enabled) })
+        .catch(() => { /* keep last known state on error */ })
+    }
+    tick()
+    const id = setInterval(tick, 60_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [user])
+
   const handleSignOut = async () => {
     try {
       await api.post('/auth/logout')
@@ -95,9 +113,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   S3
                 </NavLink>
               )}
-              <NavLink to="/gpu" className={navLinkClass}>
-                GPU
-              </NavLink>
+              {gpuPlaneEnabled && (
+                <NavLink to="/gpu" className={navLinkClass}>
+                  GPU
+                </NavLink>
+              )}
               {!user?.is_admin && (
                 <NavLink to="/keys" className={navLinkClass}>
                   Keys
@@ -136,6 +156,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                       S3 Storage
                     </NavLink>
                   )}
+                  <NavLink to="/gpu-host" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    GX10 GPU
+                  </NavLink>
                   <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Keys
                   </NavLink>

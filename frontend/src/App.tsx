@@ -9,6 +9,7 @@ import RequireVerified from '@/components/RequireVerified'
 import Admin from '@/pages/Admin'
 import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
+import GPUHost from '@/pages/GPUHost'
 import Keys from '@/pages/Keys'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
@@ -88,6 +89,7 @@ export default function App() {
                       <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
                       <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
                       <Route path="/s3" element={<RequireAdmin><S3 /></RequireAdmin>} />
+                      <Route path="/gpu-host" element={<RequireAdmin><GPUHost /></RequireAdmin>} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>
