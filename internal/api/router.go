@@ -91,6 +91,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/access-code/status", auth.VerifyStatus)
 			r.Post("/access-code/verify", auth.VerifyAccessCode)
 
+			// Bootstrap status is a read-only yes/no — both admins and
+			// regular members need it so the Provision UI can decide whether
+			// to render the form (templates ready) or the "admin access
+			// required" card (templates missing). The destructive POST stays
+			// admin-only below.
+			r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+
 			// Admin-only routes — cluster observability + cluster-wide
 			// configuration. Default users never see these endpoints; the
 			// Admin and Authentication pages are admin-only in the SPA too.
@@ -107,10 +114,9 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(60*time.Second)).
 					Post("/ips/reconcile", ips.Reconcile)
 
-				// Bootstrap status is read-only; bootstrap-templates can
-				// take 10-20 minutes when downloading all 4 OSes across
-				// every online node — give it room.
-				r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+				// Bootstrap templates can take 10-20 minutes when
+				// downloading all 4 OSes across every online node —
+				// give it room.
 				r.With(middleware.Timeout(30*time.Minute)).
 					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
 

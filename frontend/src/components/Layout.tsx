@@ -15,8 +15,10 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'Keys', path: '/keys' },
 ]
 
+// Admin-only tabs render before the regular nav so Dashboard (where admins
+// land after sign-in) sits at the far left.
 const adminNavItems: Array<{ label: string; path: string }> = [
-  { label: 'Admin', path: '/admin' },
+  { label: 'Dashboard', path: '/admin' },
   { label: 'Authentication', path: '/settings' },
 ]
 
@@ -48,11 +50,10 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
             </Link>
 
             <div className="flex gap-1 items-center">
-              {navItems.map((item) => (
+              {user?.is_admin && adminNavItems.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
-                  end={item.path === '/'}
                   className={({ isActive }) =>
                     `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
                       isActive
@@ -65,10 +66,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                 </NavLink>
               ))}
 
-              {user?.is_admin && adminNavItems.map((item) => (
+              {navItems.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
+                  end={item.path === '/'}
                   className={({ isActive }) =>
                     `px-3.5 py-2 rounded-[8px] text-sm font-medium transition-colors no-underline ${
                       isActive
