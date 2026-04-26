@@ -20,6 +20,7 @@ import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 import { buildSSHCommand, parseTunnelURL } from '@/lib/format'
+import TunnelsModal from '@/components/ui/TunnelsModal'
 import {
   OS_OPTIONS,
   type OSTemplate,
@@ -728,6 +729,7 @@ interface ResultViewProps {
 
 function ResultView({ result, onReset }: ResultViewProps) {
   const { user } = useAuth()
+  const [tunnelsOpen, setTunnelsOpen] = useState(false)
   const sshCommand = buildSSHCommand(result.username, result.ip, result.key_name)
   const tunnel = result.tunnel_url ? parseTunnelURL(result.tunnel_url) : undefined
   const publicSSHCommand = tunnel
@@ -823,10 +825,10 @@ function ResultView({ result, onReset }: ResultViewProps) {
           {hasTunnel && (
             <Button
               variant="ghost"
-              disabled
-              title="Per-port HTTP/TCP tunnels — coming soon"
+              onClick={() => setTunnelsOpen(true)}
+              title="Add HTTP/TCP tunnels for services running on this VM"
             >
-              Manage tunnels
+              🌐 Manage tunnels
             </Button>
           )}
           <Link to={dashboardHref}>
@@ -834,6 +836,13 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </Link>
           <Button onClick={onReset}>Provision another</Button>
         </div>
+        {tunnelsOpen && (
+          <TunnelsModal
+            vmId={result.id}
+            hostname={result.hostname}
+            onClose={() => setTunnelsOpen(false)}
+          />
+        )}
       </Card>
     </div>
   )

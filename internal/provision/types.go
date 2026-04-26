@@ -43,6 +43,10 @@ type Request struct {
 // outside the cluster's LAN, where the VM's internal IP isn't routable
 // from Nimbus's network position.
 type Result struct {
+	// ID is the Nimbus DB row id, used by the result page to wire follow-up
+	// actions (e.g. opening the per-VM tunnel manager) without a separate
+	// lookup. Distinct from VMID, which is Proxmox's cluster-wide VMID.
+	ID            uint   `json:"id"`
 	VMID          int    `json:"vmid"`
 	Hostname      string `json:"hostname"`
 	IP            string `json:"ip"`

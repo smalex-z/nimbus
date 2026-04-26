@@ -96,6 +96,9 @@ export interface CreateKeyResponse extends SSHKey {
 }
 
 export interface ProvisionResult {
+  // id is the Nimbus DB row id — used by the result page to wire the
+  // Networks (per-port tunnels) modal without a separate lookup.
+  id: number
   vmid: number
   hostname: string
   ip: string
