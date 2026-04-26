@@ -14,6 +14,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/s3storage"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
@@ -30,6 +31,7 @@ type Deps struct {
 	Proxmox    *proxmox.Client
 	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
 	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
+	S3         *s3storage.Service
 	Config     *config.Config
 	Restart    func()
 }
@@ -57,6 +59,7 @@ func NewRouter(d Deps) http.Handler {
 	settings := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).
 		WithTunnelInfoSetter(tunnels)
+	s3 := handlers.NewS3(d.S3, d.Provision)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -131,6 +134,21 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/settings/gopher", settings.GetGopher)
 				r.Put("/settings/gopher", settings.SaveGopher)
 				r.Get("/tunnels", tunnels.List)
+
+				// S3 storage (singleton MinIO VM) — admin-only.
+				// CreateStorage is the long-running deploy: provision flow
+				// + SSH bootstrap can take 5-8 minutes on a cold pull.
+				r.Get("/s3/storage", s3.GetStorage)
+				r.With(middleware.Timeout(15*time.Minute)).
+					Post("/s3/storage", s3.CreateStorage)
+				r.With(middleware.Timeout(5*time.Minute)).
+					Delete("/s3/storage", s3.DeleteStorage)
+
+				// Bucket CRUD on the deployed MinIO. Returns 503 from
+				// writeBucketsError when storage is absent or not ready.
+				r.Get("/s3/buckets", s3.ListBuckets)
+				r.Post("/s3/buckets", s3.CreateBucket)
+				r.Delete("/s3/buckets/{name}", s3.DeleteBucket)
 			})
 
 			// User-scoped routes — non-admins must be verified against the

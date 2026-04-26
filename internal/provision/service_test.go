@@ -51,6 +51,8 @@ type fakePVE struct {
 	setVMDescription  func(context.Context, string, int, string) error
 	resizeDisk        func(context.Context, string, int, string, string) error
 	startVM           func(context.Context, string, int) (string, error)
+	stopVM            func(context.Context, string, int) (string, error)
+	deleteVM          func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 
 	cloneCalls     atomic.Int32
@@ -109,6 +111,18 @@ func (f *fakePVE) ResizeDisk(ctx context.Context, n string, vmid int, d, s strin
 }
 func (f *fakePVE) StartVM(ctx context.Context, n string, vmid int) (string, error) {
 	return f.startVM(ctx, n, vmid)
+}
+func (f *fakePVE) StopVM(ctx context.Context, n string, vmid int) (string, error) {
+	if f.stopVM == nil {
+		return "", nil
+	}
+	return f.stopVM(ctx, n, vmid)
+}
+func (f *fakePVE) DeleteVM(ctx context.Context, n string, vmid int) (string, error) {
+	if f.deleteVM == nil {
+		return "", nil
+	}
+	return f.deleteVM(ctx, n, vmid)
 }
 func (f *fakePVE) GetAgentInterfaces(ctx context.Context, n string, vmid int) ([]proxmox.NetworkInterface, error) {
 	return f.getAgentIfaces(ctx, n, vmid)

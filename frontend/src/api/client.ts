@@ -529,4 +529,124 @@ export async function saveAuthorizedGitHubOrgs(
   return data
 }
 
+// ── S3 storage (Phase 3 — singleton MinIO VM) ────────────────────────────
+
+export type S3Status = 'deploying' | 'ready' | 'error' | 'deleting'
+
+export interface S3StorageView {
+  vmid: number
+  node: string
+  status: S3Status
+  disk_gb: number
+  endpoint?: string
+  root_user?: string
+  root_password?: string
+  error_msg?: string
+}
+
+export interface S3Bucket {
+  name: string
+  created_at: string
+  object_count: number
+  total_size_bytes: number
+}
+
+export interface S3DeployProgress {
+  step: string
+  label: string
+}
+
+// getS3Storage returns the singleton storage row, or null when nothing
+// is deployed (the API returns 404 in that case — we translate that to
+// null so the UI can render the empty state without try/catch).
+export async function getS3Storage(): Promise<S3StorageView | null> {
+  try {
+    const { data } = await api.get<S3StorageView>('/s3/storage')
+    return data
+  } catch (err) {
+    if (err instanceof Error && err.message === 'no s3 storage deployed') return null
+    throw err
+  }
+}
+
+// deployS3Storage POSTs to /api/s3/storage, NDJSON-streamed like
+// provisionVMStreaming. Same shape: progress events, then a single
+// terminal `result` (success) or `error` line. Resolves with the final
+// storage row.
+export async function deployS3Storage(
+  diskGB: number,
+  onProgress: (evt: S3DeployProgress) => void,
+  signal?: AbortSignal,
+): Promise<S3StorageView> {
+  const resp = await fetch('/api/s3/storage', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify({ disk_gb: diskGB }),
+    signal,
+  })
+  if (!resp.ok) {
+    let message = `request failed (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (body?.error) message = body.error
+    } catch {
+      // body wasn't JSON
+    }
+    throw new Error(message)
+  }
+  if (!resp.body) throw new Error('server returned no body')
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let done = false
+  while (!done) {
+    const chunk = await reader.read()
+    done = chunk.done
+    if (chunk.value) buffer += decoder.decode(chunk.value, { stream: true })
+
+    let nl = buffer.indexOf('\n')
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      nl = buffer.indexOf('\n')
+      if (!line) continue
+
+      let evt: { type?: string; step?: string; label?: string; data?: S3StorageView; message?: string }
+      try {
+        evt = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (evt.type === 'progress' && evt.step && evt.label) {
+        onProgress({ step: evt.step, label: evt.label })
+      } else if (evt.type === 'result' && evt.data) {
+        return evt.data
+      } else if (evt.type === 'error') {
+        throw new Error(evt.message ?? 's3 storage deploy failed')
+      }
+    }
+  }
+  throw new Error('deploy stream ended without a result')
+}
+
+export async function deleteS3Storage(): Promise<void> {
+  await api.delete('/s3/storage')
+}
+
+export async function listS3Buckets(): Promise<S3Bucket[]> {
+  const { data } = await api.get<S3Bucket[]>('/s3/buckets')
+  return data ?? []
+}
+
+export async function createS3Bucket(name: string): Promise<{ name: string }> {
+  const { data } = await api.post<{ name: string }>('/s3/buckets', { name })
+  return data
+}
+
+export async function deleteS3Bucket(name: string): Promise<void> {
+  await api.delete(`/s3/buckets/${encodeURIComponent(name)}`)
+}
+
 export default api

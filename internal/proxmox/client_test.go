@@ -834,3 +834,66 @@ func TestClient_ListClusterIPs_PartialNodeFailure(t *testing.T) {
 		t.Errorf("expected partial result containing 10.0.0.10, got %+v", got)
 	}
 }
+
+// TestClient_StopVM verifies the wire shape of a stop request: POST to
+// /nodes/{n}/qemu/{vmid}/status/stop, task UPID returned via the standard
+// envelope.
+func TestClient_StopVM(t *testing.T) {
+	t.Parallel()
+	var capturedMethod, capturedPath string
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		writeEnvelope(w, "UPID:node1:001:stop:42")
+	})
+
+	taskID, err := c.StopVM(context.Background(), "node1", 42)
+	if err != nil {
+		t.Fatalf("StopVM: %v", err)
+	}
+	if capturedMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", capturedMethod)
+	}
+	if capturedPath != "/api2/json/nodes/node1/qemu/42/status/stop" {
+		t.Errorf("path = %s", capturedPath)
+	}
+	if taskID != "UPID:node1:001:stop:42" {
+		t.Errorf("taskID = %q", taskID)
+	}
+}
+
+// TestClient_DeleteVM verifies the wire shape of a destroy request: DELETE
+// to /nodes/{n}/qemu/{vmid} with purge=1 + destroy-unreferenced-disks=1 in
+// the query string. Asserting these is critical — silently dropping either
+// flag leaves orphan disks in storage that the IP pool can't see.
+func TestClient_DeleteVM(t *testing.T) {
+	t.Parallel()
+	var capturedMethod, capturedPath, capturedQuery string
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		capturedQuery = r.URL.RawQuery
+		writeEnvelope(w, "UPID:node1:002:qmdestroy:42")
+	})
+
+	taskID, err := c.DeleteVM(context.Background(), "node1", 42)
+	if err != nil {
+		t.Fatalf("DeleteVM: %v", err)
+	}
+	if capturedMethod != http.MethodDelete {
+		t.Errorf("method = %s, want DELETE", capturedMethod)
+	}
+	if capturedPath != "/api2/json/nodes/node1/qemu/42" {
+		t.Errorf("path = %s", capturedPath)
+	}
+	q, _ := url.ParseQuery(capturedQuery)
+	if q.Get("purge") != "1" {
+		t.Errorf("purge = %q, want 1", q.Get("purge"))
+	}
+	if q.Get("destroy-unreferenced-disks") != "1" {
+		t.Errorf("destroy-unreferenced-disks = %q, want 1", q.Get("destroy-unreferenced-disks"))
+	}
+	if taskID != "UPID:node1:002:qmdestroy:42" {
+		t.Errorf("taskID = %q", taskID)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"nimbus/internal/netscan"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/s3storage"
 	"nimbus/internal/secrets"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
@@ -104,7 +105,7 @@ func main() {
 
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
-		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{},
+		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -300,6 +301,8 @@ func main() {
 	}
 	syncCancel()
 
+	s3Svc := s3storage.New(database.DB)
+
 	router := api.NewRouter(api.Deps{
 		Auth:       authSvc,
 		Provision:  provSvc,
@@ -310,6 +313,7 @@ func main() {
 		Proxmox:    pveClient,
 		Tunnels:    tunnelClient,
 		TunnelURL:  gopherSettings.APIURL,
+		S3:         s3Svc,
 		Config:     cfg,
 		Restart:    restartSelf,
 	})
