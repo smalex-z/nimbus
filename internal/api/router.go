@@ -57,16 +57,6 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/setup/status", setup.Status)
 		r.Post("/setup/admin", setup.CreateAdmin)
 
-		r.Get("/nodes", nodes.List)
-		r.Get("/ips", ips.List)
-		r.Get("/cluster/vms", cluster.ListVMs)
-		r.Get("/cluster/stats", cluster.Stats)
-
-		// Reconcile can run a few seconds on a busy cluster (per-node walks)
-		// — give it a longer timeout than other read endpoints.
-		r.With(middleware.Timeout(60*time.Second)).
-			Post("/ips/reconcile", ips.Reconcile)
-
 		// VM provisioning — long-running, gets its own timeout.
 		r.Route("/vms", func(r chi.Router) {
 			r.Use(middleware.Timeout(180 * time.Second))
@@ -86,13 +76,6 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/{id}/default", keys.SetDefault)
 		})
 
-		// Admin operations: template bootstrap. This can take 10-20 minutes
-		// when downloading all 4 OSes across all online nodes — give it room.
-		r.Route("/admin", func(r chi.Router) {
-			r.Get("/bootstrap-status", bs.BootstrapStatus)
-			r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
-		})
-
 		// Auth routes (public)
 		r.Post("/auth/register", auth.Register)
 		r.Post("/auth/login", auth.Login)
@@ -110,9 +93,30 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
 
-			// Admin-only routes
+			// Admin-only routes — cluster observability + cluster-wide
+			// mutations. Default users are restricted to the user-scoped
+			// /vms and /keys surface above.
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin)
+
+				r.Get("/nodes", nodes.List)
+				r.Get("/ips", ips.List)
+				r.Get("/cluster/vms", cluster.ListVMs)
+				r.Get("/cluster/stats", cluster.Stats)
+
+				// Reconcile can run a few seconds on a busy cluster
+				// (per-node walks) — give it a longer timeout.
+				r.With(middleware.Timeout(60*time.Second)).
+					Post("/ips/reconcile", ips.Reconcile)
+
+				// Template bootstrap can take 10-20 minutes when
+				// downloading all 4 OSes across all online nodes —
+				// give it room.
+				r.Route("/admin", func(r chi.Router) {
+					r.Get("/bootstrap-status", bs.BootstrapStatus)
+					r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
+				})
+
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
 			})
