@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 // Deps bundles the dependencies the router needs.
@@ -27,6 +28,8 @@ type Deps struct {
 	Pool       *ippool.Pool
 	Reconciler *ippool.Reconciler
 	Proxmox    *proxmox.Client
+	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
+	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
 	Config     *config.Config
 	Restart    func()
 }
@@ -50,12 +53,21 @@ func NewRouter(d Deps) http.Handler {
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler)
-	settings := handlers.NewSettings(d.Auth)
+	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
+	settings := handlers.NewSettings(d.Auth).
+		WithTunnelAppliers(d.Provision).
+		WithTunnelInfoSetter(tunnels)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
 		r.Get("/setup/status", setup.Status)
 		r.Post("/setup/admin", setup.CreateAdmin)
+
+		// Tunnel preview info — exposes the configured Gopher host (no
+		// secrets) so the SPA can show "<host>:<port>" before submitting.
+		// Public so the Provision form can render the disabled-checkbox
+		// state with the right hint copy when tunnels aren't configured.
+		r.Get("/tunnels/info", tunnels.Info)
 
 		// Auth routes (public)
 		r.Post("/auth/register", auth.Register)
@@ -79,6 +91,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/access-code/status", auth.VerifyStatus)
 			r.Post("/access-code/verify", auth.VerifyAccessCode)
 
+			// Bootstrap status is a read-only yes/no — both admins and
+			// regular members need it so the Provision UI can decide whether
+			// to render the form (templates ready) or the "admin access
+			// required" card (templates missing). The destructive POST stays
+			// admin-only below.
+			r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+
 			// Admin-only routes — cluster observability + cluster-wide
 			// configuration. Default users never see these endpoints; the
 			// Admin and Authentication pages are admin-only in the SPA too.
@@ -95,10 +114,9 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(60*time.Second)).
 					Post("/ips/reconcile", ips.Reconcile)
 
-				// Bootstrap status is read-only; bootstrap-templates can
-				// take 10-20 minutes when downloading all 4 OSes across
-				// every online node — give it room.
-				r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+				// Bootstrap templates can take 10-20 minutes when
+				// downloading all 4 OSes across every online node —
+				// give it room.
 				r.With(middleware.Timeout(30*time.Minute)).
 					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
 
@@ -112,6 +130,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/github-orgs", settings.SaveAuthorizedGitHubOrgs)
 				r.Get("/settings/gopher", settings.GetGopher)
 				r.Put("/settings/gopher", settings.SaveGopher)
+				r.Get("/tunnels", tunnels.List)
 			})
 
 			// User-scoped routes — non-admins must be verified against the
@@ -120,9 +139,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Use(requireVerified(d.Auth))
 
 				r.Route("/vms", func(r chi.Router) {
-					r.Use(middleware.Timeout(180 * time.Second))
 					r.Get("/", vms.List)
-					r.Post("/", vms.Create)
+					// Provision is the slow path: clone + cloud-init + boot
+					// takes 30-60s on its own, plus an optional Gopher tunnel
+					// bootstrap that can wait on dpkg locks for another
+					// 1-3min during early-boot cloud-init contention.
+					r.With(middleware.Timeout(6*time.Minute)).Post("/", vms.Create)
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 				})

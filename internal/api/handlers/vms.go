@@ -27,13 +27,16 @@ type VMs struct {
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
 
 type createVMRequest struct {
-	Hostname    string `json:"hostname"`
-	Tier        string `json:"tier"`
-	OSTemplate  string `json:"os_template"`
-	SSHKeyID    *uint  `json:"ssh_key_id,omitempty"`
-	SSHPubKey   string `json:"ssh_pubkey,omitempty"`
-	SSHPrivKey  string `json:"ssh_privkey,omitempty"`
-	GenerateKey bool   `json:"generate_key,omitempty"`
+	Hostname     string `json:"hostname"`
+	Tier         string `json:"tier"`
+	OSTemplate   string `json:"os_template"`
+	SSHKeyID     *uint  `json:"ssh_key_id,omitempty"`
+	SSHPubKey    string `json:"ssh_pubkey,omitempty"`
+	SSHPrivKey   string `json:"ssh_privkey,omitempty"`
+	GenerateKey  bool   `json:"generate_key,omitempty"`
+	PublicTunnel bool   `json:"public_tunnel,omitempty"`
+	Subdomain    string `json:"subdomain,omitempty"`
+	TunnelPort   int    `json:"tunnel_port,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -48,14 +51,27 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Provision-time tunnel is SSH-only — there's no public subdomain in
+	// play (Gopher allocates a port on the gateway instead), but its API
+	// still needs a unique tunnel identifier. Default to the VM hostname,
+	// which is already validated unique upstream and shaped like a DNS
+	// label, so the operator never has to think about it.
+	subdomain := req.Subdomain
+	if req.PublicTunnel && subdomain == "" {
+		subdomain = req.Hostname
+	}
+
 	res, err := h.svc.Provision(r.Context(), provision.Request{
-		Hostname:    req.Hostname,
-		Tier:        req.Tier,
-		OSTemplate:  req.OSTemplate,
-		SSHKeyID:    req.SSHKeyID,
-		SSHPubKey:   req.SSHPubKey,
-		SSHPrivKey:  req.SSHPrivKey,
-		GenerateKey: req.GenerateKey,
+		Hostname:     req.Hostname,
+		Tier:         req.Tier,
+		OSTemplate:   req.OSTemplate,
+		SSHKeyID:     req.SSHKeyID,
+		SSHPubKey:    req.SSHPubKey,
+		SSHPrivKey:   req.SSHPrivKey,
+		GenerateKey:  req.GenerateKey,
+		PublicTunnel: req.PublicTunnel,
+		Subdomain:    subdomain,
+		TunnelPort:   req.TunnelPort,
 	})
 	if err != nil {
 		response.FromError(w, err)
@@ -154,6 +170,12 @@ func validateCreate(req createVMRequest) error {
 		return &internalerrors.ValidationError{
 			Field:   "ssh",
 			Message: "specify at most one of ssh_key_id, ssh_pubkey, or generate_key",
+		}
+	}
+	if req.PublicTunnel && (req.TunnelPort < 0 || req.TunnelPort > 65535) {
+		return &internalerrors.ValidationError{
+			Field:   "tunnel_port",
+			Message: "must be 1–65535 (omit or 0 for default 80)",
 		}
 	}
 	return nil
