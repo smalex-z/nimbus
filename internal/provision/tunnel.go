@@ -28,6 +28,13 @@ const (
 	tunnelBootstrapRetryDelay  = 5 * time.Second
 )
 
+// maxBootstrapOutputBytes caps the bootstrap stdout/stderr we keep in the
+// VM's tunnel_error column. Real failures fit comfortably; runaway loops
+// (e.g. a bootstrap script stuck reprinting the same error) won't bloat the
+// DB. We keep the head + tail so the user sees the start of the run AND the
+// final state where the script gave up.
+const maxBootstrapOutputBytes = 8 * 1024
+
 // tunnelActiveTimeout / tunnelPollInterval pace the post-bootstrap status poll.
 // Design §10.1 specifies 60 s / 3 s.
 const (
@@ -118,11 +125,24 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		cmd := fmt.Sprintf("curl -fsSL %s | GOPHER_MACHINE_NAME=%s sh", quote(bootstrapURL), quote(machineName))
 		out, runErr := session.CombinedOutput(cmd)
 		if runErr != nil {
-			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, strings.TrimSpace(string(out)))
+			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, truncateOutput(string(out), maxBootstrapOutputBytes))
 		}
 		return nil
 	}
 	return fmt.Errorf("ssh connect failed after %d attempts: %w", tunnelBootstrapMaxAttempts, lastErr)
+}
+
+// truncateOutput keeps the first half + last half of s when it exceeds max,
+// joined by an elision marker. Trims surrounding whitespace first so the
+// return is tidy when the input fits. Used to keep bootstrap stderr from
+// blowing up tunnel_error storage on stuck loops.
+func truncateOutput(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	half := max / 2
+	return s[:half] + "\n…[truncated " + fmt.Sprintf("%d", len(s)-max) + " bytes]…\n" + s[len(s)-half:]
 }
 
 // dialSSH opens a single SSH session to ip:22 with the supplied config,
