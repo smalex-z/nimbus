@@ -197,7 +197,7 @@ func TestProvision_HappyPath_BringYourOwnKey(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 		Tier:        "medium",
 		OSTemplate:  "debian-12",
 		GenerateKey: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestProvision_WaitForIPTimeout_SoftSuccess(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("expected soft success, got error: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestProvision_WaitForIPHardError_StillFails(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("expected error for non-timeout failure")
 	}
@@ -357,7 +357,7 @@ func TestProvision_FailureReleasesIP(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -387,7 +387,7 @@ func TestProvision_NoEligibleNode(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	var conflict *internalerrors.ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected ConflictError, got %T: %v", err, err)
@@ -435,7 +435,7 @@ func TestProvision_TemplateMissing_FiltersNode(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	got := captured.Load()
@@ -452,7 +452,7 @@ func TestProvision_UnknownTier(t *testing.T) {
 		Tier:       "bogus",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError, got %v", err)
@@ -467,7 +467,7 @@ func TestProvision_UnknownOSTemplate(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "windows-95",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError, got %v", err)
@@ -483,7 +483,7 @@ func TestProvision_GenerateKey_StoresAndRetrievesFromVault(t *testing.T) {
 		Tier:        "small",
 		OSTemplate:  "ubuntu-24.04",
 		GenerateKey: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -584,7 +584,7 @@ func TestProvision_BYO_MismatchedKeypair_Rejected(t *testing.T) {
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  pubA,
 		SSHPrivKey: privB,
-	})
+	}, nil)
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError on mismatched keypair, got %v", err)
@@ -609,7 +609,7 @@ func TestProvision_BYO_MatchingKeypair_StoredInVault(t *testing.T) {
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  pub,
 		SSHPrivKey: priv,
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -644,7 +644,7 @@ func TestProvision_UseSavedKey_LinksWithoutDuplicating(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHKeyID:   &key.ID,
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -686,7 +686,7 @@ func TestProvision_NoSSHInputUsesDefaultKey(t *testing.T) {
 		Hostname:   "default-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
@@ -706,7 +706,7 @@ func TestProvision_NoSSHInputAndNoDefault_ValidationError(t *testing.T) {
 		Hostname:   "x",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
-	})
+	}, nil)
 	var ve *internalerrors.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected ValidationError, got %v", err)
@@ -740,7 +740,7 @@ func TestProvision_VerifyHappyPath(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestProvision_VerifyRaceLost_RetriesNextIP(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestProvision_VerifyExhaustsRetries(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	var conflict *internalerrors.ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected ConflictError, got %T: %v", err, err)
@@ -866,7 +866,7 @@ func TestProvision_VerifyErrorTreatedAsUnsafe(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -944,7 +944,7 @@ func TestPickNode_DiskGateRejectsFullPool(t *testing.T) {
 		Tier:       "medium",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	got := captured.Load()
@@ -982,7 +982,7 @@ func TestPickNode_SharedStorageDedupes(t *testing.T) {
 		Tier:       "medium",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 }
@@ -1022,7 +1022,7 @@ func TestPickNode_StoppedVMsBlockPlacement(t *testing.T) {
 		Tier:       "large",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	got := captured.Load()
@@ -1058,7 +1058,7 @@ func TestPickNode_RejectionMessageListsAllNodes(t *testing.T) {
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
-	})
+	}, nil)
 	var conflict *internalerrors.ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected ConflictError, got %T: %v", err, err)
@@ -1099,7 +1099,7 @@ func TestProvision_TunnelDisabled_IgnoresFlag(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -1125,7 +1125,7 @@ func TestProvision_TunnelInfraError_VMStillSucceeds(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision should still succeed despite Gopher 5xx, got %v", err)
 	}
@@ -1181,7 +1181,7 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 		PublicTunnel: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -1212,5 +1212,86 @@ func TestResultString_RedactsPrivateKey(t *testing.T) {
 	}
 	if !strings.Contains(s, "<REDACTED>") {
 		t.Errorf("expected <REDACTED> marker, got %s", s)
+	}
+}
+
+// recordReporter captures every ProgressEvent for order assertions.
+func recordReporter() (provision.ProgressReporter, *[]string) {
+	var seen []string
+	rep := func(evt provision.ProgressEvent) {
+		seen = append(seen, evt.Step)
+	}
+	return rep, &seen
+}
+
+func TestProvision_Progress_HappyPath_EmitsAllStepsInOrder(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+
+	rep, seen := recordReporter()
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "progress-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}, rep); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	want := []string{
+		provision.StepReserveIP,
+		provision.StepCloneTpl,
+		provision.StepConfigure,
+		provision.StepStartVM,
+		provision.StepWaitAgent,
+	}
+	if len(*seen) != len(want) {
+		t.Fatalf("got %d events %v, want %d %v", len(*seen), *seen, len(want), want)
+	}
+	for i, step := range want {
+		if (*seen)[i] != step {
+			t.Errorf("event[%d] = %q, want %q", i, (*seen)[i], step)
+		}
+	}
+}
+
+func TestProvision_Progress_FailureStopsAtFailingPhase(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Hard-fail the clone *task* — clone() succeeds (returns a UPID) but
+	// WaitForTask reports failure, so we expect the reserve_ip event to
+	// have fired and *no* later event.
+	fake.waitForTask = func(_ context.Context, _, _ string, _ time.Duration) error {
+		return errors.New("clone failed: out of disk")
+	}
+	svc, _, _ := newTestService(t, fake)
+
+	rep, seen := recordReporter()
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "broken-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}, rep)
+	if err == nil {
+		t.Fatalf("expected clone failure, got nil")
+	}
+
+	want := []string{provision.StepReserveIP}
+	if len(*seen) != len(want) || (*seen)[0] != want[0] {
+		t.Fatalf("got events %v, want exactly %v", *seen, want)
+	}
+}
+
+func TestProvision_Progress_NilReporterIsAllowed(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "noprog-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}, nil); err != nil {
+		t.Fatalf("Provision with nil reporter: %v", err)
 	}
 }

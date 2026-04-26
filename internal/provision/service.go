@@ -184,7 +184,16 @@ func (s *Service) SetTunnelClient(t *tunnel.Client) {
 // before returning. The Proxmox-side artifact (a half-cloned VM) is *not*
 // cleaned up automatically in Phase 1 — that's a follow-up. We do persist a
 // VM row with status=failed for visibility.
-func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
+//
+// progress is optional; when non-nil it receives a ProgressEvent each time a
+// user-visible phase boundary closes. The handler uses it to drive the
+// frontend's checklist; service tests use it to assert step ordering.
+func (s *Service) Provision(ctx context.Context, req Request, progress ProgressReporter) (*Result, error) {
+	report := func(step, label string) {
+		if progress != nil {
+			progress(ProgressEvent{Step: step, Label: label})
+		}
+	}
 	tier, ok := nodescore.Tiers[req.Tier]
 	if !ok {
 		return nil, &internalerrors.ValidationError{Field: "tier", Message: fmt.Sprintf("unknown tier %q", req.Tier)}
@@ -271,6 +280,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	report(StepReserveIP, "Reserved IP and selected node")
 
 	// Step 3: clone the template (serialized to avoid VMID races on the
 	// fresh-VMID assignment for the new VM).
@@ -292,6 +302,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 	if err := s.px.WaitForTask(ctx, target, taskID, s.cfg.PollInterval); err != nil {
 		return nil, fmt.Errorf("clone task: %w", err)
 	}
+	report(StepCloneTpl, "Cloned golden template")
 
 	// Step 4: cloud-init.
 	username := proxmox.TemplateUsername(req.OSTemplate)
@@ -330,6 +341,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("resize disk: %w", err)
 		}
 	}
+	report(StepConfigure, "Configured cloud-init and disk")
 
 	// Step 6: start the VM.
 	startTask, err := s.px.StartVM(ctx, target, newVMID)
@@ -341,6 +353,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("start task: %w", err)
 		}
 	}
+	report(StepStartVM, "Started VM")
 
 	// Step 7: wait for IP readiness.
 	//
@@ -369,6 +382,7 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("wait for ready: %w", err)
 		}
 	}
+	report(StepWaitAgent, "Guest agent ready")
 
 	// Step 7b: Gopher tunnel bootstrap. If we successfully registered a tunnel
 	// AND WaitForIP confirmed reachability (no warning), SSH in and run the
