@@ -253,6 +253,7 @@ export interface VMTunnel {
 export interface CreateVMTunnelRequest {
   target_port: number
   subdomain?: string
+  private?: boolean
 }
 
 export async function listVMTunnels(vmId: number): Promise<VMTunnel[]> {

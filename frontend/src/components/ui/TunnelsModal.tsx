@@ -22,6 +22,7 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
   const [busy, setBusy] = useState(false)
   const [port, setPort] = useState('')
   const [subdomain, setSubdomain] = useState('')
+  const [visibility, setVisibility] = useState<'public' | 'private'>('public')
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   const load = async () => {
@@ -62,9 +63,11 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
       await createVMTunnel(vmId, {
         target_port: portNum,
         subdomain: subdomain.trim() || undefined,
+        private: visibility === 'private',
       })
       setPort('')
       setSubdomain('')
+      setVisibility('public')
       await load()
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'failed to add tunnel')
@@ -140,13 +143,59 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
           )}
         </div>
 
-        <form onSubmit={onAdd} className="mt-8">
-          <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-2">
-            Add tunnel
+        <form onSubmit={onAdd} className="mt-8 pt-6 border-t border-line">
+          <div className="text-base font-display font-medium mb-5">Add Tunnel</div>
+
+          <div className="mb-5">
+            <label className="block text-[13px] font-medium text-ink mb-2">
+              Visibility{' '}
+              <span
+                className="text-ink-3 cursor-help"
+                title="Public exposes the tunnel on the gateway's external interface (reachable from anywhere). Private binds to the VPS's loopback only — useful for service-to-service traffic that should never leave the host."
+                aria-label="info"
+              >
+                ⓘ
+              </span>
+            </label>
+            <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={visibility === 'public'}
+                onClick={() => setVisibility('public')}
+                className={`px-4 py-2 text-sm font-medium transition-colors ${
+                  visibility === 'public'
+                    ? 'bg-good text-white'
+                    : 'bg-white/85 text-ink hover:bg-white'
+                }`}
+              >
+                🌐 Public
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={visibility === 'private'}
+                onClick={() => setVisibility('private')}
+                className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
+                  visibility === 'private'
+                    ? 'bg-ink text-white'
+                    : 'bg-white/85 text-ink hover:bg-white'
+                }`}
+              >
+                🔒 Private
+              </button>
+            </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-[140px_1fr_auto] gap-3 items-end">
-            <label className="block">
-              <span className="text-[11px] font-mono text-ink-3">VM port</span>
+
+          <div className="mb-5">
+            <label className="block text-[13px] font-medium text-ink mb-1">
+              Local Port{' '}
+              <span className="text-ink-3 font-normal">(port your service listens on)</span>
+            </label>
+            <div className="flex items-center rounded-[8px] border border-line bg-white/85 focus-within:border-ink">
+              <span className="px-3 py-2 font-mono text-sm text-ink-3 border-r border-line bg-[rgba(27,23,38,0.03)]">
+                localhost:
+              </span>
               <input
                 type="number"
                 value={port}
@@ -155,31 +204,43 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
                 min={1}
                 max={65535}
                 required
-                className="mt-1 block w-full px-3 py-2 rounded-[8px] border border-line bg-white/85 font-mono text-sm focus:outline-none focus:border-ink"
+                className="flex-1 px-3 py-2 font-mono text-sm bg-transparent focus:outline-none"
               />
+            </div>
+          </div>
+
+          <div className="mb-1">
+            <label className="block text-[13px] font-medium text-ink mb-1">
+              Subdomain{' '}
+              <span className="text-ink-3 font-normal">
+                (optional — exposes service via HTTPS subdomain)
+              </span>
             </label>
-            <label className="block">
-              <span className="text-[11px] font-mono text-ink-3">Subdomain (optional)</span>
-              <input
-                type="text"
-                value={subdomain}
-                onChange={(e) => setSubdomain(e.target.value)}
-                placeholder={`auto: derived from ${hostname}`}
-                className="mt-1 block w-full px-3 py-2 rounded-[8px] border border-line bg-white/85 font-mono text-sm focus:outline-none focus:border-ink"
-              />
-            </label>
+            <input
+              type="text"
+              value={subdomain}
+              onChange={(e) => setSubdomain(e.target.value)}
+              placeholder={hostname}
+              className="block w-full px-3 py-2 rounded-[8px] border border-line bg-white/85 font-mono text-sm focus:outline-none focus:border-ink"
+            />
+            <p className="mt-1.5 text-[12px] text-ink-3">
+              Leave blank to expose by port only.
+            </p>
+          </div>
+
+          {submitError && (
+            <p className="mt-3 text-[12px] text-bad">{submitError}</p>
+          )}
+
+          <div className="flex justify-end gap-2 mt-6">
+            <Button variant="ghost" type="button" onClick={onClose}>
+              Cancel
+            </Button>
             <Button type="submit" disabled={busy}>
-              {busy ? 'Adding…' : 'Add'}
+              {busy ? 'Creating…' : 'Create Tunnel'}
             </Button>
           </div>
-          {submitError && (
-            <p className="mt-2 text-[12px] text-bad">{submitError}</p>
-          )}
         </form>
-
-        <div className="flex justify-end mt-9">
-          <Button variant="ghost" onClick={onClose}>Close</Button>
-        </div>
       </Card>
     </div>,
     document.body,

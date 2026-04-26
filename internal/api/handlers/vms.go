@@ -208,10 +208,11 @@ func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
 type createTunnelRequest struct {
 	TargetPort int    `json:"target_port"`
 	Subdomain  string `json:"subdomain,omitempty"`
+	Private    bool   `json:"private,omitempty"`
 }
 
 // CreateTunnel handles POST /api/vms/{id}/tunnels — registers a per-port
-// tunnel on this VM's Gopher machine. Body: {target_port, subdomain?}.
+// tunnel on this VM's Gopher machine. Body: {target_port, subdomain?, private?}.
 func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -222,7 +223,7 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
-	t, err := h.svc.CreateVMTunnel(r.Context(), id, req.TargetPort, req.Subdomain)
+	t, err := h.svc.CreateVMTunnel(r.Context(), id, req.TargetPort, req.Subdomain, req.Private)
 	if err != nil {
 		response.FromError(w, err)
 		return

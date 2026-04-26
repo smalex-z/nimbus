@@ -162,11 +162,13 @@ type Tunnel struct {
 }
 
 // CreateTunnelRequest is the body of POST /api/v1/tunnels. Subdomain is
-// optional — Gopher derives one from the machine name when blank.
+// optional — Gopher derives one from the machine name when blank. Private
+// flips the gateway-side bind from 0.0.0.0 to 127.0.0.1 (VPS-local only).
 type CreateTunnelRequest struct {
 	MachineID  string `json:"machine_id"`
 	TargetPort int    `json:"target_port"`
 	Subdomain  string `json:"subdomain,omitempty"`
+	Private    bool   `json:"private,omitempty"`
 }
 
 // CreateTunnel adds a port exposure to an active machine. Returns an error
