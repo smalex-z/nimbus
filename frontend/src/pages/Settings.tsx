@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
   getAccessCode,
+  getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
   getOAuthSettings,
   regenerateAccessCode,
+  saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
 } from '@/api/client'
@@ -312,6 +314,39 @@ function AccessCodePanel() {
   )
 }
 
+function SetupNotes({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <details
+      style={{
+        background: 'rgba(20,18,28,0.03)',
+        border: '1px solid var(--line)',
+        borderRadius: 10,
+        padding: '10px 14px',
+        fontSize: 13,
+        color: 'var(--ink-body)',
+        lineHeight: 1.55,
+      }}
+    >
+      <summary
+        style={{
+          cursor: 'pointer',
+          fontWeight: 500,
+          color: 'var(--ink)',
+          listStyle: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          userSelect: 'none',
+        }}
+      >
+        <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>▸</span>
+        {title}
+      </summary>
+      <div style={{ marginTop: 10, paddingLeft: 4 }}>{children}</div>
+    </details>
+  )
+}
+
 function GoogleDomainsPanel() {
   const [domains, setDomains] = useState<string[]>([])
   const [draft, setDraft] = useState('')
@@ -389,6 +424,27 @@ function GoogleDomainsPanel() {
         this list are blocked at sign-up. Leaving the list empty disables the
         bypass — every Google sign-in still requires the access code.
       </p>
+
+      <SetupNotes title="Setup notes">
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <li>
+            Enter a bare domain — e.g. <code className="n-mono">acm.ucla.edu</code>, <code className="n-mono">example.com</code>.
+            A leading <code className="n-mono">@</code> is stripped automatically.
+          </li>
+          <li>
+            The bypass is dynamic: adding or removing a domain takes effect
+            on the user's very next request. A user already in the console
+            on a removed domain is sent back to the verify form.
+          </li>
+          <li>
+            For Google Workspace, this checks the email domain returned by
+            Google's <code className="n-mono">/userinfo</code> endpoint —
+            personal <code className="n-mono">@gmail.com</code> accounts and
+            domain-aliased addresses are matched on the <em>literal</em>
+            domain Google returns.
+          </li>
+        </ul>
+      </SetupNotes>
 
       {loading ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
@@ -469,6 +525,191 @@ function GoogleDomainsPanel() {
   )
 }
 
+function GitHubOrgsPanel() {
+  const [orgs, setOrgs] = useState<string[]>([])
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    getAuthorizedGitHubOrgs()
+      .then((res) => setOrgs(res.orgs))
+      .catch(() => setError('Failed to load authorized orgs'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const persist = async (next: string[]) => {
+    setError(null)
+    try {
+      const res = await saveAuthorizedGitHubOrgs(next)
+      setOrgs(res.orgs)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed')
+    }
+  }
+
+  const addOrg = async () => {
+    const cleaned = draft.trim().toLowerCase().replace(/^@/, '')
+    if (!cleaned) return
+    // GitHub logins: alphanumeric + single hyphens, can't start/end with hyphen.
+    if (!/^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/.test(cleaned)) {
+      setError('Enter a valid GitHub org login (e.g. acm-ucla)')
+      return
+    }
+    if (orgs.includes(cleaned)) {
+      setDraft('')
+      return
+    }
+    setDraft('')
+    await persist([...orgs, cleaned])
+  }
+
+  const removeOrg = async (org: string) => {
+    await persist(orgs.filter((o) => o !== org))
+  }
+
+  return (
+    <div
+      className="glass"
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ color: 'var(--ink)', opacity: 0.7 }}>
+            <GithubIcon size={18} />
+          </span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+            Authorized GitHub organizations
+          </span>
+        </div>
+        <span
+          className="n-pill"
+          style={{
+            color: 'var(--ink-mute)',
+            background: 'rgba(20,18,28,0.04)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          {orgs.length} org{orgs.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+        GitHub OAuth sign-ins from members of any of these organizations skip
+        the access code entirely. Sign-ins from accounts <em>not</em> in any
+        listed org are blocked at the GitHub callback. Leaving the list empty
+        disables the bypass — every GitHub sign-in still requires the access
+        code.
+      </p>
+
+      <SetupNotes title="Setup notes">
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <li>
+            Enter the org's GitHub login — e.g. <code className="n-mono">acm-ucla</code>,
+            not the display name. Find it in the org URL:{' '}
+            <code className="n-mono">github.com/&lt;login&gt;</code>.
+          </li>
+          <li>
+            Org membership is captured at each GitHub login, including
+            private memberships (we request the <code className="n-mono">read:org</code> scope).
+          </li>
+          <li>
+            <strong>Org SSO orgs</strong> (most enterprise GitHub orgs)
+            require the Nimbus OAuth app to be authorized at the org level.
+            The org owner must approve the app on the org's
+            "Third-party access" page — until then, member queries from the
+            Nimbus app will return empty for that org.
+          </li>
+          <li>
+            User snapshots refresh on every GitHub login, so a user newly
+            added to an authorized org just needs to sign in once via GitHub
+            to gain bypass.
+          </li>
+        </ul>
+      </SetupNotes>
+
+      {loading ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {orgs.length === 0 && (
+            <span style={{ fontSize: 13, color: 'var(--ink-mute)', fontStyle: 'italic' }}>
+              No organizations authorized.
+            </span>
+          )}
+          {orgs.map((o) => (
+            <span
+              key={o}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 6px 6px 12px',
+                borderRadius: 999,
+                background: 'rgba(27,23,38,0.06)',
+                border: '1px solid var(--line)',
+                fontSize: 13,
+                color: 'var(--ink)',
+                fontFamily: 'Geist Mono, monospace',
+              }}
+            >
+              {o}
+              <button
+                type="button"
+                aria-label={`Remove ${o}`}
+                onClick={() => removeOrg(o)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 20,
+                  height: 20,
+                  borderRadius: '50%',
+                  border: 'none',
+                  background: 'rgba(20,18,28,0.08)',
+                  color: 'var(--ink)',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          void addOrg()
+        }}
+        style={{ display: 'flex', gap: 8 }}
+      >
+        <input
+          className="n-input"
+          type="text"
+          placeholder="acm-ucla"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          style={{ flex: 1 }}
+        />
+        <button type="submit" className="n-btn n-btn-primary" disabled={!draft.trim()}>
+          Add
+        </button>
+      </form>
+
+      {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+      {saved && !error && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+    </div>
+  )
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -527,6 +768,7 @@ export default function Settings() {
                 instructionsLabel="github.com/settings/applications/new"
                 onSave={handleSaveGitHub}
               />
+              <GitHubOrgsPanel />
               <ProviderPanel
                 name="Google"
                 icon={<GoogleIcon size={20} />}

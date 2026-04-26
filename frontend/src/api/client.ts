@@ -325,4 +325,20 @@ export async function saveAuthorizedGoogleDomains(
   return data
 }
 
+export interface AuthorizedOrgsView {
+  orgs: string[]
+}
+
+export async function getAuthorizedGitHubOrgs(): Promise<AuthorizedOrgsView> {
+  const { data } = await api.get<AuthorizedOrgsView>('/settings/github-orgs')
+  return data
+}
+
+export async function saveAuthorizedGitHubOrgs(
+  orgs: string[],
+): Promise<AuthorizedOrgsView> {
+  const { data } = await api.put<AuthorizedOrgsView>('/settings/github-orgs', { orgs })
+  return data
+}
+
 export default api

@@ -24,6 +24,7 @@ var (
 	ErrInvalidAccessCode    = errors.New("invalid access code")
 	ErrAccessCodeNotPresent = errors.New("access code not configured")
 	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
+	ErrOrgNotAuthorized     = errors.New("github org not authorized")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -182,6 +183,85 @@ func (s *AuthService) IsGoogleDomainAuthorized(email string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// HasAuthorizedGitHubOrgs reports whether the admin has configured at least
+// one authorized GitHub org.
+func (s *AuthService) HasAuthorizedGitHubOrgs() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	return len(splitDomains(settings.AuthorizedGitHubOrgs)) > 0, nil
+}
+
+// IsGitHubOrgAuthorized reports whether any of the user's orgs is in the
+// admin-managed authorized-orgs list. Empty admin list always returns false.
+func (s *AuthService) IsGitHubOrgAuthorized(userOrgs []string) (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return false, err
+	}
+	authorized := splitDomains(settings.AuthorizedGitHubOrgs)
+	if len(authorized) == 0 || len(userOrgs) == 0 {
+		return false, nil
+	}
+	set := make(map[string]struct{}, len(authorized))
+	for _, a := range authorized {
+		set[strings.ToLower(a)] = struct{}{}
+	}
+	for _, u := range userOrgs {
+		if _, ok := set[strings.ToLower(u)]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SaveAuthorizedGitHubOrgs replaces the authorized-orgs list with the
+// supplied entries (lowercased, trimmed, de-duplicated).
+func (s *AuthService) SaveAuthorizedGitHubOrgs(orgs []string) error {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.AuthorizedGitHubOrgs = joinDomains(normalizeDomains(orgs))
+	return s.db.Save(settings).Error
+}
+
+// UpsertGitHubOAuthUser is the GitHub-specific upsert that also snapshots
+// the user's current org memberships into the user row. Mirrors
+// UpsertOAuthUserWithCheck for the allowCreate semantics.
+func (s *AuthService) UpsertGitHubOAuthUser(
+	name, email string,
+	orgs []string,
+	allowCreate func(orgs []string) bool,
+) (*UserView, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	name = strings.TrimSpace(name)
+	orgsCSV := joinDomains(normalizeDomains(orgs))
+
+	var user db.User
+	err := s.db.Where("email = ?", email).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if allowCreate != nil && !allowCreate(orgs) {
+			return nil, false, ErrOrgNotAuthorized
+		}
+		user = db.User{Name: name, Email: email, GitHubOrgs: orgsCSV}
+		if err := s.db.Create(&user).Error; err != nil {
+			return nil, false, err
+		}
+		return userToView(&user), false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	// Refresh the org snapshot on every login so the bypass tracks the
+	// user's current memberships.
+	if err := s.db.Model(&user).Update("github_orgs", orgsCSV).Error; err != nil {
+		return nil, true, err
+	}
+	return userToView(&user), true, nil
 }
 
 // SaveAuthorizedGoogleDomains replaces the authorized-domain list with the
@@ -380,7 +460,34 @@ func (s *AuthService) IsUserVerified(userID uint) (bool, error) {
 			}
 		}
 	}
+	if hasOrgIntersection(user.GitHubOrgs, settings.AuthorizedGitHubOrgs) {
+		return true, nil
+	}
 	return user.VerifiedCodeVersion == settings.AccessCodeVersion && settings.AccessCodeVersion > 0, nil
+}
+
+// hasOrgIntersection returns true when the user's stored org snapshot shares
+// at least one entry with the admin's authorized list. Comparison is
+// case-insensitive (lists are normalized at write time).
+func hasOrgIntersection(userOrgsCSV, authorizedCSV string) bool {
+	user := splitDomains(strings.ToLower(userOrgsCSV))
+	if len(user) == 0 {
+		return false
+	}
+	authorized := splitDomains(strings.ToLower(authorizedCSV))
+	if len(authorized) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(authorized))
+	for _, a := range authorized {
+		set[a] = struct{}{}
+	}
+	for _, u := range user {
+		if _, ok := set[u]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // generateAccessCode produces a uniformly random 8-digit numeric code.
@@ -413,11 +520,12 @@ func (s *AuthService) SaveOAuthSettings(next db.OAuthSettings) error {
 	if next.GoogleClientSecret == "" {
 		next.GoogleClientSecret = existing.GoogleClientSecret
 	}
-	// Always preserve access code state and authorized-domain list — OAuth
-	// saves never touch them.
+	// Always preserve access code state and authorized lists — OAuth saves
+	// never touch them.
 	next.AccessCode = existing.AccessCode
 	next.AccessCodeVersion = existing.AccessCodeVersion
 	next.AuthorizedGoogleDomains = existing.AuthorizedGoogleDomains
+	next.AuthorizedGitHubOrgs = existing.AuthorizedGitHubOrgs
 	next.ID = 1
 	return s.db.Save(&next).Error
 }
