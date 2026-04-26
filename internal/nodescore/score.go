@@ -2,6 +2,11 @@
 //
 // Scoring is pure and deterministic — no I/O. The caller is expected to fetch
 // live cluster telemetry (via the proxmox package) and pass it in.
+//
+// The scorer collapses eligibility filtering and ranking into a single
+// function: Score returns 0 for any node that fails a hard gate, with the
+// reason(s) captured on the Result. A non-zero score is always greater than
+// any rejected node, so callers can rank without re-applying the gates.
 package nodescore
 
 import (
@@ -26,118 +31,233 @@ var Tiers = map[string]Tier{
 	"xl":     {Name: "xl", CPU: 8, MemMB: 8192, DiskGB: 120},
 }
 
-// Node is the subset of Proxmox node telemetry we need for scoring.
+// Node is the subset of Proxmox node telemetry the scorer needs.
 type Node struct {
 	Name   string
 	Status string  // "online" / "offline" / "unknown"
 	CPU    float64 // 0.0 = idle, 1.0 = saturated
 	MaxCPU int     // physical core count
-	Mem    uint64  // bytes used
+	Mem    uint64  // bytes used (live qemu + host overhead)
 	MaxMem uint64  // bytes total
 }
 
-// Candidate is a node that has passed eligibility filtering, plus the live
-// count of running VMs on it (used for tie-breaking).
-type Candidate struct {
+// StorageInfo describes the configured VM-disk pool's capacity on one node.
+// Used bytes already account for stopped VMs because their disk images persist
+// on storage.
+type StorageInfo struct {
+	TotalBytes uint64
+	UsedBytes  uint64
+}
+
+// NodeRuntime is the per-node, per-provision data the scorer can't derive
+// from the Node struct alone — VM count for tie-break, and committed RAM
+// (sum of every non-template VM's configured MaxMem on this node, running or
+// not) for the reservation-based memory gate.
+type NodeRuntime struct {
+	VMCount           int
+	CommittedMemBytes uint64
+}
+
+// Reason names a single rejection cause. A node may carry multiple reasons
+// when several gates fail; the first cheap-to-evaluate reason fires first
+// but later gates still record their findings for diagnostics.
+type Reason string
+
+const (
+	ReasonOffline           Reason = "offline"
+	ReasonExcluded          Reason = "excluded"
+	ReasonNoTemplate        Reason = "no_template"
+	ReasonNoCapacity        Reason = "no_capacity"
+	ReasonInsufficientCores Reason = "insufficient_cores"
+	ReasonInsufficientMem   Reason = "insufficient_mem"
+	ReasonInsufficientDisk  Reason = "insufficient_disk"
+)
+
+// Env carries cluster-wide knobs and the per-node lookups the caller has
+// already gathered. Disk telemetry is optional: a nil StorageByNode disables
+// the disk gate and reverts the soft-score weights to the legacy 0.6/0.4
+// mem/cpu split.
+type Env struct {
+	Excluded         []string
+	TemplatesPresent map[string]bool
+	StorageByNode    map[string]StorageInfo // nil disables disk gate + diskweight
+	MemBufferMiB     uint64                 // RAM headroom on top of tier; default 256
+	CPULoadFactor    float64                // K, share of new VM's cores assumed used; default 0.5
+}
+
+// Result is what Score returns per node. Score == 0 ⇔ rejected; Reasons is
+// populated for rejections (one or more) and empty for accepts.
+type Result struct {
+	Score   float64
+	Reasons []Reason
+}
+
+// Decision pairs a candidate with its score result and the runtime data the
+// caller supplied. Pick consumes and returns slices of these so callers can
+// render rejection diagnostics for losers, not just the winner.
+type Decision struct {
 	Node    Node
-	VMCount int
+	Runtime NodeRuntime
+	Result  Result
 }
 
 // tieBreakDelta is the score window within which two nodes are considered
-// "effectively tied". When tied, the candidate with fewer running VMs wins —
-// preventing all new VMs from piling onto whichever node is barely ahead.
+// effectively tied — within this window the lower VM count wins.
 const tieBreakDelta = 0.05
 
-// Score returns a single number in [0, 1] where higher is better. Memory has
-// 60 % weight (cannot be overcommitted on Proxmox by default) and CPU has
-// 40 % (can be overcommitted, less brittle).
-func Score(n Node) float64 {
+// defaultMemBufferMiB and defaultCPULoadFactor are the values applied when
+// Env leaves the corresponding fields zero. Kept as package vars so tests can
+// reference them.
+const (
+	defaultMemBufferMiB  uint64  = 256
+	defaultCPULoadFactor float64 = 0.5
+)
+
+const (
+	mibBytes = uint64(1 << 20)
+	gibBytes = uint64(1 << 30)
+)
+
+// Score evaluates one node against one tier under one environment. Pure.
+//
+// Hard gates run first in order of cheapness; any failure returns Score=0
+// with the rejecting reason(s) attached. When all gates pass, the soft score
+// projects post-placement headroom across mem/cpu (and disk, when telemetry
+// is enabled) and returns a value in (0, 1].
+func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
+	memBufferMiB := env.MemBufferMiB
+	if memBufferMiB == 0 {
+		memBufferMiB = defaultMemBufferMiB
+	}
+	cpuLoadFactor := env.CPULoadFactor
+	if cpuLoadFactor == 0 {
+		cpuLoadFactor = defaultCPULoadFactor
+	}
+
+	var reasons []Reason
+
+	if n.Status != "online" {
+		reasons = append(reasons, ReasonOffline)
+	}
+	for _, name := range env.Excluded {
+		if name == n.Name {
+			reasons = append(reasons, ReasonExcluded)
+			break
+		}
+	}
+	if !env.TemplatesPresent[n.Name] {
+		reasons = append(reasons, ReasonNoTemplate)
+	}
 	if n.MaxMem == 0 {
-		return 0
+		reasons = append(reasons, ReasonNoCapacity)
 	}
-	memFree := float64(n.MaxMem-n.Mem) / float64(n.MaxMem)
-	cpuFree := 1.0 - n.CPU
-	if cpuFree < 0 {
-		cpuFree = 0
+	if t.CPU > n.MaxCPU {
+		reasons = append(reasons, ReasonInsufficientCores)
 	}
-	return 0.6*memFree + 0.4*cpuFree
+
+	// usedMem takes the larger of live host usage (which already includes file
+	// cache and ZFS ARC) and the sum of every VM's configured RAM (which
+	// includes stopped VMs). Pessimistic-by-design: never under-reports what
+	// would be consumed if every VM were running flat-out.
+	usedMem := n.Mem
+	if rt.CommittedMemBytes > usedMem {
+		usedMem = rt.CommittedMemBytes
+	}
+	var freeMem int64
+	if n.MaxMem > 0 {
+		freeMem = int64(n.MaxMem) - int64(usedMem)
+	}
+	needMem := int64(t.MemMB+memBufferMiB) * int64(mibBytes)
+	if freeMem < needMem {
+		reasons = append(reasons, ReasonInsufficientMem)
+	}
+
+	// Disk gate is optional — only enforced when the caller supplied storage
+	// telemetry. A node missing from StorageByNode is treated as having zero
+	// free bytes (the operator's configured pool isn't visible there at all).
+	var (
+		diskGateOn   bool
+		freeDisk     int64
+		totalDisk    uint64
+		needDiskByte = int64(t.DiskGB) * int64(gibBytes)
+	)
+	if env.StorageByNode != nil {
+		diskGateOn = true
+		s := env.StorageByNode[n.Name]
+		totalDisk = s.TotalBytes
+		freeDisk = int64(s.TotalBytes) - int64(s.UsedBytes)
+		if freeDisk < needDiskByte {
+			reasons = append(reasons, ReasonInsufficientDisk)
+		}
+	}
+
+	if len(reasons) > 0 {
+		return Result{Score: 0, Reasons: reasons}
+	}
+
+	memHeadroom := float64(freeMem-needMem) / float64(n.MaxMem)
+	cpuHeadroom := (1.0 - n.CPU) - cpuLoadFactor*float64(t.CPU)/float64(n.MaxCPU)
+	cpuHeadroom = clamp01(cpuHeadroom)
+
+	if !diskGateOn {
+		return Result{Score: 0.6*memHeadroom + 0.4*cpuHeadroom}
+	}
+
+	diskHeadroom := float64(freeDisk-needDiskByte) / float64(totalDisk)
+	return Result{Score: 0.5*memHeadroom + 0.3*cpuHeadroom + 0.2*diskHeadroom}
 }
 
-// Eligible filters candidate nodes against four criteria from design doc §7.2:
-//
-//  1. Node status must be "online".
-//  2. Free memory must accommodate the requested tier.
-//  3. Node name must not be in `excluded`.
-//  4. The OS template VMID must be present on the node (look-up provided by
-//     the caller via `templatesPresent`).
-//
-// Returns an empty slice when no node qualifies — caller should surface a
-// 503 with a meaningful message ("no node has X RAM free" vs. "all nodes
-// offline").
-func Eligible(
-	nodes []Node,
-	vmCounts map[string]int,
-	tier Tier,
-	excluded []string,
-	templatesPresent map[string]bool,
-) []Candidate {
-	excludedSet := toSet(excluded)
-	candidates := make([]Candidate, 0, len(nodes))
-
+// Evaluate scores every node in input order. Use this when you want
+// diagnostics for every node — rejected and accepted alike.
+func Evaluate(nodes []Node, runtime map[string]NodeRuntime, t Tier, env Env) []Decision {
+	out := make([]Decision, 0, len(nodes))
 	for _, n := range nodes {
-		if n.Status != "online" {
-			continue
-		}
-		if excludedSet[n.Name] {
-			continue
-		}
-		if !templatesPresent[n.Name] {
-			continue
-		}
-		freeMemBytes := int64(n.MaxMem) - int64(n.Mem)
-		requiredBytes := int64(tier.MemMB) * 1024 * 1024
-		if freeMemBytes < requiredBytes {
-			continue
-		}
-
-		candidates = append(candidates, Candidate{
+		rt := runtime[n.Name]
+		out = append(out, Decision{
 			Node:    n,
-			VMCount: vmCounts[n.Name],
+			Runtime: rt,
+			Result:  Score(n, t, env, rt),
 		})
 	}
-
-	return candidates
+	return out
 }
 
-// Pick returns the highest-scoring candidate, applying the tie-break rule
-// (lower VM count wins when scores fall within tieBreakDelta). Returns nil
-// when the input is empty.
-func Pick(candidates []Candidate) *Candidate {
-	if len(candidates) == 0 {
-		return nil
+// Pick returns the highest-scoring acceptable Decision plus the full slice
+// (so callers can render rejection reasons for the losers). Returns
+// (nil, decisions) when no node is acceptable.
+//
+// Tie-break: scores within tieBreakDelta of each other are treated as tied
+// and the one with the lower VMCount wins. Stable sort preserves input order
+// for true ties.
+func Pick(decisions []Decision) (winner *Decision, all []Decision) {
+	if len(decisions) == 0 {
+		return nil, decisions
 	}
 
-	// Stable sort so the input order is preserved for true ties (same score AND
-	// same VM count) — keeps behavior deterministic in tests.
-	sorted := make([]Candidate, len(candidates))
-	copy(sorted, candidates)
+	sorted := make([]Decision, len(decisions))
+	copy(sorted, decisions)
 
 	sort.SliceStable(sorted, func(i, j int) bool {
-		si := Score(sorted[i].Node)
-		sj := Score(sorted[j].Node)
+		si, sj := sorted[i].Result.Score, sorted[j].Result.Score
 		if math.Abs(si-sj) < tieBreakDelta {
-			return sorted[i].VMCount < sorted[j].VMCount
+			return sorted[i].Runtime.VMCount < sorted[j].Runtime.VMCount
 		}
 		return si > sj
 	})
 
-	return &sorted[0]
+	if sorted[0].Result.Score == 0 {
+		return nil, decisions
+	}
+	w := sorted[0]
+	return &w, decisions
 }
 
-func toSet(values []string) map[string]bool {
-	out := make(map[string]bool, len(values))
-	for _, v := range values {
-		out[v] = true
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
 	}
-	return out
+	if v > 1 {
+		return 1
+	}
+	return v
 }

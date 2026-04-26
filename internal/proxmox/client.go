@@ -366,6 +366,20 @@ func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error
 	return out, nil
 }
 
+// GetClusterVMs returns every VM (and template) on every node in one call.
+// Replaces the per-node ListVMs fan-out for callers that need cluster-wide
+// VM telemetry — notably the node scorer, which needs both VM counts and
+// per-node committed-RAM totals (sum of MaxMem across non-template rows).
+func (c *Client) GetClusterVMs(ctx context.Context) ([]ClusterVM, error) {
+	var out []ClusterVM
+	params := url.Values{}
+	params.Set("type", "vm")
+	if err := c.do(ctx, http.MethodGet, "/cluster/resources", params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetStorages lists the storage backends configured on a node. Used by the
 // bootstrap flow to detect which storage to use for downloaded cloud images
 // (needs `iso` content) vs. VM disks (needs `images` content).
