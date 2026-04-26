@@ -484,6 +484,28 @@ func (s *AuthService) VerifyGPUWorkerToken(presented string) bool {
 	return subtleConstantTimeEq(settings.WorkerToken, presented)
 }
 
+// UnpairGPU clears the GPU plane configuration — wipes the worker token,
+// disables the plane, and clears the GX10 facts. Used by the admin
+// "Unpair GX10" button. Idempotent: safe to call when no GX10 is paired.
+//
+// Operator is responsible for stopping the systemd units on the GX10
+// itself. Until they do, the worker keeps polling Nimbus and gets 401s —
+// harmless but noisy in journalctl on the GX10 side.
+func (s *AuthService) UnpairGPU() error {
+	settings, err := s.GetGPUSettings()
+	if err != nil {
+		return err
+	}
+	settings.Enabled = false
+	settings.BaseURL = ""
+	settings.InferenceModel = ""
+	settings.WorkerToken = ""
+	settings.GX10Hostname = ""
+	settings.PairingToken = ""
+	settings.PairingTokenExpiresAt = nil
+	return s.db.Save(settings).Error
+}
+
 // gpuPairingTTL is how long a freshly-minted pairing token remains valid
 // before MintGPUPairingToken would need to be called again. Five minutes is
 // long enough for the operator to SSH from one window to the GX10 and paste

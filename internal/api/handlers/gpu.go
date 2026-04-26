@@ -271,6 +271,52 @@ type pairingView struct {
 	Curl      string `json:"curl"`
 }
 
+// unpairView is what the admin Unpair endpoint returns. CleanupCmd is the
+// shell snippet the operator runs on the GX10 itself to stop the systemd
+// units — Nimbus can't reach into the GX10 to do this for them (the
+// pairing flow is GX10-pulls-from-Nimbus, never the reverse).
+type unpairView struct {
+	CancelledJobs int    `json:"cancelled_jobs"`
+	CleanupCmd    string `json:"cleanup_cmd"`
+}
+
+// Unpair handles POST /api/settings/gpu/unpair (admin-only). Flow:
+//
+//  1. Cancel every queued/running GPU job — no worker will claim them after
+//     unpair, so leaving them alive just hides them in the table.
+//  2. Wipe the GPU settings (worker token, base URL, model, hostname).
+//  3. Notify the live provision config applier so freshly provisioned VMs
+//     stop receiving the now-stale OPENAI_BASE_URL.
+//
+// The handler returns a cleanup-command string the SPA shows the operator
+// for the GX10-side teardown. Idempotent: calling Unpair on an unpaired
+// instance is a successful no-op (0 jobs cancelled).
+func (h *GPU) Unpair(w http.ResponseWriter, r *http.Request) {
+	n, err := h.svc.CancelAllNonTerminal(r.Context())
+	if err != nil {
+		// Logged but not fatal — the unpair should still proceed so the
+		// operator can recover from a broken state.
+		response.InternalError(w, "cancel jobs failed: "+err.Error())
+		return
+	}
+	if err := h.auth.UnpairGPU(); err != nil {
+		response.InternalError(w, "failed to clear GPU settings: "+err.Error())
+		return
+	}
+	if h.gpuConfigApplier != nil {
+		// Empty strings → provision flow falls through the gpuCfg.BaseURL
+		// guard and skips the GPU bootstrap on subsequent VMs.
+		h.gpuConfigApplier("", "")
+	}
+	response.Success(w, unpairView{
+		CancelledJobs: n,
+		CleanupCmd: "sudo systemctl disable --now nimbus-vllm nimbus-gpu-worker && " +
+			"sudo rm -f /etc/systemd/system/nimbus-vllm.service " +
+			"/etc/systemd/system/nimbus-gpu-worker.service /etc/nimbus-gpu-worker.env && " +
+			"sudo systemctl daemon-reload",
+	})
+}
+
 // MintPairing handles POST /api/settings/gpu/pairing (admin-only). Mints a
 // fresh 5-min pairing token and returns the curl command the operator
 // pastes onto the GX10. Replaces any active pairing token; we only support

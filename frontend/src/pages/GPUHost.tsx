@@ -3,6 +3,7 @@ import {
   getGPUSettings,
   mintGPUPairingToken,
   saveGPUSettings,
+  unpairGX10,
 } from '@/api/client'
 import type { GPUSettingsView } from '@/types'
 
@@ -29,6 +30,12 @@ export default function GPUHost() {
   const [pairingExpiresIn, setPairingExpiresIn] = useState(0)
   const [pairingCopied, setPairingCopied] = useState(false)
   const [pairing, setPairing] = useState(false)
+  // Unpair flow uses a two-click confirm: first click flips this, second
+  // click within 4s actually fires. Avoids accidental wipes.
+  const [unpairConfirming, setUnpairConfirming] = useState(false)
+  const [unpairing, setUnpairing] = useState(false)
+  const [unpairResult, setUnpairResult] = useState<{ cancelledJobs: number; cleanupCmd: string } | null>(null)
+  const [cleanupCopied, setCleanupCopied] = useState(false)
 
   useEffect(() => {
     getGPUSettings()
@@ -66,6 +73,35 @@ export default function GPUHost() {
       setError(err instanceof Error ? err.message : 'Save failed')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleUnpair = async () => {
+    if (!unpairConfirming) {
+      setUnpairConfirming(true)
+      // Auto-revert after 4s so a stray click doesn't leave the button in
+      // confirm-mode forever.
+      setTimeout(() => setUnpairConfirming(false), 4_000)
+      return
+    }
+    setError(null)
+    setUnpairing(true)
+    try {
+      const r = await unpairGX10()
+      setUnpairResult({ cancelledJobs: r.cancelled_jobs, cleanupCmd: r.cleanup_cmd })
+      // Refetch settings so the panel rerenders in the unpaired state.
+      const fresh = await getGPUSettings()
+      setSettings(fresh)
+      setBaseURL(fresh.base_url)
+      setModel(fresh.inference_model)
+      // Wipe any stale pairing display.
+      setPairingCmd(null)
+      setPairingExpiresIn(0)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unpair failed')
+    } finally {
+      setUnpairing(false)
+      setUnpairConfirming(false)
     }
   }
 
@@ -129,17 +165,69 @@ export default function GPUHost() {
           up the job worker. No tokens to copy by hand.
         </p>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <button
             type="button"
             className="n-btn n-btn-primary"
             onClick={handleAddGX10}
-            disabled={pairing}
+            disabled={pairing || unpairing}
           >
             {pairing ? 'Generating…' : configured ? 'Re-pair GX10' : 'Add GX10'}
           </button>
+          {configured && (
+            <button
+              type="button"
+              className="n-btn"
+              onClick={handleUnpair}
+              disabled={pairing || unpairing}
+              style={unpairConfirming ? { borderColor: 'var(--err)', color: 'var(--err)' } : undefined}
+              title="Wipes the worker token, cancels queued/running jobs, and disables the GPU plane. The GX10 itself keeps running its systemd units until you tear them down on the host."
+            >
+              {unpairing
+                ? 'Unpairing…'
+                : unpairConfirming
+                  ? 'Click again to confirm'
+                  : 'Unpair GX10'}
+            </button>
+          )}
           {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
         </div>
+
+        {unpairResult && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+            <span style={{ fontSize: 13, color: 'var(--ink)' }}>
+              Unpaired{unpairResult.cancelledJobs > 0 ? ` · ${unpairResult.cancelledJobs} job${unpairResult.cancelledJobs === 1 ? '' : 's'} cancelled` : ''}.
+            </span>
+            <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
+              Run on the GX10 to stop and remove the systemd units:
+            </span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+              <code style={{
+                flex: 1,
+                padding: '8px 12px',
+                background: 'rgba(20,18,28,0.05)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                fontSize: 12,
+                fontFamily: 'monospace',
+                wordBreak: 'break-all',
+              }}>{unpairResult.cleanupCmd}</code>
+              <button
+                type="button"
+                className="n-btn"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(unpairResult.cleanupCmd)
+                    setCleanupCopied(true)
+                    setTimeout(() => setCleanupCopied(false), 1500)
+                  } catch { /* noop */ }
+                }}
+              >
+                {cleanupCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {pairingCmd && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

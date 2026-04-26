@@ -205,6 +205,7 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/settings/gpu", settings.GetGPU)
 					r.Put("/settings/gpu", settings.SaveGPU)
 					r.Post("/settings/gpu/pairing", gpuHandler.MintPairing)
+					r.Post("/settings/gpu/unpair", gpuHandler.Unpair)
 				}
 			})
 

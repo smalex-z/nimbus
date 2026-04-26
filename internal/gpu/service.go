@@ -349,6 +349,30 @@ func (s *Service) ReportStatus(ctx context.Context, jobID uint, req ReportStatus
 	return nil
 }
 
+// CancelAllNonTerminal flips every queued or running job to cancelled in
+// one bulk update. Used by the admin "Unpair GX10" flow so the queue
+// doesn't outlive the worker — pending jobs would have nobody to claim
+// them, and running ones would have nobody to post status back. Returns
+// the number of rows touched for logging.
+//
+// Out-of-scope: stopping in-flight `docker run` containers on the GX10.
+// Those orphan containers exit on their own (or get cleaned by docker's
+// `--rm` flag) the next time the operator restarts the GX10.
+func (s *Service) CancelAllNonTerminal(ctx context.Context) (int, error) {
+	now := s.clock().UTC()
+	res := s.db.WithContext(ctx).Model(&db.GPUJob{}).
+		Where("status IN ?", []string{StatusQueued, StatusRunning}).
+		Updates(map[string]any{
+			"status":      StatusCancelled,
+			"finished_at": &now,
+			"error_msg":   "cancelled at GX10 unpair",
+		})
+	if res.Error != nil {
+		return 0, fmt.Errorf("cancel non-terminal: %w", res.Error)
+	}
+	return int(res.RowsAffected), nil
+}
+
 // ReapStuckJobs marks any job that's been in `running` longer than
 // `timeout` as failed with a synthetic error message. Run from main.go on
 // every startup so a GX10 reboot mid-job doesn't leave a job permanently
