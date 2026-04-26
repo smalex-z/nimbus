@@ -34,6 +34,16 @@ type VMStatus struct {
 	Template int    `json:"template"`
 }
 
+// LXCStatus is the subset of /nodes/{node}/lxc data we consume. LXC VMIDs
+// share the cluster-wide ID space with QEMU VMs, so callers can index by
+// VMID without disambiguating type.
+type LXCStatus struct {
+	VMID     int    `json:"vmid"`
+	Name     string `json:"name"`
+	Status   string `json:"status"` // "running" / "stopped"
+	Template int    `json:"template"`
+}
+
 // ClusterStorage is one row from /cluster/resources?type=storage. A shared
 // storage pool appears once per node; callers should dedupe by Storage name
 // when Shared==1 to avoid double-counting.

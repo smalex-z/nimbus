@@ -21,6 +21,7 @@ import (
 	"nimbus/internal/db"
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
+	"nimbus/internal/netscan"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
@@ -194,6 +195,22 @@ func main() {
 	defer cancelBg()
 	go runReconcileLoop(bgCtx, reconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
+	// Netscan: catches IPs in use by non-VM hosts on the LAN (gateway, NAS,
+	// statically-assigned workstations, etc.) and reserves them in the pool
+	// as source=external so we never hand them to a new VM. Pure stdlib —
+	// TCP probe + /proc/net/arp read, no privilege escalation.
+	netscanCfg := netscan.Config{
+		Mode:        netscan.ParseMode(cfg.NetscanMode),
+		TCPTimeout:  time.Duration(cfg.NetscanTimeoutMS) * time.Millisecond,
+		Concurrency: cfg.NetscanConcurrency,
+	}
+	netscanReconciler := netscan.NewReconciler(
+		netscan.New(netscanCfg),
+		pool,
+		netscan.WithMissThreshold(cfg.VacateMissThreshold),
+	)
+	go runNetscanLoop(bgCtx, netscanReconciler, time.Duration(cfg.NetscanIntervalSecs)*time.Second, netscanCfg.Mode)
+
 	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
@@ -205,7 +222,11 @@ func main() {
 		MemBufferMiB:     cfg.MemBufferMiB,
 		CPULoadFactor:    cfg.CPULoadFactor,
 	})
-	provSvc.SetIPVerifier(reconciler)
+	// Chain verifier: Proxmox cluster snapshot first (fast, cached), then a
+	// single-IP netscan probe (~800ms worst case). Either failure rejects
+	// the candidate IP and verifyAndRetryReserve leapfrogs to the next free
+	// address.
+	provSvc.SetIPVerifier(chainVerifier{reconciler, netscan.NewVerifier(netscan.New(netscanCfg))})
 
 	// Backfill Nimbus marker + description metadata onto VMs provisioned by
 	// older builds. Migrates the legacy three-tag scheme down to a single
@@ -380,6 +401,70 @@ func ensureNimbusTagColor(ctx context.Context, px *proxmox.Client) error {
 	}
 	log.Printf("pinned nimbus tag color in cluster tag-style")
 	return nil
+}
+
+// chainVerifier runs each wrapped verifier in order at provision time and
+// returns the first negative result. Used to compose the Proxmox cluster
+// snapshot check (fast, cached) with the netscan single-IP probe (slower,
+// catches non-VM LAN devices).
+type chainVerifier []provisionIPVerifier
+
+// provisionIPVerifier mirrors provision.IPVerifier — declared here to keep
+// the chain helper in main.go without an import cycle.
+type provisionIPVerifier interface {
+	VerifyFree(ctx context.Context, ip string) (bool, *int, error)
+}
+
+// VerifyFree returns the first non-free or error result. (true, nil, nil)
+// only when every verifier agrees the IP is free.
+func (c chainVerifier) VerifyFree(ctx context.Context, ip string) (bool, *int, error) {
+	for _, v := range c {
+		free, holder, err := v.VerifyFree(ctx, ip)
+		if err != nil {
+			return false, nil, err
+		}
+		if !free {
+			return false, holder, nil
+		}
+	}
+	return true, nil, nil
+}
+
+// runNetscanLoop runs netscan reconciliation every interval until ctx is
+// cancelled. ModeOff or interval<=0 disables the loop entirely. Errors are
+// logged at the call site; transient probe failures don't stop the loop.
+func runNetscanLoop(ctx context.Context, r *netscan.Reconciler, interval time.Duration, mode netscan.Mode) {
+	if mode == netscan.ModeOff || interval <= 0 {
+		log.Printf("netscan loop disabled (mode=%s interval=%v)", mode, interval)
+		return
+	}
+	log.Printf("netscan loop starting (mode=%s interval=%v)", mode, interval)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	// Run immediately on startup so the pool reflects LAN reality before the
+	// first user-driven Reserve, instead of waiting one full interval.
+	runOnce := func() {
+		runCtx, cancel := context.WithTimeout(ctx, interval)
+		defer cancel()
+		rep, err := r.Reconcile(runCtx)
+		if err != nil {
+			log.Printf("netscan reconcile error: %v", err)
+			return
+		}
+		if len(rep.Marked) > 0 || len(rep.Freed) > 0 {
+			log.Printf("netscan: marked=%d touched=%d missed=%d freed=%d",
+				len(rep.Marked), rep.Touched, len(rep.Missed), len(rep.Freed))
+		}
+	}
+	runOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runOnce()
+		}
+	}
 }
 
 // runReconcileLoop runs reconciler.Reconcile every interval until ctx is

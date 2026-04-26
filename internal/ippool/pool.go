@@ -273,6 +273,65 @@ func (p *Pool) IncrementMissedCycles(ctx context.Context, ip string) (int, error
 	return post, nil
 }
 
+// MarkExternal upserts a row to status=allocated with source=external. Used
+// by the netscan loop when a host on the LAN is observed at an IP that
+// neither Nimbus nor any Proxmox VM owns. The row is NOT bound to a vmid —
+// external IPs are just "do not touch" reservations.
+//
+// Resets MissedCycles to 0 and stamps last_seen_at with now. Idempotent: a
+// row that's already allocated to a Proxmox VM (source=adopted/local) is
+// left alone — Proxmox-claimed IPs never get downgraded to "external" by
+// the netscan, since the Proxmox walk is the more authoritative source.
+//
+// Returns ErrNotFound if the IP is outside the configured pool range.
+func (p *Pool) MarkExternal(ctx context.Context, ip string) error {
+	now := time.Now().UTC()
+	res := p.db.WithContext(ctx).
+		Model(&IPAllocation{}).
+		// The status/source guard is the heart of the precedence rule: never
+		// overwrite a Proxmox-sourced row. A row that was previously external
+		// stays external (with refreshed timestamps); a free row gets claimed.
+		Where("ip = ? AND (status = ? OR (status = ? AND source = ?))",
+			ip, StatusFree, StatusAllocated, SourceExternal).
+		Updates(map[string]any{
+			"status":        StatusAllocated,
+			"vmid":          nil,
+			"hostname":      nil,
+			"allocated_at":  &now,
+			"last_seen_at":  &now,
+			"source":        SourceExternal,
+			"missed_cycles": 0,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("mark external %s: %w", ip, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Either out-of-range, or the IP is held by Proxmox — both are
+		// silently fine for the netscan caller. Verify the row exists at all
+		// to distinguish "out of pool range" (genuine error) from "Proxmox
+		// owns it" (no-op).
+		var row IPAllocation
+		if err := p.db.WithContext(ctx).Where("ip = ?", ip).First(&row).Error; err != nil {
+			return fmt.Errorf("mark external %s: %w", ip, ErrNotFound)
+		}
+	}
+	return nil
+}
+
+// ListExternal returns every row currently marked as external. Used by the
+// netscan reconciler to compute the diff against the latest scan: rows we
+// previously marked external that are no longer responding either get a
+// missed-cycle bump or get released.
+func (p *Pool) ListExternal(ctx context.Context) ([]IPAllocation, error) {
+	var rows []IPAllocation
+	if err := p.db.WithContext(ctx).
+		Where("status = ? AND source = ?", StatusAllocated, SourceExternal).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list external: %w", err)
+	}
+	return rows, nil
+}
+
 // ReleaseStaleReservations frees every row where status=reserved and
 // reserved_at is older than cutoff. Returns the IPs that were freed for
 // telemetry/logging. A nil slice and nil error means nothing was stale.
