@@ -3,6 +3,7 @@ import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/clien
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import OSIcon from '@/components/ui/OSIcon'
+import Pagination from '@/components/ui/Pagination'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
@@ -163,6 +164,19 @@ export default function Admin() {
     }
   }, [nodes, ips, clusterStats])
 
+  // Sort nodes deterministically so the cards don't reshuffle on every poll.
+  // /api/nodes returns whatever order Proxmox walks, which jitters the grid.
+  // Online-first then alphabetical: live capacity stays at the top of the
+  // grid, offline/unknown nodes drop below where they belong.
+  const sortedNodes = useMemo(() => {
+    const statusOrder = { online: 0, unknown: 1, offline: 2 }
+    return [...nodes].sort((a, b) => {
+      const byStatus = (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3)
+      if (byStatus !== 0) return byStatus
+      return a.name.localeCompare(b.name)
+    })
+  }, [nodes])
+
   const allNodes = useMemo(() => [...new Set(vms.map((v) => v.node))].sort(), [vms])
   const allTiers = useMemo<TierName[]>(() => {
     const order: TierName[] = ['small', 'medium', 'large', 'xl']
@@ -201,7 +215,7 @@ export default function Admin() {
             <div className="eyebrow">Nodes</div>
           </div>
           <NodeCardGrid
-            nodes={nodes}
+            nodes={sortedNodes}
             activeNode={filters.node}
             onNodeClick={setNodeFilter}
           />
@@ -542,6 +556,22 @@ function VMTable({
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(25)
+
+  // Clamp the current page when the filtered set shrinks (filter change,
+  // VMs disappearing). Without this you can land on "page 5 of 2" after
+  // filtering and the table goes empty.
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(vms.length / pageSize) - 1)
+    if (page > maxPage) setPage(maxPage)
+  }, [vms.length, pageSize, page])
+
+  const pagedVMs = useMemo(
+    () => vms.slice(page * pageSize, (page + 1) * pageSize),
+    [vms, page, pageSize],
+  )
+
   const selectClass =
     'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
 
@@ -618,7 +648,7 @@ function VMTable({
               </tr>
             </thead>
             <tbody>
-              {vms.map((vm) => {
+              {pagedVMs.map((vm) => {
                 const displayName = vm.hostname || vm.name
                 const dash = <span className="text-ink-3">—</span>
                 const osFamily = resolveOSId({
@@ -712,6 +742,13 @@ function VMTable({
               })}
             </tbody>
           </table>
+          <Pagination
+            total={vms.length}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(n) => { setPageSize(n); setPage(0) }}
+          />
         </Card>
       )}
       {sshTarget && (
@@ -756,6 +793,8 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   // they want to see what's still available.
   const [showFree, setShowFree] = useState(false)
   const [filters, setFilters] = useState<IPFilterState>(EMPTY_IP_FILTERS)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(25)
 
   const sorted = useMemo(() => {
     return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))
@@ -769,6 +808,17 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
       return true
     })
   }, [sorted, showFree, filters])
+
+  // Clamp page when filtered set shrinks (filter change, IPs released).
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(filtered.length / pageSize) - 1)
+    if (page > maxPage) setPage(maxPage)
+  }, [filtered.length, pageSize, page])
+
+  const paged = useMemo(
+    () => filtered.slice(page * pageSize, (page + 1) * pageSize),
+    [filtered, page, pageSize],
+  )
 
   const counts = useMemo(() => {
     let allocated = 0
@@ -872,11 +922,18 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row) => (
+              {paged.map((row) => (
                 <IPRow key={row.ip} row={row} />
               ))}
             </tbody>
           </table>
+          <Pagination
+            total={filtered.length}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(n) => { setPageSize(n); setPage(0) }}
+          />
         </Card>
       )}
     </div>
