@@ -14,12 +14,14 @@ import Input from '@/components/ui/Input'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import RadioCard from '@/components/ui/RadioCard'
 import Textarea from '@/components/ui/Textarea'
+import { useAuth } from '@/hooks/useAuth'
 import type { SSHKey } from '@/types'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 
 type Mode = 'gen' | 'import'
 
 export default function Keys() {
+  const { user } = useAuth()
   const [keys, setKeys] = useState<SSHKey[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -92,6 +94,7 @@ export default function Keys() {
           <KeyRow
             key={k.id}
             sshKey={k}
+            currentUserId={user?.id}
             onChanged={refresh}
             onError={(msg) => setError(msg)}
           />
@@ -311,13 +314,18 @@ function FreshlyGeneratedKey({ keyName, privateKey, onDismiss }: FreshlyGenerate
 
 interface KeyRowProps {
   sshKey: SSHKey
+  currentUserId: number | undefined
   onChanged: () => void
   onError: (msg: string) => void
 }
 
-function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
+function KeyRow({ sshKey, currentUserId, onChanged, onError }: KeyRowProps) {
   const [busy, setBusy] = useState<null | 'default' | 'delete' | 'download'>(null)
   const [attaching, setAttaching] = useState(false)
+  // Defense in depth: server-side filter already restricts the list to the
+  // caller's own keys, but if the data is ever inconsistent, hide actions on
+  // rows the user doesn't own.
+  const isMine = currentUserId !== undefined && sshKey.owner_id === currentUserId
 
   const downloadKey = async () => {
     setBusy('download')
@@ -399,7 +407,7 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
 
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <CopyButton value={sshKey.public_key} label="COPY PUB" />
-          {sshKey.has_private_key && (
+          {isMine && sshKey.has_private_key && (
             <button
               type="button"
               onClick={downloadKey}
@@ -410,7 +418,7 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
               <span>{busy === 'download' ? 'FETCHING…' : 'DOWNLOAD'}</span>
             </button>
           )}
-          {!sshKey.has_private_key && (
+          {isMine && !sshKey.has_private_key && (
             <button
               type="button"
               onClick={() => setAttaching((v) => !v)}
@@ -420,7 +428,7 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
               {attaching ? 'CANCEL' : '+ PRIVATE KEY'}
             </button>
           )}
-          {!sshKey.is_default && (
+          {isMine && !sshKey.is_default && (
             <button
               type="button"
               onClick={promote}
@@ -430,14 +438,16 @@ function KeyRow({ sshKey, onChanged, onError }: KeyRowProps) {
               {busy === 'default' ? 'SETTING…' : 'MAKE DEFAULT'}
             </button>
           )}
-          <button
-            type="button"
-            onClick={remove}
-            disabled={busy !== null}
-            className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(184,58,58,0.25)] bg-[rgba(184,58,58,0.04)] text-bad hover:bg-[rgba(184,58,58,0.1)] transition-colors disabled:opacity-50"
-          >
-            {busy === 'delete' ? 'DELETING…' : 'DELETE'}
-          </button>
+          {isMine && (
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy !== null}
+              className="inline-flex items-center px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-[rgba(184,58,58,0.25)] bg-[rgba(184,58,58,0.04)] text-bad hover:bg-[rgba(184,58,58,0.1)] transition-colors disabled:opacity-50"
+            >
+              {busy === 'delete' ? 'DELETING…' : 'DELETE'}
+            </button>
+          )}
         </div>
       </div>
 

@@ -38,6 +38,7 @@ func TestAdminRoutesRejectAnonymous(t *testing.T) {
 		{http.MethodPost, "/api/admin/bootstrap-templates"},
 		{http.MethodGet, "/api/settings/oauth"},
 		{http.MethodPut, "/api/settings/oauth"},
+		{http.MethodDelete, "/api/vms/1"},
 	}
 
 	for _, tc := range cases {

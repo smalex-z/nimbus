@@ -51,6 +51,8 @@ type fakePVE struct {
 	setVMDescription  func(context.Context, string, int, string) error
 	resizeDisk        func(context.Context, string, int, string, string) error
 	startVM           func(context.Context, string, int) (string, error)
+	stopVM            func(context.Context, string, int) (string, error)
+	destroyVM         func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 
 	cloneCalls     atomic.Int32
@@ -109,6 +111,18 @@ func (f *fakePVE) ResizeDisk(ctx context.Context, n string, vmid int, d, s strin
 }
 func (f *fakePVE) StartVM(ctx context.Context, n string, vmid int) (string, error) {
 	return f.startVM(ctx, n, vmid)
+}
+func (f *fakePVE) StopVM(ctx context.Context, n string, vmid int) (string, error) {
+	if f.stopVM == nil {
+		return "task:stop", nil
+	}
+	return f.stopVM(ctx, n, vmid)
+}
+func (f *fakePVE) DestroyVM(ctx context.Context, n string, vmid int) (string, error) {
+	if f.destroyVM == nil {
+		return "task:destroy", nil
+	}
+	return f.destroyVM(ctx, n, vmid)
 }
 func (f *fakePVE) GetAgentInterfaces(ctx context.Context, n string, vmid int) ([]proxmox.NetworkInterface, error) {
 	return f.getAgentIfaces(ctx, n, vmid)
@@ -513,7 +527,7 @@ func TestProvision_GenerateKey_StoresAndRetrievesFromVault(t *testing.T) {
 
 	// GetPrivateKey decrypts and returns the same value the user got at
 	// provision time.
-	keyName, priv, err := svc.GetPrivateKey(context.Background(), vm.ID)
+	keyName, priv, err := svc.GetPrivateKey(context.Background(), vm.ID, nil)
 	if err != nil {
 		t.Fatalf("GetPrivateKey: %v", err)
 	}
@@ -556,7 +570,7 @@ func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
 		t.Error("BYO without privkey should not populate the vault columns")
 	}
 
-	_, _, err := svc.GetPrivateKey(context.Background(), vm.ID)
+	_, _, err := svc.GetPrivateKey(context.Background(), vm.ID, nil)
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("expected NotFound from GetPrivateKey, got %v", err)
@@ -617,7 +631,7 @@ func TestProvision_BYO_MatchingKeypair_StoredInVault(t *testing.T) {
 	if err := database.First(&row, "hostname = ?", "byo-vault-vm").Error; err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := svc.GetPrivateKey(context.Background(), row.ID)
+	got, _, err := svc.GetPrivateKey(context.Background(), row.ID, nil)
 	if err != nil {
 		t.Fatalf("GetPrivateKey: %v", err)
 	}
@@ -1293,5 +1307,111 @@ func TestProvision_Progress_NilReporterIsAllowed(t *testing.T) {
 		SSHPubKey:  realPubKey(t),
 	}, nil); err != nil {
 		t.Fatalf("Provision with nil reporter: %v", err)
+	}
+}
+
+func TestBackfillOwnership(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	// newTestService doesn't migrate Users — bring it up here. Create the
+	// schema and seed the principals: an admin (id will be 1, lowest), a
+	// non-admin, and a second admin (verifies "lowest ID" deterministic
+	// selection).
+	if err := database.AutoMigrate(&db.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	admin := db.User{Name: "Brendan", Email: "a@x", IsAdmin: true}
+	if err := database.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	member := db.User{Name: "Member", Email: "m@x", IsAdmin: false}
+	if err := database.Create(&member).Error; err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	admin2 := db.User{Name: "OtherAdmin", Email: "b@x", IsAdmin: true}
+	if err := database.Create(&admin2).Error; err != nil {
+		t.Fatalf("create admin2: %v", err)
+	}
+
+	// Two legacy VMs (owner_id NULL) and one already-owned VM. The owned
+	// row pins to the member to verify backfill leaves it alone.
+	legacy1 := db.VM{Hostname: "legacy1", VMID: 100, IP: "10.0.0.10", Node: "alpha"}
+	legacy2 := db.VM{Hostname: "legacy2", VMID: 101, IP: "10.0.0.11", Node: "alpha"}
+	memberID := member.ID
+	owned := db.VM{Hostname: "owned", VMID: 102, IP: "10.0.0.12", Node: "alpha", OwnerID: &memberID}
+	for _, vm := range []*db.VM{&legacy1, &legacy2, &owned} {
+		if err := database.Create(vm).Error; err != nil {
+			t.Fatalf("seed vm: %v", err)
+		}
+	}
+
+	n, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("first run rows affected: got %d, want 2", n)
+	}
+
+	// Verify legacy rows now point to the lower-id admin (admin, not admin2).
+	var refreshedLegacy1, refreshedLegacy2, refreshedOwned db.VM
+	if err := database.First(&refreshedLegacy1, legacy1.ID).Error; err != nil {
+		t.Fatalf("reload legacy1: %v", err)
+	}
+	if refreshedLegacy1.OwnerID == nil || *refreshedLegacy1.OwnerID != admin.ID {
+		t.Errorf("legacy1 owner: got %v, want %d", refreshedLegacy1.OwnerID, admin.ID)
+	}
+	if err := database.First(&refreshedLegacy2, legacy2.ID).Error; err != nil {
+		t.Fatalf("reload legacy2: %v", err)
+	}
+	if refreshedLegacy2.OwnerID == nil || *refreshedLegacy2.OwnerID != admin.ID {
+		t.Errorf("legacy2 owner: got %v, want %d", refreshedLegacy2.OwnerID, admin.ID)
+	}
+	if err := database.First(&refreshedOwned, owned.ID).Error; err != nil {
+		t.Fatalf("reload owned: %v", err)
+	}
+	if refreshedOwned.OwnerID == nil || *refreshedOwned.OwnerID != memberID {
+		t.Errorf("owned row clobbered: got %v, want %d", refreshedOwned.OwnerID, memberID)
+	}
+
+	// Idempotency: re-running with no remaining NULLs should touch zero rows.
+	n2, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership second run: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second run rows affected: got %d, want 0", n2)
+	}
+}
+
+func TestBackfillOwnership_NoAdminYet(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+
+	if err := database.AutoMigrate(&db.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	// No users at all — common during the setup wizard.
+	legacy := db.VM{Hostname: "legacy", VMID: 200, IP: "10.0.0.20", Node: "alpha"}
+	if err := database.Create(&legacy).Error; err != nil {
+		t.Fatalf("seed legacy vm: %v", err)
+	}
+
+	n, err := svc.BackfillOwnership(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOwnership: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rows affected without admin: got %d, want 0", n)
+	}
+
+	// Legacy row stays NULL so the next startup (post-setup) can finish the job.
+	var refreshed db.VM
+	if err := database.First(&refreshed, legacy.ID).Error; err != nil {
+		t.Fatalf("reload legacy: %v", err)
+	}
+	if refreshed.OwnerID != nil {
+		t.Errorf("legacy row mutated despite missing admin: owner_id=%v", refreshed.OwnerID)
 	}
 }
