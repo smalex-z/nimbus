@@ -211,8 +211,8 @@ export default function Provision() {
             <Summary
               form={form}
               savedKeys={savedKeys}
-              tierLabel={`${selectedTier.cpu} / ${selectedTier.memMB / 1024} GB`}
-              diskLabel={`${selectedTier.diskGB} GB`}
+              tierLabel={`${selectedTier.cpu} / ${selectedTier.memMB / 1024} GiB`}
+              diskLabel={`${selectedTier.diskGB} GiB`}
             />
             <Button
               type="button"
@@ -280,7 +280,7 @@ function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGa
         <h3 className="text-2xl mt-1 mb-3">OS templates aren't set up yet</h3>
         <p className="text-base text-ink-2 leading-relaxed mb-7">
           Nimbus provisions VMs by cloning cloud-image templates on your Proxmox nodes.
-          This one-time download (~2 GB per OS) runs in parallel across all cluster nodes
+          This one-time download (~2 GiB per OS) runs in parallel across all cluster nodes
           and takes 10–20 minutes on a typical home lab. Once done, VM provisioning is
           instant.
         </p>
