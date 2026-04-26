@@ -20,7 +20,7 @@ import (
 type fakePX struct {
 	getNodes             func(context.Context) ([]proxmox.Node, error)
 	templateExists       func(context.Context, string, int) (bool, error)
-	nextVMID             func(context.Context) (int, error)
+	nextVMIDFrom         func(context.Context, int) (int, error)
 	ensureStorageContent func(context.Context, string, string) error
 	storageHasFile       func(context.Context, string, string, string, string) (bool, error)
 	downloadStorageURL   func(context.Context, string, string, string, string, string) (string, error)
@@ -41,8 +41,8 @@ func (f *fakePX) GetNodes(ctx context.Context) ([]proxmox.Node, error) {
 func (f *fakePX) TemplateExists(ctx context.Context, n string, vmid int) (bool, error) {
 	return f.templateExists(ctx, n, vmid)
 }
-func (f *fakePX) NextVMID(ctx context.Context) (int, error) {
-	return f.nextVMID(ctx)
+func (f *fakePX) NextVMIDFrom(ctx context.Context, minVMID int) (int, error) {
+	return f.nextVMIDFrom(ctx, minVMID)
 }
 func (f *fakePX) EnsureStorageContent(ctx context.Context, s, ct string) error {
 	return f.ensureStorageContent(ctx, s, ct)
@@ -69,8 +69,9 @@ func (f *fakePX) ConvertToTemplate(ctx context.Context, n string, vmid int) erro
 	return f.convertToTemplate(ctx, n, vmid)
 }
 
-// happyPX returns a fully-mocked client where everything succeeds. NextVMID
-// returns sequential IDs starting at 200 so each test gets distinct values.
+// happyPX returns a fully-mocked client where everything succeeds.
+// NextVMIDFrom returns sequential IDs starting at the requested floor so each
+// test gets distinct values inside the configured range.
 func happyPX() *fakePX {
 	f := &fakePX{
 		getNodes: func(_ context.Context) ([]proxmox.Node, error) {
@@ -92,8 +93,8 @@ func happyPX() *fakePX {
 		setCloudInitDrive: func(_ context.Context, _ string, _ int, _ string) error { return nil },
 		convertToTemplate: func(_ context.Context, _ string, _ int) error { return nil },
 	}
-	f.nextVMID = func(_ context.Context) (int, error) {
-		return 200 + int(f.nextVMIDSeq.Add(1)) - 1, nil
+	f.nextVMIDFrom = func(_ context.Context, min int) (int, error) {
+		return min + int(f.nextVMIDSeq.Add(1)) - 1, nil
 	}
 	return f
 }
@@ -138,13 +139,14 @@ func TestBootstrap_HappyPath_AllOSesAllNodes(t *testing.T) {
 		t.Errorf("ConvertToTemplate called %d times, want 8", got)
 	}
 
-	// VMIDs come from the mocked NextVMID (sequential from 200). The
-	// important properties are: every outcome has a non-zero VMID, every
-	// VMID is unique across the cluster (matches Proxmox's actual constraint).
+	// VMIDs come from the mocked NextVMIDFrom (sequential from the configured
+	// floor). Every VMID must be inside the template range AND cluster-wide
+	// unique (matches Proxmox's actual constraint).
 	seen := map[int]bool{}
 	for _, o := range res.Created {
-		if o.VMID == 0 {
-			t.Errorf("created outcome has VMID=0: %+v", o)
+		if o.VMID < bootstrap.DefaultTemplateBase {
+			t.Errorf("VMID %d below template floor %d (outcome %+v)",
+				o.VMID, bootstrap.DefaultTemplateBase, o)
 		}
 		if seen[o.VMID] {
 			t.Errorf("duplicate VMID across outcomes: %d", o.VMID)
@@ -288,10 +290,11 @@ func TestBootstrap_SubsetOSesAndNodes(t *testing.T) {
 	if got := len(res.Created); got != 1 {
 		t.Errorf("created = %d, want 1", got)
 	}
-	// VMID is now Proxmox-assigned via NextVMID, not derived from base+offset.
-	// Just assert it's non-zero.
-	if res.Created[0].VMID == 0 {
-		t.Errorf("expected non-zero VMID assigned, got 0")
+	// VMID is now allocated via NextVMIDFrom(TemplateBaseVMID), not derived
+	// from base+offset. Assert it landed inside the configured range.
+	if res.Created[0].VMID < bootstrap.DefaultTemplateBase {
+		t.Errorf("VMID = %d, want >= %d (template range)",
+			res.Created[0].VMID, bootstrap.DefaultTemplateBase)
 	}
 	if res.Created[0].Node != "alpha" {
 		t.Errorf("node = %s, want alpha", res.Created[0].Node)
@@ -409,7 +412,7 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		mu.Unlock()
 		return "UPID:dl", nil
 	}
-	px.nextVMID = func(_ context.Context) (int, error) {
+	px.nextVMIDFrom = func(_ context.Context, _ int) (int, error) {
 		mu.Lock()
 		sequence = append(sequence, "nextid")
 		mu.Unlock()
