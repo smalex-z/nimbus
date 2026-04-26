@@ -862,11 +862,11 @@ func TestClient_StopVM(t *testing.T) {
 	}
 }
 
-// TestClient_DeleteVM verifies the wire shape of a destroy request: DELETE
+// TestClient_DestroyVM verifies the wire shape of a destroy request: DELETE
 // to /nodes/{n}/qemu/{vmid} with purge=1 + destroy-unreferenced-disks=1 in
 // the query string. Asserting these is critical — silently dropping either
 // flag leaves orphan disks in storage that the IP pool can't see.
-func TestClient_DeleteVM(t *testing.T) {
+func TestClient_DestroyVM(t *testing.T) {
 	t.Parallel()
 	var capturedMethod, capturedPath, capturedQuery string
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
@@ -876,9 +876,9 @@ func TestClient_DeleteVM(t *testing.T) {
 		writeEnvelope(w, "UPID:node1:002:qmdestroy:42")
 	})
 
-	taskID, err := c.DeleteVM(context.Background(), "node1", 42)
+	taskID, err := c.DestroyVM(context.Background(), "node1", 42)
 	if err != nil {
-		t.Fatalf("DeleteVM: %v", err)
+		t.Fatalf("DestroyVM: %v", err)
 	}
 	if capturedMethod != http.MethodDelete {
 		t.Errorf("method = %s, want DELETE", capturedMethod)

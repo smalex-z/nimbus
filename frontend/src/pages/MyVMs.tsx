@@ -1,17 +1,30 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { listVMs } from '@/api/client'
+import { deleteVM, listVMs } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
+import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
+import { useAuth } from '@/hooks/useAuth'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
+  const { user } = useAuth()
   const [vms, setVms] = useState<VM[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const rows = await listVMs()
+      setVms(rows)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -65,17 +78,35 @@ export default function MyVMs() {
 
       <div className="grid gap-3 mt-7">
         {vms.map((vm) => (
-          <VMRow key={vm.ID} vm={vm} />
+          <VMRow
+            key={vm.ID}
+            vm={vm}
+            currentUserId={user?.id}
+            onChanged={refresh}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function VMRow({ vm }: { vm: VM }) {
+function VMRow({
+  vm,
+  currentUserId,
+  onChanged,
+}: {
+  vm: VM
+  currentUserId: number | undefined
+  onChanged: () => void
+}) {
   const [sshOpen, setSshOpen] = useState(false)
   const [tunnelsOpen, setTunnelsOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const hasTunnel = Boolean(vm.tunnel_url)
+  // Only show Delete on VMs the current user provisioned. Legacy rows
+  // (owner_id null, pre-ownership) and VMs created by other users render
+  // without the button — they're not deletable through this UI.
+  const canDelete = currentUserId !== undefined && vm.owner_id === currentUserId
 
   return (
     <Card className="p-5">
@@ -115,6 +146,16 @@ function VMRow({ vm }: { vm: VM }) {
             <span aria-hidden>↗</span>
             <span>SSH</span>
           </button>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={() => setDeleteOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-bad hover:border-bad transition-colors"
+              title="Destroy this VM and release its resources"
+            >
+              Delete
+            </button>
+          )}
         </div>
       </div>
       {sshOpen && (
@@ -137,6 +178,23 @@ function VMRow({ vm }: { vm: VM }) {
           vmId={vm.ID}
           hostname={vm.hostname}
           onClose={() => setTunnelsOpen(false)}
+        />
+      )}
+      {deleteOpen && (
+        <DeleteVMConfirm
+          vm={{
+            id: vm.ID,
+            hostname: vm.hostname,
+            ip: vm.ip,
+            vmid: vm.vmid,
+            node: vm.node,
+          }}
+          onConfirm={deleteVM}
+          onCancel={() => setDeleteOpen(false)}
+          onDeleted={() => {
+            setDeleteOpen(false)
+            onChanged()
+          }}
         />
       )}
     </Card>

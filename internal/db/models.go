@@ -162,6 +162,11 @@ func (NodeTemplate) TableName() string { return "node_templates" }
 // MVP — fine for a self-hosted single-tenant box, not fine for anything else.
 type S3Storage struct {
 	gorm.Model
+	// VMRowID is the Nimbus-side vms.id of the storage VM. Used by the
+	// teardown path to call provision.Service.AdminDelete (which is keyed
+	// on the Nimbus row id, not the Proxmox VMID). Nullable because a
+	// crash mid-deploy can leave the row before Provision returns.
+	VMRowID      *uint  `gorm:"column:vm_row_id;index"             json:"vm_row_id,omitempty"`
 	VMID         int    `gorm:"column:vmid;uniqueIndex;not null"   json:"vmid"`
 	Node         string `gorm:"column:node;not null"               json:"node"`
 	IP           string `gorm:"column:ip"                          json:"ip,omitempty"`

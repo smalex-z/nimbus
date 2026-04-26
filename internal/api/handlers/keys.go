@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/sshkeys"
 )
@@ -61,6 +62,18 @@ type createKeyRequest struct {
 	SetDefault bool   `json:"set_default,omitempty"`
 }
 
+// requesterID returns the signed-in user's ID for owner-gating, or writes a
+// 401 and returns (0, false) when the request is somehow unauthenticated
+// (shouldn't happen behind requireAuth, but cheap to defend).
+func requesterID(w http.ResponseWriter, r *http.Request) (uint, bool) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return 0, false
+	}
+	return user.ID, true
+}
+
 // Create handles POST /api/keys. On generate, the response includes the
 // freshly minted private key (the only time it'll ever cross the wire from
 // the server's perspective unless re-downloaded later).
@@ -68,6 +81,10 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	uid, ok := requesterID(w, r)
+	if !ok {
 		return
 	}
 
@@ -78,6 +95,7 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 		PrivateKey: req.PrivateKey,
 		Generate:   req.Generate,
 		SetDefault: req.SetDefault,
+		OwnerID:    &uid,
 	})
 	if err != nil {
 		response.FromError(w, err)
@@ -92,7 +110,7 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 	// Surface the private key in the response only when we just generated it
 	// — for imports the user already has it.
 	if req.Generate {
-		_, priv, err := h.svc.GetPrivateKey(r.Context(), row.ID)
+		_, priv, err := h.svc.GetPrivateKey(r.Context(), row.ID, &uid)
 		if err == nil {
 			body.PrivateKey = priv
 		}
@@ -100,9 +118,13 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 	response.Created(w, body)
 }
 
-// List handles GET /api/keys.
+// List handles GET /api/keys — strictly scoped to the caller's own keys.
 func (h *Keys) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.svc.List(r.Context(), nil)
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.svc.List(r.Context(), &uid)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -120,7 +142,11 @@ func (h *Keys) Get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	row, err := h.svc.Get(r.Context(), id)
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
+	row, err := h.svc.Get(r.Context(), id, &uid)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -134,7 +160,11 @@ func (h *Keys) PrivateKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	name, priv, err := h.svc.GetPrivateKey(r.Context(), id)
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
+	name, priv, err := h.svc.GetPrivateKey(r.Context(), id, &uid)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -153,6 +183,10 @@ func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		PrivateKey string `json:"private_key"`
 	}
@@ -164,7 +198,7 @@ func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "private_key is required")
 		return
 	}
-	if err := h.svc.AttachPrivateKey(r.Context(), id, req.PrivateKey); err != nil {
+	if err := h.svc.AttachPrivateKey(r.Context(), id, req.PrivateKey, &uid); err != nil {
 		response.FromError(w, err)
 		return
 	}
@@ -177,7 +211,11 @@ func (h *Keys) SetDefault(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.SetDefault(r.Context(), id); err != nil {
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.svc.SetDefault(r.Context(), id, &uid); err != nil {
 		response.FromError(w, err)
 		return
 	}
@@ -190,7 +228,11 @@ func (h *Keys) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.Delete(r.Context(), id); err != nil {
+	uid, ok := requesterID(w, r)
+	if !ok {
+		return
+	}
+	if err := h.svc.Delete(r.Context(), id, &uid); err != nil {
 		response.FromError(w, err)
 		return
 	}

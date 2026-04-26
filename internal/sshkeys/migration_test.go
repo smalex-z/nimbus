@@ -89,7 +89,7 @@ func TestMigrateLegacyVMKeys_PromotesAndLinks(t *testing.T) {
 
 	// And it's decryptable through the keys service — round-trip back to plaintext.
 	svc := sshkeys.New(database.DB, cipher)
-	_, plain, err := svc.GetPrivateKey(context.Background(), key.ID)
+	_, plain, err := svc.GetPrivateKey(context.Background(), key.ID, nil)
 	if err != nil {
 		t.Fatalf("GetPrivateKey: %v", err)
 	}

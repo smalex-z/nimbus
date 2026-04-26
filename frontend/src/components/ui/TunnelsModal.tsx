@@ -23,7 +23,6 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
   const [port, setPort] = useState('')
   const [subdomain, setSubdomain] = useState('')
   const [transport, setTransport] = useState<'tcp' | 'udp'>('tcp')
-  const [visibility, setVisibility] = useState<'public' | 'private'>('public')
   const [botProtection, setBotProtection] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -71,13 +70,11 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
         target_port: portNum,
         transport,
         subdomain: !isUDP && subdomain.trim() ? subdomain.trim() : undefined,
-        private: visibility === 'private',
         bot_protection_enabled: !isUDP && botProtection ? true : undefined,
       })
       setPort('')
       setSubdomain('')
       setTransport('tcp')
-      setVisibility('public')
       setBotProtection(false)
       await load()
     } catch (err) {
@@ -157,79 +154,40 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
         <form onSubmit={onAdd} className="mt-8 pt-6 border-t border-line">
           <div className="text-base font-display font-medium mb-5">Add Tunnel</div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
-            <div>
-              <label className="block text-[13px] font-medium text-ink mb-2">
-                Transport{' '}
-                <span
-                  className="text-ink-3 cursor-help"
-                  title="TCP for HTTP/SSH/most services. UDP for raw datagram services (DNS, gaming, WireGuard) — UDP tunnels skip Caddy and the subdomain."
-                  aria-label="info"
-                >
-                  ⓘ
-                </span>
-              </label>
-              <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={transport === 'tcp'}
-                  onClick={() => setTransport('tcp')}
-                  className={`px-4 py-2 text-sm font-medium transition-colors ${
-                    transport === 'tcp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
-                  }`}
-                >
-                  TCP
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={transport === 'udp'}
-                  onClick={() => setTransport('udp')}
-                  className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
-                    transport === 'udp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
-                  }`}
-                >
-                  UDP
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[13px] font-medium text-ink mb-2">
-                Visibility{' '}
-                <span
-                  className="text-ink-3 cursor-help"
-                  title="Public exposes the tunnel on the gateway's external interface. Private binds to the VPS's loopback only — useful for service-to-service traffic that shouldn't leave the host."
-                  aria-label="info"
-                >
-                  ⓘ
-                </span>
-              </label>
-              <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={visibility === 'public'}
-                  onClick={() => setVisibility('public')}
-                  className={`px-4 py-2 text-sm font-medium transition-colors ${
-                    visibility === 'public' ? 'bg-good text-white' : 'bg-white/85 text-ink hover:bg-white'
-                  }`}
-                >
-                  🌐 Public
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={visibility === 'private'}
-                  onClick={() => setVisibility('private')}
-                  className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
-                    visibility === 'private' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
-                  }`}
-                >
-                  🔒 Private
-                </button>
-              </div>
+          <div className="mb-5">
+            <label className="block text-[13px] font-medium text-ink mb-2">
+              Transport{' '}
+              <span
+                className="text-ink-3 cursor-help"
+                title="TCP for HTTP/SSH/most services. UDP for raw datagram services (DNS, gaming, WireGuard) — UDP tunnels skip Caddy and the subdomain."
+                aria-label="info"
+              >
+                ⓘ
+              </span>
+            </label>
+            <div role="tablist" className="inline-flex rounded-md border border-line overflow-hidden">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={transport === 'tcp'}
+                onClick={() => setTransport('tcp')}
+                className={`px-4 py-2 text-sm font-medium transition-colors ${
+                  transport === 'tcp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
+                }`}
+              >
+                TCP
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={transport === 'udp'}
+                onClick={() => setTransport('udp')}
+                className={`px-4 py-2 text-sm font-medium border-l border-line transition-colors ${
+                  transport === 'udp' ? 'bg-ink text-white' : 'bg-white/85 text-ink hover:bg-white'
+                }`}
+              >
+                UDP
+              </button>
             </div>
           </div>
 
