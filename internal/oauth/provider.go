@@ -7,10 +7,15 @@ import "context"
 // UserInfo is the normalised identity returned by any OAuth provider after a
 // successful code exchange.
 type UserInfo struct {
-	ProviderID string // provider-specific user ID (for future deduplication)
-	Login      string // username / handle shown in the handshake page
-	Name       string // display name
-	Email      string // primary verified email
+	ProviderID string   // provider-specific user ID (for future deduplication)
+	Login      string   // username / handle shown in the handshake page
+	Name       string   // display name
+	Email      string   // primary verified email
+	Orgs       []string // optional: GitHub org logins the user belongs to
+	// Token is the raw OAuth access token obtained from the provider during
+	// Exchange. Optional — providers populate it only when the caller might
+	// need to revoke (e.g. GitHub on a rejected callback). Never persisted.
+	Token string
 }
 
 // Provider is the interface every OAuth provider must implement.
