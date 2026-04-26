@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
 	"nimbus/internal/secrets"
+	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
@@ -292,6 +294,16 @@ func main() {
 		log.Printf("gpu plane enabled (url=%s, model=%s)", gpuStored.BaseURL, gpuStored.InferenceModel)
 	}
 
+	// Self-bootstrap: when Gopher creds are saved (or already present at
+	// startup), this service registers the Nimbus host with Gopher and
+	// exposes the dashboard at cloud.<domain>. The Settings page polls
+	// its status; SaveGopher kicks it off automatically.
+	nimbusPort, _ := strconv.Atoi(cfg.Port)
+	if nimbusPort == 0 {
+		nimbusPort = 8080
+	}
+	selfTunnelSvc := selftunnel.New(authSvc, tunnelClient, nimbusPort)
+
 	// Backfill Nimbus marker + description metadata onto VMs provisioned by
 	// older builds. Migrates the legacy three-tag scheme down to a single
 	// chip in the Proxmox UI and stamps tier/OS into the description.
@@ -393,20 +405,21 @@ func main() {
 	}
 
 	router := api.NewRouter(api.Deps{
-		Auth:       authSvc,
-		Provision:  provSvc,
-		Bootstrap:  bootstrapSvc,
-		Keys:       keysSvc,
-		Pool:       pool,
-		Reconciler: reconciler,
-		Proxmox:    pveClient,
-		Tunnels:    tunnelClient,
-		TunnelURL:  gopherSettings.APIURL,
-		S3:         s3Svc,
-		GPU:        gpuSvc,
-		GX10Assets: gx10AssetsFS,
-		Config:     cfg,
-		Restart:    restartSelf,
+		Auth:          authSvc,
+		Provision:     provSvc,
+		Bootstrap:     bootstrapSvc,
+		Keys:          keysSvc,
+		Pool:          pool,
+		Reconciler:    reconciler,
+		Proxmox:       pveClient,
+		Tunnels:       tunnelClient,
+		TunnelURL:     gopherSettings.APIURL,
+		SelfBootstrap: selfTunnelSvc,
+		S3:            s3Svc,
+		GPU:           gpuSvc,
+		GX10Assets:    gx10AssetsFS,
+		Config:        cfg,
+		Restart:       restartSelf,
 	})
 
 	mux := http.NewServeMux()

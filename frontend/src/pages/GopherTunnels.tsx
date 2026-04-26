@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getGopherSettings, saveGopherSettings } from '@/api/client'
 import type { GopherSettingsView } from '@/api/client'
+import SelfBootstrapModal from '@/components/ui/SelfBootstrapModal'
 
 function GopherPanel() {
   const [settings, setSettings] = useState<GopherSettingsView | null>(null)
@@ -9,6 +10,9 @@ function GopherPanel() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Pops the self-bootstrap modal after a successful save. Backend kicks
+  // off the bootstrap automatically; the modal just polls + reports state.
+  const [bootstrapOpen, setBootstrapOpen] = useState(false)
 
   useEffect(() => {
     getGopherSettings()
@@ -31,6 +35,10 @@ function GopherPanel() {
       setAPIKey('')
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
+      // SaveGopher kicks off self-bootstrap server-side when creds are
+      // valid; pop the modal so the admin sees the phase indicator and
+      // (on success) gets redirected to the cloud URL.
+      if (next.configured) setBootstrapOpen(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
     } finally {
@@ -119,6 +127,7 @@ function GopherPanel() {
           {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
         </div>
       </form>
+      {bootstrapOpen && <SelfBootstrapModal onClose={() => setBootstrapOpen(false)} />}
     </div>
   )
 }

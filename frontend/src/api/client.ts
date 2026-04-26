@@ -362,6 +362,30 @@ export async function saveGopherSettings(
   return data
 }
 
+export type SelfBootstrapState =
+  | ''
+  | 'registering'
+  | 'installing'
+  | 'waiting_connect'
+  | 'creating_tunnel'
+  | 'active'
+  | 'failed'
+
+export interface SelfBootstrapStatus {
+  state: SelfBootstrapState
+  error?: string
+  tunnel_url?: string
+}
+
+export async function getSelfBootstrapStatus(): Promise<SelfBootstrapStatus> {
+  const { data } = await api.get<SelfBootstrapStatus>('/settings/gopher/self-bootstrap')
+  return data
+}
+
+export async function startSelfBootstrap(): Promise<void> {
+  await api.post('/settings/gopher/self-bootstrap', {})
+}
+
 export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }
