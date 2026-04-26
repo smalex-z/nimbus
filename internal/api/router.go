@@ -2,6 +2,7 @@
 package api
 
 import (
+	"io/fs"
 	"net/http"
 	"strings"
 	"time"
@@ -24,20 +25,20 @@ import (
 
 // Deps bundles the dependencies the router needs.
 type Deps struct {
-	Auth          *service.AuthService
-	Provision     *provision.Service
-	Bootstrap     *bootstrap.Service
-	Keys          *sshkeys.Service
-	Pool          *ippool.Pool
-	Reconciler    *ippool.Reconciler
-	Proxmox       *proxmox.Client
-	Tunnels       *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
-	TunnelURL     string         // configured Gopher URL; surfaced via /api/tunnels/info
-	S3            *s3storage.Service
-	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
-	GX10ScriptDir string       // disk path to scripts/gx10/ (served via /api/gpu/scripts/{name})
-	Config        *config.Config
-	Restart       func()
+	Auth       *service.AuthService
+	Provision  *provision.Service
+	Bootstrap  *bootstrap.Service
+	Keys       *sshkeys.Service
+	Pool       *ippool.Pool
+	Reconciler *ippool.Reconciler
+	Proxmox    *proxmox.Client
+	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
+	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
+	S3         *s3storage.Service
+	GPU        *gpu.Service // optional: nil disables /api/gpu/* routes
+	GX10Assets fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
+	Config     *config.Config
+	Restart    func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -82,7 +83,7 @@ func NewRouter(d Deps) http.Handler {
 					})
 				}
 			})
-		gpuScripts = handlers.NewScriptHandler(d.GX10ScriptDir)
+		gpuScripts = handlers.NewScriptHandler(d.GX10Assets)
 	}
 
 	r.Route("/api", func(r chi.Router) {

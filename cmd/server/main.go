@@ -35,6 +35,14 @@ import (
 //go:embed all:frontend/dist
 var frontendFS embed.FS
 
+// gx10AssetsFS bundles the GX10 install scripts + cross-compiled worker
+// binary so the deployed `nimbus` binary is self-contained. Populated by
+// `make gx10-bundle` before `go build`. The .gitkeep keeps the directory
+// alive in source control so `go:embed` doesn't fail on a fresh clone.
+//
+//go:embed all:gx10-assets
+var gx10AssetsFS embed.FS
+
 func main() {
 	// Subcommand dispatch — `nimbus bootstrap [flags]` runs the template
 	// bootstrap once and exits, sharing the same code path as the HTTP
@@ -381,20 +389,20 @@ func main() {
 	}
 
 	router := api.NewRouter(api.Deps{
-		Auth:          authSvc,
-		Provision:     provSvc,
-		Bootstrap:     bootstrapSvc,
-		Keys:          keysSvc,
-		Pool:          pool,
-		Reconciler:    reconciler,
-		Proxmox:       pveClient,
-		Tunnels:       tunnelClient,
-		TunnelURL:     gopherSettings.APIURL,
-		S3:            s3Svc,
-		GPU:           gpuSvc,
-		GX10ScriptDir: "scripts/gx10",
-		Config:        cfg,
-		Restart:       restartSelf,
+		Auth:       authSvc,
+		Provision:  provSvc,
+		Bootstrap:  bootstrapSvc,
+		Keys:       keysSvc,
+		Pool:       pool,
+		Reconciler: reconciler,
+		Proxmox:    pveClient,
+		Tunnels:    tunnelClient,
+		TunnelURL:  gopherSettings.APIURL,
+		S3:         s3Svc,
+		GPU:        gpuSvc,
+		GX10Assets: gx10AssetsFS,
+		Config:     cfg,
+		Restart:    restartSelf,
 	})
 
 	mux := http.NewServeMux()

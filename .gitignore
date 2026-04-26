@@ -16,6 +16,13 @@ nimbus-windows-*
 # should run `make gx10-worker` before packaging.
 scripts/gx10/gx10-worker
 
+# GX10 asset bundle — populated by `make gx10-bundle` (or by the build
+# pipeline before `go build`). Mirrors the cmd/server/frontend/dist
+# pattern: directory must exist at compile time for the //go:embed
+# directive in main.go, but its contents are build artifacts.
+cmd/server/gx10-assets/*
+!cmd/server/gx10-assets/.gitkeep
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
