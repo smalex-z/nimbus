@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getVMPrivateKey, listVMs } from '@/api/client'
+import { listVMs } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import CopyButton from '@/components/ui/CopyButton'
+import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import type { VM } from '@/types'
 
@@ -72,13 +72,11 @@ export default function MyVMs() {
 }
 
 function VMRow({ vm }: { vm: VM }) {
-  const sshCommand = vm.key_name
-    ? `ssh -i ~/.ssh/${vm.key_name} ${vm.username}@${vm.ip}`
-    : `ssh ${vm.username}@${vm.ip}`
+  const [sshOpen, setSshOpen] = useState(false)
 
   return (
     <Card className="p-5">
-      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto_auto] gap-5 items-center">
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto] gap-5 items-center">
         <div>
           <div className="font-display text-lg font-medium">{vm.hostname}</div>
           <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
@@ -89,52 +87,29 @@ function VMRow({ vm }: { vm: VM }) {
           {vm.tier}
         </span>
         <StatusBadge status={vm.status} />
-        <CopyButton value={sshCommand} label="COPY SSH" />
-        {vm.key_name && <DownloadKeyButton vmId={vm.ID} />}
+        <button
+          type="button"
+          onClick={() => setSshOpen(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+        >
+          <span aria-hidden>↗</span>
+          <span>SSH</span>
+        </button>
       </div>
+      {sshOpen && (
+        <SSHDetailsModal
+          target={{
+            hostname: vm.hostname,
+            ip: vm.ip,
+            username: vm.username,
+            vmid: vm.vmid,
+            node: vm.node,
+            dbId: vm.ID,
+            keyName: vm.key_name,
+          }}
+          onClose={() => setSshOpen(false)}
+        />
+      )}
     </Card>
-  )
-}
-
-function DownloadKeyButton({ vmId }: { vmId: number }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const onClick = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      const { key_name, private_key } = await getVMPrivateKey(vmId)
-      const content = private_key.endsWith('\n') ? private_key : private_key + '\n'
-      const blob = new Blob([content], { type: 'application/x-pem-file' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = key_name
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'download failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={busy}
-        title="Download the private key stored in the Nimbus vault."
-        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-50 disabled:cursor-wait"
-      >
-        <span aria-hidden>↓</span>
-        <span>{busy ? 'FETCHING…' : 'DOWNLOAD KEY'}</span>
-      </button>
-      {error && <span className="text-[11px] text-bad">{error}</span>}
-    </div>
   )
 }
