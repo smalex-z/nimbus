@@ -4,11 +4,9 @@ import {
   getGPUInference,
   getGPUJob,
   listGPUJobs,
-  submitGPUJob,
 } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import Input from '@/components/ui/Input'
 import { formatRelativeTime } from '@/lib/format'
 import type { GPUInferenceStatus, GPUJob, GPUJobStatus } from '@/types'
 
@@ -88,15 +86,16 @@ export default function GPU() {
         <div className="eyebrow">GPU plane</div>
         <h2 className="text-3xl">Jobs</h2>
         <p className="text-base text-ink-2 mt-2">
-          Submit training jobs to the GX10 and watch them run. One job at a time, FIFO.
+          Monitor training jobs running on the GX10. Submit jobs from your VM
+          with{' '}
+          <code className="font-mono text-sm bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded">
+            gx10 submit &lt;image&gt; -- &lt;command&gt;
+          </code>
+          .
         </p>
       </div>
 
       <InferenceCard inference={inference} />
-
-      <div className="mt-6">
-        <SubmitForm onSubmitted={(j) => setJobs((prev) => [j, ...prev])} disabled={!inference?.enabled} />
-      </div>
 
       {error && (
         <Card className="mt-6 p-4 text-bad text-sm">Failed to load jobs: {error}</Card>
@@ -121,7 +120,13 @@ export default function GPU() {
           {jobs.length === 0 && (
             <Card className="p-12 text-center">
               <div className="eyebrow">No jobs yet</div>
-              <p className="text-sm text-ink-2 mt-2">Submit one above to get started.</p>
+              <p className="text-sm text-ink-2 mt-2">
+                SSH into a VM and run{' '}
+                <code className="font-mono text-xs bg-[rgba(27,23,38,0.05)] px-1.5 py-0.5 rounded">
+                  gx10 submit
+                </code>{' '}
+                to queue your first job.
+              </p>
             </Card>
           )}
         </div>
@@ -164,69 +169,6 @@ function InferenceCard({ inference }: { inference: GPUInferenceStatus | null }) 
       <div className={`font-mono text-[11px] uppercase tracking-wider ${statusTone}`}>
         {status}
       </div>
-    </Card>
-  )
-}
-
-interface SubmitFormProps {
-  onSubmitted: (j: GPUJob) => void
-  disabled: boolean
-}
-
-function SubmitForm({ onSubmitted, disabled }: SubmitFormProps) {
-  const [image, setImage] = useState('')
-  const [command, setCommand] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const onSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!image.trim()) {
-      setError('image is required')
-      return
-    }
-    setSubmitting(true)
-    setError(null)
-    try {
-      const job = await submitGPUJob({ image: image.trim(), command: command.trim() })
-      onSubmitted(job)
-      setImage('')
-      setCommand('')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <Card className="p-5">
-      <div className="eyebrow mb-3">Submit a job</div>
-      <form onSubmit={onSubmit} className="space-y-3">
-        <Input
-          label="Container image"
-          value={image}
-          onChange={(e) => setImage(e.target.value)}
-          placeholder="pytorch/pytorch:latest"
-          disabled={disabled || submitting}
-        />
-        <Input
-          label="Command (optional)"
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          placeholder="python train.py --epochs 10"
-          disabled={disabled || submitting}
-        />
-        {error && <p className="text-bad text-xs">{error}</p>}
-        {disabled && (
-          <p className="text-ink-3 text-xs">
-            GPU plane disabled — admin must configure it under Settings → GPU.
-          </p>
-        )}
-        <Button type="submit" disabled={disabled || submitting}>
-          {submitting ? 'submitting…' : 'submit job'}
-        </Button>
-      </form>
     </Card>
   )
 }

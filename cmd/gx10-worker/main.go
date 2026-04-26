@@ -148,9 +148,27 @@ func (w *worker) claim(ctx context.Context) (*claimedJob, error) {
 // runJob invokes docker run with --gpus all, streams logs, and posts the
 // terminal status. The container is run synchronously; this function does
 // not return until the container exits or ctx is cancelled.
+//
+// Baseline env injected into every container:
+//
+//	NIMBUS_URL        — base URL of this Nimbus instance (so jobs can curl
+//	                    back into /api/gpu/scripts/* for shared assets)
+//	NIMBUS_GPU_API    — convenience alias for NIMBUS_URL + "/api/gpu"
+//	NIMBUS_JOB_ID     — DB id of the running job
+//
+// Caller-supplied env (`job.Env`) overrides any baseline key with the same name.
 func (w *worker) runJob(ctx context.Context, job *claimedJob) error {
-	args := []string{"run", "--rm", "--gpus", "all"}
+	envs := map[string]string{
+		"NIMBUS_URL":     w.nimbusURL,
+		"NIMBUS_GPU_API": w.nimbusURL + "/api/gpu",
+		"NIMBUS_JOB_ID":  fmt.Sprintf("%d", job.ID),
+	}
 	for k, v := range job.Env {
+		envs[k] = v
+	}
+
+	args := []string{"run", "--rm", "--gpus", "all"}
+	for k, v := range envs {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
 	}
 	args = append(args, job.Image)
