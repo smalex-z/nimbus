@@ -227,3 +227,48 @@ export interface HealthResponse {
 export interface ApiError {
   error: string
 }
+
+// GPU plane (Phase 4) types ───────────────────────────────────────────
+
+export type GPUJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export interface GPUJob {
+  id: number
+  owner_id: number
+  vm_id?: number
+  status: GPUJobStatus
+  image: string
+  command: string
+  env?: Record<string, string>
+  worker_id?: string
+  exit_code?: number
+  artifact_path?: string
+  error_msg?: string
+  queued_at: string
+  started_at?: string
+  finished_at?: string
+  log_tail?: string
+}
+
+export interface GPUSubmitRequest {
+  image: string
+  command: string
+  env?: Record<string, string>
+  vm_id?: number
+}
+
+export interface GPUInferenceStatus {
+  enabled: boolean
+  base_url?: string
+  model?: string
+  status: 'up' | 'down' | 'unconfigured'
+}
+
+export interface GPUSettingsView {
+  enabled: boolean
+  base_url: string
+  inference_model: string
+  configured: boolean
+  // worker_token is populated only on the regenerate response.
+  worker_token?: string
+}

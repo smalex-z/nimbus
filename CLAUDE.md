@@ -63,11 +63,14 @@ unless the user explicitly asks for them.
 
 ```
 cmd/server/             entry point + frontend embed
+cmd/gx10-worker/        ARM64 GX10 worker daemon (Phase 4)
 internal/
   api/                  Chi router, middleware, handlers
   config/               env-based config + .env loader
   db/                   GORM models, SQLite single-writer setup
+  gpu/                  GX10 job queue + log storage (Phase 4)
   ippool/               atomic IP allocation + Proxmox reconciliation
+  netscan/              LAN-host probe — fills the IP-pool with non-VM holders
   proxmox/              Proxmox REST client (form-encoded, self-signed TLS)
   provision/            9-step VM lifecycle orchestrator
   nodescore/            pure node scoring (60% mem free, 40% cpu free)
@@ -80,6 +83,7 @@ internal/
   build/                build-time version info (ldflags)
 frontend/               React 18 + TS + Vite + Tailwind SPA
 scripts/                build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
+scripts/gx10/           install-inference.sh + install-worker.sh (Phase 4)
 .github/workflows/      build, test, lint, release
 ```
 
@@ -187,6 +191,15 @@ These are easy to violate by accident — push back if a change would erode them
 5. **Setup-wizard fork at startup.** When `!cfg.IsConfigured()`, only the setup
    router is mounted. Don't add code that assumes Proxmox is reachable before
    `IsConfigured()` returns true.
+6. **GPU job queue is a SQLite table.** `gpu_jobs` + `ClaimNextJob`'s
+   transactional UPDATE-WHERE-status='queued' is the entire scheduler. Don't
+   add Redis, an external queue, or a separate writer goroutine. Two workers
+   polling at the same time is fine — the WHERE guard makes one transaction
+   the loser.
+7. **GPU plane is single-host.** One GX10, one job at a time, FIFO. Multi-GPU
+   scheduling is Phase 5 — adding worker pools or per-GPU dispatch now will
+   make that migration painful. If a worker request mentions "scheduling" or
+   "multiple GX10s", push back.
 
 ## Schema changes and data backfills
 
@@ -237,6 +250,17 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
 - **Fake `time.Now()` in tests by injecting `WithClock`** — never mix injected
   clock domains with real-time stamps from `pool.Reserve` (which always uses
   `time.Now().UTC()`).
+- **Bash-printf format specifiers in Go string templates need escaping.** When
+  embedding shell scripts via `fmt.Sprintf`, every literal `%s` for the bash
+  side must be written as `%%s` in the Go source — otherwise `go vet` fails
+  with "format %s reads arg #N, but call has fewer args". The GPU bootstrap
+  script in `provision/gpu_bootstrap.go` learned this the hard way; if you
+  write a heredoc-into-Go-template, prefer plain string concatenation or
+  `text/template` over `fmt.Sprintf`.
+- **GPU worker token is a pre-shared bearer.** `requireGPUWorkerToken` middleware
+  uses `subtle.ConstantTimeCompare` against the stored hex. Don't add
+  shortcut comparisons elsewhere; rotate the token via the Settings page,
+  never by hand-editing the DB.
 
 ## When you change reconciliation, verification, or the IP pool
 
@@ -379,7 +403,61 @@ in `internal/tunnel/client.go` handles both — confirmed against
 | `NIMBUS_VM_DISK_STORAGE` | `local-lvm` | Proxmox storage pool the disk gate checks for free space; empty disables the disk gate (scorer reverts to mem+cpu) |
 | `NIMBUS_MEM_BUFFER_MIB` | 256 | RAM headroom required above the tier's request — avoids packing a node to literal zero free |
 | `NIMBUS_CPU_LOAD_FACTOR` | 0.5 | Share of a fresh VM's vCPUs the soft score assumes consumed (range 0.25–1.0) |
+| `NIMBUS_NETSCAN_MODE` | `both` | `off` / `tcp` / `both` — netscan probe mode |
+| `NIMBUS_NETSCAN_INTERVAL_SECONDS` | 300 | Netscan loop cadence; 0 disables |
+| `NIMBUS_NETSCAN_TIMEOUT_MS` | 200 | Per-port TCP dial timeout for netscan |
+| `NIMBUS_NETSCAN_CONCURRENCY` | 50 | Parallel probes during a netscan sweep |
 
 When tuning, remember: lower `VERIFY_CACHE_TTL_SECONDS` tightens the race window
 at the cost of more Proxmox API calls; higher `VACATE_MISS_THRESHOLD` tolerates
 longer migrations at the cost of slower convergence after manual deletions.
+
+## GX10 GPU plane (Phase 4)
+
+Adds two services running on a single GX10 (or any aarch64 NVIDIA box):
+
+- **`nimbus-vllm`** — always-on inference server, OpenAI-compatible. Every
+  Nimbus-provisioned VM gets `OPENAI_BASE_URL` injected via the per-VM
+  GPU bootstrap (`provision/gpu_bootstrap.go`).
+- **`nimbus-gpu-worker`** — polls `/api/gpu/worker/claim` every 3s, runs
+  the claimed job in `docker run --gpus all`, streams logs back, posts
+  terminal status. Bearer-token auth.
+
+### State
+
+Every job is a row in `gpu_jobs`. Status flow: `queued → running →
+{succeeded | failed | cancelled}`. Single FIFO queue, one job at a time.
+Logs split: last 64 KB inline in `log_tail`, full history under
+`/var/lib/nimbus/gpu-jobs/{id}.log`.
+
+### Settings
+
+`db.GPUSettings` (singleton, ID=1) holds enabled flag, base URL, model name,
+and worker token. Same DB-as-source-of-truth pattern as Gopher: env vars
+seed once on first boot, after that the **Settings → GPU** page is the
+authoritative editor and changes take effect without restart via
+`Settings.WithGPUAppliers(...)`.
+
+### Onboarding
+
+The Settings page emits a one-line curl that the operator pastes onto the
+GX10. The curl downloads `install-inference.sh` + `install-worker.sh` from
+`/api/gpu/scripts/{name}` (whitelist enforced) and runs them with
+`NIMBUS_URL` + `NIMBUS_WORKER_TOKEN` already in the env. Idempotent; re-run
+upgrades both services.
+
+### Cross-compile the worker before deploying
+
+`make gx10-worker` builds `cmd/gx10-worker` for `linux/arm64` and drops the
+binary into `scripts/gx10/`. The worker installer fetches it from
+`/api/gpu/scripts/gx10-worker` — without the binary in place that endpoint
+404s and `install-worker.sh` fails. **Run `make gx10-worker` before any
+release tag**, otherwise existing GX10s can't upgrade their worker via the
+re-run install script.
+
+### Stuck-job reaper
+
+If a GX10 reboots mid-job (or the worker dies), the job stays in `running`
+with no one watching. Startup runs `gpu.Service.ReapStuckJobs(1h)` to flip
+anything that's been running too long to `failed`. Tunable; one hour is
+the conservative default for legitimately long training runs.

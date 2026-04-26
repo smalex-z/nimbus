@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -375,6 +376,27 @@ func generateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// generateHexToken mints a hex-encoded random token of `bytes` raw bytes
+// (resulting string is 2*bytes long). Used for both session IDs and
+// pre-shared bearer tokens like the GPU worker token.
+func generateHexToken(bytes int) (string, error) {
+	b := make([]byte, bytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// subtleConstantTimeEq compares two strings in constant time. Used for
+// pre-shared bearer tokens so an attacker can't time the comparison to
+// recover a valid token byte-by-byte.
+func subtleConstantTimeEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 // GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
 // default empty row on first call.
 func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
@@ -399,6 +421,67 @@ func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	}
 	next.ID = 1
 	return s.db.Save(&next).Error
+}
+
+// GetGPUSettings returns the GX10 / GPU plane settings, creating an empty
+// row on first call. Empty BaseURL or Enabled=false means the GPU plane is
+// effectively off — VMs receive no inference env vars and the jobs API
+// rejects new submissions.
+func (s *AuthService) GetGPUSettings() (*db.GPUSettings, error) {
+	var settings db.GPUSettings
+	err := s.db.FirstOrCreate(&settings, db.GPUSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveGPUSettings persists GPU plane settings. Empty string fields are
+// treated as "preserve existing" so the UI can rotate just one field at a
+// time. The Enabled flag is always written through (no preserve semantics).
+func (s *AuthService) SaveGPUSettings(next db.GPUSettings) error {
+	existing, err := s.GetGPUSettings()
+	if err != nil {
+		return err
+	}
+	if next.BaseURL == "" {
+		next.BaseURL = existing.BaseURL
+	}
+	if next.InferenceModel == "" {
+		next.InferenceModel = existing.InferenceModel
+	}
+	if next.WorkerToken == "" {
+		next.WorkerToken = existing.WorkerToken
+	}
+	next.ID = 1
+	return s.db.Save(&next).Error
+}
+
+// RegenerateGPUWorkerToken mints a fresh 32-byte hex worker token and
+// persists it. Returns the new token so the caller can surface it in the
+// UI exactly once — admins must capture it for the GX10 install command.
+func (s *AuthService) RegenerateGPUWorkerToken() (string, error) {
+	tok, err := generateHexToken(32)
+	if err != nil {
+		return "", err
+	}
+	settings, err := s.GetGPUSettings()
+	if err != nil {
+		return "", err
+	}
+	settings.WorkerToken = tok
+	if err := s.db.Save(settings).Error; err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// VerifyGPUWorkerToken does a constant-time comparison against the stored
+// worker token. Returns false when GPU is disabled, when no token has ever
+// been generated, or when the presented token doesn't match.
+func (s *AuthService) VerifyGPUWorkerToken(presented string) bool {
+	settings, err := s.GetGPUSettings()
+	if err != nil || settings.WorkerToken == "" || presented == "" {
+		return false
+	}
+	return subtleConstantTimeEq(settings.WorkerToken, presented)
 }
 
 // GetOAuthSettings returns the stored OAuth provider credentials.

@@ -66,6 +66,64 @@ type GopherSettings struct {
 	APIKey string `gorm:"default:''"`
 }
 
+// GPUSettings stores the GX10 (or single-host GPU) plane configuration. Only
+// a single row (ID=1) is used. When Enabled=false (or BaseURL empty), GPU
+// integration is off — Nimbus injects no inference env vars into VMs and the
+// jobs API rejects new submissions.
+//
+// WorkerToken is a pre-shared bearer the GX10's worker daemon presents on
+// every /gpu/worker/* call. Regenerating it (Settings page → Regenerate)
+// immediately invalidates the running worker's auth so a compromised token
+// can be cycled without a Nimbus restart.
+type GPUSettings struct {
+	ID             uint   `gorm:"primaryKey"`
+	Enabled        bool   `gorm:"default:false"`
+	BaseURL        string `gorm:"default:''"` // e.g. http://gx10.lan:8000
+	InferenceModel string `gorm:"default:''"` // e.g. meta-llama/Llama-3.1-8B-Instruct
+	WorkerToken    string `gorm:"default:''"`
+}
+
+// GPUJob is one queued / running / terminal training job submitted to the
+// GPU plane. The queue is FIFO; ClaimNextJob's transactional UPDATE picks
+// the oldest queued row and flips it to running.
+//
+// LogTail is an inline mirror of the last ~64 KB of the job's combined
+// stdout+stderr — kept in the DB so the API can return it without disk I/O.
+// The full log lives at /var/lib/nimbus/gpu-jobs/{ID}.log and is pruned by
+// a startup sweep after 30 days.
+//
+// EnvJSON is a JSON-encoded map[string]string of additional env vars to
+// inject into the docker run. The worker also adds a few baseline vars
+// (HF_HOME, NIMBUS_GPU_API, etc.) that aren't stored here.
+type GPUJob struct {
+	gorm.Model
+	OwnerID uint  `gorm:"column:owner_id;index;not null"  json:"owner_id"`
+	VMID    *uint `gorm:"column:vm_id;index"              json:"vm_id,omitempty"`
+
+	Status   string `gorm:"column:status;index;not null"   json:"status"` // queued|running|succeeded|failed|cancelled
+	Image    string `gorm:"column:image;not null"          json:"image"`
+	Command  string `gorm:"column:command;type:text"       json:"command"`
+	EnvJSON  string `gorm:"column:env_json;type:text"      json:"env,omitempty"`
+	WorkerID string `gorm:"column:worker_id"               json:"worker_id,omitempty"`
+
+	// Terminal fields — populated only after the worker reports back.
+	ExitCode     *int   `gorm:"column:exit_code"               json:"exit_code,omitempty"`
+	ArtifactPath string `gorm:"column:artifact_path"           json:"artifact_path,omitempty"`
+	ErrorMsg     string `gorm:"column:error_msg"               json:"error_msg,omitempty"`
+
+	QueuedAt   time.Time  `gorm:"column:queued_at;index;not null"  json:"queued_at"`
+	StartedAt  *time.Time `gorm:"column:started_at"                json:"started_at,omitempty"`
+	FinishedAt *time.Time `gorm:"column:finished_at"               json:"finished_at,omitempty"`
+
+	// LogTail caps at gpu.LogTailMax bytes. Older bytes are written to disk
+	// only — readers that need full history must hit the on-disk file.
+	LogTail string `gorm:"column:log_tail;type:text"        json:"log_tail,omitempty"`
+}
+
+// TableName pins the GORM table name so it isn't pluralized to "g_p_u_jobs"
+// or similar by GORM's snake-case heuristic.
+func (GPUJob) TableName() string { return "gpu_jobs" }
+
 // VM is the canonical record for a provisioned virtual machine.
 type VM struct {
 	gorm.Model

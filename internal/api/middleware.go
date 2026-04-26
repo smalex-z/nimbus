@@ -101,6 +101,31 @@ func requireAuth(authSvc *service.AuthService) func(http.Handler) http.Handler {
 	}
 }
 
+// requireGPUWorkerToken authenticates the GX10 worker via a pre-shared
+// bearer token in the `Authorization: Bearer <hex>` header. Constant-time
+// comparison via AuthService.VerifyGPUWorkerToken so timing attacks can't
+// recover the token byte-by-byte.
+//
+// Failure is a flat 401 — no body, no hint about what went wrong.
+func requireGPUWorkerToken(authSvc *service.AuthService) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := r.Header.Get("Authorization")
+			const prefix = "Bearer "
+			if len(h) <= len(prefix) || h[:len(prefix)] != prefix {
+				response.Error(w, http.StatusUnauthorized, "missing bearer token")
+				return
+			}
+			token := h[len(prefix):]
+			if !authSvc.VerifyGPUWorkerToken(token) {
+				response.Error(w, http.StatusUnauthorized, "invalid worker token")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // requireAdmin responds 403 if the authenticated user is not an admin.
 // Must be used after requireAuth.
 func requireAdmin(next http.Handler) http.Handler {

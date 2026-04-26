@@ -95,6 +95,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   S3
                 </NavLink>
               )}
+              <NavLink to="/gpu" className={navLinkClass}>
+                GPU
+              </NavLink>
               {!user?.is_admin && (
                 <NavLink to="/keys" className={navLinkClass}>
                   Keys

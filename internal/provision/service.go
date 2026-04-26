@@ -137,6 +137,13 @@ type Service struct {
 	tunnels  *tunnel.Client // optional Gopher client; nil disables tunnel support
 	cfg      Config
 
+	// gpuMu / gpuCfg guard the live-reloadable GPU bootstrap config. Setting
+	// is rare (admins flip the toggle in Settings); reads happen on every
+	// provision. A simple RWMutex would also work; we use plain Mutex because
+	// contention is negligible.
+	gpuMu  sync.Mutex
+	gpuCfg GPUBootstrapConfig
+
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
@@ -178,6 +185,24 @@ func (s *Service) SetIPVerifier(v IPVerifier) {
 // regardless of req.PublicTunnel.
 func (s *Service) SetTunnelClient(t *tunnel.Client) {
 	s.tunnels = t
+}
+
+// SetGPUBootstrapConfig installs the GPU plane info that's stamped into
+// each freshly provisioned VM (env vars + ~/bin/gx10 CLI). Passing a zero
+// value (BaseURL == "") disables GPU bootstrap — Provision will silently
+// skip the SSH-based config delivery. Live-reloadable from the Settings
+// page so admins can flip the GPU plane on/off without a Nimbus restart.
+func (s *Service) SetGPUBootstrapConfig(cfg GPUBootstrapConfig) {
+	s.gpuMu.Lock()
+	defer s.gpuMu.Unlock()
+	s.gpuCfg = cfg
+}
+
+// gpuBootstrapConfig returns the current GPU config under lock.
+func (s *Service) gpuBootstrapConfig() GPUBootstrapConfig {
+	s.gpuMu.Lock()
+	defer s.gpuMu.Unlock()
+	return s.gpuCfg
 }
 
 // Provision executes the 9-step flow from design doc §5.2.
@@ -420,6 +445,20 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 					tunnelError = "machine active but no public SSH host/port returned"
 				}
 			}
+		}
+	}
+
+	// Step 7c: GPU env bootstrap. Mirrors the tunnel bootstrap pattern but
+	// always-on (default) — when the GPU plane is configured cluster-wide,
+	// every VM gets `OPENAI_BASE_URL` and a `gx10` CLI helper unless the
+	// caller asked to skip. Failures are logged, never block provisioning.
+	gpuCfg := s.gpuBootstrapConfig()
+	if !req.SkipGPUBootstrap && gpuCfg.BaseURL != "" && warning == "" {
+		privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
+		if perr != nil {
+			log.Printf("gpu bootstrap: cannot bootstrap (no private key available): %v", perr)
+		} else if berr := runGPUBootstrap(ctx, ip, username, privKey, gpuCfg); berr != nil {
+			log.Printf("gpu bootstrap vmid=%d: %v (continuing)", newVMID, berr)
 		}
 	}
 

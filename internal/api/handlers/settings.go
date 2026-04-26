@@ -8,6 +8,7 @@ import (
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
+	"nimbus/internal/provision"
 	"nimbus/internal/service"
 	"nimbus/internal/tunnel"
 )
@@ -26,11 +27,20 @@ type TunnelInfoSetter interface {
 	SetClient(c *tunnel.Client, apiURL string)
 }
 
+// GPUConfigApplier is implemented by anything that holds the live
+// provision.GPUBootstrapConfig and needs to be re-pushed when admins edit
+// the GPU settings. provision.Service satisfies via SetGPUBootstrapConfig.
+type GPUConfigApplier interface {
+	SetGPUBootstrapConfig(provision.GPUBootstrapConfig)
+}
+
 // Settings handles admin-only configuration endpoints.
 type Settings struct {
-	auth     *service.AuthService
-	appliers []TunnelClientApplier
-	tunnels  TunnelInfoSetter
+	auth         *service.AuthService
+	appliers     []TunnelClientApplier
+	tunnels      TunnelInfoSetter
+	gpuAppliers  []GPUConfigApplier
+	nimbusAppURL string // captured at construction so SaveGPU can build NimbusGPUAPI URL
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -48,6 +58,21 @@ func (s *Settings) WithTunnelAppliers(a ...TunnelClientApplier) *Settings {
 // {client, apiURL} stay in sync with what's stored.
 func (s *Settings) WithTunnelInfoSetter(t TunnelInfoSetter) *Settings {
 	s.tunnels = t
+	return s
+}
+
+// WithGPUAppliers registers components that should be notified when GPU
+// settings change. Same shape as WithTunnelAppliers.
+func (s *Settings) WithGPUAppliers(a ...GPUConfigApplier) *Settings {
+	s.gpuAppliers = append(s.gpuAppliers, a...)
+	return s
+}
+
+// WithNimbusAppURL captures the configured AppURL so SaveGPU can compose
+// the per-VM NIMBUS_GPU_API var without threading config through every
+// caller.
+func (s *Settings) WithNimbusAppURL(u string) *Settings {
+	s.nimbusAppURL = u
 	return s
 }
 
@@ -265,6 +290,107 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, gopherSettingsView{
 		APIURL:     settings.APIURL,
 		Configured: client != nil,
+	})
+}
+
+// gpuSettingsView is what GET /api/settings/gpu returns. The worker token
+// is sent back masked unless explicitly requested via ?reveal=1, so the
+// settings page can display "[CONFIGURED]" without leaking the secret.
+type gpuSettingsView struct {
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"base_url"`
+	InferenceModel string `json:"inference_model"`
+	Configured     bool   `json:"configured"`
+	WorkerToken    string `json:"worker_token,omitempty"` // populated only on regenerate
+}
+
+// GetGPU handles GET /api/settings/gpu (admin only).
+func (s *Settings) GetGPU(w http.ResponseWriter, _ *http.Request) {
+	settings, err := s.auth.GetGPUSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load GPU settings")
+		return
+	}
+	response.Success(w, gpuSettingsView{
+		Enabled:        settings.Enabled,
+		BaseURL:        settings.BaseURL,
+		InferenceModel: settings.InferenceModel,
+		Configured:     settings.WorkerToken != "" && settings.BaseURL != "",
+	})
+}
+
+type saveGPURequest struct {
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"base_url"`
+	InferenceModel string `json:"inference_model"`
+}
+
+// SaveGPU handles PUT /api/settings/gpu (admin only).
+func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
+	var req saveGPURequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := s.auth.SaveGPUSettings(db.GPUSettings{
+		Enabled:        req.Enabled,
+		BaseURL:        strings.TrimSpace(req.BaseURL),
+		InferenceModel: strings.TrimSpace(req.InferenceModel),
+	}); err != nil {
+		response.InternalError(w, "failed to save GPU settings")
+		return
+	}
+	settings, err := s.auth.GetGPUSettings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+
+	// Push the fresh config to anything that holds a live copy
+	// (provision.Service for cloud-init env injection). Disabled or empty
+	// BaseURL means push a zero config — provision will then skip the
+	// GPU bootstrap step on subsequent VMs.
+	var bootstrapCfg provision.GPUBootstrapConfig
+	if settings.Enabled && settings.BaseURL != "" {
+		bootstrapCfg = provision.GPUBootstrapConfig{
+			BaseURL:        settings.BaseURL,
+			NimbusGPUAPI:   strings.TrimRight(s.nimbusAppURL, "/") + "/api/gpu",
+			InferenceModel: settings.InferenceModel,
+		}
+	}
+	for _, a := range s.gpuAppliers {
+		a.SetGPUBootstrapConfig(bootstrapCfg)
+	}
+
+	response.Success(w, gpuSettingsView{
+		Enabled:        settings.Enabled,
+		BaseURL:        settings.BaseURL,
+		InferenceModel: settings.InferenceModel,
+		Configured:     settings.WorkerToken != "" && settings.BaseURL != "",
+	})
+}
+
+// RegenerateGPUWorkerToken handles POST /api/settings/gpu/worker-token/regenerate
+// (admin only). Returns the freshly minted token in the response — admins
+// must capture it for the GX10 install command. Subsequent GETs of the
+// settings page will not return it.
+func (s *Settings) RegenerateGPUWorkerToken(w http.ResponseWriter, _ *http.Request) {
+	tok, err := s.auth.RegenerateGPUWorkerToken()
+	if err != nil {
+		response.InternalError(w, "failed to regenerate worker token")
+		return
+	}
+	settings, err := s.auth.GetGPUSettings()
+	if err != nil {
+		response.InternalError(w, "regenerated, but failed to reload: "+err.Error())
+		return
+	}
+	response.Success(w, gpuSettingsView{
+		Enabled:        settings.Enabled,
+		BaseURL:        settings.BaseURL,
+		InferenceModel: settings.InferenceModel,
+		Configured:     true,
+		WorkerToken:    tok,
 	})
 }
 

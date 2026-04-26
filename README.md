@@ -20,6 +20,36 @@ Originally built for ACM@UCLA's internal cluster. A static UI mockup of the full
 
 VM **deletion** is the notable gap — it's not yet a first-class action in the UI.
 
+## Phase 4 — GX10 GPU plane
+
+Two services run on a single GX10 (or any aarch64 NVIDIA box on the LAN):
+
+- **vLLM inference server** — always-on, OpenAI-compatible. Every Nimbus VM
+  receives `OPENAI_BASE_URL` + a `gx10` CLI helper at provision time.
+- **Job worker** — pulls queued training jobs from Nimbus, runs each in
+  `docker run --gpus all`, streams logs back. One job at a time, FIFO.
+
+No GPU is ever attached to a VM. The GX10 is not a Proxmox node. It's a
+peer service Nimbus hands out via env vars + an HTTP API.
+
+### Setup
+
+1. **Provision a GX10** with Docker + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+2. **In Nimbus**: Settings → GX10 GPU → click **Add GX10**, copy the
+   one-line `curl ... | sudo bash` command.
+3. **SSH to the GX10**, paste the curl. Two systemd units come up:
+   `nimbus-vllm` and `nimbus-gpu-worker`.
+4. **From any Nimbus VM**:
+   ```bash
+   curl $OPENAI_BASE_URL/v1/models      # inference
+   gx10 submit pytorch/pytorch:latest -- python train.py   # training
+   ```
+
+Production builds run `make build`, which depends on `make gx10-bundle` —
+that target cross-compiles the ARM64 worker and stages it (plus the
+install scripts and demo) into `cmd/server/gx10-assets/` for `//go:embed`,
+making the deployed `nimbus` binary self-contained.
+
 ## Quick start
 
 ### Install from a release (recommended)

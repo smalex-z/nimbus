@@ -28,6 +28,12 @@ type Request struct {
 	PublicTunnel bool
 	Subdomain    string
 	TunnelPort   int
+
+	// SkipGPUBootstrap, when true, opts the VM out of the GPU env-var
+	// injection step (default off — GPU env is delivered to every VM when
+	// the GPU plane is configured cluster-wide). Useful for VMs that should
+	// have nothing to do with the inference server / job queue.
+	SkipGPUBootstrap bool
 }
 
 // Result is the value returned to the user after a successful provision.

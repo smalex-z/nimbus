@@ -11,6 +11,11 @@ nimbus-linux-*
 nimbus-darwin-*
 nimbus-windows-*
 
+# GX10 worker binary — produced by `make gx10-worker`, served at runtime
+# via /api/gpu/scripts/gx10-worker. Build artifact; production deploys
+# should run `make gx10-worker` before packaging.
+scripts/gx10/gx10-worker
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
