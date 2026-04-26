@@ -22,6 +22,9 @@ type nodeView struct {
 	MaxCPU       int     `json:"max_cpu"`
 	MemUsed      uint64  `json:"mem_used"`
 	MemTotal     uint64  `json:"mem_total"`
+	MemAllocated uint64  `json:"mem_allocated"`  // sum of maxmem across all non-template VMs
+	SwapUsed     uint64  `json:"swap_used"`      // bytes paged out (0 when no swap pressure)
+	SwapTotal    uint64  `json:"swap_total"`     // configured swap on the host
 	VMCount      int     `json:"vm_count"`       // running, non-template
 	VMCountTotal int     `json:"vm_count_total"` // all non-template (running + stopped)
 }
@@ -34,12 +37,38 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch VM counts from Proxmox for each node concurrently.
-	type vmCounts struct {
-		running int
-		total   int
+	// One cluster-wide call gives us every VM with its configured maxmem and
+	// status, replacing the per-node ListVMs fan-out and letting us derive
+	// allocated-RAM totals in the same pass.
+	vms, err := h.px.GetClusterVMs(r.Context())
+	if err != nil {
+		response.FromError(w, err)
+		return
 	}
-	counts := make([]vmCounts, len(nodes))
+
+	type aggregate struct {
+		running      int
+		total        int
+		memAllocated uint64
+	}
+	agg := make(map[string]aggregate, len(nodes))
+	for _, vm := range vms {
+		if vm.Template != 0 {
+			continue
+		}
+		a := agg[vm.Node]
+		a.total++
+		a.memAllocated += vm.MaxMem
+		if vm.Status == "running" {
+			a.running++
+		}
+		agg[vm.Node] = a
+	}
+
+	// Swap counters live on /nodes/{node}/status, not /nodes — fan out per
+	// online node in parallel. A failed status call shouldn't block the rest:
+	// we leave swap fields at zero for that node and serve the page anyway.
+	swap := make([]proxmox.MemPair, len(nodes))
 	var wg sync.WaitGroup
 	for i, n := range nodes {
 		if n.Status != "online" {
@@ -48,33 +77,27 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(i int, name string) {
 			defer wg.Done()
-			vms, err := h.px.ListVMs(r.Context(), name)
+			st, err := h.px.GetNodeStatus(r.Context(), name)
 			if err != nil {
 				return
 			}
-			c := vmCounts{}
-			for _, vm := range vms {
-				if vm.Template != 0 {
-					continue
-				}
-				c.total++
-				if vm.Status == "running" {
-					c.running++
-				}
-			}
-			counts[i] = c
+			swap[i] = st.Swap
 		}(i, n.Name)
 	}
 	wg.Wait()
 
 	out := make([]nodeView, 0, len(nodes))
 	for i, n := range nodes {
+		a := agg[n.Name]
 		out = append(out, nodeView{
 			Name: n.Name, Status: n.Status,
 			CPU: n.CPU, MaxCPU: n.MaxCPU,
 			MemUsed: n.Mem, MemTotal: n.MaxMem,
-			VMCount:      counts[i].running,
-			VMCountTotal: counts[i].total,
+			MemAllocated: a.memAllocated,
+			SwapUsed:     swap[i].Used,
+			SwapTotal:    swap[i].Total,
+			VMCount:      a.running,
+			VMCountTotal: a.total,
 		})
 	}
 	response.Success(w, out)

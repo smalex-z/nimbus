@@ -11,6 +11,21 @@ type Node struct {
 	MaxMem uint64  `json:"maxmem"` // bytes total
 }
 
+// MemPair is the {used,total,free} shape Proxmox returns inside its node
+// status response. Both `memory` and `swap` use this layout.
+type MemPair struct {
+	Used  uint64 `json:"used"`
+	Total uint64 `json:"total"`
+	Free  uint64 `json:"free"`
+}
+
+// NodeStatus is the subset of /nodes/{node}/status we read — currently just
+// the swap counters (the physical memory totals are already on Node).
+type NodeStatus struct {
+	Memory MemPair `json:"memory"`
+	Swap   MemPair `json:"swap"`
+}
+
 // VMStatus is the subset of /nodes/{node}/qemu data we consume.
 type VMStatus struct {
 	VMID     int    `json:"vmid"`

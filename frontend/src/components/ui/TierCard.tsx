@@ -10,7 +10,7 @@ interface TierCardProps {
   onClick: () => void
 }
 
-const formatMem = (mb: number) => (mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`)
+const formatMem = (mb: number) => (mb >= 1024 ? `${mb / 1024} GiB` : `${mb} MiB`)
 
 export default function TierCard({
   name,
@@ -38,7 +38,7 @@ export default function TierCard({
       )}
       <div className="font-display text-[17px] font-semibold capitalize">{name}</div>
       <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
-        {cpu} vCPU · {formatMem(memMB)} RAM · {diskGB} GB
+        {cpu} vCPU · {formatMem(memMB)} RAM · {diskGB} GiB
       </div>
     </button>
   )
