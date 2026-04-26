@@ -11,6 +11,7 @@ import (
 	"nimbus/internal/api/handlers"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/config"
+	"nimbus/internal/gpu"
 	"nimbus/internal/ippool"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
@@ -22,18 +23,20 @@ import (
 
 // Deps bundles the dependencies the router needs.
 type Deps struct {
-	Auth       *service.AuthService
-	Provision  *provision.Service
-	Bootstrap  *bootstrap.Service
-	Keys       *sshkeys.Service
-	Pool       *ippool.Pool
-	Reconciler *ippool.Reconciler
-	Proxmox    *proxmox.Client
-	Tunnels    *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
-	TunnelURL  string         // configured Gopher URL; surfaced via /api/tunnels/info
-	S3         *s3storage.Service
-	Config     *config.Config
-	Restart    func()
+	Auth          *service.AuthService
+	Provision     *provision.Service
+	Bootstrap     *bootstrap.Service
+	Keys          *sshkeys.Service
+	Pool          *ippool.Pool
+	Reconciler    *ippool.Reconciler
+	Proxmox       *proxmox.Client
+	Tunnels       *tunnel.Client // optional: nil disables /api/tunnels admin endpoint
+	TunnelURL     string         // configured Gopher URL; surfaced via /api/tunnels/info
+	S3            *s3storage.Service
+	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
+	GX10ScriptDir string       // disk path to scripts/gx10/ (served via /api/gpu/scripts/{name})
+	Config        *config.Config
+	Restart       func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -58,8 +61,17 @@ func NewRouter(d Deps) http.Handler {
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
 	settings := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).
-		WithTunnelInfoSetter(tunnels)
+		WithTunnelInfoSetter(tunnels).
+		WithGPUAppliers(d.Provision).
+		WithNimbusAppURL(d.Config.AppURL)
 	s3 := handlers.NewS3(d.S3, d.Provision)
+
+	var gpuHandler *handlers.GPU
+	var gpuScripts *handlers.ScriptHandler
+	if d.GPU != nil {
+		gpuHandler = handlers.NewGPU(d.GPU, d.Auth, d.Config.AppURL)
+		gpuScripts = handlers.NewScriptHandler(d.GX10ScriptDir)
+	}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", health.Check)
@@ -71,6 +83,22 @@ func NewRouter(d Deps) http.Handler {
 		// Public so the Provision form can render the disabled-checkbox
 		// state with the right hint copy when tunnels aren't configured.
 		r.Get("/tunnels/info", tunnels.Info)
+
+		// GPU worker endpoints — bearer-token auth, callable from the GX10
+		// worker daemon over the LAN. Mounted OUTSIDE the requireAuth group
+		// because the GX10 doesn't have a session cookie; it has a token.
+		if gpuHandler != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(requireGPUWorkerToken(d.Auth))
+				r.Post("/gpu/worker/claim", gpuHandler.ClaimNext)
+				r.Post("/gpu/worker/jobs/{id}/logs", gpuHandler.AppendLogs)
+				r.Post("/gpu/worker/jobs/{id}/status", gpuHandler.ReportStatus)
+			})
+			// Static script downloads — also outside requireAuth so the
+			// GX10's curl-bootstrap can fetch them. Whitelist enforced
+			// inside the handler so this isn't a path-traversal vector.
+			r.Get("/gpu/scripts/{name}", gpuScripts.Serve)
+		}
 
 		// Auth routes (public)
 		r.Post("/auth/register", auth.Register)
@@ -150,6 +178,16 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/s3/buckets", s3.ListBuckets)
 				r.Post("/s3/buckets", s3.CreateBucket)
 				r.Delete("/s3/buckets/{name}", s3.DeleteBucket)
+
+				// GPU plane — admin-only configuration + the install-script
+				// emitter. The job submission/list endpoints are exposed
+				// to all verified users below.
+				if gpuHandler != nil {
+					r.Get("/settings/gpu", settings.GetGPU)
+					r.Put("/settings/gpu", settings.SaveGPU)
+					r.Post("/settings/gpu/worker-token/regenerate", settings.RegenerateGPUWorkerToken)
+					r.Get("/gpu/install.sh", gpuHandler.InstallScript)
+				}
 			})
 
 			// User-scoped routes — non-admins must be verified against the
@@ -183,6 +221,21 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{id}/private-key", keys.AttachPrivateKey)
 					r.Post("/{id}/default", keys.SetDefault)
 				})
+
+				// GPU plane — submit/list/cancel jobs, inference status.
+				// Mounted under requireVerified so the access-code gate
+				// applies. Admin gets all jobs; non-admin gets their own.
+				if gpuHandler != nil {
+					r.Route("/gpu", func(r chi.Router) {
+						r.Get("/inference", gpuHandler.Inference)
+						r.Route("/jobs", func(r chi.Router) {
+							r.Get("/", gpuHandler.ListJobs)
+							r.Post("/", gpuHandler.SubmitJob)
+							r.Get("/{id}", gpuHandler.GetJob)
+							r.Post("/{id}/cancel", gpuHandler.CancelJob)
+						})
+					})
+				}
 			})
 		})
 	})

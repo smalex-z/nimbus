@@ -19,6 +19,7 @@ import (
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/gpu"
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
 	"nimbus/internal/netscan"
@@ -105,6 +106,7 @@ func main() {
 
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
+		&db.GPUSettings{}, &db.GPUJob{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		ippool.Model(),
 	)
@@ -261,6 +263,23 @@ func main() {
 		provSvc.SetTunnelClient(tunnelClient)
 	}
 
+	// GPU bootstrap config — same seed pattern as Gopher. When the operator
+	// later edits these from Settings → GPU, the SaveGPU handler calls
+	// provSvc.SetGPUBootstrapConfig again so live VM provisions pick up
+	// the new values without restart.
+	gpuStored, err := authSvc.GetGPUSettings()
+	if err != nil {
+		log.Fatalf("failed to load GPU settings: %v", err)
+	}
+	if gpuStored.Enabled && gpuStored.BaseURL != "" {
+		provSvc.SetGPUBootstrapConfig(provision.GPUBootstrapConfig{
+			BaseURL:        gpuStored.BaseURL,
+			NimbusGPUAPI:   strings.TrimRight(cfg.AppURL, "/") + "/api/gpu",
+			InferenceModel: gpuStored.InferenceModel,
+		})
+		log.Printf("gpu plane enabled (url=%s, model=%s)", gpuStored.BaseURL, gpuStored.InferenceModel)
+	}
+
 	// Backfill Nimbus marker + description metadata onto VMs provisioned by
 	// older builds. Migrates the legacy three-tag scheme down to a single
 	// chip in the Proxmox UI and stamps tier/OS into the description.
@@ -328,19 +347,54 @@ func main() {
 
 	s3Svc := s3storage.New(database.DB)
 
+	// GPU plane (Phase 4). Service is constructed unconditionally — when
+	// admins disable GPU in settings, the API handlers reject submissions
+	// at the request layer; the queue table just sits idle. The on-disk
+	// log dir is created here so existing job logs can be served even
+	// while GPU is "off" in settings (e.g. during a maintenance pause).
+	gpuLogDir := "/var/lib/nimbus/gpu-jobs"
+	if cfg.DBPath == "./nimbus.db" {
+		// Dev mode: keep logs alongside the DB so a clean checkout doesn't
+		// need root to write under /var/lib.
+		gpuLogDir = "./gpu-jobs"
+	}
+	gpuSvc, err := gpu.New(database.DB, gpuLogDir)
+	if err != nil {
+		log.Fatalf("failed to init gpu service: %v", err)
+	}
+
+	// Reap any jobs that were "running" when Nimbus restarted — the worker
+	// is gone, no one's going to report status. 1 hour is the conservative
+	// default; ops can extend by patching gpu.DefaultStuckJobTimeout if
+	// they have legitimately long jobs.
+	if n, err := gpuSvc.ReapStuckJobs(context.Background(), gpu.DefaultStuckJobTimeout); err != nil {
+		log.Printf("warning: gpu stuck-job reap failed: %v", err)
+	} else if n > 0 {
+		log.Printf("reaped %d stuck gpu job(s)", n)
+	}
+	// Prune old job logs from disk (DB tail stays). Idempotent and bounded
+	// by maxAge so a missed startup just defers the cleanup, never loses it.
+	if n, freed, err := gpuSvc.PruneOldLogs(context.Background(), gpu.DefaultLogRetention); err != nil {
+		log.Printf("warning: gpu log prune failed: %v", err)
+	} else if n > 0 {
+		log.Printf("pruned %d gpu job log file(s), freed %d bytes", n, freed)
+	}
+
 	router := api.NewRouter(api.Deps{
-		Auth:       authSvc,
-		Provision:  provSvc,
-		Bootstrap:  bootstrapSvc,
-		Keys:       keysSvc,
-		Pool:       pool,
-		Reconciler: reconciler,
-		Proxmox:    pveClient,
-		Tunnels:    tunnelClient,
-		TunnelURL:  gopherSettings.APIURL,
-		S3:         s3Svc,
-		Config:     cfg,
-		Restart:    restartSelf,
+		Auth:          authSvc,
+		Provision:     provSvc,
+		Bootstrap:     bootstrapSvc,
+		Keys:          keysSvc,
+		Pool:          pool,
+		Reconciler:    reconciler,
+		Proxmox:       pveClient,
+		Tunnels:       tunnelClient,
+		TunnelURL:     gopherSettings.APIURL,
+		S3:            s3Svc,
+		GPU:           gpuSvc,
+		GX10ScriptDir: "scripts/gx10",
+		Config:        cfg,
+		Restart:       restartSelf,
 	})
 
 	mux := http.NewServeMux()

@@ -4,6 +4,10 @@ import type {
   ClusterVM,
   CreateKeyRequest,
   CreateKeyResponse,
+  GPUInferenceStatus,
+  GPUJob,
+  GPUSettingsView,
+  GPUSubmitRequest,
   HealthResponse,
   IPAllocation,
   NodeView,
@@ -661,6 +665,53 @@ export async function createS3Bucket(name: string): Promise<{ name: string }> {
 
 export async function deleteS3Bucket(name: string): Promise<void> {
   await api.delete(`/s3/buckets/${encodeURIComponent(name)}`)
+}
+
+// ──────────────────────── GPU plane (Phase 4) ────────────────────────
+
+export async function listGPUJobs(status?: string): Promise<GPUJob[]> {
+  const params = status ? { status } : {}
+  const { data } = await api.get<GPUJob[]>('/gpu/jobs', { params })
+  return data
+}
+
+export async function getGPUJob(id: number): Promise<GPUJob> {
+  const { data } = await api.get<GPUJob>(`/gpu/jobs/${id}`)
+  return data
+}
+
+export async function submitGPUJob(req: GPUSubmitRequest): Promise<GPUJob> {
+  const { data } = await api.post<GPUJob>('/gpu/jobs', req)
+  return data
+}
+
+export async function cancelGPUJob(id: number): Promise<GPUJob> {
+  const { data } = await api.post<GPUJob>(`/gpu/jobs/${id}/cancel`)
+  return data
+}
+
+export async function getGPUInference(): Promise<GPUInferenceStatus> {
+  const { data } = await api.get<GPUInferenceStatus>('/gpu/inference')
+  return data
+}
+
+export async function getGPUSettings(): Promise<GPUSettingsView> {
+  const { data } = await api.get<GPUSettingsView>('/settings/gpu')
+  return data
+}
+
+export async function saveGPUSettings(req: {
+  enabled: boolean
+  base_url: string
+  inference_model: string
+}): Promise<GPUSettingsView> {
+  const { data } = await api.put<GPUSettingsView>('/settings/gpu', req)
+  return data
+}
+
+export async function regenerateGPUWorkerToken(): Promise<GPUSettingsView> {
+  const { data } = await api.post<GPUSettingsView>('/settings/gpu/worker-token/regenerate')
+  return data
 }
 
 export default api
