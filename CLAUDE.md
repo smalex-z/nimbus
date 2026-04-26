@@ -187,6 +187,40 @@ These are easy to violate by accident — push back if a change would erode them
    router is mounted. Don't add code that assumes Proxmox is reachable before
    `IsConfigured()` returns true.
 
+## Schema changes and data backfills
+
+`db.New` runs `gormDB.AutoMigrate(...)` on every server boot, so adding a new
+column to a struct in `internal/db/models.go` is enough to roll the schema
+forward — no SQL migration files. **But existing rows get the column's zero
+value**, which can quietly break things for pre-existing data:
+
+- `is_admin bool default:false` was added later → every old user became a
+  member, leaving deployments with no admin at all (`HasAnyUsers()` returned
+  true so the setup wizard never re-prompted). The fix lives in
+  `service.AuthService.PromoteFirstUserIfNoAdmin()` and runs from `main.go`
+  on every startup. Idempotent — safe to call repeatedly.
+
+When you add a column whose **zero value would mis-classify existing rows**
+(default-deny flags, type discriminators, ownership pointers), pair the
+struct change with a one-shot backfill in the relevant service package and
+call it from `main.go` after `db.New`. Pattern:
+
+```go
+func (s *X) MigrateFooBackfill() (changed bool, err error) { … }   // idempotent
+```
+
+```go
+// in main.go
+if changed, err := svc.MigrateFooBackfill(); err != nil {
+    log.Printf("warning: foo backfill failed: %v", err)
+} else if changed {
+    log.Printf("backfill: …")
+}
+```
+
+`nimbus install --upgrade` replaces the binary and restarts the systemd unit,
+so any backfill in `main()` runs on the first post-upgrade boot for free.
+
 ## Gotchas the codebase already documents (read before editing)
 
 - **Proxmox API is form-encoded, not JSON.** `client.go:do` sets
