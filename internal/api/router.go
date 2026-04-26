@@ -52,7 +52,7 @@ func NewRouter(d Deps) http.Handler {
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
-	auth := handlers.NewAuth(d.Auth, d.Config.AppURL)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler)
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
 	settings := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).

@@ -66,11 +66,14 @@ type ProxmoxClient interface {
 	GetNodes(ctx context.Context) ([]proxmox.Node, error)
 	GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error)
 	GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error)
+	GetVMConfig(ctx context.Context, node string, vmid int) (map[string]any, error)
 	TemplateExists(ctx context.Context, node string, vmid int) (bool, error)
 	NextVMID(ctx context.Context) (int, error)
 	CloneVM(ctx context.Context, sourceNode, targetNode string, templateVMID, newVMID int, name string) (string, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	SetCloudInit(ctx context.Context, node string, vmid int, cfg proxmox.CloudInitConfig) error
+	SetVMTags(ctx context.Context, node string, vmid int, tags []string) error
+	SetVMDescription(ctx context.Context, node string, vmid int, description string) error
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
@@ -306,6 +309,19 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
 	}
 
+	// Stamp the Nimbus marker so other instances sharing the cluster can
+	// recognize this VM as foreign-Nimbus-managed. Tier/OS go into the VM's
+	// description as a hidden HTML comment — keeps the Proxmox dashboard
+	// from filling up with three colored chips per VM. Both writes are
+	// non-fatal — the VM is otherwise complete and a follow-up backfill
+	// will retry on the next startup.
+	if err := s.px.SetVMTags(ctx, target, newVMID, proxmox.EncodeNimbusTags()); err != nil {
+		log.Printf("set tags vmid=%d: %v (continuing)", newVMID, err)
+	}
+	if err := s.px.SetVMDescription(ctx, target, newVMID, proxmox.EncodeNimbusDescription(req.Tier, req.OSTemplate)); err != nil {
+		log.Printf("set description vmid=%d: %v (continuing)", newVMID, err)
+	}
+
 	// Step 5: resize the disk to tier spec. The cloud image ships at a small
 	// size; we *grow* it by the difference. (Proxmox accepts +<n>G deltas.)
 	resizeDelta := tier.DiskGB - 10 // cloud images are typically 10G base
@@ -440,6 +456,78 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		TunnelURL:     tunnelURL,
 		TunnelError:   tunnelError,
 	}, nil
+}
+
+// BackfillNimbusMetadata walks every persisted VM row and ensures the Proxmox
+// VM carries (a) the bare `nimbus` marker tag and (b) the structured tier/OS
+// marker inside its description. Legacy `nimbus-tier-*` / `nimbus-os-*` tags
+// from older Nimbus builds are stripped in the same pass — the Proxmox UI
+// shows one chip per VM instead of three.
+//
+// Idempotent: a VM whose tags and description are already correct is skipped
+// without any API writes. Returns the number of VMs whose Proxmox config was
+// touched. Per-VM failures are logged but do not abort the walk.
+func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
+	var vms []db.VM
+	if err := s.db.WithContext(ctx).Find(&vms).Error; err != nil {
+		return 0, fmt.Errorf("list vms: %w", err)
+	}
+	updated := 0
+	for _, vm := range vms {
+		if vm.Tier == "" || vm.OSTemplate == "" || vm.Node == "" || vm.VMID == 0 {
+			continue
+		}
+		cfg, err := s.px.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err != nil {
+			log.Printf("backfill: get config vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+			continue
+		}
+		var existingTags []string
+		if raw, _ := cfg["tags"].(string); raw != "" {
+			existingTags = proxmox.SplitTags(raw)
+		}
+		existingDesc, _ := cfg["description"].(string)
+
+		wantTags := proxmox.MergeNimbusTags(existingTags)
+		wantDesc := proxmox.MergeNimbusDescription(existingDesc, vm.Tier, vm.OSTemplate)
+
+		tagsChanged := !tagsEqual(existingTags, wantTags)
+		descChanged := existingDesc != wantDesc
+		if !tagsChanged && !descChanged {
+			continue
+		}
+		if tagsChanged {
+			if err := s.px.SetVMTags(ctx, vm.Node, vm.VMID, wantTags); err != nil {
+				log.Printf("backfill: set tags vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+				continue
+			}
+		}
+		if descChanged {
+			if err := s.px.SetVMDescription(ctx, vm.Node, vm.VMID, wantDesc); err != nil {
+				log.Printf("backfill: set description vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+				continue
+			}
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// tagsEqual compares two tag slices for set equality (order-insensitive).
+func tagsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, t := range a {
+		seen[t] = true
+	}
+	for _, t := range b {
+		if !seen[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // List returns persisted VM rows. Phase 1 ignores ownerID and returns all.
