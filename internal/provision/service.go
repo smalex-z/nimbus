@@ -225,9 +225,14 @@ func (s *Service) Provision(ctx context.Context, req Request) (*Result, error) {
 		tunnelError string
 	)
 	if req.PublicTunnel && s.tunnels != nil {
+		// Provision-time tunnel is always SSH (port 22). Multi-port tunnels for
+		// other services on the VM will be added via a separate post-provision
+		// surface — at provision we focus on getting SSH working first so the
+		// VM is reachable before we worry about anything else. TunnelPort lets
+		// scripts override the default; the API/UI should stick to 22.
 		port := req.TunnelPort
 		if port == 0 {
-			port = 80
+			port = 22
 		}
 		t, terr := s.tunnels.Create(ctx, tunnel.CreateRequest{
 			Subdomain:  req.Subdomain,
