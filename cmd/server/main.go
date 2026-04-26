@@ -280,6 +280,10 @@ func main() {
 		log.Fatalf("failed to load GPU settings: %v", err)
 	}
 	if gpuStored.Enabled && gpuStored.BaseURL != "" {
+		// SetGPUBootstrapConfig has its own localhost guard — passing a
+		// localhost-y APP_URL here gets logged and dropped on the
+		// provision side. We still call so a non-localhost APP_URL
+		// activates the bootstrap.
 		provSvc.SetGPUBootstrapConfig(provision.GPUBootstrapConfig{
 			BaseURL:        gpuStored.BaseURL,
 			NimbusGPUAPI:   strings.TrimRight(cfg.AppURL, "/") + "/api/gpu",

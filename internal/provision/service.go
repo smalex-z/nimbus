@@ -192,7 +192,16 @@ func (s *Service) SetTunnelClient(t *tunnel.Client) {
 // value (BaseURL == "") disables GPU bootstrap — Provision will silently
 // skip the SSH-based config delivery. Live-reloadable from the Settings
 // page so admins can flip the GPU plane on/off without a Nimbus restart.
+//
+// Refuses to install a config whose NimbusGPUAPI is localhost — those URLs
+// would bake into the VM's profile and leave the in-VM `gx10` CLI calling
+// the *VM's* localhost instead of Nimbus. Operator must set APP_URL to a
+// publicly-reachable hostname before pairing for the bootstrap to fire.
 func (s *Service) SetGPUBootstrapConfig(cfg GPUBootstrapConfig) {
+	if cfg.NimbusGPUAPI != "" && looksLikeLocalhostURL(cfg.NimbusGPUAPI) {
+		log.Printf("provision: refusing GPU bootstrap — NIMBUS_GPU_API would resolve to localhost (%s). Set APP_URL to a publicly-reachable URL and restart.", cfg.NimbusGPUAPI)
+		cfg = GPUBootstrapConfig{} // empty cfg → bootstrap step is skipped
+	}
 	s.gpuMu.Lock()
 	defer s.gpuMu.Unlock()
 	s.gpuCfg = cfg

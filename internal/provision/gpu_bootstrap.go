@@ -24,6 +24,30 @@ type GPUBootstrapConfig struct {
 // just dropping a couple of files into the user's homedir.
 const gpuBootstrapTimeout = 30 * time.Second
 
+// looksLikeLocalhostURL reports whether the URL's host is one of the
+// localhost aliases — those URLs are unreachable from inside a guest VM
+// (they'd resolve to the VM's own loopback) so we refuse to bake them
+// into the per-VM env. Empty input also returns true so an unset URL is
+// treated as "don't bake".
+func looksLikeLocalhostURL(url string) bool {
+	if url == "" {
+		return true
+	}
+	u := strings.ToLower(url)
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+	if i := strings.IndexAny(u, "/?#"); i >= 0 {
+		u = u[:i]
+	}
+	if i := strings.LastIndex(u, ":"); i >= 0 && !strings.Contains(u[:i], ":") {
+		u = u[:i]
+	}
+	return u == "localhost" ||
+		strings.HasPrefix(u, "127.") ||
+		u == "0.0.0.0" ||
+		u == "::1" ||
+		u == "[::1]"
+}
+
 // runGPUBootstrap SSH's into the freshly provisioned VM as `user` and writes
 // /home/<user>/.profile.d/nimbus-gpu.sh + ~/bin/gx10. Both are no-ops when
 // the GPU plane isn't configured (Service.cfg.GPU.BaseURL == "") — caller
