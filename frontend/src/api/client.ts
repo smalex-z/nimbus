@@ -21,11 +21,14 @@ const api: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-// Provisioning is a long-running call (template clone, cloud-init, boot,
-// agent ready) that can legitimately take 60-180s.
+// Provisioning is a long-running call: template clone + cloud-init + boot +
+// agent ready (~30-60s), and when a Gopher tunnel is requested the SSH
+// bootstrap on the VM can wait on dpkg locks for another 1-3min during
+// early-boot cloud-init contention. 6 min covers worst-case end-to-end with
+// some headroom; matches the server-side route timeout.
 const provisionClient: AxiosInstance = axios.create({
   baseURL: '/api',
-  timeout: 200000,
+  timeout: 6 * 60 * 1000,
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
