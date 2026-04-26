@@ -375,6 +375,32 @@ func generateSessionID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
+// default empty row on first call.
+func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
+	var settings db.GopherSettings
+	err := s.db.FirstOrCreate(&settings, db.GopherSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveGopherSettings persists Gopher credentials. Empty fields are treated as
+// "preserve existing" so the UI can rotate just the API key without
+// re-entering the URL (and vice versa).
+func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
+	existing, err := s.GetGopherSettings()
+	if err != nil {
+		return err
+	}
+	if next.APIURL == "" {
+		next.APIURL = existing.APIURL
+	}
+	if next.APIKey == "" {
+		next.APIKey = existing.APIKey
+	}
+	next.ID = 1
+	return s.db.Save(&next).Error
+}
+
 // GetOAuthSettings returns the stored OAuth provider credentials.
 // Creates a default empty row on first call. If the row exists but no access
 // code has ever been generated, one is generated lazily so the admin always
