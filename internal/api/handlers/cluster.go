@@ -166,7 +166,16 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		tier, osTemplate, isNimbus := proxmox.ParseNimbusTags(d.Tags)
+		// Tier/OS for foreign-Nimbus VMs come from the description marker
+		// (current scheme) with a fallback to legacy `nimbus-tier-*` /
+		// `nimbus-os-*` tags for VMs whose owning instance hasn't migrated
+		// yet. The bare `nimbus` tag remains the recognition signal.
+		legacyTier, legacyOS, isNimbus := proxmox.ParseNimbusTags(d.Tags)
+		descTier, descOS, hasDesc := proxmox.ParseNimbusDescription(d.Description)
+		tier, osTemplate := descTier, descOS
+		if !hasDesc {
+			tier, osTemplate = legacyTier, legacyOS
+		}
 		switch {
 		case isNimbus:
 			view.Source = sourceForeign
