@@ -294,7 +294,14 @@ func (h *GPU) MintPairing(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to mint pairing token")
 		return
 	}
-	curl := fmt.Sprintf(`sudo bash <(curl -fsSL %q)`,
+	// Pipe-form rather than process-substitution: `sudo bash <(curl ...)`
+	// fails on some distros (notably recent Ubuntu / DGX OS) because sudo
+	// strips the /dev/fd/N descriptor across the privilege boundary,
+	// producing a cryptic "/dev/fd/63: No such file or directory". Reading
+	// the script from stdin sidesteps that — sudo preserves stdin cleanly,
+	// and the script is non-interactive so we don't lose stdin to anything
+	// important inside it.
+	curl := fmt.Sprintf(`curl -fsSL %q | sudo bash`,
 		base+"/api/gpu/install.sh?token="+tok)
 	response.Success(w, pairingView{
 		Token:     tok,
@@ -334,8 +341,8 @@ func (h *GPU) InstallScript(w http.ResponseWriter, r *http.Request) {
 # nimbus-gpu-worker.service. Idempotent.
 #
 # Override before piping if you want different defaults:
-#   GX10_INFERENCE_MODEL=mistralai/Mistral-7B-Instruct-v0.3 sudo bash <(...)
-#   GX10_INFERENCE_PORT=8000
+#   curl ... | GX10_INFERENCE_MODEL=mistralai/Mistral-7B-Instruct-v0.3 sudo -E bash
+#   curl ... | GX10_INFERENCE_PORT=8000 sudo -E bash
 set -euo pipefail
 
 NIMBUS_URL=%q

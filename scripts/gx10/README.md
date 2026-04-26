@@ -18,7 +18,7 @@ back a one-line `curl` that pre-fills `NIMBUS_URL` + the freshly minted
 worker token. SSH into the GX10 and paste it:
 
 ```bash
-sudo bash <(curl -fsSL https://nimbus.example.com/api/gpu/install.sh)
+curl -fsSL "https://nimbus.example.com/api/gpu/install.sh?token=<pairing>" | sudo bash
 ```
 
 This downloads + runs `install-inference.sh` and `install-worker.sh` in
