@@ -54,6 +54,13 @@ type clusterVMView struct {
 	Username   string `json:"username,omitempty"` // local-only SSH username
 	CreatedAt  string `json:"created_at,omitempty"`
 
+	// ID is the Nimbus DB row id, set only for local-source VMs. Used by the
+	// admin SSH modal to call the per-VM private-key download endpoint.
+	ID uint `json:"id,omitempty"`
+	// KeyName is the SSH key file name, set only for local-source VMs that
+	// were provisioned with a vault-stored key.
+	KeyName string `json:"key_name,omitempty"`
+
 	// OS detail block — best-effort agent osinfo, surfaced to the frontend
 	// so it can render an icon, version label, and a hover popover with
 	// kernel/arch details. Empty string when unavailable.
@@ -144,6 +151,8 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 			// Local Nimbus DB row wins for tier/OS/hostname/username/IP.
 			view.Source = sourceLocal
 			view.NimbusManaged = true
+			view.ID = managed.ID
+			view.KeyName = managed.KeyName
 			view.Hostname = managed.Hostname
 			view.Tier = managed.Tier
 			view.OSTemplate = managed.OSTemplate

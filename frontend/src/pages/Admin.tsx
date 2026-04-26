@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import CopyButton from '@/components/ui/CopyButton'
 import OSIcon from '@/components/ui/OSIcon'
+import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
@@ -428,6 +428,7 @@ function VMTable({
   hasFilters: boolean
   onClearFilters: () => void
 }) {
+  const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const selectClass =
     'rounded-[8px] bg-white/85 font-sans text-sm text-ink border border-line-2 px-3 py-1.5 focus:outline-none'
 
@@ -509,6 +510,7 @@ function VMTable({
                 const dash = <span className="text-ink-3">—</span>
                 const osFamily = resolveOSId({
                   agentId: vm.os_id,
+                  name: vm.name,
                   template: vm.os_template,
                   ostype: vm.os_template, // external VMs put raw ostype here
                 })
@@ -553,7 +555,24 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3">
                       {vm.source === 'local' && vm.username && vm.ip ? (
-                        <CopyButton value={`ssh ${vm.username}@${vm.ip}`} label="COPY SSH" />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSshTarget({
+                              hostname: vm.hostname || vm.name,
+                              ip: vm.ip!,
+                              username: vm.username!,
+                              vmid: vm.vmid,
+                              node: vm.node,
+                              dbId: vm.id,
+                              keyName: vm.key_name,
+                            })
+                          }
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                        >
+                          <span aria-hidden>↗</span>
+                          <span>SSH</span>
+                        </button>
                       ) : dash}
                     </td>
                   </tr>
@@ -562,6 +581,9 @@ function VMTable({
             </tbody>
           </table>
         </Card>
+      )}
+      {sshTarget && (
+        <SSHDetailsModal target={sshTarget} onClose={() => setSshTarget(null)} />
       )}
     </div>
   )
