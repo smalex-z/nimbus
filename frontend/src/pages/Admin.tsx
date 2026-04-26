@@ -3,8 +3,11 @@ import { getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/clien
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
+import OSIcon from '@/components/ui/OSIcon'
 import StatusBadge from '@/components/ui/StatusBadge'
 import UsageBar from '@/components/ui/UsageBar'
+import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
+import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes } from '@/lib/format'
 import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, NodeView, TierName, VMSource } from '@/types'
 
@@ -363,6 +366,22 @@ function NodeCard({
   )
 }
 
+// osLabelFor returns the user-facing OS string for a VM row. Priority:
+//   1. Agent osinfo `version-id` ("22.04") prefixed by distro name from agent
+//      `id` — most accurate, available when qemu-guest-agent is running.
+//   2. Nimbus os_template ("ubuntu-22.04" → "Ubuntu 22.04").
+//   3. Raw Proxmox ostype hint (l26/win10) humanized to "Linux"/"Windows 10".
+//   4. Empty when nothing is known — caller renders a dash.
+function osLabelFor(vm: ClusterVM): string {
+  if (vm.os_id && vm.os_version_id) {
+    const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
+    return `${distro} ${vm.os_version_id}`
+  }
+  if (vm.os_pretty) return vm.os_pretty
+  if (vm.os_template) return humanizeOSTemplate(vm.os_template)
+  return ''
+}
+
 function SourceLabel({ source }: { source: VMSource }) {
   // Three states: local (this Nimbus), foreign (another Nimbus on the same
   // cluster), external (not Nimbus-provisioned). Foreign and local share the
@@ -488,9 +507,17 @@ function VMTable({
               {vms.map((vm) => {
                 const displayName = vm.hostname || vm.name
                 const dash = <span className="text-ink-3">—</span>
+                const osFamily = resolveOSId({
+                  agentId: vm.os_id,
+                  template: vm.os_template,
+                  ostype: vm.os_template, // external VMs put raw ostype here
+                })
+                const osLabel = osLabelFor(vm)
                 return (
                   <tr key={`${vm.node}-${vm.vmid}`} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
-                    <td className="px-4 py-3 font-display font-medium whitespace-nowrap">{displayName}</td>
+                    <td className="px-4 py-3 font-display font-medium whitespace-nowrap">
+                      <VMDetailsPopover vm={vm}>{displayName}</VMDetailsPopover>
+                    </td>
                     <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">{vm.vmid}</td>
                     <td className="px-4 py-3">
                       <button
@@ -510,8 +537,13 @@ function VMTable({
                         </span>
                       ) : dash}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
-                      {vm.os_template || dash}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {osLabel ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <OSIcon family={osFamily} className="text-ink-2" />
+                          <span className="font-mono text-xs text-ink-2">{osLabel}</span>
+                        </span>
+                      ) : dash}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <StatusBadge status={vm.status} />

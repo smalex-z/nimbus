@@ -53,6 +53,16 @@ type clusterVMView struct {
 	Hostname   string `json:"hostname,omitempty"` // local-only Nimbus hostname
 	Username   string `json:"username,omitempty"` // local-only SSH username
 	CreatedAt  string `json:"created_at,omitempty"`
+
+	// OS detail block — best-effort agent osinfo, surfaced to the frontend
+	// so it can render an icon, version label, and a hover popover with
+	// kernel/arch details. Empty string when unavailable.
+	OSID        string `json:"os_id,omitempty"`         // "ubuntu" / "debian" / "mswindows" / …
+	OSPretty    string `json:"os_pretty,omitempty"`     // "Ubuntu 22.04.3 LTS"
+	OSVersion   string `json:"os_version,omitempty"`    // "22.04.3 LTS (Jammy Jellyfish)"
+	OSVersionID string `json:"os_version_id,omitempty"` // "22.04"
+	OSKernel    string `json:"os_kernel,omitempty"`     // "5.15.0-91-generic"
+	OSMachine   string `json:"os_machine,omitempty"`    // "x86_64"
 }
 
 type clusterStatsView struct {
@@ -120,6 +130,14 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 			Status:   d.Status,
 			IP:       d.IP,
 			IPSource: d.IPSource,
+		}
+		if d.OS != nil {
+			view.OSID = d.OS.ID
+			view.OSPretty = d.OS.PrettyName
+			view.OSVersion = d.OS.Version
+			view.OSVersionID = d.OS.VersionID
+			view.OSKernel = d.OS.KernelRelease
+			view.OSMachine = d.OS.Machine
 		}
 
 		if managed, ok := byVMID[d.VMID]; ok {

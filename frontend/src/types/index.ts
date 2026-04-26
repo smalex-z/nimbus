@@ -146,6 +146,15 @@ export interface ClusterVM {
   os_template?: OSTemplate | string
   username?: string
   created_at?: string
+  // Best-effort qemu-guest-agent OS info. Empty when the agent is unavailable
+  // or the VM is stopped. Cached server-side for 24h since OS rarely changes
+  // on a running VM.
+  os_id?: string         // "ubuntu" / "debian" / "mswindows" / …
+  os_pretty?: string     // "Ubuntu 22.04.3 LTS"
+  os_version?: string    // "22.04.3 LTS (Jammy Jellyfish)"
+  os_version_id?: string // "22.04"
+  os_kernel?: string     // "5.15.0-91-generic"
+  os_machine?: string    // "x86_64"
 }
 
 export interface IPAllocation {
