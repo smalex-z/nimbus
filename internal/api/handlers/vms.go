@@ -254,12 +254,21 @@ func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTunnelRequest struct {
-	TargetPort int    `json:"target_port"`
-	Subdomain  string `json:"subdomain,omitempty"`
+	TargetPort           int    `json:"target_port"`
+	Subdomain            string `json:"subdomain,omitempty"`
+	Transport            string `json:"transport,omitempty"`
+	Private              bool   `json:"private,omitempty"`
+	NoTLS                bool   `json:"no_tls,omitempty"`
+	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
+	TLSSkipVerify        bool   `json:"tls_skip_verify,omitempty"`
 }
 
 // CreateTunnel handles POST /api/vms/{id}/tunnels — registers a per-port
-// tunnel on this VM's Gopher machine. Body: {target_port, subdomain?}.
+// tunnel on this VM's Gopher machine. Mirrors Gopher's POST /api/v1/tunnels
+// body shape; see Gopher's OpenAPI spec for field semantics + UDP/bot-
+// protection coercion rules.
 func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -270,7 +279,17 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
-	t, err := h.svc.CreateVMTunnel(r.Context(), id, req.TargetPort, req.Subdomain)
+	t, err := h.svc.CreateVMTunnel(r.Context(), id, provision.VMTunnelRequest{
+		TargetPort:           req.TargetPort,
+		Subdomain:            req.Subdomain,
+		Transport:            req.Transport,
+		Private:              req.Private,
+		NoTLS:                req.NoTLS,
+		BotProtectionEnabled: req.BotProtectionEnabled,
+		BotProtectionTTL:     req.BotProtectionTTL,
+		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		TLSSkipVerify:        req.TLSSkipVerify,
+	})
 	if err != nil {
 		response.FromError(w, err)
 		return
