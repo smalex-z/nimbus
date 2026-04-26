@@ -275,13 +275,25 @@ type pairingView struct {
 // fresh 5-min pairing token and returns the curl command the operator
 // pastes onto the GX10. Replaces any active pairing token; we only support
 // pairing one GX10 at a time.
+//
+// Fails with 412 when neither r.Host nor APP_URL is publicly reachable —
+// otherwise we'd hand back a curl with `localhost` baked in, which the
+// GX10 obviously can't reach. The operator either browses Nimbus at its
+// LAN/public hostname or sets APP_URL before retrying.
 func (h *GPU) MintPairing(w http.ResponseWriter, r *http.Request) {
+	base := h.resolveBase(r)
+	if base == "" {
+		response.Error(w, http.StatusPreconditionFailed,
+			"Nimbus appears to be accessed via localhost — the GX10 can't reach a localhost URL. "+
+				"Either browse Nimbus at its LAN / public hostname before clicking Add GX10, "+
+				"or set APP_URL in Nimbus's environment to a publicly-reachable URL and restart.")
+		return
+	}
 	tok, err := h.auth.MintGPUPairingToken()
 	if err != nil {
 		response.InternalError(w, "failed to mint pairing token")
 		return
 	}
-	base := h.resolveBase(r)
 	curl := fmt.Sprintf(`sudo bash <(curl -fsSL %q)`,
 		base+"/api/gpu/install.sh?token="+tok)
 	response.Success(w, pairingView{
@@ -306,7 +318,13 @@ func (h *GPU) InstallScript(w http.ResponseWriter, r *http.Request) {
 			"invalid or expired pairing token — admin must click 'Add GX10' in Settings → GPU")
 		return
 	}
-	base := h.resolveBase(r)
+	// At this point the GX10 successfully reached us, so r.Host is already
+	// proven-reachable. Use it directly — no need to re-fall-back to AppURL.
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	base := scheme + "://" + r.Host
 	// All four substitutions are: nimbus URL, pairing token, nimbus URL, nimbus URL.
 	// Splitting the format string from the heredoc body keeps the Go-side
 	// template readable.
@@ -426,19 +444,56 @@ func (h *GPU) Register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveBase picks the base URL Nimbus knows about, falling back to the
-// inbound request's host when AppURL hasn't been set. Lets the install
-// script work on a freshly-set-up Nimbus where the operator hasn't
-// hardcoded an external URL yet.
+// resolveBase picks the base URL the GX10 should phone home to. Priority:
+//
+//  1. The inbound request's Host header, when it's a real hostname. This
+//     is what the operator's browser used to reach Nimbus, so it's the URL
+//     most likely reachable from the GX10 too — including any reverse
+//     proxy / CF tunnel in front.
+//  2. The configured AppURL, when r.Host is localhost-ish (typical dev
+//     setup with Vite at :5173 proxying to Nimbus at :8080). AppURL must
+//     itself be a real hostname; the localhost default is rejected.
+//
+// Returns "" when no usable base could be derived — the caller surfaces
+// a clear error so the operator knows to set APP_URL or browse Nimbus at
+// its LAN/public hostname before pairing.
 func (h *GPU) resolveBase(r *http.Request) string {
-	if h.nimbusBaseURL != "" {
+	if !isLocalhostHost(r.Host) {
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		return scheme + "://" + r.Host
+	}
+	if h.nimbusBaseURL != "" && !isLocalhostURL(h.nimbusBaseURL) {
 		return h.nimbusBaseURL
 	}
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
+	return ""
+}
+
+func isLocalhostHost(host string) bool {
+	h := strings.ToLower(host)
+	if h == "" {
+		return true // empty Host is unusable, treat like localhost
 	}
-	return scheme + "://" + r.Host
+	// Strip optional port for the prefix check.
+	if i := strings.LastIndex(h, ":"); i >= 0 && !strings.Contains(h[:i], ":") {
+		h = h[:i]
+	}
+	return h == "localhost" ||
+		strings.HasPrefix(h, "127.") ||
+		h == "0.0.0.0" ||
+		h == "::1" ||
+		h == "[::1]"
+}
+
+func isLocalhostURL(url string) bool {
+	u := strings.ToLower(url)
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+	if i := strings.IndexAny(u, "/?#"); i >= 0 {
+		u = u[:i]
+	}
+	return isLocalhostHost(u)
 }
 
 func defaultIfZero(n, fallback int) int {
