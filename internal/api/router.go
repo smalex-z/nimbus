@@ -93,6 +93,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
 
+			// Bootstrap status is a read-only yes/no — both admins and
+			// regular members need it to decide whether the Provision UI
+			// should render the form or wait for an admin to set up
+			// templates. The destructive POST stays admin-only below.
+			r.Get("/admin/bootstrap-status", bs.BootstrapStatus)
+
 			// Admin-only routes — cluster observability + cluster-wide
 			// mutations. Default users are restricted to the user-scoped
 			// /vms and /keys surface above.
@@ -112,10 +118,8 @@ func NewRouter(d Deps) http.Handler {
 				// Template bootstrap can take 10-20 minutes when
 				// downloading all 4 OSes across all online nodes —
 				// give it room.
-				r.Route("/admin", func(r chi.Router) {
-					r.Get("/bootstrap-status", bs.BootstrapStatus)
-					r.With(middleware.Timeout(30*time.Minute)).Post("/bootstrap-templates", bs.BootstrapTemplates)
-				})
+				r.With(middleware.Timeout(30*time.Minute)).
+					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
 
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
