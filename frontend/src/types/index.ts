@@ -181,13 +181,24 @@ export interface ClusterVM {
   os_machine?: string    // "x86_64"
 }
 
+// IPSource describes who claimed the IP. Mirrors ippool.Source* in Go:
+//   - "local"    — claimed by this Nimbus instance via Reserve/MarkAllocated
+//   - "adopted"  — observed in Proxmox; another Nimbus instance owns the VM
+//   - "external" — detected on the LAN by netscan; not in Proxmox at all
+export type IPSource = 'local' | 'adopted' | 'external' | ''
+
+export type IPStatus = 'free' | 'reserved' | 'allocated'
+
 export interface IPAllocation {
   ip: string
-  status: 'free' | 'reserved' | 'allocated'
+  status: IPStatus
   vmid?: number | null
   hostname?: string | null
   reserved_at?: string | null
   allocated_at?: string | null
+  last_seen_at?: string | null
+  source?: IPSource
+  missed_cycles?: number
 }
 
 export interface HealthResponse {
