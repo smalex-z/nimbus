@@ -73,12 +73,21 @@ export default function Admin() {
 
 
   const filteredVMs = useMemo(() => {
-    return vms.filter((vm) => {
-      if (filters.node && vm.node !== filters.node) return false
-      if (filters.status && vm.status !== filters.status) return false
-      if (filters.tier && vm.tier !== filters.tier) return false
-      return true
-    })
+    // Stable sort: node ascending, then VMID ascending within a node.
+    // /api/cluster/vms returns rows in whatever order Proxmox walks its
+    // nodes, which jumbles the table on every poll. A deterministic order
+    // keeps the row positions fixed across the 15s refresh cycle.
+    return vms
+      .filter((vm) => {
+        if (filters.node && vm.node !== filters.node) return false
+        if (filters.status && vm.status !== filters.status) return false
+        if (filters.tier && vm.tier !== filters.tier) return false
+        return true
+      })
+      .sort((a, b) => {
+        const byNode = a.node.localeCompare(b.node)
+        return byNode !== 0 ? byNode : a.vmid - b.vmid
+      })
   }, [vms, filters])
 
   const stats = useMemo(() => {

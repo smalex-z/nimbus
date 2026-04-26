@@ -89,14 +89,7 @@ export default function SSHDetailsModal({ target, onClose }: SSHDetailsModalProp
             value={target.keyName ?? '—'}
             copyable={Boolean(target.keyName)}
           />
-          <DetailCell
-            label={publicSSHCommand ? 'SSH (LAN)' : 'SSH command'}
-            value={sshCommand}
-            fullWidth
-          />
-          {publicSSHCommand && (
-            <DetailCell label="SSH (public)" value={publicSSHCommand} fullWidth />
-          )}
+          <SSHCommandCell lanCommand={sshCommand} wanCommand={publicSSHCommand} />
         </div>
 
         {canDownload && (
@@ -126,6 +119,61 @@ interface DetailCellProps {
   value: string
   fullWidth?: boolean
   copyable?: boolean
+}
+
+// SSHCommandCell renders the SSH command line. When a public-tunnel command
+// is also available, the label switches into a WAN/LAN toggle and the cell
+// defaults to WAN — that's the more useful one for SSHing in from anywhere.
+// Falls back to a plain "SSH command" cell when only LAN is available.
+function SSHCommandCell({ lanCommand, wanCommand }: { lanCommand: string; wanCommand?: string }) {
+  const [mode, setMode] = useState<'wan' | 'lan'>(wanCommand ? 'wan' : 'lan')
+  if (!wanCommand) {
+    return <DetailCell label="SSH command" value={lanCommand} fullWidth />
+  }
+  const value = mode === 'wan' ? wanCommand : lanCommand
+  return (
+    <div className="p-3.5 rounded-[10px] bg-white/85 border border-line sm:col-span-2">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3">
+          SSH
+        </div>
+        <div
+          role="tablist"
+          aria-label="SSH endpoint"
+          className="inline-flex rounded-md border border-line overflow-hidden text-[10px] font-mono uppercase tracking-wider"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'wan'}
+            onClick={() => setMode('wan')}
+            title="Public tunnel — reachable from anywhere"
+            className={`px-2 py-0.5 transition-colors ${
+              mode === 'wan' ? 'bg-ink text-white' : 'bg-transparent text-ink-3 hover:text-ink'
+            }`}
+          >
+            🌐 WAN
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'lan'}
+            onClick={() => setMode('lan')}
+            title="LAN — only reachable from inside the cluster network"
+            className={`px-2 py-0.5 border-l border-line transition-colors ${
+              mode === 'lan' ? 'bg-ink text-white' : 'bg-transparent text-ink-3 hover:text-ink'
+            }`}
+          >
+            🏠 LAN
+          </button>
+        </div>
+      </div>
+      <div className="font-mono text-sm text-ink break-all flex items-center justify-between gap-3">
+        <span>{value}</span>
+        <CopyButton value={value} />
+      </div>
+    </div>
+  )
 }
 
 function DetailCell({ label, value, fullWidth = false, copyable = true }: DetailCellProps) {
