@@ -16,8 +16,56 @@ interface AdminData {
   vms: ClusterVM[]
   ips: IPAllocation[]
   clusterStats: ClusterStats | null
-  loading: boolean
-  error: string | null
+  // statsLoading is true while the lightweight overview (nodes, IPs, cluster
+  // stats) is being fetched. vmsLoading is its own flag because /cluster/vms
+  // can be much slower (cold qemu-agent OS-info cache after a restart, etc.)
+  // — splitting the two lets the stats grid render while the VM table is
+  // still spinning.
+  statsLoading: boolean
+  vmsLoading: boolean
+  statsError: string | null
+  vmsError: string | null
+}
+
+// pollEachWith fires `fn` immediately, then every `intervalMs`, until the
+// returned cleanup is invoked. The cleanup is effect-safe: ignores results
+// from in-flight calls. Used twice below — once for the overview triple and
+// once for the heavy /cluster/vms walk.
+function usePoll<T>(
+  fn: () => Promise<T>,
+  intervalMs: number,
+  onResult: (v: T) => void,
+  onError: (e: string) => void,
+  onSettled: () => void,
+) {
+  useEffect(() => {
+    let cancelled = false
+    const tick = () => {
+      fn()
+        .then((v) => {
+          if (!cancelled) {
+            onResult(v)
+            onError('')
+          }
+        })
+        .catch((e: unknown) => {
+          if (!cancelled) onError(e instanceof Error ? e.message : String(e))
+        })
+        .finally(() => {
+          if (!cancelled) onSettled()
+        })
+    }
+    tick()
+    const id = setInterval(tick, intervalMs)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+    // The callback set is stable for the lifetime of the page; deps lint is
+    // disabled here intentionally because including the callbacks would
+    // re-create the interval on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 }
 
 function useAdminData(): AdminData {
@@ -25,38 +73,35 @@ function useAdminData(): AdminData {
   const [vms, setVMs] = useState<ClusterVM[]>([])
   const [ips, setIPs] = useState<IPAllocation[]>([])
   const [clusterStats, setClusterStats] = useState<ClusterStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [statsLoading, setStatsLoading] = useState(true)
+  const [vmsLoading, setVmsLoading] = useState(true)
+  const [statsError, setStatsError] = useState<string | null>(null)
+  const [vmsError, setVmsError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    const fetch = () => {
-      Promise.all([listNodes(), listClusterVMs(), listIPs(), getClusterStats()])
-        .then(([n, v, i, s]) => {
-          if (!cancelled) {
-            setNodes(n)
-            setVMs(v)
-            setIPs(i)
-            setClusterStats(s)
-            setError(null)
-          }
-        })
-        .catch((e: unknown) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        })
-    }
-    fetch()
-    const id = setInterval(fetch, 15_000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
+  // Overview triple — fast endpoints (DB-only or thin Proxmox calls).
+  usePoll(
+    () => Promise.all([listNodes(), listIPs(), getClusterStats()]),
+    15_000,
+    ([n, i, s]) => {
+      setNodes(n)
+      setIPs(i)
+      setClusterStats(s)
+    },
+    (e) => setStatsError(e || null),
+    () => setStatsLoading(false),
+  )
 
-  return { nodes, vms, ips, clusterStats, loading, error }
+  // Heavy walk — qemu-agent probes per running VM. Polls on its own cadence
+  // so a slow response doesn't delay the overview tile rendering.
+  usePoll(
+    () => listClusterVMs(),
+    15_000,
+    (v) => setVMs(v),
+    (e) => setVmsError(e || null),
+    () => setVmsLoading(false),
+  )
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError }
 }
 
 interface FilterState {
@@ -68,7 +113,7 @@ interface FilterState {
 const EMPTY_FILTERS: FilterState = { node: null, status: null, tier: null }
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, loading, error } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -140,12 +185,14 @@ export default function Admin() {
         </p>
       </div>
 
-      {loading && <p className="mt-8 text-ink-3 font-mono text-sm">Loading…</p>}
-      {error && (
-        <Card className="mt-8 p-6 text-bad text-sm">Failed to load: {error}</Card>
+      {statsLoading && (
+        <p className="mt-8 text-ink-3 font-mono text-sm">Loading overview…</p>
+      )}
+      {statsError && (
+        <Card className="mt-8 p-6 text-bad text-sm">Failed to load overview: {statsError}</Card>
       )}
 
-      {!loading && (
+      {!statsLoading && (
         <>
           <SummaryStats stats={stats} />
 
@@ -159,19 +206,34 @@ export default function Admin() {
           />
 
           <div className="mt-10 mb-2">
-            <div className="eyebrow">{filteredVMs.length} machine{filteredVMs.length === 1 ? '' : 's'}</div>
+            <div className="eyebrow">
+              {vmsLoading
+                ? 'loading machines…'
+                : `${filteredVMs.length} machine${filteredVMs.length === 1 ? '' : 's'}`}
+            </div>
             <h3 className="text-xl">Virtual machines</h3>
           </div>
-          <VMTable
-            vms={filteredVMs}
-            allVMs={vms}
-            allNodes={allNodes}
-            allTiers={allTiers}
-            filters={filters}
-            onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
-            hasFilters={hasFilters}
-            onClearFilters={clearFilters}
-          />
+          {vmsError && (
+            <Card className="mt-2 p-4 text-bad text-sm">
+              Failed to load machine table: {vmsError}
+            </Card>
+          )}
+          {vmsLoading && vms.length === 0 ? (
+            <Card className="mt-2 p-6 text-ink-3 font-mono text-sm">
+              Walking nodes for VM details… this can take a few seconds on the first load after a restart while the qemu-agent OS-info cache is cold.
+            </Card>
+          ) : (
+            <VMTable
+              vms={filteredVMs}
+              allVMs={vms}
+              allNodes={allNodes}
+              allTiers={allTiers}
+              filters={filters}
+              onFilterChange={(patch) => setFilters((f) => ({ ...f, ...patch }))}
+              hasFilters={hasFilters}
+              onClearFilters={clearFilters}
+            />
+          )}
         </>
       )}
     </div>
