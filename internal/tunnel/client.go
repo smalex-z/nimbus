@@ -1,15 +1,24 @@
 // Package tunnel is a focused client for Gopher's external tunnel API.
 //
 // Gopher (https://github.com/uclaacm/gopher) is ACM@UCLA's self-hosted reverse
-// tunnel gateway — rathole + Caddy on a VPS. It exposes services running on
-// internal hosts at public HTTPS subdomains. Nimbus uses Gopher's external
-// API to register a tunnel for each VM that asks for one; the actual tunnel
-// is established by a one-line bootstrap script run on the VM.
+// tunnel gateway — rathole + Caddy on a VPS. Nimbus uses Gopher's external
+// API to expose VMs to the internet at provision time.
 //
-// All endpoints use Bearer-token auth via the GOPHER_API_KEY env var. When the
-// configured base URL is empty the constructor returns nil and callers are
-// expected to skip tunnel work entirely — see provision.Service for the
-// "tunnel-disabled" code path.
+// Gopher models exposure in two layers:
+//
+//   - **Machines**: a registered host running the rathole client. Created
+//     with `public_ssh: true` to flip on SSH exposure. The response carries
+//     a one-shot bootstrap_url; running `curl <bootstrap_url> | sh` on the
+//     VM links it to Gopher and the machine flips from `pending` to `active`.
+//
+//   - **Tunnels**: per-port exposures *on top of* an active machine. Used to
+//     route additional services (HTTP, custom TCP) to specific ports inside
+//     the VM. Provision-time SSH exposure does NOT use this surface — it
+//     rides on the machine's `public_ssh` flag.
+//
+// All endpoints use Bearer-token auth via the Gopher API key. When the
+// configured base URL is empty the constructor returns nil; callers do
+// `if c == nil { skip }` for the tunnel-disabled code path.
 package tunnel
 
 import (
@@ -21,27 +30,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 )
 
-// subdomainRE constrains subdomains to a DNS-safe label. Mirrors RFC 1123
-// single-label hostnames (lowercase). Validating client-side is best-effort —
-// Gopher is the source of truth for "available", but we want to reject obvious
-// garbage before round-tripping.
-var subdomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-
-// ValidateSubdomain returns nil for a syntactically valid subdomain, or a
-// descriptive error. Callers should still expect Gopher to reject duplicates.
-func ValidateSubdomain(s string) error {
-	if !subdomainRE.MatchString(s) {
-		return fmt.Errorf("subdomain must be 1–63 chars, lowercase letters/digits/hyphens, no leading or trailing hyphen")
-	}
-	return nil
-}
-
-// Tunnel statuses returned by Gopher's Get endpoint.
+// Status values returned by Gopher for both machines and tunnels.
 const (
 	StatusPending = "pending"
 	StatusActive  = "active"
@@ -79,32 +72,97 @@ func New(baseURL, apiKey string, timeout time.Duration) (*Client, error) {
 	}, nil
 }
 
-// CreateRequest is the body of POST /api/v1/tunnels.
-type CreateRequest struct {
-	Subdomain  string `json:"subdomain"`
-	TargetIP   string `json:"target_ip"`
+// ── Machines ──────────────────────────────────────────────────────────────────
+
+// Machine is the canonical Gopher object — a host that runs the rathole
+// client. Field names match Gopher's JSON. BootstrapURL is set on creation
+// (one-shot, used by `curl … | sh` to link the VM). Once Status flips to
+// "active", Gopher populates the public-SSH connection details (host/port);
+// the exact field names there are inferred from the design doc and the
+// response shape will be confirmed on the first real provision.
+type Machine struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	PublicSSH     bool   `json:"public_ssh"`
+	BootstrapURL  string `json:"bootstrap_url,omitempty"`
+	PublicSSHHost string `json:"public_ssh_host,omitempty"`
+	PublicSSHPort int    `json:"public_ssh_port,omitempty"`
+	CreatedAt     string `json:"created_at,omitempty"`
+}
+
+// CreateMachineRequest is the body of POST /api/v1/machines.
+type CreateMachineRequest struct {
+	PublicSSH bool `json:"public_ssh,omitempty"`
+}
+
+// CreateMachine registers a new machine. With PublicSSH=true, Gopher
+// allocates an SSH port at the gateway and returns a bootstrap_url that the
+// VM must run to establish the rathole tunnel.
+func (c *Client) CreateMachine(ctx context.Context, req CreateMachineRequest) (*Machine, error) {
+	var out Machine
+	if err := c.do(ctx, http.MethodPost, "/api/v1/machines", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetMachine fetches one machine by ID. Used to poll status during the
+// bootstrap window. Returns ErrNotFound on 404 (machine deleted).
+func (c *Client) GetMachine(ctx context.Context, id string) (*Machine, error) {
+	var out Machine
+	if err := c.do(ctx, http.MethodGet, "/api/v1/machines/"+url.PathEscape(id), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteMachine tears down a machine and all its tunnels. 404 is treated as
+// success (already gone) so retries are idempotent.
+func (c *Client) DeleteMachine(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/api/v1/machines/"+url.PathEscape(id), nil, nil)
+	if err == nil {
+		return nil
+	}
+	var he *httpError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+// ListMachines returns every machine known to Gopher. Admin-scoped — non-admin
+// tokens may receive a filtered list. Surfaces the first page (default limit).
+func (c *Client) ListMachines(ctx context.Context) ([]Machine, error) {
+	var page paginatedMachines
+	if err := c.do(ctx, http.MethodGet, "/api/v1/machines", nil, &page); err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+// ── Tunnels ───────────────────────────────────────────────────────────────────
+
+// Tunnel is an additional port exposure on an existing active machine. Used
+// for HTTP/custom services beyond SSH. Created post-provision via the
+// machine page UI (not yet built — provision-time exposure is SSH-only).
+type Tunnel struct {
+	ID         string `json:"id"`
+	MachineID  string `json:"machine_id"`
+	TargetPort int    `json:"target_port"`
+	Status     string `json:"status,omitempty"`
+	URL        string `json:"url,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+}
+
+// CreateTunnelRequest is the body of POST /api/v1/tunnels.
+type CreateTunnelRequest struct {
+	MachineID  string `json:"machine_id"`
 	TargetPort int    `json:"target_port"`
 }
 
-// Tunnel is the canonical Gopher tunnel object. Field names match Gopher's
-// JSON. URL is empty until Status flips to "active".
-type Tunnel struct {
-	ID           string `json:"id"`
-	Subdomain    string `json:"subdomain"`
-	Status       string `json:"status"`
-	URL          string `json:"url,omitempty"`
-	BootstrapURL string `json:"bootstrap_url,omitempty"`
-	TargetIP     string `json:"target_ip,omitempty"`
-	TargetPort   int    `json:"target_port,omitempty"`
-}
-
-// ErrSubdomainTaken is returned by Create when Gopher reports the subdomain
-// is already registered (HTTP 409). Callers map this to a fail-fast
-// validation error.
-var ErrSubdomainTaken = errors.New("tunnel: subdomain already taken")
-
-// Create registers a new tunnel. On 409 returns ErrSubdomainTaken.
-func (c *Client) Create(ctx context.Context, req CreateRequest) (*Tunnel, error) {
+// CreateTunnel adds a port exposure to an active machine. Returns an error
+// when MachineID names a machine that doesn't exist or is still pending.
+func (c *Client) CreateTunnel(ctx context.Context, req CreateTunnelRequest) (*Tunnel, error) {
 	var out Tunnel
 	if err := c.do(ctx, http.MethodPost, "/api/v1/tunnels", req, &out); err != nil {
 		return nil, err
@@ -112,19 +170,8 @@ func (c *Client) Create(ctx context.Context, req CreateRequest) (*Tunnel, error)
 	return &out, nil
 }
 
-// Get fetches one tunnel by ID. Used to poll status during the bootstrap
-// window.
-func (c *Client) Get(ctx context.Context, id string) (*Tunnel, error) {
-	var out Tunnel
-	if err := c.do(ctx, http.MethodGet, "/api/v1/tunnels/"+url.PathEscape(id), nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// Delete tears down a tunnel and releases its subdomain. 404 is treated as
-// success (already gone) so retries are idempotent.
-func (c *Client) Delete(ctx context.Context, id string) error {
+// DeleteTunnel removes a tunnel. 404 → idempotent success.
+func (c *Client) DeleteTunnel(ctx context.Context, id string) error {
 	err := c.do(ctx, http.MethodDelete, "/api/v1/tunnels/"+url.PathEscape(id), nil, nil)
 	if err == nil {
 		return nil
@@ -136,17 +183,16 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// List returns every tunnel known to Gopher. Admin-scoped — non-admin tokens
-// may receive a filtered list. Gopher paginates server-side; for now we
-// surface the first page (default limit) which is sufficient for any
-// realistic admin view today. Add cursoring if/when it bites.
-func (c *Client) List(ctx context.Context) ([]Tunnel, error) {
+// ListTunnels returns every tunnel known to Gopher. Admin-scoped.
+func (c *Client) ListTunnels(ctx context.Context) ([]Tunnel, error) {
 	var page paginatedTunnels
 	if err := c.do(ctx, http.MethodGet, "/api/v1/tunnels", nil, &page); err != nil {
 		return nil, err
 	}
 	return page.Items, nil
 }
+
+// ── Internals ─────────────────────────────────────────────────────────────────
 
 // httpError carries a non-2xx response so callers can branch on status code.
 type httpError struct {
@@ -158,15 +204,20 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("tunnel: gopher returned HTTP %d: %s", e.Status, e.Body)
 }
 
-// envelope is Gopher's standard {success, data, error} JSON wrapper. Every
-// response carries it, including 4xx/5xx errors.
+// envelope is Gopher's standard {success, data, error} JSON wrapper.
 type envelope struct {
 	Success bool            `json:"success"`
 	Data    json.RawMessage `json:"data"`
 	Error   string          `json:"error,omitempty"`
 }
 
-// paginatedTunnels mirrors Gopher's {items, limit, offset, total} list shape.
+type paginatedMachines struct {
+	Items  []Machine `json:"items"`
+	Limit  int       `json:"limit,omitempty"`
+	Offset int       `json:"offset,omitempty"`
+	Total  int       `json:"total,omitempty"`
+}
+
 type paginatedTunnels struct {
 	Items  []Tunnel `json:"items"`
 	Limit  int      `json:"limit,omitempty"`
@@ -174,9 +225,8 @@ type paginatedTunnels struct {
 	Total  int      `json:"total,omitempty"`
 }
 
-// do is the shared request body. body and out are optional; pass nil to skip
-// either side. Decodes Gopher's {success,data,error} envelope on every
-// response and surfaces server-supplied messages on failure.
+// do issues the HTTP request, decodes Gopher's {success, data, error}
+// envelope, and surfaces server-supplied error messages on non-2xx.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -202,9 +252,6 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	defer resp.Body.Close() //nolint:errcheck
 	respBody, _ := io.ReadAll(resp.Body)
 
-	// Try to decode the envelope. Gopher uses it consistently, but if a
-	// proxy/middleware in front returns a non-JSON 5xx page we still want a
-	// useful error.
 	var env envelope
 	if len(respBody) > 0 {
 		_ = json.Unmarshal(respBody, &env)
@@ -224,12 +271,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return nil
 	}
 
-	if resp.StatusCode == http.StatusConflict {
-		return ErrSubdomainTaken
+	body4xx := env.Error
+	if body4xx == "" {
+		body4xx = strings.TrimSpace(string(respBody))
 	}
-	body409 := env.Error
-	if body409 == "" {
-		body409 = strings.TrimSpace(string(respBody))
-	}
-	return &httpError{Status: resp.StatusCode, Body: body409}
+	return &httpError{Status: resp.StatusCode, Body: body4xx}
 }

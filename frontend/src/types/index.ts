@@ -63,8 +63,6 @@ export interface ProvisionRequest {
   ssh_privkey?: string
   generate_key?: boolean
   public_tunnel?: boolean
-  subdomain?: string
-  tunnel_port?: number
 }
 
 export interface SSHKey {
