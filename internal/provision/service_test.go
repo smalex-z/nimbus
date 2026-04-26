@@ -3,6 +3,8 @@ package provision_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 	"nimbus/internal/proxmox"
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/tunnel"
 )
 
 // realPubKey returns a parseable ssh-ed25519 public key. The provision
@@ -1065,6 +1068,135 @@ func TestPickNode_RejectionMessageListsAllNodes(t *testing.T) {
 	}
 	if !strings.Contains(conflict.Error(), "bravo=offline") {
 		t.Errorf("expected 'bravo=offline' in error, got: %s", conflict.Error())
+	}
+}
+
+// ---- Gopher tunnel integration -------------------------------------------
+
+func newGopherStub(t *testing.T, handler http.HandlerFunc) (*tunnel.Client, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := tunnel.New(srv.URL, "test-key", 2*time.Second)
+	if err != nil {
+		t.Fatalf("tunnel.New: %v", err)
+	}
+	return c, &calls
+}
+
+func TestProvision_TunnelDisabled_IgnoresFlag(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+	// Note: SetTunnelClient never called — service has nil tunnels.
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "no-tunnel-vm",
+		Tier:         "small",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+		PublicTunnel: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if res.TunnelURL != "" || res.TunnelError != "" {
+		t.Errorf("expected tunnel fields blank when client unset, got url=%q err=%q",
+			res.TunnelURL, res.TunnelError)
+	}
+}
+
+// 5xx from Gopher must NOT fail the VM provision. The VM comes back with
+// tunnel_error populated.
+func TestProvision_TunnelInfraError_VMStillSucceeds(t *testing.T) {
+	t.Parallel()
+	svc, _, database := newTestService(t, happyFakePVE(t))
+	tc, _ := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	svc.SetTunnelClient(tc)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "infra-fail",
+		Tier:         "small",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+		PublicTunnel: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision should still succeed despite Gopher 5xx, got %v", err)
+	}
+	if res.TunnelURL != "" {
+		t.Errorf("TunnelURL = %q, want empty on infra error", res.TunnelURL)
+	}
+	if res.TunnelError == "" {
+		t.Errorf("TunnelError should be populated on Gopher infra failure")
+	}
+	// VM row carries the same fields.
+	var vm db.VM
+	if err := database.First(&vm, "vmid = ?", res.VMID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if vm.TunnelError == "" {
+		t.Errorf("VM.TunnelError should be persisted, got empty")
+	}
+}
+
+// When WaitForIP soft-fails (cluster LAN unreachable), tunnel is registered
+// but the bootstrap is skipped — surface manual-fix instructions in
+// tunnel_error so the user knows how to finish.
+func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getAgentIfaces = func(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
+		return []proxmox.NetworkInterface{}, nil // never reports the IP
+	}
+	svc, _, _ := newTestService(t, fake)
+
+	var seenDelete atomic.Bool
+	tc, _ := newGopherStub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			// Real Gopher shape: POST /machines returns the new machine in
+			// the envelope. The bootstrap URL lives on the machine.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"m-soft","status":"pending","public_ssh":true,"bootstrap_url":"https://gopher.example.com/bootstrap/abc"}}`))
+		case http.MethodDelete:
+			seenDelete.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":null}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	svc.SetTunnelClient(tc)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "soft",
+		Tier:         "small",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+		PublicTunnel: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if res.Warning == "" {
+		t.Errorf("expected reachability warning")
+	}
+	if res.TunnelURL != "" {
+		t.Errorf("TunnelURL should be empty when bootstrap is skipped, got %q", res.TunnelURL)
+	}
+	if !strings.Contains(res.TunnelError, "bootstrap_url") &&
+		!strings.Contains(res.TunnelError, "manually") {
+		t.Errorf("TunnelError should describe the manual recovery path: %q", res.TunnelError)
+	}
+	if seenDelete.Load() {
+		t.Errorf("tunnel should NOT be deleted on soft-success — user can finish manually")
 	}
 }
 

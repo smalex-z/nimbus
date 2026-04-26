@@ -204,6 +204,16 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 	var errs []error
 	for _, row := range rows {
 		px, hasPx := pxByIP[row.IP]
+		// External rows are owned by the netscan reconciler — its own loop
+		// handles their freshness. Skip them here so the Proxmox reconciler
+		// doesn't spuriously bump missed_cycles and release a live LAN host
+		// just because Proxmox doesn't know about it. If Proxmox has now
+		// adopted the same IP (a VM was created on top of an external row),
+		// fall through so handleAdopt can promote it.
+		if row.Status == StatusAllocated && row.Source == SourceExternal && !hasPx {
+			rep.NoOps++
+			continue
+		}
 		switch {
 		case hasPx && row.Status == StatusAllocated:
 			r.handleAllocatedSeen(ctx, row, px, &rep, &errs)

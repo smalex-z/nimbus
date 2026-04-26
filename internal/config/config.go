@@ -49,6 +49,19 @@ type Config struct {
 	VerifyCacheTTLSeconds    int // ListClusterIPs cache reuse     — default 5
 	VacateMissThreshold      int // consecutive missing cycles before auto-vacate — default 3
 
+	// Netscan — best-effort detection of non-VM hosts on the LAN that share
+	// the IP pool range (gateway, NAS, IoT, statically-assigned workstations).
+	// Closes a hole in the Proxmox reconciler, which only sees VM-claimed IPs.
+	//
+	// NetscanMode:     off | tcp | both — default "both" (TCP probe + ARP cache read)
+	// NetscanInterval: scan cadence in seconds — default 300 (5min); 0 disables
+	// NetscanTimeoutMS: per-port TCP dial timeout — default 200
+	// NetscanConcurrency: parallel probes — default 50
+	NetscanMode         string
+	NetscanIntervalSecs int
+	NetscanTimeoutMS    int
+	NetscanConcurrency  int
+
 	// Node-scoring knobs. VMDiskStorage names the Proxmox storage pool the
 	// disk gate checks; an empty value disables the disk gate. MemBufferMiB
 	// adds RAM headroom on top of the tier's request to avoid packing to
@@ -99,6 +112,11 @@ func Load() (*Config, error) {
 		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
 		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
 		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
+
+		NetscanMode:         getEnv("NIMBUS_NETSCAN_MODE", "both"),
+		NetscanIntervalSecs: getEnvInt("NIMBUS_NETSCAN_INTERVAL_SECONDS", 300),
+		NetscanTimeoutMS:    getEnvInt("NIMBUS_NETSCAN_TIMEOUT_MS", 200),
+		NetscanConcurrency:  getEnvInt("NIMBUS_NETSCAN_CONCURRENCY", 50),
 
 		VMDiskStorage: getEnv("NIMBUS_VM_DISK_STORAGE", "local-lvm"),
 		MemBufferMiB:  uint64(getEnvInt("NIMBUS_MEM_BUFFER_MIB", 256)),

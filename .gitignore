@@ -16,10 +16,12 @@ frontend/node_modules/
 frontend/dist/
 frontend/.npm-cache/
 
-# Embedded dist (built output goes here; ignore compiled assets but keep placeholder)
-cmd/server/frontend/dist/assets/
-cmd/server/frontend/dist/*.js
-cmd/server/frontend/dist/*.css
+# Embedded dist (built output goes here). The directory is required at
+# `go build` time by `//go:embed all:frontend/dist` — we keep it in git via
+# .gitkeep but ignore every actual build artifact, so frontend rebuilds don't
+# show up in git status / cause merge conflicts.
+cmd/server/frontend/dist/*
+!cmd/server/frontend/dist/.gitkeep
 
 # Database
 *.db

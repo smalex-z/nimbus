@@ -6,7 +6,9 @@ import {
   getBootstrapStatus,
   bootstrapTemplates,
   listKeys,
+  getTunnelInfo,
   type BootstrapResult,
+  type TunnelInfo,
 } from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import Card from '@/components/ui/Card'
@@ -18,6 +20,8 @@ import RadioCard from '@/components/ui/RadioCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
+import { buildSSHCommand, parseTunnelURL } from '@/lib/format'
+import TunnelsModal from '@/components/ui/TunnelsModal'
 import {
   OS_OPTIONS,
   type OSTemplate,
@@ -41,6 +45,7 @@ interface FormState {
   savedKeyId: number | null
   pubKey: string
   privKey: string
+  publicTunnel: boolean
 }
 
 const DEFAULT_FORM: FormState = {
@@ -51,6 +56,7 @@ const DEFAULT_FORM: FormState = {
   savedKeyId: null,
   pubKey: '',
   privKey: '',
+  publicTunnel: false,
 }
 
 export default function Provision() {
@@ -74,6 +80,16 @@ export default function Provision() {
   // Saved-key inventory. We default the picker to the user's chosen default
   // key when the page loads with at least one saved key.
   const [savedKeys, setSavedKeys] = useState<SSHKey[]>([])
+
+  // Tunnel availability + host preview. When tunnels are disabled (no
+  // GOPHER_API_URL configured) we hide the public-access section entirely
+  // rather than showing a checkbox that does nothing.
+  const [tunnelInfo, setTunnelInfo] = useState<TunnelInfo | null>(null)
+  useEffect(() => {
+    getTunnelInfo()
+      .then(setTunnelInfo)
+      .catch(() => setTunnelInfo({ enabled: false, host: '' }))
+  }, [])
 
   useEffect(() => {
     getBootstrapStatus()
@@ -163,6 +179,12 @@ export default function Provision() {
           ssh_pubkey: form.keyMode === 'byo' ? form.pubKey.trim() : undefined,
           ssh_privkey: trimmedPriv ? trimmedPriv : undefined,
           generate_key: form.keyMode === 'gen' ? true : undefined,
+          public_tunnel: form.publicTunnel ? true : undefined,
+          // No subdomain — provision-time tunnels are SSH only and Gopher
+          // allocates a port on the gateway. Backend defaults the tunnel
+          // identifier to the VM hostname so admins don't need to think
+          // about it. HTTP tunnels (which DO use subdomains via wildcard
+          // DNS) are added later from the machine page.
         },
         (evt) => setCurrentStep(evt.step),
       )
@@ -228,7 +250,12 @@ export default function Provision() {
       {bootstrapped === true && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 mt-8">
           <Card className="p-9">
-            <FormBody form={form} updateForm={updateForm} savedKeys={savedKeys} />
+            <FormBody
+              form={form}
+              updateForm={updateForm}
+              savedKeys={savedKeys}
+              tunnelInfo={tunnelInfo}
+            />
           </Card>
 
           <Card className="p-7 self-start lg:sticky lg:top-[100px]">
@@ -388,9 +415,10 @@ interface FormBodyProps {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
+  tunnelInfo: TunnelInfo | null
 }
 
-function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, tunnelInfo }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -546,17 +574,47 @@ function FormBody({ form, updateForm, savedKeys }: FormBodyProps) {
         )}
       </div>
 
-      <div className="flex flex-col gap-2 opacity-50">
+      <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">Public access</label>
-        <div className="flex items-center gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/60">
-          <span className="w-[18px] h-[18px] rounded-md border-[1.5px] border-ink-3 bg-white" />
+        <label
+          className={`flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
+            tunnelInfo?.enabled
+              ? 'cursor-pointer hover:border-ink/40'
+              : 'cursor-not-allowed opacity-60'
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={form.publicTunnel}
+            onChange={(e) => updateForm('publicTunnel', e.target.checked)}
+            disabled={!tunnelInfo?.enabled}
+            className="mt-0.5 w-4 h-4 accent-ink disabled:cursor-not-allowed"
+          />
           <div className="flex-1">
-            <div className="text-sm font-medium">Expose at a public hostname</div>
+            <div className="text-sm font-medium">Expose SSH publicly</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Coming in Phase 2 — Gopher tunnel integration.
+              Bootstraps a Gopher reverse tunnel to this VM's port 22. Gopher
+              allocates a public port at the gateway — SSH lands at{' '}
+              <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
+              Subdomains are an HTTP-tunnel concept and don't apply here;
+              expose web services later from the machine page.
             </div>
+            {!tunnelInfo?.enabled && (
+              <div className="text-xs text-warn mt-1.5">
+                Tunnel integration not configured. An admin can wire it up
+                from{' '}
+                <Link to="/settings" className="underline">Settings → Gopher tunnels</Link>.
+              </div>
+            )}
           </div>
-        </div>
+        </label>
+        {form.publicTunnel && tunnelInfo?.enabled && tunnelInfo.host && (
+          <div className="text-xs text-ink-3 mt-1.5 leading-relaxed">
+            After the VM boots, SSH will be reachable at{' '}
+            <span className="font-mono text-ink">{tunnelInfo.host}:&lt;port&gt;</span>.
+            Gopher assigns the port — it'll show on the result screen.
+          </div>
+        )}
       </div>
     </div>
   )
@@ -570,6 +628,7 @@ interface SummaryProps {
 }
 
 function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
+  const tunnelLabel = form.publicTunnel ? 'ssh' : 'no'
   const sshLabel = (() => {
     if (form.keyMode === 'gen') return 'generate (vaulted)'
     if (form.keyMode === 'saved') {
@@ -588,6 +647,7 @@ function Summary({ form, savedKeys, tierLabel, diskLabel }: SummaryProps) {
         <SummaryRow label="vCPU / RAM" value={tierLabel} />
         <SummaryRow label="Disk" value={diskLabel} />
         <SummaryRow label="SSH" value={sshLabel} />
+        <SummaryRow label="Public SSH" value={tunnelLabel} />
       </div>
     </>
   )
@@ -754,15 +814,22 @@ interface ResultViewProps {
 }
 
 function ResultView({ result, onReset }: ResultViewProps) {
-  const sshCommand = result.key_name
-    ? `ssh -i ~/.ssh/${result.key_name} ${result.username}@${result.ip}`
-    : `ssh ${result.username}@${result.ip}`
+  const { user } = useAuth()
+  const [tunnelsOpen, setTunnelsOpen] = useState(false)
+  const sshCommand = buildSSHCommand(result.username, result.ip, result.key_name)
+  const tunnel = result.tunnel_url ? parseTunnelURL(result.tunnel_url) : undefined
+  const publicSSHCommand = tunnel
+    ? buildSSHCommand(result.username, tunnel.host, result.key_name, tunnel.port)
+    : undefined
   const hasWarning = Boolean(result.warning)
+  const hasTunnel = Boolean(publicSSHCommand)
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
     : 'bg-[rgba(45,125,90,0.1)] text-good'
   const dotColorClass = hasWarning ? 'bg-warn' : 'bg-good'
+  const dashboardHref = user?.is_admin ? '/admin' : '/vms'
+  const dashboardLabel = user?.is_admin ? 'Back to dashboard' : 'Back to my machines'
   return (
     <div className="py-5 pb-10">
       <Card className="max-w-[720px] mx-auto p-11">
@@ -789,13 +856,35 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
+        {result.tunnel_error && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">⚠</span>
+            <div>
+              <strong>Tunnel not active.</strong>{' '}
+              <span className="whitespace-pre-line">{result.tunnel_error}</span>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
-          <CredCell label="IP address" value={result.ip} />
+          <CredCell label="Local IP" value={result.ip} />
           <CredCell label="Username" value={result.username} />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
-          <CredCell label="SSH command" value={sshCommand} fullWidth />
+          <CredCell
+            label={hasTunnel ? 'SSH (LAN)' : 'SSH command'}
+            value={sshCommand}
+            fullWidth
+          />
         </div>
+
+        {publicSSHCommand && tunnel && (
+          <GopherTunnelBox
+            host={tunnel.host}
+            port={tunnel.port}
+            sshCommand={publicSSHCommand}
+          />
+        )}
 
         {result.ssh_private_key && (
           <div className="mt-6">
@@ -818,12 +907,75 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        <div className="flex gap-2.5 justify-end mt-9">
-          <Button variant="ghost" onClick={onReset}>
-            Provision another
-          </Button>
+        <div className="flex gap-2.5 justify-end mt-9 flex-wrap">
+          {hasTunnel && (
+            <Button
+              variant="ghost"
+              onClick={() => setTunnelsOpen(true)}
+              title="Add HTTP/TCP tunnels for services running on this VM"
+            >
+              🌐 Manage tunnels
+            </Button>
+          )}
+          <Link to={dashboardHref}>
+            <Button variant="ghost">{dashboardLabel}</Button>
+          </Link>
+          <Button onClick={onReset}>Provision another</Button>
         </div>
+        {tunnelsOpen && (
+          <TunnelsModal
+            vmId={result.id}
+            hostname={result.hostname}
+            onClose={() => setTunnelsOpen(false)}
+          />
+        )}
       </Card>
+    </div>
+  )
+}
+
+interface GopherTunnelBoxProps {
+  host: string
+  port: number
+  sshCommand: string
+}
+
+// GopherTunnelBox renders a self-contained section explaining the public
+// tunnel that's been wired up via Gopher (ACM@UCLA's reverse-tunnel gateway).
+// Only shown when the provision actually established the tunnel.
+function GopherTunnelBox({ host, port, sshCommand }: GopherTunnelBoxProps) {
+  const endpoint = `${host}:${port}`
+  return (
+    <div className="mt-7 p-5 rounded-[10px] bg-[rgba(45,125,90,0.06)] border border-[rgba(45,125,90,0.25)]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span className="text-lg" aria-hidden>🌐</span>
+          <span className="font-display text-base font-medium">Gopher tunnel</span>
+        </div>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-good bg-[rgba(45,125,90,0.12)] px-2 py-0.5 rounded">
+          ACTIVE
+        </span>
+      </div>
+      <p className="text-[13px] text-ink-2 mt-2 leading-relaxed">
+        SSH is exposed publicly via the Gopher reverse-tunnel gateway, so you can
+        reach this machine from anywhere — no LAN required.
+      </p>
+      <div className="grid grid-cols-1 gap-3 mt-4">
+        <div className="p-3.5 rounded-[10px] bg-white/85 border border-line">
+          <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-1.5">
+            Routing
+          </div>
+          <div className="font-mono text-sm text-ink break-all flex items-center gap-2 flex-wrap">
+            <span>{endpoint}</span>
+            <span className="text-ink-3" aria-hidden>→</span>
+            <span>localhost:22</span>
+            <span className="font-mono text-[10px] uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
+              SSH
+            </span>
+          </div>
+        </div>
+        <CredCell label="SSH (public)" value={sshCommand} fullWidth />
+      </div>
     </div>
   )
 }
