@@ -95,7 +95,13 @@ type VM struct {
 	// follow-up once the migration has run on all environments.
 	SSHPrivKeyCT    []byte `gorm:"column:ssh_privkey_ct"                json:"-"`
 	SSHPrivKeyNonce []byte `gorm:"column:ssh_privkey_nonce"             json:"-"`
-	ErrorMsg        string `gorm:"column:error_msg"                     json:"error_msg,omitempty"`
+	// Tunnel fields (Phase 2 — Gopher integration). Empty when the user did
+	// not request a public tunnel; TunnelError is non-empty when registration
+	// or bootstrap failed but the VM itself is fine.
+	TunnelID    string `gorm:"column:tunnel_id"                        json:"tunnel_id,omitempty"`
+	TunnelURL   string `gorm:"column:tunnel_url"                       json:"tunnel_url,omitempty"`
+	TunnelError string `gorm:"column:tunnel_error"                     json:"tunnel_error,omitempty"`
+	ErrorMsg    string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.
