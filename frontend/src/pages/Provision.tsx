@@ -19,6 +19,7 @@ import RadioCard from '@/components/ui/RadioCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
+import { buildSSHCommand, parseTunnelURL } from '@/lib/format'
 import {
   OS_OPTIONS,
   type OSTemplate,
@@ -726,9 +727,11 @@ interface ResultViewProps {
 }
 
 function ResultView({ result, onReset }: ResultViewProps) {
-  const sshCommand = result.key_name
-    ? `ssh -i ~/.ssh/${result.key_name} ${result.username}@${result.ip}`
-    : `ssh ${result.username}@${result.ip}`
+  const sshCommand = buildSSHCommand(result.username, result.ip, result.key_name)
+  const tunnel = result.tunnel_url ? parseTunnelURL(result.tunnel_url) : undefined
+  const publicSSHCommand = tunnel
+    ? buildSSHCommand(result.username, tunnel.host, result.key_name, tunnel.port)
+    : undefined
   const hasWarning = Boolean(result.warning)
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
@@ -786,9 +789,9 @@ function ResultView({ result, onReset }: ResultViewProps) {
           <CredCell label="IP address" value={result.ip} />
           <CredCell label="Username" value={result.username} />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
-          <CredCell label="SSH command" value={sshCommand} fullWidth />
-          {result.tunnel_url && (
-            <CredCell label="Public SSH" value={result.tunnel_url} fullWidth />
+          <CredCell label="SSH (LAN)" value={sshCommand} fullWidth />
+          {publicSSHCommand && (
+            <CredCell label="SSH (public)" value={publicSSHCommand} fullWidth />
           )}
         </div>
 
