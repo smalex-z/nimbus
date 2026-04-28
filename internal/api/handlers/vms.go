@@ -193,6 +193,29 @@ func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Lifecycle handles POST /api/vms/{id}/{op} where op is one of
+// start | shutdown | stop | reboot. Owner-gated like Delete: a non-owning
+// requester gets 404 so existence isn't disclosed.
+func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	op := provision.VMLifecycleOp(chi.URLParam(r, "op"))
+	if err := h.svc.LifecycleOp(r.Context(), uint(id), user.ID, op); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // GetPrivateKey handles GET /api/vms/{id}/private-key. Returns
 // {key_name, private_key} for vault-stored keys; 404 when no key was
 // deposited for this VM.
@@ -377,4 +400,19 @@ func validateCreate(req createVMRequest) error {
 		}
 	}
 	return nil
+}
+
+// Reconcile handles POST /api/vms/reconcile (admin only). Walks the local vms
+// table against the live Proxmox cluster snapshot, updates rows whose VMs
+// have migrated to a different node, and soft-deletes rows whose VMID hasn't
+// been observed for vacateMissThreshold consecutive runs. Refuses to act when
+// Proxmox returns an empty cluster snapshot (transient API failure → would
+// otherwise wipe every row).
+func (h *VMs) Reconcile(w http.ResponseWriter, r *http.Request) {
+	rep, err := h.svc.ReconcileVMs(r.Context())
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, rep)
 }

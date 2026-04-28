@@ -11,6 +11,19 @@ type Node struct {
 	MaxMem uint64  `json:"maxmem"` // bytes total
 }
 
+// ClusterStatusEntry is one row from /api2/json/cluster/status. The endpoint
+// returns a heterogeneous list (cluster + per-node entries); the per-node
+// rows carry the node's address. Fields we don't read are dropped — Proxmox
+// also reports level, quorum state, etc.
+type ClusterStatusEntry struct {
+	Type   string `json:"type"`   // "cluster" | "node"
+	Name   string `json:"name"`   // node hostname (empty for the cluster row)
+	IP     string `json:"ip"`     // address Proxmox advertises for this node
+	Online int    `json:"online"` // 1 = part of corosync quorum
+	Local  int    `json:"local"`  // 1 if this is the node we made the API call on
+	NodeID int    `json:"nodeid"` // numeric corosync id
+}
+
 // MemPair is the {used,total,free} shape Proxmox returns inside its node
 // status response. Both `memory` and `swap` use this layout.
 type MemPair struct {
