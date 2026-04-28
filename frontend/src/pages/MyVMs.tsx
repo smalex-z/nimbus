@@ -142,10 +142,11 @@ function VMRow({
           <button
             type="button"
             onClick={() => setSshOpen(true)}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+            title={`SSH details for ${vm.hostname}`}
+            aria-label={`SSH details for ${vm.hostname}`}
           >
             <span aria-hidden>↗</span>
-            <span>SSH</span>
           </button>
           <VMActions
             hostname={vm.hostname}

@@ -2,12 +2,20 @@ import { KeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react'
 
 type Placement = 'bottom-end' | 'right-start' | 'left-start'
 
+// triggerOn controls how the menu opens. 'hover' (default) matches the
+// existing nav menus where a mouseEnter pops the panel; 'click' suppresses
+// the hover handlers entirely so the menu only opens on the trigger button's
+// click. Per-row dropdowns inside dense tables use 'click' to avoid
+// accidentally opening every row the cursor passes over.
+type TriggerOn = 'hover' | 'click'
+
 interface NavDropdownProps {
   trigger: ReactNode
   triggerClassName?: string
   panelClassName?: string
   wrapperClassName?: string
   placement?: Placement
+  triggerOn?: TriggerOn
   children: ReactNode
 }
 
@@ -19,6 +27,7 @@ export default function NavDropdown({
   panelClassName,
   wrapperClassName = 'inline-block',
   placement = 'bottom-end',
+  triggerOn = 'hover',
   children,
 }: NavDropdownProps) {
   const [open, setOpen] = useState(false)
@@ -78,15 +87,22 @@ export default function NavDropdown({
         ? 'right-full top-0'
         : 'right-0 top-full mt-1'
 
+  const hoverProps =
+    triggerOn === 'hover'
+      ? {
+          onMouseEnter: () => {
+            cancelClose()
+            setOpen(true)
+          },
+          onMouseLeave: scheduleClose,
+        }
+      : {}
+
   return (
     <div
       ref={wrapperRef}
       className={`relative ${wrapperClassName}`}
-      onMouseEnter={() => {
-        cancelClose()
-        setOpen(true)
-      }}
-      onMouseLeave={scheduleClose}
+      {...hoverProps}
       onKeyDown={handleKeyDown}
     >
       <button
