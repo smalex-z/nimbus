@@ -649,6 +649,80 @@ func (c *Client) GetAgentOSInfoCached(ctx context.Context, node string, vmid int
 	return info
 }
 
+// ProbeReachability TCP-dials each address concurrently and returns the set
+// of node names that didn't answer within timeout. An empty map means all
+// addresses responded (or the input map was empty).
+//
+// The reconcilers use this as a skip-the-reaper guard: if a node went off
+// the network briefly (kernel update, ifdown, broken switch port), Proxmox's
+// /cluster/resources stops listing its VMs, every IP allocated to one of
+// those VMs flows through the missed-cycle path, and after VACATE_MISS_THRESHOLD
+// cycles the rows get vacated and soft-deleted. Skipping the bump on
+// unreachable nodes keeps the local DB intact across short outages —
+// Proxmox's `online` flag is unreliable when nimbus's own host is the one
+// with bad cluster connectivity.
+//
+// Port 8006 is pveproxy's default. We're not authenticating — a successful
+// TCP handshake is enough to say "the box is alive and routing".
+func ProbeReachability(ctx context.Context, addresses map[string]string, timeout time.Duration) map[string]bool {
+	if len(addresses) == 0 {
+		return nil
+	}
+	out := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, ip := range addresses {
+		wg.Add(1)
+		go func(name, ip string) {
+			defer wg.Done()
+			d := net.Dialer{Timeout: timeout}
+			conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, "8006"))
+			if err != nil {
+				mu.Lock()
+				out[name] = true
+				mu.Unlock()
+				return
+			}
+			_ = conn.Close()
+		}(name, ip)
+	}
+	wg.Wait()
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// GetClusterStatus returns the heterogeneous /cluster/status payload — one
+// entry per node carrying its corosync address, plus a cluster-summary row.
+// Callers usually want NodeAddresses, not raw entries.
+func (c *Client) GetClusterStatus(ctx context.Context) ([]ClusterStatusEntry, error) {
+	var out []ClusterStatusEntry
+	if err := c.do(ctx, http.MethodGet, "/cluster/status", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// NodeAddresses returns name → IP for every node in the cluster, derived from
+// /cluster/status. Used by the IP-pool labeller (so a hypervisor's own LAN
+// address shows as "PROXMOX NODE foo" instead of generic EXTERNAL) and the
+// reconciler reachability guard (TCP-probe before counting a missing-VM
+// cycle so a brief node outage doesn't reap rows en masse).
+func (c *Client) NodeAddresses(ctx context.Context) (map[string]string, error) {
+	entries, err := c.GetClusterStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.Type == "node" && e.Name != "" && e.IP != "" {
+			out[e.Name] = e.IP
+		}
+	}
+	return out, nil
+}
+
 // GetClusterStorage returns every storage entry visible at the cluster level.
 // Shared storage appears once per node; callers must dedupe by Storage name.
 func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error) {

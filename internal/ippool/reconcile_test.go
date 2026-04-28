@@ -377,3 +377,41 @@ func TestReconcile_OutOfRangeProxmoxIPsAreIgnored(t *testing.T) {
 		t.Errorf("out-of-range Proxmox IPs must not affect Adopted/Conflicts: %+v", rep)
 	}
 }
+
+// TestReconcile_UnreachableNodeSuppressesMissBump asserts the reachability
+// guard: when the WithUnreachableVMIDs probe reports that a row’s vmid lives
+// on a node we currently can’t reach, missing-from-snapshot is treated as
+// "still alive, just out of sight" — missed_cycles stays put and the row
+// never gets vacated even after threshold cycles.
+func TestReconcile_UnreachableNodeSuppressesMissBump(t *testing.T) {
+	t.Parallel()
+	p := newSeedPool(t, "10.0.0.1", "10.0.0.5")
+	ctx := context.Background()
+
+	_, _ = p.Reserve(ctx, "host")
+	_ = p.MarkAllocated(ctx, "10.0.0.1", 200)
+
+	emptyLister := staticLister(nil, nil)
+	probe := func(context.Context) map[int]bool { return map[int]bool{200: true} }
+	r := ippool.NewReconciler(p, emptyLister,
+		ippool.WithMissThreshold(2),
+		ippool.WithUnreachableVMIDs(probe),
+	)
+
+	for i := 1; i <= 3; i++ {
+		rep, err := r.Reconcile(ctx)
+		if err != nil {
+			t.Fatalf("Reconcile #%d: %v", i, err)
+		}
+		if len(rep.Vacated) != 0 {
+			t.Errorf("cycle %d vacated %v, must hold while host is unreachable", i, rep.Vacated)
+		}
+		row, _ := p.GetByIP(ctx, "10.0.0.1")
+		if row.MissedCycles != 0 {
+			t.Errorf("cycle %d missed_cycles = %d, want 0 (gate should suppress)", i, row.MissedCycles)
+		}
+		if row.Status != ippool.StatusAllocated {
+			t.Errorf("cycle %d status = %s, want allocated", i, row.Status)
+		}
+	}
+}

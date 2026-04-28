@@ -192,3 +192,39 @@ func TestReconcileVMs_EmptyClusterErrorIsTyped(t *testing.T) {
 		t.Errorf("err = %v, want a non-empty error", err)
 	}
 }
+
+// TestReconcileVMs_UnreachableNodeSuppressesMissBump asserts the reachability
+// guard: when SetUnreachableNodesProbe reports the host node as unreachable,
+// a VM missing from the cluster snapshot is treated as still-alive rather
+// than an orphan ready to soft-delete. MissedCycles stays at 0 across N
+// cycles where N exceeds the vacate threshold.
+func TestReconcileVMs_UnreachableNodeSuppressesMissBump(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Cluster snapshot returns an unrelated VM only — vmid 200 is missing.
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 999, Node: "alpha", Name: "other"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "vm-a", 200, "10.0.0.2")
+	svc.SetUnreachableNodesProbe(func(context.Context) map[string]bool {
+		return map[string]bool{"alpha": true}
+	})
+
+	for i := 1; i <= 5; i++ {
+		rep, err := svc.ReconcileVMs(context.Background())
+		if err != nil {
+			t.Fatalf("ReconcileVMs #%d: %v", i, err)
+		}
+		if len(rep.Deleted) != 0 || len(rep.Missed) != 0 {
+			t.Errorf("cycle %d rep = %+v; want no deletes / no misses while host is unreachable", i, rep)
+		}
+	}
+	var got db.VM
+	if err := database.WithContext(context.Background()).First(&got, "vmid = ?", 200).Error; err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.MissedCycles != 0 {
+		t.Errorf("missed_cycles = %d, want 0 (probe should suppress every cycle)", got.MissedCycles)
+	}
+}

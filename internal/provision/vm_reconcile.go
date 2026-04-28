@@ -62,6 +62,22 @@ type VMDeleted struct {
 // pass.
 var errEmptyClusterSnapshot = errors.New("cluster snapshot is empty — refusing to soft-delete every vm row")
 
+// UnreachableNodesFunc returns the set of node names the local host can't
+// currently reach over TCP. The reconciler treats a VM that's missing from
+// the cluster snapshot as "still alive, just unreachable" when its host node
+// is in this set — no missed_cycles bump, no soft-delete. Wired up in
+// main.go via SetUnreachableNodesProbe; nil disables the guard (legacy
+// behaviour where every missing VM gets reaped after the threshold).
+type UnreachableNodesFunc func(ctx context.Context) map[string]bool
+
+// SetUnreachableNodesProbe installs the per-cycle reachability check. Safe
+// to call before/after the reconcile loop has started; reads happen at the
+// top of each ReconcileVMs invocation so a freshly-installed probe takes
+// effect on the next cycle.
+func (s *Service) SetUnreachableNodesProbe(f UnreachableNodesFunc) {
+	s.unreachableNodes = f
+}
+
 // ReconcileVMs walks the local vms table and converges it to the cluster
 // snapshot. Three things can happen per row:
 //
@@ -105,10 +121,25 @@ func (s *Service) ReconcileVMs(ctx context.Context) (VMSyncReport, error) {
 		return rep, fmt.Errorf("list vms: %w", err)
 	}
 
+	// One reachability snapshot per cycle — fans out TCP dials so a transient
+	// node outage doesn't soft-delete every VM living there.
+	var unreachable map[string]bool
+	if s.unreachableNodes != nil {
+		unreachable = s.unreachableNodes(ctx)
+	}
+
 	for _, vm := range rows {
 		px, found := byVMID[vm.VMID]
 		switch {
 		case !found:
+			// Missing from cluster snapshot AND host node is currently
+			// unreachable → almost certainly a node outage, not a manual
+			// destroy. Don't bump missed_cycles; the row stays intact and
+			// gets re-evaluated next cycle.
+			if unreachable[vm.Node] {
+				rep.NoOps++
+				continue
+			}
 			s.handleVMMissing(ctx, vm, &rep)
 		case px.Node != vm.Node:
 			s.handleVMMigrated(ctx, vm, px.Node, &rep)

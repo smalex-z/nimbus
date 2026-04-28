@@ -224,10 +224,54 @@ func main() {
 	}
 	migCancel()
 
+	// hypervisorReachabilityProbe TCP-dials each cluster node's pveproxy port
+	// and returns the names of nodes that didn't answer. Reused by both
+	// reconcilers below — when a node is unreachable the reconciler treats
+	// its VMs as still-alive-just-out-of-sight rather than reaping the rows
+	// after VACATE_MISS_THRESHOLD cycles. 1 s timeout per node, fans out
+	// concurrently so a 5-node cluster with 2 dead nodes still completes
+	// the probe in ~1 s rather than 5.
+	hypervisorReachabilityProbe := func(ctx context.Context) map[string]bool {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		addrs, err := pveClient.NodeAddresses(probeCtx)
+		if err != nil {
+			log.Printf("reachability: NodeAddresses failed (treating all nodes as reachable): %v", err)
+			return nil
+		}
+		return proxmox.ProbeReachability(probeCtx, addrs, 1*time.Second)
+	}
+
+	// unreachableVMIDsForReconciler maps node-level reachability into the
+	// vmid set the ippool reconciler consumes. The local vms table is the
+	// only place we know which VMID lives on which node, so the lookup
+	// happens here rather than inside the reconciler package.
+	unreachableVMIDsForReconciler := func(ctx context.Context) map[int]bool {
+		unreachable := hypervisorReachabilityProbe(ctx)
+		if len(unreachable) == 0 {
+			return nil
+		}
+		nodes := make([]string, 0, len(unreachable))
+		for n := range unreachable {
+			nodes = append(nodes, n)
+		}
+		var vms []db.VM
+		if err := database.WithContext(ctx).Where("node IN ?", nodes).Find(&vms).Error; err != nil {
+			log.Printf("reachability: vmid lookup failed (skipping guard this cycle): %v", err)
+			return nil
+		}
+		out := make(map[int]bool, len(vms))
+		for _, v := range vms {
+			out[v.VMID] = true
+		}
+		return out
+	}
+
 	reconciler := ippool.NewReconciler(pool, pveClient,
 		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
 		ippool.WithCacheTTL(time.Duration(cfg.VerifyCacheTTLSeconds)*time.Second),
 		ippool.WithMissThreshold(cfg.VacateMissThreshold),
+		ippool.WithUnreachableVMIDs(unreachableVMIDsForReconciler),
 	)
 
 	// Startup reconcile: bounded so a temporarily unreachable Proxmox doesn't
@@ -391,7 +435,10 @@ func main() {
 
 	// VM-table reconciler: keeps vms.node in sync with Proxmox migrations and
 	// soft-deletes orphan rows whose VMID hasn't been observed for N
-	// consecutive runs. Same cadence as the IP reconciler.
+	// consecutive runs. Same cadence as the IP reconciler. The reachability
+	// probe — same one the ippool reconciler uses — keeps a flapping node
+	// from cascading into a soft-delete of every row living there.
+	provSvc.SetUnreachableNodesProbe(hypervisorReachabilityProbe)
 	go runVMReconcileLoop(bgCtx, provSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{

@@ -152,6 +152,12 @@ type Service struct {
 	gatewayMu sync.RWMutex
 	gatewayIP string
 
+	// unreachableNodes is the per-cycle reachability probe consulted by
+	// ReconcileVMs. nil → no guard (legacy reap-on-miss behaviour). Set via
+	// SetUnreachableNodesProbe. Lock-free: a single pointer write swaps the
+	// closure atomically, and ReconcileVMs reads it once per call.
+	unreachableNodes UnreachableNodesFunc
+
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
