@@ -158,8 +158,11 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 // ListVMTunnels returns every Gopher per-port tunnel attached to this VM.
 // Returns an empty slice when the VM has no Gopher machine record (i.e.
 // public_tunnel was not requested at provision time, or registration failed).
-func (s *Service) ListVMTunnels(ctx context.Context, vmID uint) ([]tunnel.Tunnel, error) {
-	vm, err := s.Get(ctx, vmID)
+//
+// requesterID is forwarded to Get for ownership gating; non-nil values must
+// match vm.OwnerID or NotFound is returned.
+func (s *Service) ListVMTunnels(ctx context.Context, vmID uint, requesterID *uint) ([]tunnel.Tunnel, error) {
+	vm, err := s.Get(ctx, vmID, requesterID)
 	if err != nil {
 		return nil, err
 	}
@@ -191,19 +194,26 @@ type VMTunnelRequest struct {
 // the created tunnel record — note Gopher coerces some fields server-side
 // (e.g. clears bot_protection on UDP tunnels), so the response is the
 // source of truth, not the request.
-func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, req VMTunnelRequest) (*tunnel.Tunnel, error) {
-	if s.tunnels == nil {
-		return nil, errors.New("gopher tunnel integration is not configured")
-	}
+//
+// requesterID is forwarded to Get for ownership gating; non-nil values must
+// match vm.OwnerID or NotFound is returned. Without this gate a member could
+// create internet-facing tunnels on another member's VM.
+func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, req VMTunnelRequest, requesterID *uint) (*tunnel.Tunnel, error) {
+	// Cheap input validation comes first — same answer for any caller.
 	if req.TargetPort < 1 || req.TargetPort > 65535 {
 		return nil, &internalerrors.ValidationError{Field: "target_port", Message: "must be 1-65535"}
 	}
 	if req.Transport != "" && req.Transport != "tcp" && req.Transport != "udp" {
 		return nil, &internalerrors.ValidationError{Field: "transport", Message: "must be \"tcp\" or \"udp\""}
 	}
-	vm, err := s.Get(ctx, vmID)
+	// Ownership before deployment-config so a non-owner gets NotFound rather
+	// than learning whether tunnels are wired up at all.
+	vm, err := s.Get(ctx, vmID, requesterID)
 	if err != nil {
 		return nil, err
+	}
+	if s.tunnels == nil {
+		return nil, errors.New("gopher tunnel integration is not configured")
 	}
 	if vm.TunnelID == "" {
 		return nil, &internalerrors.ValidationError{
@@ -228,13 +238,19 @@ func (s *Service) CreateVMTunnel(ctx context.Context, vmID uint, req VMTunnelReq
 // DeleteVMTunnel removes a per-port tunnel. The tunnelID must belong to the
 // named VM's Gopher machine — we filter by machine_id before deleting so a
 // caller can't tear down another VM's tunnel by guessing IDs.
-func (s *Service) DeleteVMTunnel(ctx context.Context, vmID uint, tunnelID string) error {
-	if s.tunnels == nil {
-		return errors.New("gopher tunnel integration is not configured")
-	}
-	vm, err := s.Get(ctx, vmID)
+//
+// requesterID is forwarded to Get for ownership gating; non-nil values must
+// match vm.OwnerID or NotFound is returned. The machine_id filter on its own
+// only prevents cross-VM mismatch, not cross-user access.
+func (s *Service) DeleteVMTunnel(ctx context.Context, vmID uint, tunnelID string, requesterID *uint) error {
+	// Ownership before deployment-config so a non-owner gets NotFound rather
+	// than learning whether tunnels are wired up at all.
+	vm, err := s.Get(ctx, vmID, requesterID)
 	if err != nil {
 		return err
+	}
+	if s.tunnels == nil {
+		return errors.New("gopher tunnel integration is not configured")
 	}
 	if vm.TunnelID == "" {
 		return &internalerrors.NotFoundError{Resource: "tunnel", ID: tunnelID}
