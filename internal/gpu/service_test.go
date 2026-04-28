@@ -258,3 +258,75 @@ func TestReapStuckJobs_FlipsLongRunningJobsToFailed(t *testing.T) {
 func errorsAs(err error, target any) bool {
 	return errors.As(err, target)
 }
+
+func TestEnqueueJob_MemberAtCapRejected(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	for i := 0; i < gpu.MemberMaxActiveJobs; i++ {
+		if _, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"}); err != nil {
+			t.Fatalf("seed enqueue %d: %v", i, err)
+		}
+	}
+	_, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"})
+	var conflict *internalerrors.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("EnqueueJob over cap: err = %v, want ConflictError", err)
+	}
+}
+
+func TestEnqueueJob_AdminBypassesCap(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	for i := 0; i < gpu.MemberMaxActiveJobs; i++ {
+		if _, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"}); err != nil {
+			t.Fatalf("seed enqueue %d: %v", i, err)
+		}
+	}
+	_, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{
+		OwnerID:          7,
+		Image:            "alpine",
+		RequesterIsAdmin: true,
+	})
+	if err != nil {
+		t.Fatalf("admin should bypass cap: %v", err)
+	}
+}
+
+func TestEnqueueJob_TerminalJobsDontCountTowardCap(t *testing.T) {
+	t.Parallel()
+	svc, database := newTestService(t)
+	ctx := context.Background()
+	// Cap+2 succeeded jobs — terminal, so they don't count.
+	for i := 0; i < gpu.MemberMaxActiveJobs+2; i++ {
+		j, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"})
+		if err != nil {
+			t.Fatalf("seed enqueue %d: %v", i, err)
+		}
+		if err := database.Model(&db.GPUJob{}).Where("id = ?", j.ID).
+			Update("status", gpu.StatusSucceeded).Error; err != nil {
+			t.Fatalf("flip status: %v", err)
+		}
+	}
+	// New enqueue must succeed — none of the prior jobs are queued/running.
+	if _, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"}); err != nil {
+		t.Fatalf("EnqueueJob with only-terminal history: %v", err)
+	}
+}
+
+func TestEnqueueJob_OtherUsersJobsDontCountTowardCap(t *testing.T) {
+	t.Parallel()
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+	// User 7 fills the queue.
+	for i := 0; i < gpu.MemberMaxActiveJobs; i++ {
+		if _, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 7, Image: "alpine"}); err != nil {
+			t.Fatalf("seed enqueue %d: %v", i, err)
+		}
+	}
+	// User 8 should be unaffected.
+	if _, err := svc.EnqueueJob(ctx, gpu.EnqueueRequest{OwnerID: 8, Image: "alpine"}); err != nil {
+		t.Fatalf("other-user enqueue must not be quota-blocked by user 7: %v", err)
+	}
+}

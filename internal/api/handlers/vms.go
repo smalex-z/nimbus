@@ -96,26 +96,32 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	// Stamp the creator's user ID so the VM shows up in their My Machines and
 	// is the only person who can delete it later. Pre-existing VMs without an
 	// owner remain visible to everyone (see service.List) but immutable
-	// through the Delete endpoint.
-	var ownerID *uint
+	// through the Delete endpoint. RequesterIsAdmin lets the service skip
+	// member quotas and the tier allowlist for admin callers.
+	var (
+		ownerID          *uint
+		requesterIsAdmin bool
+	)
 	if user := ctxutil.User(r.Context()); user != nil {
 		id := user.ID
 		ownerID = &id
+		requesterIsAdmin = user.IsAdmin
 	}
 
 	res, err := h.svc.Provision(r.Context(), provision.Request{
-		Hostname:     req.Hostname,
-		Tier:         req.Tier,
-		OSTemplate:   req.OSTemplate,
-		SSHKeyID:     req.SSHKeyID,
-		SSHPubKey:    req.SSHPubKey,
-		SSHPrivKey:   req.SSHPrivKey,
-		GenerateKey:  req.GenerateKey,
-		PublicTunnel: req.PublicTunnel,
-		Subdomain:    subdomain,
-		TunnelPort:   req.TunnelPort,
-		EnableGPU:    req.EnableGPU,
-		OwnerID:      ownerID,
+		Hostname:         req.Hostname,
+		Tier:             req.Tier,
+		OSTemplate:       req.OSTemplate,
+		SSHKeyID:         req.SSHKeyID,
+		SSHPubKey:        req.SSHPubKey,
+		SSHPrivKey:       req.SSHPrivKey,
+		GenerateKey:      req.GenerateKey,
+		PublicTunnel:     req.PublicTunnel,
+		Subdomain:        subdomain,
+		TunnelPort:       req.TunnelPort,
+		EnableGPU:        req.EnableGPU,
+		OwnerID:          ownerID,
+		RequesterIsAdmin: requesterIsAdmin,
 	}, reporter)
 	if err != nil {
 		writeLine(map[string]any{
@@ -386,13 +392,9 @@ func validateCreate(req createVMRequest) error {
 	if _, ok := nodescore.Tiers[req.Tier]; !ok {
 		return &internalerrors.ValidationError{Field: "tier", Message: "must be one of small, medium, large"}
 	}
-	// xl is admin-only and not yet wired to OAuth; reject explicitly.
-	if req.Tier == "xl" {
-		return &internalerrors.ValidationError{
-			Field:   "tier",
-			Message: "xl tier requires admin approval (not yet enabled in this build)",
-		}
-	}
+	// Per-tier authorization (member allowlist vs admin-bypass) is enforced
+	// in provision.Service.Provision so the rule lives next to the quota
+	// it shares semantics with. validateCreate only checks tier shape.
 	if _, ok := proxmox.TemplateOffsets[req.OSTemplate]; !ok {
 		return &internalerrors.ValidationError{
 			Field:   "os_template",
