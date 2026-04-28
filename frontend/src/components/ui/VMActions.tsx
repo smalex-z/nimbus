@@ -66,9 +66,11 @@ export default function VMActions({
         {isOn ? <ShutdownIcon /> : <PlayIcon />}
       </button>
 
-      {/* … menu */}
+      {/* … menu — click-only so brushing the cursor through a dense table
+          doesn't pop every row's panel. */}
       <NavDropdown
         placement="bottom-end"
+        triggerOn="click"
         triggerClassName="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         trigger={<MoreIcon />}
       >

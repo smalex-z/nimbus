@@ -513,22 +513,23 @@ function NodeCard({
   )
 }
 
-// osLabelFor returns the SHORT user-facing OS label for a row. Priority is
-// stripped to just distro + version-id, so e.g. "Ubuntu 24.04.3 LTS (Noble
-// Numbat)" collapses to "Ubuntu 24.04". The verbose form lives in the
-// tooltip — see osTooltipFor — so admins can still see kernel / pretty name
-// on hover without polluting the column.
+// osLabelFor returns the SHORT user-facing OS label for a row. The OSIcon
+// adjacent to it already carries the distro identity, so the text drops to
+// just the version ("24.04", "12") to keep the column narrow. The verbose
+// pretty-name + kernel + arch live in the tooltip — see osTooltipFor.
 //
-//   1. Agent osinfo `id` + `version-id` ("ubuntu", "22.04") → "Ubuntu 22.04".
-//   2. Nimbus os_template ("ubuntu-22.04" → "Ubuntu 22.04").
-//   3. Raw Proxmox ostype hint (l26/win10) humanized.
+//   1. Agent osinfo `version-id` ("22.04") — most accurate.
+//   2. Nimbus os_template ("ubuntu-22.04" → "22.04").
+//   3. Raw Proxmox ostype hint (l26/win10) humanized when nothing else fits.
 //   4. Empty when nothing is known — caller renders a dash.
 function osLabelFor(vm: ClusterVM): string {
-  if (vm.os_id && vm.os_version_id) {
-    const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
-    return `${distro} ${vm.os_version_id}`
+  if (vm.os_version_id) return vm.os_version_id
+  if (vm.os_template) {
+    // Strip the leading distro segment so "ubuntu-22.04" becomes "22.04".
+    const m = /^[a-z]+[-_](.+)$/i.exec(vm.os_template)
+    if (m) return m[1]
+    return humanizeOSTemplate(vm.os_template)
   }
-  if (vm.os_template) return humanizeOSTemplate(vm.os_template)
   return ''
 }
 
@@ -572,8 +573,11 @@ function SourceLabel({ source }: { source: VMSource }) {
       )
     case 'foreign':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help" title={tip}>
-          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+          title={tip}
+        >
+          NIMBUS <ForeignWarningIcon />
         </span>
       )
     default:
@@ -624,6 +628,31 @@ function NetworkIcon() {
       <circle cx="8" cy="8" r="6" />
       <ellipse cx="8" cy="8" rx="3" ry="6" />
       <path d="M2 8h12" />
+    </svg>
+  )
+}
+
+// ForeignWarningIcon flags rows whose VM exists on the cluster with a nimbus
+// tag but is not in *our* DB — i.e. provisioned by another nimbus instance.
+// Stamped next to the NIMBUS chip so admins notice at a glance that this
+// row's credentials and ownership belong to someone else.
+function ForeignWarningIcon() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="text-warn"
+    >
+      <path d="M8 1.5 L15 14 L1 14 Z" />
+      <line x1="8" y1="6" x2="8" y2="10" />
+      <circle cx="8" cy="12" r="0.5" fill="currentColor" />
     </svg>
   )
 }
@@ -764,7 +793,7 @@ function VMTable({
                     </span>
                   </button>
                 </th>
-                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH', 'Actions'].map((col) => (
+                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'Actions'].map((col) => (
                   <th key={col} className={headerCellClass}>{col}</th>
                 ))}
               </tr>
@@ -822,32 +851,29 @@ function VMTable({
                       <SourceLabel source={vm.source} />
                     </td>
                     <td className="px-4 py-3">
-                      {vm.source === 'local' && vm.username && vm.ip ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSshTarget({
-                              hostname: vm.hostname || vm.name,
-                              ip: vm.ip!,
-                              username: vm.username!,
-                              vmid: vm.vmid,
-                              node: vm.node,
-                              dbId: vm.id,
-                              keyName: vm.key_name,
-                              tunnelUrl: vm.tunnel_url,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                          title={`SSH details for ${vm.hostname || vm.name}`}
-                          aria-label={`SSH details for ${vm.hostname || vm.name}`}
-                        >
-                          <TerminalIcon />
-                          <span>SSH</span>
-                        </button>
-                      ) : dash}
-                    </td>
-                    <td className="px-4 py-3">
                       <div className="flex gap-1.5 items-center">
+                        {vm.source === 'local' && vm.username && vm.ip && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSshTarget({
+                                hostname: vm.hostname || vm.name,
+                                ip: vm.ip!,
+                                username: vm.username!,
+                                vmid: vm.vmid,
+                                node: vm.node,
+                                dbId: vm.id,
+                                keyName: vm.key_name,
+                                tunnelUrl: vm.tunnel_url,
+                              })
+                            }
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                            title={`SSH details for ${vm.hostname || vm.name}`}
+                            aria-label={`SSH details for ${vm.hostname || vm.name}`}
+                          >
+                            <TerminalIcon />
+                          </button>
+                        )}
                         {vm.source === 'local' && vm.id !== undefined && vm.tunnel_url && (
                           <button
                             type="button"
