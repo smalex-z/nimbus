@@ -278,7 +278,7 @@ export default function Admin() {
             </div>
             <h3 className="text-xl">IP pool</h3>
           </div>
-          <IPTable ips={ips} clusterVMs={vms} />
+          <IPTable ips={ips} clusterVMs={vms} nodes={nodes} />
         </>
       )}
     </div>
@@ -961,7 +961,7 @@ interface IPFilterState {
 
 const EMPTY_IP_FILTERS: IPFilterState = { status: null, source: null }
 
-function IPTable({ ips, clusterVMs }: { ips: IPAllocation[]; clusterVMs: ClusterVM[] }) {
+function IPTable({ ips, clusterVMs, nodes }: { ips: IPAllocation[]; clusterVMs: ClusterVM[]; nodes: NodeView[] }) {
   // Default-hide free rows. A typical /24 pool has ~240 entries; the
   // interesting ones are reserved + allocated. Admins flip this on when
   // they want to see what's still available.
@@ -980,6 +980,18 @@ function IPTable({ ips, clusterVMs }: { ips: IPAllocation[]; clusterVMs: Cluster
     for (const v of clusterVMs) m.set(v.vmid, v.source)
     return m
   }, [clusterVMs])
+
+  // ip → node-name lookup so a hypervisor's own LAN address renders as
+  // "PROXMOX NODE foo" instead of the generic EXTERNAL chip netscan would
+  // otherwise stamp on it. Nodes without an `ip` field (single-node setups,
+  // pre-/cluster/status fetch) silently fall through.
+  const nodeByIP = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const n of nodes) {
+      if (n.ip) m.set(n.ip, n.name)
+    }
+    return m
+  }, [nodes])
 
   const sorted = useMemo(() => {
     return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))
@@ -1112,6 +1124,7 @@ function IPTable({ ips, clusterVMs }: { ips: IPAllocation[]; clusterVMs: Cluster
                   key={row.ip}
                   row={row}
                   clusterSource={row.vmid != null ? vmSourceByVMID.get(row.vmid) : undefined}
+                  nodeName={nodeByIP.get(row.ip)}
                 />
               ))}
             </tbody>
@@ -1129,7 +1142,15 @@ function IPTable({ ips, clusterVMs }: { ips: IPAllocation[]; clusterVMs: Cluster
   )
 }
 
-function IPRow({ row, clusterSource }: { row: IPAllocation; clusterSource: VMSource | undefined }) {
+function IPRow({
+  row,
+  clusterSource,
+  nodeName,
+}: {
+  row: IPAllocation
+  clusterSource: VMSource | undefined
+  nodeName: string | undefined
+}) {
   const dash = <span className="text-ink-3">—</span>
   const lastSeen = row.last_seen_at || row.allocated_at || row.reserved_at || null
   return (
@@ -1139,7 +1160,9 @@ function IPRow({ row, clusterSource }: { row: IPAllocation; clusterSource: VMSou
         <IPStatusBadge status={row.status} />
       </td>
       <td className="px-4 py-3 whitespace-nowrap">
-        {row.status === 'free' ? dash : <IPSourceLabel source={row.source} clusterSource={clusterSource} />}
+        {row.status === 'free' ? dash : (
+          <IPSourceLabel source={row.source} clusterSource={clusterSource} nodeName={nodeName} />
+        )}
       </td>
       <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
         {row.vmid ?? dash}
@@ -1200,10 +1223,27 @@ const ipSourceTooltip = {
 function IPSourceLabel({
   source,
   clusterSource,
+  nodeName,
 }: {
   source: IPSource | undefined
   clusterSource: VMSource | undefined
+  nodeName: string | undefined
 }) {
+  // Hypervisor IPs win over every other classification: a Proxmox node's own
+  // LAN address shows up in netscan as "external" but it's actually one of
+  // our hosts. Render the dedicated chip whenever the row's IP matches a
+  // node from /cluster/status — regardless of whether the source field
+  // came back as "external" or "adopted".
+  if (nodeName) {
+    return (
+      <span
+        className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+        title={`Proxmox hypervisor "${nodeName}". This is one of the cluster nodes' own LAN addresses; netscan picked it up because it lives in the pool subnet.`}
+      >
+        PROXMOX NODE <span className="text-ink-3">· {nodeName}</span>
+      </span>
+    )
+  }
   switch (source) {
     case 'local':
       return (
