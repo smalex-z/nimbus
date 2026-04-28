@@ -278,7 +278,7 @@ export default function Admin() {
             </div>
             <h3 className="text-xl">IP pool</h3>
           </div>
-          <IPTable ips={ips} />
+          <IPTable ips={ips} clusterVMs={vms} />
         </>
       )}
     </div>
@@ -961,7 +961,7 @@ interface IPFilterState {
 
 const EMPTY_IP_FILTERS: IPFilterState = { status: null, source: null }
 
-function IPTable({ ips }: { ips: IPAllocation[] }) {
+function IPTable({ ips, clusterVMs }: { ips: IPAllocation[]; clusterVMs: ClusterVM[] }) {
   // Default-hide free rows. A typical /24 pool has ~240 entries; the
   // interesting ones are reserved + allocated. Admins flip this on when
   // they want to see what's still available.
@@ -969,6 +969,17 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   const [filters, setFilters] = useState<IPFilterState>(EMPTY_IP_FILTERS)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
+
+  // Build a vmid → cluster-source lookup so the IPSourceLabel can split
+  // the broad "adopted" bucket (anything Proxmox claims that nimbus didn't
+  // create) into "another nimbus instance" (carries the nimbus tag → shown
+  // as NIMBUS + warning) vs. "VM not provisioned by any nimbus" (shown as
+  // EXTERNAL VM). Without this cross-reference both look the same.
+  const vmSourceByVMID = useMemo(() => {
+    const m = new Map<number, VMSource>()
+    for (const v of clusterVMs) m.set(v.vmid, v.source)
+    return m
+  }, [clusterVMs])
 
   const sorted = useMemo(() => {
     return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))
@@ -1097,7 +1108,11 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
             </thead>
             <tbody>
               {paged.map((row) => (
-                <IPRow key={row.ip} row={row} />
+                <IPRow
+                  key={row.ip}
+                  row={row}
+                  clusterSource={row.vmid != null ? vmSourceByVMID.get(row.vmid) : undefined}
+                />
               ))}
             </tbody>
           </table>
@@ -1114,7 +1129,7 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   )
 }
 
-function IPRow({ row }: { row: IPAllocation }) {
+function IPRow({ row, clusterSource }: { row: IPAllocation; clusterSource: VMSource | undefined }) {
   const dash = <span className="text-ink-3">—</span>
   const lastSeen = row.last_seen_at || row.allocated_at || row.reserved_at || null
   return (
@@ -1124,7 +1139,7 @@ function IPRow({ row }: { row: IPAllocation }) {
         <IPStatusBadge status={row.status} />
       </td>
       <td className="px-4 py-3 whitespace-nowrap">
-        {row.status === 'free' ? dash : <IPSourceLabel source={row.source} />}
+        {row.status === 'free' ? dash : <IPSourceLabel source={row.source} clusterSource={clusterSource} />}
       </td>
       <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
         {row.vmid ?? dash}
@@ -1161,23 +1176,72 @@ function IPStatusBadge({ status }: { status: IPStatus }) {
   )
 }
 
-function IPSourceLabel({ source }: { source: IPSource | undefined }) {
+// IP source tooltip copy. Four cases — three "external" flavours we used to
+// flatten under a single label:
+//   * adopted+foreign    → another nimbus instance manages the VM. The
+//                          hypervisor admin we'd reach is *external to us*,
+//                          so we call this "external hypervisor".
+//   * adopted+!foreign   → a regular Proxmox VM that no nimbus instance
+//                          tagged. "External VM" — same cluster, just not
+//                          ours and not a peer's.
+//   * external           → netscan picked up an IP that doesn't belong to
+//                          any Proxmox VM at all (router, NAS, IoT). "True
+//                          external" — Proxmox doesn't even know about it.
+const ipSourceTooltip = {
+  local: 'Allocated by this nimbus instance for a VM we provisioned.',
+  externalHypervisor:
+    'Claimed by a VM tagged nimbus on the cluster but not in our DB — managed by a different nimbus instance ("external hypervisor"). Reachable through Proxmox; ownership and credentials live with the other instance.',
+  externalVM:
+    'Claimed by a Proxmox VM that no nimbus instance created. Real VM, just not part of any nimbus deployment — not in our DB and not in a peer\'s either.',
+  externalLAN:
+    'Detected on the LAN by netscan but not bound to any Proxmox VM. A non-VM host sharing the pool subnet (gateway, NAS, printer, statically-assigned workstation, …) — included in the pool so we never hand its address to a fresh provision.',
+}
+
+function IPSourceLabel({
+  source,
+  clusterSource,
+}: {
+  source: IPSource | undefined
+  clusterSource: VMSource | undefined
+}) {
   switch (source) {
     case 'local':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help"
+          title={ipSourceTooltip.local}
+        >
           NIMBUS
         </span>
       )
     case 'adopted':
+      // The reconciler stamps "adopted" on every Proxmox-claimed IP that
+      // wasn't reserved through us. Splitting that bucket needs the
+      // cluster-VM cross-reference to tell whose hypervisor it is.
+      if (clusterSource === 'foreign') {
+        return (
+          <span
+            className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+            title={ipSourceTooltip.externalHypervisor}
+          >
+            NIMBUS <ForeignWarningIcon />
+          </span>
+        )
+      }
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
-          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-ink-2 cursor-help"
+          title={ipSourceTooltip.externalVM}
+        >
+          EXTERNAL VM
         </span>
       )
     case 'external':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-2">
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-ink-3 cursor-help"
+          title={ipSourceTooltip.externalLAN}
+        >
           EXTERNAL
         </span>
       )
