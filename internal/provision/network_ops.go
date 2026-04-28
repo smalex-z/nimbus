@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"nimbus/internal/db"
 	"nimbus/internal/ippool"
@@ -71,14 +72,18 @@ func (s *Service) ForceGatewayUpdate(ctx context.Context, gateway string) (Netwo
 		if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
 			IPConfig0: ipconfig,
 		}); err != nil {
+			msg := "set cloud-init: " + err.Error()
+			if isVMConfigMissing(err) {
+				msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
+			}
 			log.Printf("force-gateway: set cloud-init vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
 			rep.Failures = append(rep.Failures, NetworkOpFailure{
 				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "set cloud-init: " + err.Error(),
+				Err: msg,
 			})
 			continue
 		}
-		if err := s.rebootIfRunning(ctx, vm); err != nil {
+		if err := s.rebootForNetworkChange(ctx, vm); err != nil {
 			log.Printf("force-gateway: reboot vmid=%d on %s: %v (config saved, will apply on next boot)", vm.VMID, vm.Node, err)
 			rep.Failures = append(rep.Failures, NetworkOpFailure{
 				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
@@ -139,15 +144,19 @@ func (s *Service) RenumberAllVMs(ctx context.Context, gateway string) (NetworkOp
 			IPConfig0: ipconfig,
 		}); err != nil {
 			_ = s.pool.Release(ctx, newIP)
+			msg := "set cloud-init: " + err.Error()
+			if isVMConfigMissing(err) {
+				msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
+			}
 			log.Printf("renumber: set cloud-init vmid=%d on %s: %v (rolled back reservation)", vm.VMID, vm.Node, err)
 			rep.Failures = append(rep.Failures, NetworkOpFailure{
 				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "set cloud-init: " + err.Error(),
+				Err: msg,
 			})
 			continue
 		}
 
-		if err := s.rebootIfRunning(ctx, vm); err != nil {
+		if err := s.rebootForNetworkChange(ctx, vm); err != nil {
 			log.Printf("renumber: reboot vmid=%d on %s: %v (config saved, IP not yet active)", vm.VMID, vm.Node, err)
 			// Don't roll back — the cloud-init drive is already updated.
 			// Mark the new IP allocated and update DB so the operator's
@@ -176,16 +185,18 @@ func (s *Service) RenumberAllVMs(ctx context.Context, gateway string) (NetworkOp
 	return rep, nil
 }
 
-// rebootIfRunning issues a Proxmox reboot only when the local DB believes the
-// VM is running. Avoids returning errors for stopped VMs (which would be
-// expected — Proxmox refuses to reboot a stopped VM, but the cloud-init
-// change still applies on next start).
-func (s *Service) rebootIfRunning(ctx context.Context, vm db.VM) error {
-	if vm.Status != "running" {
-		return nil
-	}
+// rebootForNetworkChange issues a Proxmox reboot so the new cloud-init
+// applies. The local vms.status column is unreliable (the reconciler doesn't
+// keep it in sync with Proxmox power state), so we always attempt the reboot
+// and let Proxmox tell us when there's no work — its "VM N not running" 500
+// is treated as a no-op since cloud-init will apply on next boot anyway.
+func (s *Service) rebootForNetworkChange(ctx context.Context, vm db.VM) error {
 	taskID, err := s.px.RebootVM(ctx, vm.Node, vm.VMID)
 	if err != nil {
+		if isVMNotRunning(err) {
+			// VM is stopped — config is already on disk; next boot picks it up.
+			return nil
+		}
 		return err
 	}
 	if taskID != "" {
@@ -194,4 +205,28 @@ func (s *Service) rebootIfRunning(ctx context.Context, vm db.VM) error {
 		}
 	}
 	return nil
+}
+
+// isVMNotRunning matches the Proxmox 500 body that means "you asked me to
+// reboot a stopped VM" — fine for our purposes; the cloud-init drive is
+// already updated and the change applies on next boot.
+func isVMNotRunning(err error) bool {
+	var httpErr *proxmox.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.Status == 500 && strings.Contains(httpErr.Body, "not running")
+}
+
+// isVMConfigMissing matches the Proxmox 500 body for "Configuration file
+// 'nodes/<node>/qemu-server/<vmid>.conf' does not exist" — the VM has drifted
+// off this node (manual migration, manual destroy) but nimbus's DB still
+// thinks it lives here. Surface a cleaner failure message so the operator
+// knows to clean up the row rather than chasing a Proxmox-internal error.
+func isVMConfigMissing(err error) bool {
+	var httpErr *proxmox.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.Status == 500 && strings.Contains(httpErr.Body, "does not exist")
 }
