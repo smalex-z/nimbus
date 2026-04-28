@@ -168,7 +168,7 @@ func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	vms, err := h.svc.List(r.Context(), &user.ID)
+	vms, err := h.svc.ListWithLiveStatus(r.Context(), &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return
