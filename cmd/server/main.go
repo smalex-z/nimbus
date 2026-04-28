@@ -116,7 +116,7 @@ func main() {
 
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
-		&db.GPUSettings{}, &db.GPUJob{},
+		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		ippool.Model(),
 	)
@@ -152,8 +152,44 @@ func main() {
 		log.Printf("backfill: promoted oldest user to admin (no admin existed)")
 	}
 
+	// Network settings: env vars seed the DB row on first boot; after that the
+	// Settings → Network page is the source of truth and live-rotates the
+	// gateway/pool without a restart. Same pattern as Gopher.
+	netSettings, err := authSvc.GetNetworkSettings()
+	if err != nil {
+		log.Fatalf("failed to load network settings: %v", err)
+	}
+	if netSettings.IPPoolStart == "" && netSettings.IPPoolEnd == "" && netSettings.GatewayIP == "" &&
+		(cfg.IPPoolStart != "" || cfg.IPPoolEnd != "" || cfg.GatewayIP != "") {
+		if err := authSvc.SaveNetworkSettings(db.NetworkSettings{
+			IPPoolStart: cfg.IPPoolStart,
+			IPPoolEnd:   cfg.IPPoolEnd,
+			GatewayIP:   cfg.GatewayIP,
+		}); err != nil {
+			log.Printf("warning: failed to seed network settings from env: %v", err)
+		} else {
+			log.Printf("seeded network settings from env vars (one-time migration)")
+			netSettings.IPPoolStart = cfg.IPPoolStart
+			netSettings.IPPoolEnd = cfg.IPPoolEnd
+			netSettings.GatewayIP = cfg.GatewayIP
+		}
+	}
+	// DB wins after seeding; the live values feed pool seed + provision gateway.
+	effectivePoolStart := netSettings.IPPoolStart
+	effectivePoolEnd := netSettings.IPPoolEnd
+	effectiveGateway := netSettings.GatewayIP
+	if effectivePoolStart == "" {
+		effectivePoolStart = cfg.IPPoolStart
+	}
+	if effectivePoolEnd == "" {
+		effectivePoolEnd = cfg.IPPoolEnd
+	}
+	if effectiveGateway == "" {
+		effectiveGateway = cfg.GatewayIP
+	}
+
 	pool := ippool.New(database.DB)
-	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
+	if err := pool.Seed(context.Background(), effectivePoolStart, effectivePoolEnd); err != nil {
 		log.Fatalf("failed to seed IP pool: %v", err)
 	}
 
@@ -188,10 +224,54 @@ func main() {
 	}
 	migCancel()
 
+	// hypervisorReachabilityProbe TCP-dials each cluster node's pveproxy port
+	// and returns the names of nodes that didn't answer. Reused by both
+	// reconcilers below — when a node is unreachable the reconciler treats
+	// its VMs as still-alive-just-out-of-sight rather than reaping the rows
+	// after VACATE_MISS_THRESHOLD cycles. 1 s timeout per node, fans out
+	// concurrently so a 5-node cluster with 2 dead nodes still completes
+	// the probe in ~1 s rather than 5.
+	hypervisorReachabilityProbe := func(ctx context.Context) map[string]bool {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		addrs, err := pveClient.NodeAddresses(probeCtx)
+		if err != nil {
+			log.Printf("reachability: NodeAddresses failed (treating all nodes as reachable): %v", err)
+			return nil
+		}
+		return proxmox.ProbeReachability(probeCtx, addrs, 1*time.Second)
+	}
+
+	// unreachableVMIDsForReconciler maps node-level reachability into the
+	// vmid set the ippool reconciler consumes. The local vms table is the
+	// only place we know which VMID lives on which node, so the lookup
+	// happens here rather than inside the reconciler package.
+	unreachableVMIDsForReconciler := func(ctx context.Context) map[int]bool {
+		unreachable := hypervisorReachabilityProbe(ctx)
+		if len(unreachable) == 0 {
+			return nil
+		}
+		nodes := make([]string, 0, len(unreachable))
+		for n := range unreachable {
+			nodes = append(nodes, n)
+		}
+		var vms []db.VM
+		if err := database.WithContext(ctx).Where("node IN ?", nodes).Find(&vms).Error; err != nil {
+			log.Printf("reachability: vmid lookup failed (skipping guard this cycle): %v", err)
+			return nil
+		}
+		out := make(map[int]bool, len(vms))
+		for _, v := range vms {
+			out[v.VMID] = true
+		}
+		return out
+	}
+
 	reconciler := ippool.NewReconciler(pool, pveClient,
 		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
 		ippool.WithCacheTTL(time.Duration(cfg.VerifyCacheTTLSeconds)*time.Second),
 		ippool.WithMissThreshold(cfg.VacateMissThreshold),
+		ippool.WithUnreachableVMIDs(unreachableVMIDsForReconciler),
 	)
 
 	// Startup reconcile: bounded so a temporarily unreachable Proxmox doesn't
@@ -228,7 +308,7 @@ func main() {
 	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
-		GatewayIP:        cfg.GatewayIP,
+		GatewayIP:        effectiveGateway,
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
@@ -352,6 +432,14 @@ func main() {
 		log.Printf("warning: nimbus tag color sync skipped: %v", err)
 	}
 	tagColorCancel()
+
+	// VM-table reconciler: keeps vms.node in sync with Proxmox migrations and
+	// soft-deletes orphan rows whose VMID hasn't been observed for N
+	// consecutive runs. Same cadence as the IP reconciler. The reachability
+	// probe — same one the ippool reconciler uses — keeps a flapping node
+	// from cascading into a soft-delete of every row living there.
+	provSvc.SetUnreachableNodesProbe(hypervisorReachabilityProbe)
+	go runVMReconcileLoop(bgCtx, provSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
@@ -605,6 +693,37 @@ func runNetscanLoop(ctx context.Context, r *netscan.Reconciler, interval time.Du
 			return
 		case <-t.C:
 			runOnce()
+		}
+	}
+}
+
+// runVMReconcileLoop runs provSvc.ReconcileVMs every interval until ctx is
+// cancelled. Mirrors runReconcileLoop's shape — errors are logged, never
+// fatal. Skips quietly when the cluster snapshot is empty (transient API
+// issue) so a Proxmox blip doesn't soft-delete every row in one cycle.
+func runVMReconcileLoop(ctx context.Context, svc *provision.Service, interval time.Duration) {
+	if interval <= 0 {
+		log.Printf("vm-reconcile loop disabled (interval=%v)", interval)
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, interval)
+			rep, err := svc.ReconcileVMs(runCtx)
+			cancel()
+			if err != nil {
+				log.Printf("background vm-reconcile error: %v", err)
+				continue
+			}
+			if len(rep.Migrated) > 0 || len(rep.Deleted) > 0 {
+				log.Printf("background vm-reconcile: migrated=%d missed=%d deleted=%d",
+					len(rep.Migrated), len(rep.Missed), len(rep.Deleted))
+			}
 		}
 	}
 }

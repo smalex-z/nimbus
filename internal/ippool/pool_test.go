@@ -418,3 +418,106 @@ func TestReleaseStaleReservations(t *testing.T) {
 		}
 	})
 }
+
+func TestReseed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("growing the range adds new addresses", func(t *testing.T) {
+		p := newTestPool(t)
+		ctx := context.Background()
+		if err := p.Seed(ctx, "10.0.0.10", "10.0.0.12"); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+		added, removedFree, stranded, err := p.Reseed(ctx, "10.0.0.10", "10.0.0.15")
+		if err != nil {
+			t.Fatalf("Reseed: %v", err)
+		}
+		if added != 3 || removedFree != 0 || stranded != 0 {
+			t.Errorf("added=%d removedFree=%d stranded=%d; want 3/0/0", added, removedFree, stranded)
+		}
+		got, _ := p.List(ctx)
+		if len(got) != 6 {
+			t.Errorf("post-grow rows = %d, want 6", len(got))
+		}
+	})
+
+	t.Run("shrinking removes free rows outside new range", func(t *testing.T) {
+		p := newTestPool(t)
+		ctx := context.Background()
+		if err := p.Seed(ctx, "10.0.0.10", "10.0.0.15"); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+		added, removedFree, stranded, err := p.Reseed(ctx, "10.0.0.10", "10.0.0.12")
+		if err != nil {
+			t.Fatalf("Reseed: %v", err)
+		}
+		if added != 0 || removedFree != 3 || stranded != 0 {
+			t.Errorf("added=%d removedFree=%d stranded=%d; want 0/3/0", added, removedFree, stranded)
+		}
+		got, _ := p.List(ctx)
+		if len(got) != 3 {
+			t.Errorf("post-shrink rows = %d, want 3", len(got))
+		}
+	})
+
+	t.Run("shrinking leaves allocated rows stranded outside the range", func(t *testing.T) {
+		p := newTestPool(t)
+		ctx := context.Background()
+		if err := p.Seed(ctx, "10.0.0.10", "10.0.0.15"); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+		// Force-allocate .14 (will be outside the new range).
+		if err := p.AdoptAllocation(ctx, "10.0.0.14", 999, "stranded-host"); err != nil {
+			t.Fatalf("AdoptAllocation: %v", err)
+		}
+
+		added, removedFree, stranded, err := p.Reseed(ctx, "10.0.0.10", "10.0.0.12")
+		if err != nil {
+			t.Fatalf("Reseed: %v", err)
+		}
+		if added != 0 {
+			t.Errorf("added=%d, want 0", added)
+		}
+		// .13, .15 were free → removed (2). .14 allocated → kept (1 stranded).
+		if removedFree != 2 {
+			t.Errorf("removedFree=%d, want 2", removedFree)
+		}
+		if stranded != 1 {
+			t.Errorf("stranded=%d, want 1", stranded)
+		}
+		// .14 row must still exist with its allocation.
+		row, err := p.GetByIP(ctx, "10.0.0.14")
+		if err != nil {
+			t.Fatalf("stranded row .14 missing: %v", err)
+		}
+		if row.Status != ippool.StatusAllocated {
+			t.Errorf(".14 status = %s, want allocated", row.Status)
+		}
+	})
+
+	t.Run("rejects invalid range", func(t *testing.T) {
+		p := newTestPool(t)
+		_, _, _, err := p.Reseed(context.Background(), "not-an-ip", "10.0.0.5")
+		if !errors.Is(err, ippool.ErrInvalidRange) {
+			t.Errorf("err = %v, want ErrInvalidRange", err)
+		}
+	})
+}
+
+func TestCountFree(t *testing.T) {
+	t.Parallel()
+	p := newTestPool(t)
+	ctx := context.Background()
+	if err := p.Seed(ctx, "10.0.0.10", "10.0.0.14"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if n, err := p.CountFree(ctx); err != nil || n != 5 {
+		t.Errorf("CountFree pre-reserve = %d, %v; want 5, nil", n, err)
+	}
+	if _, err := p.Reserve(ctx, "x"); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if n, err := p.CountFree(ctx); err != nil || n != 4 {
+		t.Errorf("CountFree post-reserve = %d, %v; want 4, nil", n, err)
+	}
+}

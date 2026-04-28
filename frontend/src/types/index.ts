@@ -145,6 +145,11 @@ export interface NodeView {
   swap_total: number
   vm_count: number
   vm_count_total: number
+  // Corosync ring address for this node, when available. The IP-pool table
+  // uses it to render hypervisor LAN addresses as "PROXMOX NODE <name>"
+  // instead of the generic EXTERNAL chip netscan would otherwise stamp on
+  // them.
+  ip?: string
 }
 
 export interface ClusterStats {

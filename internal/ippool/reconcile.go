@@ -39,15 +39,25 @@ type ClusterIPLister interface {
 	ListClusterIPs(ctx context.Context) ([]proxmox.ClusterIP, error)
 }
 
+// UnreachableVMIDsFunc returns the set of VMIDs whose host node is currently
+// unreachable. The reconciler treats those rows' "missing from snapshot" as
+// "we just can't see them right now" instead of "the VM is gone" — neither
+// missed_cycles bumps nor vacates fire while the node is offline. A nil
+// return means "no probe wired" → behave as before. Errors inside the
+// implementation should swallow + return nil rather than failing the whole
+// reconcile pass.
+type UnreachableVMIDsFunc func(ctx context.Context) map[int]bool
+
 // Reconciler diffs Proxmox cluster state against the local IP pool and applies
 // targeted fixes. Safe for concurrent use.
 type Reconciler struct {
-	pool          *Pool
-	px            ClusterIPLister
-	staleAfter    time.Duration
-	cacheTTL      time.Duration
-	missThreshold int
-	clock         func() time.Time
+	pool             *Pool
+	px               ClusterIPLister
+	staleAfter       time.Duration
+	cacheTTL         time.Duration
+	missThreshold    int
+	clock            func() time.Time
+	unreachableVMIDs UnreachableVMIDsFunc
 
 	mu       sync.Mutex
 	cached   []proxmox.ClusterIP
@@ -95,6 +105,16 @@ func WithClock(f func() time.Time) Option {
 		if f != nil {
 			r.clock = f
 		}
+	}
+}
+
+// WithUnreachableVMIDs wires a probe that the reconciler consults each cycle
+// to find VMIDs whose Proxmox host is currently unreachable. Misses on those
+// rows become no-ops instead of bumping missed_cycles, so a transient node
+// outage doesn't cascade into IP vacates after VACATE_MISS_THRESHOLD cycles.
+func WithUnreachableVMIDs(f UnreachableVMIDsFunc) Option {
+	return func(r *Reconciler) {
+		r.unreachableVMIDs = f
 	}
 }
 
@@ -201,6 +221,16 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 		return rep, fmt.Errorf("list local rows: %w", err)
 	}
 
+	// One reachability check per cycle — fans out TCP dials to every node's
+	// pveproxy port. A non-empty result means: when these VMIDs are missing
+	// from the cluster snapshot, treat the absence as a network blip rather
+	// than evidence the VMs were destroyed. Falls back to the old behaviour
+	// (no probe) when the option wasn't wired or the probe returns nil.
+	var unreachable map[int]bool
+	if r.unreachableVMIDs != nil {
+		unreachable = r.unreachableVMIDs(ctx)
+	}
+
 	var errs []error
 	for _, row := range rows {
 		px, hasPx := pxByIP[row.IP]
@@ -222,6 +252,17 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 		case row.Status == StatusReserved:
 			r.handleReservedMissing(ctx, row, &rep, &errs)
 		case row.Status == StatusAllocated:
+			// Skip the missed-cycle bump when the VM lives on a node we
+			// can't currently reach — most likely a brief outage, not a
+			// genuine destruction. We still TouchSeen so the row's
+			// last_seen_at stays fresh for the stale-detection guard.
+			if row.VMID != nil && unreachable[*row.VMID] {
+				if err := r.pool.TouchSeen(ctx, row.IP); err != nil {
+					errs = append(errs, fmt.Errorf("touch %s (unreachable host): %w", row.IP, err))
+				}
+				rep.NoOps++
+				break
+			}
 			r.handleAllocatedMissing(ctx, row, &rep, &errs)
 		default:
 			rep.NoOps++

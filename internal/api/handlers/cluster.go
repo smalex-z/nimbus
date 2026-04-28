@@ -222,3 +222,24 @@ func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// VMLifecycle handles POST /api/cluster/vms/{node}/{vmid}/{op} where op is
+// one of start | shutdown | stop | reboot. Admin-only. Works on any source
+// (local, foreign, external) since it routes by (node, vmid) instead of
+// nimbus DB row id. For local rows the status column is updated
+// optimistically; the reconciler corrects any drift.
+func (h *Cluster) VMLifecycle(w http.ResponseWriter, r *http.Request) {
+	node := chi.URLParam(r, "node")
+	vmidStr := chi.URLParam(r, "vmid")
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil || vmid <= 0 {
+		response.BadRequest(w, "invalid vmid")
+		return
+	}
+	op := provision.VMLifecycleOp(chi.URLParam(r, "op"))
+	if err := h.svc.AdminLifecycleByVMID(r.Context(), node, vmid, op); err != nil {
+		response.FromError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

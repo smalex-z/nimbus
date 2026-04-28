@@ -543,6 +543,32 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 	return taskID, nil
 }
 
+// ShutdownVM asks Proxmox to stop a VM gracefully — talks to the guest agent
+// (or sends ACPI when no agent) so the OS can flush filesystems and exit
+// cleanly. The Proxmox endpoint falls back to forceStop after its own
+// configured timeout, so a hung guest still ends up off without our caller
+// babysitting. Used for the user-facing "Shutdown" button.
+func (c *Client) ShutdownVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/shutdown", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// RebootVM triggers a graceful reboot through the guest agent (or ACPI when
+// no agent is present). Used after a cloud-init network change so the VM picks
+// up the new ipconfig0 on next boot. Returns the task UPID.
+func (c *Client) RebootVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/reboot", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
 // DestroyVM removes a VM from Proxmox.
 //
 //   - purge=1 also clears job/replication/HA references (otherwise stale
@@ -621,6 +647,80 @@ func (c *Client) GetAgentOSInfoCached(ctx context.Context, node string, vmid int
 	}
 	c.osInfoCache.put(node, vmid, info, now)
 	return info
+}
+
+// ProbeReachability TCP-dials each address concurrently and returns the set
+// of node names that didn't answer within timeout. An empty map means all
+// addresses responded (or the input map was empty).
+//
+// The reconcilers use this as a skip-the-reaper guard: if a node went off
+// the network briefly (kernel update, ifdown, broken switch port), Proxmox's
+// /cluster/resources stops listing its VMs, every IP allocated to one of
+// those VMs flows through the missed-cycle path, and after VACATE_MISS_THRESHOLD
+// cycles the rows get vacated and soft-deleted. Skipping the bump on
+// unreachable nodes keeps the local DB intact across short outages —
+// Proxmox's `online` flag is unreliable when nimbus's own host is the one
+// with bad cluster connectivity.
+//
+// Port 8006 is pveproxy's default. We're not authenticating — a successful
+// TCP handshake is enough to say "the box is alive and routing".
+func ProbeReachability(ctx context.Context, addresses map[string]string, timeout time.Duration) map[string]bool {
+	if len(addresses) == 0 {
+		return nil
+	}
+	out := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, ip := range addresses {
+		wg.Add(1)
+		go func(name, ip string) {
+			defer wg.Done()
+			d := net.Dialer{Timeout: timeout}
+			conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, "8006"))
+			if err != nil {
+				mu.Lock()
+				out[name] = true
+				mu.Unlock()
+				return
+			}
+			_ = conn.Close()
+		}(name, ip)
+	}
+	wg.Wait()
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// GetClusterStatus returns the heterogeneous /cluster/status payload — one
+// entry per node carrying its corosync address, plus a cluster-summary row.
+// Callers usually want NodeAddresses, not raw entries.
+func (c *Client) GetClusterStatus(ctx context.Context) ([]ClusterStatusEntry, error) {
+	var out []ClusterStatusEntry
+	if err := c.do(ctx, http.MethodGet, "/cluster/status", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// NodeAddresses returns name → IP for every node in the cluster, derived from
+// /cluster/status. Used by the IP-pool labeller (so a hypervisor's own LAN
+// address shows as "PROXMOX NODE foo" instead of generic EXTERNAL) and the
+// reconciler reachability guard (TCP-probe before counting a missing-VM
+// cycle so a brief node outage doesn't reap rows en masse).
+func (c *Client) NodeAddresses(ctx context.Context) (map[string]string, error) {
+	entries, err := c.GetClusterStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.Type == "node" && e.Name != "" && e.IP != "" {
+			out[e.Name] = e.IP
+		}
+	}
+	return out, nil
 }
 
 // GetClusterStorage returns every storage entry visible at the cluster level.

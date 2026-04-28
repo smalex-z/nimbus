@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteVM, listVMs } from '@/api/client'
+import { deleteVM, listVMs, vmLifecycle } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
+import VMActions from '@/components/ui/VMActions'
+import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
 import type { VM } from '@/types'
 
@@ -117,8 +119,9 @@ function VMRow({
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
           {vm.tunnel_url && (
-            <div className="font-mono text-[11px] text-good mt-1 truncate" title={vm.tunnel_url}>
-              🌐 {vm.tunnel_url}
+            <div className="font-mono text-[11px] text-good mt-1 truncate inline-flex items-center gap-1.5" title={vm.tunnel_url}>
+              <NetworkIcon size={11} />
+              <span className="truncate">{vm.tunnel_url}</span>
             </div>
           )}
         </div>
@@ -131,31 +134,32 @@ function VMRow({
             <button
               type="button"
               onClick={() => setTunnelsOpen(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-              title="Manage Gopher tunnels for this VM"
+              className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+              title={`Manage Gopher tunnels for ${vm.hostname}`}
+              aria-label={`Manage tunnels for ${vm.hostname}`}
             >
-              <span aria-hidden>🌐</span>
-              <span>Networks</span>
+              <NetworkIcon />
             </button>
           )}
           <button
             type="button"
             onClick={() => setSshOpen(true)}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+            title={`SSH details for ${vm.hostname}`}
+            aria-label={`SSH details for ${vm.hostname}`}
           >
-            <span aria-hidden>↗</span>
-            <span>SSH</span>
+            <TerminalIcon />
           </button>
-          {canDelete && (
-            <button
-              type="button"
-              onClick={() => setDeleteOpen(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-bad hover:border-bad transition-colors"
-              title="Destroy this VM and release its resources"
-            >
-              Delete
-            </button>
-          )}
+          <VMActions
+            hostname={vm.hostname}
+            status={vm.status as 'running' | 'stopped' | 'paused' | 'unknown'}
+            canRemove={canDelete}
+            onLifecycle={async (op) => {
+              await vmLifecycle(vm.ID, op)
+              onChanged()
+            }}
+            onRemove={canDelete ? () => setDeleteOpen(true) : undefined}
+          />
         </div>
       </div>
       {sshOpen && (

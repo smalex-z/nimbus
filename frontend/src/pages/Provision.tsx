@@ -238,7 +238,7 @@ export default function Provision() {
           <div className="eyebrow">New machine</div>
           <h2 className="text-3xl">What are we spinning up today?</h2>
           <p className="text-base text-ink-2 mt-2 leading-relaxed">
-            Pick a size, give it a name, grab your key. Done in &lt; 60s.
+            Pick a size, give it a name, grab your key. Most builds finish in 90–120s.
           </p>
         </div>
       </div>
@@ -289,7 +289,7 @@ export default function Provision() {
               Provision machine →
             </Button>
             <p className="text-xs text-ink-3 text-center mt-3 leading-relaxed">
-              Typically completes in 30–60 seconds.
+              Typically completes in 90–120 seconds.
             </p>
             {form.tier === 'xl' && (
               <p className="text-xs text-warn text-center mt-2">
@@ -772,7 +772,7 @@ function LoadingView({ hostname, currentStep }: LoadingViewProps) {
           </span>
         </h2>
         <p className="text-base text-ink-2 mt-4 leading-relaxed">
-          Hold tight — your machine is on its way. Provisioning typically takes 30–60s.
+          Hold tight — your machine is on its way. Provisioning typically takes 90–120s.
         </p>
         <div className="mt-4 font-mono text-2xl text-ink tabular-nums">{fmt(elapsed)}</div>
 

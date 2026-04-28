@@ -27,6 +27,13 @@ type nodeView struct {
 	SwapTotal    uint64  `json:"swap_total"`     // configured swap on the host
 	VMCount      int     `json:"vm_count"`       // running, non-template
 	VMCountTotal int     `json:"vm_count_total"` // all non-template (running + stopped)
+	// IP is the node's corosync ring address from /cluster/status. Surfaced
+	// so the SPA can label hypervisor IPs in the IP-pool table — when an
+	// allocation row's IP matches a node, we render "PROXMOX NODE foo"
+	// instead of the generic EXTERNAL chip the netscan would otherwise pin
+	// it with. Empty when /cluster/status didn't include the node (single-
+	// node deployments, fresh installs).
+	IP string `json:"ip,omitempty"`
 }
 
 // List handles GET /api/nodes.
@@ -65,6 +72,14 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 		agg[vm.Node] = a
 	}
 
+	// /cluster/status carries each node's corosync ring address. Single
+	// extra cluster-level call (cheap) — failure leaves nodeIP entries empty
+	// and the SPA falls back to the EXTERNAL label for those rows.
+	nodeIP, err := h.px.NodeAddresses(r.Context())
+	if err != nil {
+		nodeIP = nil
+	}
+
 	// Swap counters live on /nodes/{node}/status, not /nodes — fan out per
 	// online node in parallel. A failed status call shouldn't block the rest:
 	// we leave swap fields at zero for that node and serve the page anyway.
@@ -98,6 +113,7 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 			SwapTotal:    swap[i].Total,
 			VMCount:      a.running,
 			VMCountTotal: a.total,
+			IP:           nodeIP[n.Name],
 		})
 	}
 	response.Success(w, out)

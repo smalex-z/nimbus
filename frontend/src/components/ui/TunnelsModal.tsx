@@ -145,7 +145,7 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
           {tunnels !== null && tunnels.length > 0 && (
             <div className="grid gap-2">
               {tunnels.map((t) => (
-                <TunnelRow key={t.id} tunnel={t} busy={busy} onDelete={onDelete} />
+                <TunnelRow key={t.id} tunnel={t} hostname={hostname} busy={busy} onDelete={onDelete} />
               ))}
             </div>
           )}
@@ -286,13 +286,20 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
 
 interface TunnelRowProps {
   tunnel: VMTunnel
+  hostname: string
   busy: boolean
   onDelete: (id: string) => void
 }
 
-function TunnelRow({ tunnel, busy, onDelete }: TunnelRowProps) {
+function TunnelRow({ tunnel, hostname, busy, onDelete }: TunnelRowProps) {
   const display = tunnel.tunnel_url || tunnel.subdomain || tunnel.id
   const isFailed = tunnel.status === 'failed'
+  // The SSH base tunnel maps the public host's :port to the guest's
+  // sshd. Spelling out "→ {hostname}:localhost:{port}" makes that
+  // mapping explicit instead of just "port 22" — which reads like a
+  // free-floating port number and doesn't say where the traffic ends up.
+  const targetPort = tunnel.target_port
+  const isSSHBase = targetPort === 22
   return (
     <div
       className={`p-3.5 rounded-[10px] bg-white/85 border ${isFailed ? 'border-[rgba(184,101,15,0.35)]' : 'border-line'}`}
@@ -312,9 +319,20 @@ function TunnelRow({ tunnel, busy, onDelete }: TunnelRowProps) {
             ) : (
               display
             )}
+            {isSSHBase && (
+              <span
+                className="ml-2 align-middle text-[10px] font-mono uppercase tracking-wider text-good bg-[rgba(60,150,90,0.10)] border border-[rgba(60,150,90,0.25)] rounded px-1.5 py-0.5"
+                title="The provision-time SSH exposure for this VM. Public host:port maps to the guest's sshd."
+              >
+                SSH base
+              </span>
+            )}
           </div>
           <div className="text-[11px] font-mono text-ink-3 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
-            <span>→ port {tunnel.target_port}</span>
+            <span title={`Mapped to ${hostname}'s localhost:${targetPort}`}>
+              → <span className="text-ink-2">{hostname}</span>
+              <span className="text-ink-3"> · localhost:{targetPort}</span>
+            </span>
             {tunnel.transport && tunnel.transport !== 'tcp' && (
               <span className="uppercase">· {tunnel.transport}</span>
             )}

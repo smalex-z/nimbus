@@ -77,6 +77,8 @@ type ProxmoxClient interface {
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
 	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	ShutdownVM(ctx context.Context, node string, vmid int) (string, error)
+	RebootVM(ctx context.Context, node string, vmid int) (string, error)
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 }
@@ -144,6 +146,18 @@ type Service struct {
 	gpuMu  sync.Mutex
 	gpuCfg GPUBootstrapConfig
 
+	// gatewayMu guards the live-reloadable gateway IP. Replaces the cfg.GatewayIP
+	// read at clone time so the Settings → Network page can rotate the gateway
+	// without a restart. Initial value is seeded from cfg.GatewayIP in New.
+	gatewayMu sync.RWMutex
+	gatewayIP string
+
+	// unreachableNodes is the per-cycle reachability probe consulted by
+	// ReconcileVMs. nil → no guard (legacy reap-on-miss behaviour). Set via
+	// SetUnreachableNodesProbe. Lock-free: a single pointer write swaps the
+	// closure atomically, and ReconcileVMs reads it once per call.
+	unreachableNodes UnreachableNodesFunc
+
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
@@ -161,14 +175,35 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 		cfg.PollInterval = 3 * time.Second
 	}
 	return &Service{
-		px:       px,
-		pool:     pool,
-		verifier: noopVerifier{},
-		db:       database,
-		cipher:   cipher,
-		keys:     keys,
-		cfg:      cfg,
+		px:        px,
+		pool:      pool,
+		verifier:  noopVerifier{},
+		db:        database,
+		cipher:    cipher,
+		keys:      keys,
+		cfg:       cfg,
+		gatewayIP: cfg.GatewayIP,
 	}
+}
+
+// SetGatewayIP rotates the gateway used for new provisions. Live-reloadable
+// from Settings → Network. Empty input is a no-op so the handler can blindly
+// push the persisted value without re-checking. Existing VMs are NOT updated
+// — that requires the explicit force-gateway-update op.
+func (s *Service) SetGatewayIP(ip string) {
+	if ip == "" {
+		return
+	}
+	s.gatewayMu.Lock()
+	defer s.gatewayMu.Unlock()
+	s.gatewayIP = ip
+}
+
+// GatewayIP returns the gateway used for new provisions, under lock.
+func (s *Service) GatewayIP() string {
+	s.gatewayMu.RLock()
+	defer s.gatewayMu.RUnlock()
+	return s.gatewayIP
 }
 
 // SetIPVerifier installs (or replaces) the IP verifier used after each Reserve
@@ -345,7 +380,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	cloudInit := proxmox.CloudInitConfig{
 		CIUser:       username,
 		SSHKeys:      sshPubKey,
-		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.cfg.GatewayIP),
+		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.GatewayIP()),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
@@ -708,6 +743,136 @@ func (s *Service) Delete(ctx context.Context, id, requesterID uint) error {
 		return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
 	}
 	return s.deleteVM(ctx, &vm)
+}
+
+// VMLifecycleOp identifies one of the four user-facing power operations.
+// Used by the user-scoped lifecycle wrapper so the handler doesn't have to
+// know which Proxmox endpoint corresponds to each verb.
+type VMLifecycleOp string
+
+const (
+	VMOpStart    VMLifecycleOp = "start"
+	VMOpShutdown VMLifecycleOp = "shutdown" // graceful (guest agent / ACPI)
+	VMOpStop     VMLifecycleOp = "stop"     // force (pull plug)
+	VMOpReboot   VMLifecycleOp = "reboot"
+)
+
+// LifecycleOp issues a power operation against a VM the requester owns.
+// Same ownership semantics as Delete: a non-owning caller gets NotFound so
+// existence isn't disclosed. On success vms.status is updated optimistically
+// (the reconciler will correct if the change actually fails on Proxmox after
+// the task UPID is returned).
+func (s *Service) LifecycleOp(ctx context.Context, id, requesterID uint, op VMLifecycleOp) error {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if vm.OwnerID == nil || *vm.OwnerID != requesterID {
+		return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+	}
+	return s.runLifecycleOp(ctx, &vm, op)
+}
+
+// AdminLifecycleOp issues a power operation without an owner gate. Used by
+// the admin cluster handler so an admin can power-cycle any local VM (foreign
+// and external are reachable via the by-(node,vmid) cluster endpoints).
+func (s *Service) AdminLifecycleOp(ctx context.Context, id uint, op VMLifecycleOp) error {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return fmt.Errorf("get vm %d: %w", id, err)
+	}
+	return s.runLifecycleOp(ctx, &vm, op)
+}
+
+// AdminLifecycleByVMID issues a power operation against a Proxmox VM that
+// may not have a local DB row (foreign / external). When a local row exists
+// for this (node, vmid), its status is updated optimistically; otherwise the
+// op is purely a Proxmox API call.
+func (s *Service) AdminLifecycleByVMID(ctx context.Context, node string, vmid int, op VMLifecycleOp) error {
+	if node == "" || vmid <= 0 {
+		return &internalerrors.ValidationError{Field: "vmid", Message: "node and vmid are required"}
+	}
+	var (
+		upid       string
+		err        error
+		nextStatus string
+	)
+	switch op {
+	case VMOpStart:
+		upid, err = s.px.StartVM(ctx, node, vmid)
+		nextStatus = "running"
+	case VMOpShutdown:
+		upid, err = s.px.ShutdownVM(ctx, node, vmid)
+		nextStatus = "stopped"
+	case VMOpStop:
+		upid, err = s.px.StopVM(ctx, node, vmid)
+		nextStatus = "stopped"
+	case VMOpReboot:
+		upid, err = s.px.RebootVM(ctx, node, vmid)
+		nextStatus = "running"
+	default:
+		return &internalerrors.ValidationError{Field: "op", Message: fmt.Sprintf("unknown lifecycle op %q", op)}
+	}
+	if err != nil {
+		return fmt.Errorf("%s vm %d on %s: %w", op, vmid, node, err)
+	}
+	if upid != "" {
+		if err := s.px.WaitForTask(ctx, node, upid, s.cfg.PollInterval); err != nil {
+			return fmt.Errorf("%s task vm %d: %w", op, vmid, err)
+		}
+	}
+	// Best-effort optimistic status sync for local rows.
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).
+		Where("vmid = ? AND node = ?", vmid, node).
+		Update("status", nextStatus).Error; err != nil {
+		log.Printf("admin lifecycle %s vm=%d node=%s: status update failed: %v", op, vmid, node, err)
+	}
+	return nil
+}
+
+// runLifecycleOp dispatches op to the right Proxmox endpoint, waits for the
+// task, then updates vms.status. Returns ValidationError for an unknown op.
+func (s *Service) runLifecycleOp(ctx context.Context, vm *db.VM, op VMLifecycleOp) error {
+	var (
+		upid       string
+		err        error
+		nextStatus string
+	)
+	switch op {
+	case VMOpStart:
+		upid, err = s.px.StartVM(ctx, vm.Node, vm.VMID)
+		nextStatus = "running"
+	case VMOpShutdown:
+		upid, err = s.px.ShutdownVM(ctx, vm.Node, vm.VMID)
+		nextStatus = "stopped"
+	case VMOpStop:
+		upid, err = s.px.StopVM(ctx, vm.Node, vm.VMID)
+		nextStatus = "stopped"
+	case VMOpReboot:
+		upid, err = s.px.RebootVM(ctx, vm.Node, vm.VMID)
+		nextStatus = "running"
+	default:
+		return &internalerrors.ValidationError{Field: "op", Message: fmt.Sprintf("unknown lifecycle op %q", op)}
+	}
+	if err != nil {
+		return fmt.Errorf("%s vm %d on %s: %w", op, vm.VMID, vm.Node, err)
+	}
+	if upid != "" {
+		if err := s.px.WaitForTask(ctx, vm.Node, upid, s.cfg.PollInterval); err != nil {
+			return fmt.Errorf("%s task vm %d: %w", op, vm.VMID, err)
+		}
+	}
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("id = ?", vm.ID).
+		Update("status", nextStatus).Error; err != nil {
+		log.Printf("lifecycle %s vm=%d: status update failed (proxmox already applied): %v", op, vm.ID, err)
+	}
+	return nil
 }
 
 // AdminDelete destroys a VM regardless of who owns it. Same semantics as

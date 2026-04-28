@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { adminDeleteVM, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { adminDeleteVM, adminVMLifecycle, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -9,7 +9,9 @@ import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
+import VMActions from '@/components/ui/VMActions'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
+import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes, formatRelativeTime } from '@/lib/format'
 import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, IPSource, IPStatus, NodeView, TierName, VMSource } from '@/types'
@@ -32,6 +34,9 @@ interface AdminData {
   // admin delete, so the table reflects the change immediately instead of
   // waiting for the next 15s poll.
   removeVM: (id: number) => void
+  // updateVMStatus stamps a row's status optimistically after a lifecycle
+  // op. Keyed by (node, vmid) since foreign/external rows lack a nimbus id.
+  updateVMStatus: (node: string, vmid: number, status: ClusterVMStatus) => void
 }
 
 // pollEachWith fires `fn` immediately, then every `intervalMs`, until the
@@ -112,7 +117,19 @@ function useAdminData(): AdminData {
     setVMs((prev) => prev.filter((v) => v.id !== id))
   }, [])
 
-  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM }
+  // updateVMStatus stamps a row's status optimistically after a lifecycle
+  // op. Keyed by (node, vmid) since foreign/external rows lack a nimbus id.
+  // The 15 s poll above corrects any drift.
+  const updateVMStatus = useCallback(
+    (node: string, vmid: number, status: ClusterVMStatus) => {
+      setVMs((prev) =>
+        prev.map((v) => (v.node === node && v.vmid === vmid ? { ...v, status } : v)),
+      )
+    },
+    [],
+  )
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus }
 }
 
 interface FilterState {
@@ -127,7 +144,7 @@ const headerCellClass =
   'text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap'
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -251,6 +268,7 @@ export default function Admin() {
               hasFilters={hasFilters}
               onClearFilters={clearFilters}
               onVMDeleted={removeVM}
+              onVMStatusChanged={updateVMStatus}
             />
           )}
 
@@ -260,7 +278,7 @@ export default function Admin() {
             </div>
             <h3 className="text-xl">IP pool</h3>
           </div>
-          <IPTable ips={ips} />
+          <IPTable ips={ips} clusterVMs={vms} nodes={nodes} />
         </>
       )}
     </div>
@@ -452,7 +470,9 @@ function NodeCard({
               {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
             </div>
             <div className="font-mono text-[11px] text-ink-3 mt-0.5">
-              {n.vm_count} VM{n.vm_count !== 1 ? 's' : ''}
+              <span title={`${n.vm_count} running of ${n.vm_count_total} total VM${n.vm_count_total === 1 ? '' : 's'}`}>
+                {n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+              </span>
               {active && <span className="text-ink ml-2">· filtered</span>}
             </div>
           </div>
@@ -496,57 +516,93 @@ function NodeCard({
   )
 }
 
-// osLabelFor returns the user-facing OS string for a VM row. Priority:
-//   1. Agent osinfo `version-id` ("22.04") prefixed by distro name from agent
-//      `id` — most accurate, available when qemu-guest-agent is running.
-//   2. Nimbus os_template ("ubuntu-22.04" → "Ubuntu 22.04").
-//   3. Raw Proxmox ostype hint (l26/win10) humanized to "Linux"/"Windows 10".
+// osLabelFor returns the SHORT user-facing OS label for a row. The OSIcon
+// adjacent to it already carries the distro identity, so the text drops to
+// just the version ("24.04", "12") to keep the column narrow. The verbose
+// pretty-name + kernel + arch live in the tooltip — see osTooltipFor.
+//
+//   1. Agent osinfo `version-id` ("22.04") — most accurate.
+//   2. Nimbus os_template ("ubuntu-22.04" → "22.04").
+//   3. Raw Proxmox ostype hint (l26/win10) humanized when nothing else fits.
 //   4. Empty when nothing is known — caller renders a dash.
 function osLabelFor(vm: ClusterVM): string {
+  if (vm.os_version_id) return vm.os_version_id
+  if (vm.os_template) {
+    // Strip the leading distro segment so "ubuntu-22.04" becomes "22.04".
+    const m = /^[a-z]+[-_](.+)$/i.exec(vm.os_template)
+    if (m) return m[1]
+    return humanizeOSTemplate(vm.os_template)
+  }
+  return ''
+}
+
+// osTooltipFor returns the friendly distro+version string shown on hover —
+// e.g. "Ubuntu 24.04". The cell text dropped the distro prefix to save
+// width, so the tooltip's job is to put it back. Falls back to os_pretty
+// (verbose) only when neither agent fields nor a recognisable os_template
+// are available, since that's the only signal we have left.
+function osTooltipFor(vm: ClusterVM): string {
   if (vm.os_id && vm.os_version_id) {
     const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
     return `${distro} ${vm.os_version_id}`
   }
-  if (vm.os_pretty) return vm.os_pretty
   if (vm.os_template) return humanizeOSTemplate(vm.os_template)
-  return ''
+  return vm.os_pretty || osLabelFor(vm)
+}
+
+// Tooltip copy explaining what each Source bucket means. Surfaced via the
+// SourceLabel's title attribute so admins can hover any chip to learn what
+// the cluster actually knows about that VM and what they can do with it.
+const sourceTooltip: Record<VMSource, string> = {
+  local:
+    'Created by this nimbus instance. Full lifecycle + delete available — the SSH key, IP allocation, and DB row all live here.',
+  foreign:
+    'Created by a different nimbus instance on this cluster (carries the nimbus tag but is not in our DB). You can power-cycle it via Proxmox; remove is disabled because the credentials and ownership belong to the other instance.',
+  external:
+    'Not provisioned by any nimbus instance — a regular Proxmox VM. You can power-cycle it like any other, but nimbus refuses to remove it as a separation-of-powers guard.',
 }
 
 function SourceLabel({ source }: { source: VMSource }) {
   // Three states: local (this Nimbus), foreign (another Nimbus on the same
   // cluster), external (not Nimbus-provisioned). Foreign and local share the
   // green tone since both are Nimbus-managed; foreign carries a sub-label so
-  // admins can tell whose instance owns the credentials.
+  // admins can tell whose instance owns the credentials. Hover any chip for
+  // a longer-form explanation pulled from sourceTooltip.
+  const tip = sourceTooltip[source]
   switch (source) {
     case 'local':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help" title={tip}>
           NIMBUS
         </span>
       )
     case 'foreign':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
-          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+          title={tip}
+        >
+          NIMBUS <ForeignWarningIcon />
         </span>
       )
     default:
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3 cursor-help" title={tip}>
           EXTERNAL
         </span>
       )
   }
 }
 
-// Small inline icons for the per-row action buttons. Kept inline (not a
-// shared component) because they're styled exactly for the 14×14 button
-// slot and don't carry over anywhere else in the app.
-function TerminalIcon() {
+// ForeignWarningIcon flags rows whose VM exists on the cluster with a nimbus
+// tag but is not in *our* DB — i.e. provisioned by another nimbus instance.
+// Stamped next to the NIMBUS chip so admins notice at a glance that this
+// row's credentials and ownership belong to someone else.
+function ForeignWarningIcon() {
   return (
     <svg
-      width="14"
-      height="14"
+      width="11"
+      height="11"
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
@@ -554,54 +610,15 @@ function TerminalIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
+      className="text-warn"
     >
-      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-      <path d="M4 6l2.5 2L4 10" />
-      <path d="M8.5 10.5h3.5" />
+      <path d="M8 1.5 L15 14 L1 14 Z" />
+      <line x1="8" y1="6" x2="8" y2="10" />
+      <circle cx="8" cy="12" r="0.5" fill="currentColor" />
     </svg>
   )
 }
 
-function NetworkIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="8" cy="8" r="6" />
-      <ellipse cx="8" cy="8" rx="3" ry="6" />
-      <path d="M2 8h12" />
-    </svg>
-  )
-}
-
-function TrashIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M3 4h10" />
-      <path d="M6 4V2.75A.75.75 0 0 1 6.75 2h2.5a.75.75 0 0 1 .75.75V4" />
-      <path d="M4.5 4l.75 9a1 1 0 0 0 1 .9h3.5a1 1 0 0 0 1-.9L11.5 4" />
-      <path d="M6.5 7v4M9.5 7v4" />
-    </svg>
-  )
-}
 
 function VMTable({
   vms,
@@ -613,6 +630,7 @@ function VMTable({
   hasFilters,
   onClearFilters,
   onVMDeleted,
+  onVMStatusChanged,
 }: {
   vms: ClusterVM[]
   allVMs: ClusterVM[]
@@ -623,6 +641,7 @@ function VMTable({
   hasFilters: boolean
   onClearFilters: () => void
   onVMDeleted: (id: number) => void
+  onVMStatusChanged: (node: string, vmid: number, status: ClusterVMStatus) => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
@@ -736,7 +755,7 @@ function VMTable({
                     </span>
                   </button>
                 </th>
-                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'SSH', 'Actions'].map((col) => (
+                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'Actions'].map((col) => (
                   <th key={col} className={headerCellClass}>{col}</th>
                 ))}
               </tr>
@@ -778,7 +797,10 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {osLabel ? (
-                        <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className="inline-flex items-center gap-1.5 cursor-help"
+                          title={osTooltipFor(vm)}
+                        >
                           <OSIcon family={osFamily} className="text-ink-2" />
                           <span className="font-mono text-xs text-ink-2">{osLabel}</span>
                         </span>
@@ -791,60 +813,62 @@ function VMTable({
                       <SourceLabel source={vm.source} />
                     </td>
                     <td className="px-4 py-3">
-                      {vm.source === 'local' && vm.username && vm.ip ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSshTarget({
-                              hostname: vm.hostname || vm.name,
-                              ip: vm.ip!,
-                              username: vm.username!,
-                              vmid: vm.vmid,
-                              node: vm.node,
-                              dbId: vm.id,
-                              keyName: vm.key_name,
-                              tunnelUrl: vm.tunnel_url,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                          title={`SSH details for ${vm.hostname || vm.name}`}
-                          aria-label={`SSH details for ${vm.hostname || vm.name}`}
-                        >
-                          <TerminalIcon />
-                          <span>SSH</span>
-                        </button>
-                      ) : dash}
-                    </td>
-                    <td className="px-4 py-3">
-                      {vm.source === 'local' && vm.id !== undefined ? (
-                        <div className="flex gap-1.5">
-                          {vm.tunnel_url && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setTunnelsTarget({
-                                  vmId: vm.id!,
-                                  hostname: vm.hostname || vm.name,
-                                })
-                              }
-                              className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                              title="Manage Gopher tunnels for this VM"
-                              aria-label={`Manage tunnels for ${vm.hostname || vm.name}`}
-                            >
-                              <NetworkIcon />
-                            </button>
-                          )}
+                      <div className="flex gap-1.5 items-center">
+                        {vm.source === 'local' && vm.username && vm.ip && (
                           <button
                             type="button"
-                            onClick={() => setEditTarget(vm)}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-bad hover:border-bad hover:bg-[rgba(184,58,58,0.06)] transition-colors"
-                            title={`Delete ${vm.hostname || vm.name}`}
-                            aria-label={`Delete ${vm.hostname || vm.name}`}
+                            onClick={() =>
+                              setSshTarget({
+                                hostname: vm.hostname || vm.name,
+                                ip: vm.ip!,
+                                username: vm.username!,
+                                vmid: vm.vmid,
+                                node: vm.node,
+                                dbId: vm.id,
+                                keyName: vm.key_name,
+                                tunnelUrl: vm.tunnel_url,
+                              })
+                            }
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                            title={`SSH details for ${vm.hostname || vm.name}`}
+                            aria-label={`SSH details for ${vm.hostname || vm.name}`}
                           >
-                            <TrashIcon />
+                            <TerminalIcon />
                           </button>
-                        </div>
-                      ) : dash}
+                        )}
+                        {vm.source === 'local' && vm.id !== undefined && vm.tunnel_url && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setTunnelsTarget({
+                                vmId: vm.id!,
+                                hostname: vm.hostname || vm.name,
+                              })
+                            }
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                            title="Manage Gopher tunnels for this VM"
+                            aria-label={`Manage tunnels for ${vm.hostname || vm.name}`}
+                          >
+                            <NetworkIcon />
+                          </button>
+                        )}
+                        <VMActions
+                          hostname={vm.hostname || vm.name}
+                          status={vm.status}
+                          canRemove={vm.source === 'local' && vm.id !== undefined}
+                          onLifecycle={async (op) => {
+                            await adminVMLifecycle(vm.node, vm.vmid, op)
+                            const next: ClusterVMStatus =
+                              op === 'start' || op === 'reboot' ? 'running' : 'stopped'
+                            onVMStatusChanged(vm.node, vm.vmid, next)
+                          }}
+                          onRemove={
+                            vm.source === 'local' && vm.id !== undefined
+                              ? () => setEditTarget(vm)
+                              : undefined
+                          }
+                        />
+                      </div>
                     </td>
                   </tr>
                 )
@@ -914,7 +938,7 @@ interface IPFilterState {
 
 const EMPTY_IP_FILTERS: IPFilterState = { status: null, source: null }
 
-function IPTable({ ips }: { ips: IPAllocation[] }) {
+function IPTable({ ips, clusterVMs, nodes }: { ips: IPAllocation[]; clusterVMs: ClusterVM[]; nodes: NodeView[] }) {
   // Default-hide free rows. A typical /24 pool has ~240 entries; the
   // interesting ones are reserved + allocated. Admins flip this on when
   // they want to see what's still available.
@@ -922,6 +946,29 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   const [filters, setFilters] = useState<IPFilterState>(EMPTY_IP_FILTERS)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
+
+  // Build a vmid → cluster-source lookup so the IPSourceLabel can split
+  // the broad "adopted" bucket (anything Proxmox claims that nimbus didn't
+  // create) into "another nimbus instance" (carries the nimbus tag → shown
+  // as NIMBUS + warning) vs. "VM not provisioned by any nimbus" (shown as
+  // EXTERNAL VM). Without this cross-reference both look the same.
+  const vmSourceByVMID = useMemo(() => {
+    const m = new Map<number, VMSource>()
+    for (const v of clusterVMs) m.set(v.vmid, v.source)
+    return m
+  }, [clusterVMs])
+
+  // ip → node-name lookup so a hypervisor's own LAN address renders as
+  // "PROXMOX NODE foo" instead of the generic EXTERNAL chip netscan would
+  // otherwise stamp on it. Nodes without an `ip` field (single-node setups,
+  // pre-/cluster/status fetch) silently fall through.
+  const nodeByIP = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const n of nodes) {
+      if (n.ip) m.set(n.ip, n.name)
+    }
+    return m
+  }, [nodes])
 
   const sorted = useMemo(() => {
     return [...ips].sort((a, b) => ipToOctets(a.ip) - ipToOctets(b.ip))
@@ -1050,7 +1097,12 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
             </thead>
             <tbody>
               {paged.map((row) => (
-                <IPRow key={row.ip} row={row} />
+                <IPRow
+                  key={row.ip}
+                  row={row}
+                  clusterSource={row.vmid != null ? vmSourceByVMID.get(row.vmid) : undefined}
+                  nodeName={nodeByIP.get(row.ip)}
+                />
               ))}
             </tbody>
           </table>
@@ -1067,7 +1119,15 @@ function IPTable({ ips }: { ips: IPAllocation[] }) {
   )
 }
 
-function IPRow({ row }: { row: IPAllocation }) {
+function IPRow({
+  row,
+  clusterSource,
+  nodeName,
+}: {
+  row: IPAllocation
+  clusterSource: VMSource | undefined
+  nodeName: string | undefined
+}) {
   const dash = <span className="text-ink-3">—</span>
   const lastSeen = row.last_seen_at || row.allocated_at || row.reserved_at || null
   return (
@@ -1077,7 +1137,9 @@ function IPRow({ row }: { row: IPAllocation }) {
         <IPStatusBadge status={row.status} />
       </td>
       <td className="px-4 py-3 whitespace-nowrap">
-        {row.status === 'free' ? dash : <IPSourceLabel source={row.source} />}
+        {row.status === 'free' ? dash : (
+          <IPSourceLabel source={row.source} clusterSource={clusterSource} nodeName={nodeName} />
+        )}
       </td>
       <td className="px-4 py-3 font-mono text-xs text-ink-2 whitespace-nowrap">
         {row.vmid ?? dash}
@@ -1114,23 +1176,89 @@ function IPStatusBadge({ status }: { status: IPStatus }) {
   )
 }
 
-function IPSourceLabel({ source }: { source: IPSource | undefined }) {
+// IP source tooltip copy. Four cases — three "external" flavours we used to
+// flatten under a single label:
+//   * adopted+foreign    → another nimbus instance manages the VM. The
+//                          hypervisor admin we'd reach is *external to us*,
+//                          so we call this "external hypervisor".
+//   * adopted+!foreign   → a regular Proxmox VM that no nimbus instance
+//                          tagged. "External VM" — same cluster, just not
+//                          ours and not a peer's.
+//   * external           → netscan picked up an IP that doesn't belong to
+//                          any Proxmox VM at all (router, NAS, IoT). "True
+//                          external" — Proxmox doesn't even know about it.
+const ipSourceTooltip = {
+  local: 'Allocated by this nimbus instance for a VM we provisioned.',
+  externalHypervisor:
+    'Claimed by a VM tagged nimbus on the cluster but not in our DB — managed by a different nimbus instance ("external hypervisor"). Reachable through Proxmox; ownership and credentials live with the other instance.',
+  externalVM:
+    'Claimed by a Proxmox VM that no nimbus instance created. Real VM, just not part of any nimbus deployment — not in our DB and not in a peer\'s either.',
+  externalLAN:
+    'Detected on the LAN by netscan but not bound to any Proxmox VM. A non-VM host sharing the pool subnet (gateway, NAS, printer, statically-assigned workstation, …) — included in the pool so we never hand its address to a fresh provision.',
+}
+
+function IPSourceLabel({
+  source,
+  clusterSource,
+  nodeName,
+}: {
+  source: IPSource | undefined
+  clusterSource: VMSource | undefined
+  nodeName: string | undefined
+}) {
+  // Hypervisor IPs win over every other classification: a Proxmox node's own
+  // LAN address shows up in netscan as "external" but it's actually one of
+  // our hosts. Render the dedicated chip whenever the row's IP matches a
+  // node from /cluster/status — regardless of whether the source field
+  // came back as "external" or "adopted".
+  if (nodeName) {
+    return (
+      <span
+        className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+        title={`Proxmox hypervisor "${nodeName}". This is one of the cluster nodes' own LAN addresses; netscan picked it up because it lives in the pool subnet.`}
+      >
+        PROXMOX NODE <span className="text-ink-3">· {nodeName}</span>
+      </span>
+    )
+  }
   switch (source) {
     case 'local':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help"
+          title={ipSourceTooltip.local}
+        >
           NIMBUS
         </span>
       )
     case 'adopted':
+      // The reconciler stamps "adopted" on every Proxmox-claimed IP that
+      // wasn't reserved through us. Splitting that bucket needs the
+      // cluster-VM cross-reference to tell whose hypervisor it is.
+      if (clusterSource === 'foreign') {
+        return (
+          <span
+            className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help inline-flex items-center gap-1"
+            title={ipSourceTooltip.externalHypervisor}
+          >
+            NIMBUS <ForeignWarningIcon />
+          </span>
+        )
+      }
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
-          NIMBUS <span className="text-ink-3">· FOREIGN</span>
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-ink-2 cursor-help"
+          title={ipSourceTooltip.externalVM}
+        >
+          EXTERNAL VM
         </span>
       )
     case 'external':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-2">
+        <span
+          className="font-mono text-[11px] uppercase tracking-wider text-ink-3 cursor-help"
+          title={ipSourceTooltip.externalLAN}
+        >
           EXTERNAL
         </span>
       )

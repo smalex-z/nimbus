@@ -200,6 +200,11 @@ type VM struct {
 	TunnelURL   string `gorm:"column:tunnel_url"                       json:"tunnel_url,omitempty"`
 	TunnelError string `gorm:"column:tunnel_error"                     json:"tunnel_error,omitempty"`
 	ErrorMsg    string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
+	// MissedCycles counts consecutive VM-reconciler runs in which Proxmox
+	// reported no VM at this row's (node, vmid). Reset to 0 whenever the VM
+	// is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
+	// Default 0 — pre-existing rows behave correctly without backfill.
+	MissedCycles int `gorm:"column:missed_cycles;default:0"          json:"missed_cycles,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.
@@ -278,3 +283,15 @@ type S3Storage struct {
 
 // TableName pins the table name; without this GORM would pluralize to "s3_storages".
 func (S3Storage) TableName() string { return "s3_storage" }
+
+// NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
+// single row (ID=1) is used. The columns mirror the env vars they replace
+// (IP_POOL_START / IP_POOL_END / GATEWAY_IP) — env vars now act as first-boot
+// defaults only; once the row is populated, the DB is the source of truth and
+// admins manage these from Settings → Network.
+type NetworkSettings struct {
+	ID          uint   `gorm:"primaryKey"`
+	IPPoolStart string `gorm:"default:''"`
+	IPPoolEnd   string `gorm:"default:''"`
+	GatewayIP   string `gorm:"default:''"`
+}

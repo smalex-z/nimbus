@@ -67,7 +67,10 @@ func NewRouter(d Deps) http.Handler {
 		WithTunnelAppliers(d.Provision).
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
-		WithNimbusAppURL(d.Config.AppURL)
+		WithNimbusAppURL(d.Config.AppURL).
+		WithNetworkAppliers(d.Provision).
+		WithNetworkOps(d.Provision).
+		WithPoolReseeder(d.Pool)
 	if d.SelfBootstrap != nil {
 		settingsBuilder = settingsBuilder.WithSelfBootstrap(d.SelfBootstrap)
 	}
@@ -171,12 +174,23 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
+				// Power operations on any cluster VM (local / foreign /
+				// external). Routed by (node, vmid) so foreign + external
+				// rows that have no nimbus DB id are still reachable.
+				// Reboot waits on a Proxmox task — give it some headroom.
+				r.With(middleware.Timeout(2*time.Minute)).
+					Post("/cluster/vms/{node}/{vmid}/{op}", cluster.VMLifecycle)
 				r.Get("/cluster/stats", cluster.Stats)
 
 				// Reconcile can run a few seconds on a busy cluster
 				// (per-node walks) — give it a longer timeout.
 				r.With(middleware.Timeout(60*time.Second)).
 					Post("/ips/reconcile", ips.Reconcile)
+				// VM-table reconcile: tracks migrations and soft-deletes
+				// orphan rows that have been missing from Proxmox for N
+				// consecutive runs. Refuses on empty cluster snapshot.
+				r.With(middleware.Timeout(60*time.Second)).
+					Post("/vms/reconcile", vms.Reconcile)
 
 				// Bootstrap templates can take 10-20 minutes when
 				// downloading all 4 OSes across every online node —
@@ -196,6 +210,14 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/gopher", settings.SaveGopher)
 				r.Get("/settings/gopher/self-bootstrap", settings.SelfBootstrapStatus)
 				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
+				r.Get("/settings/network", settings.GetNetwork)
+				r.Put("/settings/network", settings.SaveNetwork)
+				// Disruptive batch ops — generous timeout because each VM
+				// reboot waits on a Proxmox task.
+				r.With(middleware.Timeout(15*time.Minute)).
+					Post("/settings/network/renumber-vms", settings.RenumberVMs)
+				r.With(middleware.Timeout(15*time.Minute)).
+					Post("/settings/network/force-gateway-update", settings.ForceGatewayUpdate)
 				r.Get("/tunnels", tunnels.List)
 
 				// S3 storage (singleton MinIO VM) — admin-only.
@@ -239,6 +261,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 					r.Delete("/{id}", vms.Delete)
+					// Power operations on the caller's own VM. Reboot
+					// waits on a Proxmox task — give it some room.
+					r.With(middleware.Timeout(2*time.Minute)).
+						Post("/{id}/{op:start|shutdown|stop|reboot}", vms.Lifecycle)
 					// Per-port tunnels on top of the VM's Gopher machine —
 					// the post-provision Networks surface.
 					r.Get("/{id}/tunnels", vms.ListTunnels)
