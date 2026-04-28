@@ -3,7 +3,9 @@ package provision_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
@@ -204,5 +206,48 @@ func TestListWithLiveStatus_ScopedToOwner(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].VMID != 200 {
 		t.Fatalf("got = %+v, want only owner=42's row", got)
+	}
+}
+
+// TestLifecycleOp_IdempotentWhenAlreadyInTargetState exercises the user-clicks-
+// Start-on-already-running flow that surfaced as a 500 in production. Proxmox
+// returns a UPID and then the qmstart task fails with "VM N already running"
+// from qmeventd. The dispatcher should swallow that specific failure and
+// still write the local status, so the UI sees the click as a no-op success
+// instead of a confusing internal-server-error toast.
+func TestLifecycleOp_IdempotentWhenAlreadyInTargetState(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		op     provision.VMLifecycleOp
+		taskID string // matches what RebootVM/StartVM/etc. return
+		errMsg string // simulates a WaitForTask failure
+	}{
+		{provision.VMOpStart, "task:start", "task UPID:n:00:00:69:qmstart:200: failed: VM 200 already running"},
+		{provision.VMOpShutdown, "task:shutdown", "task UPID:n:00:00:69:qmshutdown:200: failed: VM 200 not running"},
+		{provision.VMOpStop, "task:stop", "task UPID:n:00:00:69:qmstop:200: failed: VM 200 already stopped"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(string(tc.op), func(t *testing.T) {
+			t.Parallel()
+			fake := happyFakePVE(t)
+			// Make the relevant op return its task ID, then make WaitForTask
+			// return the simulated qmeventd failure.
+			fake.startVM = func(_ context.Context, _ string, _ int) (string, error) { return tc.taskID, nil }
+			fake.stopVM = func(_ context.Context, _ string, _ int) (string, error) { return tc.taskID, nil }
+			fake.shutdownVM = func(_ context.Context, _ string, _ int) (string, error) { return tc.taskID, nil }
+			fake.waitForTask = func(_ context.Context, _, taskID string, _ time.Duration) error {
+				if taskID == tc.taskID {
+					return fmt.Errorf("%s", tc.errMsg)
+				}
+				return nil
+			}
+			svc, _, database := newTestService(t, fake)
+			id := seedOwnedVM(t, database, 42, "vm-a", 200, "alpha")
+
+			if err := svc.LifecycleOp(context.Background(), id, 42, tc.op); err != nil {
+				t.Fatalf("LifecycleOp(%s) on already-in-target-state VM should be a no-op: %v", tc.op, err)
+			}
+		})
 	}
 }

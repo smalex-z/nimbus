@@ -883,12 +883,15 @@ func (s *Service) AdminLifecycleByVMID(ctx context.Context, node string, vmid in
 	default:
 		return &internalerrors.ValidationError{Field: "op", Message: fmt.Sprintf("unknown lifecycle op %q", op)}
 	}
-	if err != nil {
+	if err != nil && !isAlreadyInTargetState(op, err) {
 		return fmt.Errorf("%s vm %d on %s: %w", op, vmid, node, err)
 	}
-	if upid != "" {
-		if err := s.px.WaitForTask(ctx, node, upid, s.cfg.PollInterval); err != nil {
-			return fmt.Errorf("%s task vm %d: %w", op, vmid, err)
+	if err == nil && upid != "" {
+		if waitErr := s.px.WaitForTask(ctx, node, upid, s.cfg.PollInterval); waitErr != nil {
+			if !isAlreadyInTargetState(op, waitErr) {
+				return fmt.Errorf("%s task vm %d: %w", op, vmid, waitErr)
+			}
+			log.Printf("admin lifecycle %s vm=%d node=%s: task surfaced a benign already-in-state error: %v", op, vmid, node, waitErr)
 		}
 	}
 	// Best-effort optimistic status sync for local rows.
@@ -902,6 +905,15 @@ func (s *Service) AdminLifecycleByVMID(ctx context.Context, node string, vmid in
 
 // runLifecycleOp dispatches op to the right Proxmox endpoint, waits for the
 // task, then updates vms.status. Returns ValidationError for an unknown op.
+//
+// Idempotency: a Start on an already-running VM (or a Stop/Shutdown on an
+// already-stopped one) returns no-error and still updates the local status.
+// Proxmox surfaces these as either an HTTP 500 from the API call (handled by
+// isAlreadyInTargetState's HTTPError branch) or as a task-failed string from
+// WaitForTask (handled by the substring branch), depending on whether
+// pveproxy or qm/qmeventd notices first. The user's intent — "this VM should
+// be in state X" — is satisfied either way; surfacing a 500 from Start when
+// the VM is already up is just confusing.
 func (s *Service) runLifecycleOp(ctx context.Context, vm *db.VM, op VMLifecycleOp) error {
 	var (
 		upid       string
@@ -924,12 +936,17 @@ func (s *Service) runLifecycleOp(ctx context.Context, vm *db.VM, op VMLifecycleO
 	default:
 		return &internalerrors.ValidationError{Field: "op", Message: fmt.Sprintf("unknown lifecycle op %q", op)}
 	}
-	if err != nil {
+	if err != nil && !isAlreadyInTargetState(op, err) {
 		return fmt.Errorf("%s vm %d on %s: %w", op, vm.VMID, vm.Node, err)
 	}
-	if upid != "" {
-		if err := s.px.WaitForTask(ctx, vm.Node, upid, s.cfg.PollInterval); err != nil {
-			return fmt.Errorf("%s task vm %d: %w", op, vm.VMID, err)
+	if err == nil && upid != "" {
+		if waitErr := s.px.WaitForTask(ctx, vm.Node, upid, s.cfg.PollInterval); waitErr != nil {
+			if !isAlreadyInTargetState(op, waitErr) {
+				return fmt.Errorf("%s task vm %d: %w", op, vm.VMID, waitErr)
+			}
+			// Task failed but only because the VM was already in the
+			// target state — fall through and let the status write run.
+			log.Printf("lifecycle %s vm=%d: task surfaced a benign already-in-state error: %v", op, vm.ID, waitErr)
 		}
 	}
 	if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("id = ?", vm.ID).
@@ -937,6 +954,39 @@ func (s *Service) runLifecycleOp(ctx context.Context, vm *db.VM, op VMLifecycleO
 		log.Printf("lifecycle %s vm=%d: status update failed (proxmox already applied): %v", op, vm.ID, err)
 	}
 	return nil
+}
+
+// isAlreadyInTargetState reports whether a Proxmox-side error means "the VM
+// is already in the state op was trying to put it in" — the kind of failure
+// a user-facing Start/Shutdown click should treat as success rather than a
+// 500.
+//
+// Two surfaces produce this kind of error and they look different:
+//   - The status/start | status/stop endpoint can return HTTP 500 with a body
+//     like "VM N is not running" / "VM N already running".
+//   - The async task can succeed-then-fail in qmeventd with the same wording
+//     in ExitStatus, surfacing as an opaque "task ... failed: VM N ..."
+//     wrapped error from WaitForTask.
+//
+// We accept both. Reboot stays strict — "VM not running" on a reboot click is
+// a real misuse the user should see.
+func isAlreadyInTargetState(op VMLifecycleOp, err error) bool {
+	if err == nil {
+		return false
+	}
+	body := err.Error()
+	if httpErr := (*proxmox.HTTPError)(nil); errors.As(err, &httpErr) {
+		body = httpErr.Body
+	}
+	body = strings.ToLower(body)
+	switch op {
+	case VMOpStart:
+		return strings.Contains(body, "already running")
+	case VMOpShutdown, VMOpStop:
+		return strings.Contains(body, "not running") ||
+			strings.Contains(body, "already stopped")
+	}
+	return false
 }
 
 // AdminDelete destroys a VM regardless of who owns it. Same semantics as
