@@ -200,6 +200,11 @@ type VM struct {
 	TunnelURL   string `gorm:"column:tunnel_url"                       json:"tunnel_url,omitempty"`
 	TunnelError string `gorm:"column:tunnel_error"                     json:"tunnel_error,omitempty"`
 	ErrorMsg    string `gorm:"column:error_msg"                        json:"error_msg,omitempty"`
+	// MissedCycles counts consecutive VM-reconciler runs in which Proxmox
+	// reported no VM at this row's (node, vmid). Reset to 0 whenever the VM
+	// is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
+	// Default 0 — pre-existing rows behave correctly without backfill.
+	MissedCycles int `gorm:"column:missed_cycles;default:0"          json:"missed_cycles,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.

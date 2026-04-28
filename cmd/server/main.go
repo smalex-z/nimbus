@@ -389,6 +389,11 @@ func main() {
 	}
 	tagColorCancel()
 
+	// VM-table reconciler: keeps vms.node in sync with Proxmox migrations and
+	// soft-deletes orphan rows whose VMID hasn't been observed for N
+	// consecutive runs. Same cadence as the IP reconciler.
+	go runVMReconcileLoop(bgCtx, provSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 	})
@@ -641,6 +646,37 @@ func runNetscanLoop(ctx context.Context, r *netscan.Reconciler, interval time.Du
 			return
 		case <-t.C:
 			runOnce()
+		}
+	}
+}
+
+// runVMReconcileLoop runs provSvc.ReconcileVMs every interval until ctx is
+// cancelled. Mirrors runReconcileLoop's shape — errors are logged, never
+// fatal. Skips quietly when the cluster snapshot is empty (transient API
+// issue) so a Proxmox blip doesn't soft-delete every row in one cycle.
+func runVMReconcileLoop(ctx context.Context, svc *provision.Service, interval time.Duration) {
+	if interval <= 0 {
+		log.Printf("vm-reconcile loop disabled (interval=%v)", interval)
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, interval)
+			rep, err := svc.ReconcileVMs(runCtx)
+			cancel()
+			if err != nil {
+				log.Printf("background vm-reconcile error: %v", err)
+				continue
+			}
+			if len(rep.Migrated) > 0 || len(rep.Deleted) > 0 {
+				log.Printf("background vm-reconcile: migrated=%d missed=%d deleted=%d",
+					len(rep.Migrated), len(rep.Missed), len(rep.Deleted))
+			}
 		}
 	}
 }

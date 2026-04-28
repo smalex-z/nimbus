@@ -180,6 +180,11 @@ func NewRouter(d Deps) http.Handler {
 				// (per-node walks) — give it a longer timeout.
 				r.With(middleware.Timeout(60*time.Second)).
 					Post("/ips/reconcile", ips.Reconcile)
+				// VM-table reconcile: tracks migrations and soft-deletes
+				// orphan rows that have been missing from Proxmox for N
+				// consecutive runs. Refuses on empty cluster snapshot.
+				r.With(middleware.Timeout(60*time.Second)).
+					Post("/vms/reconcile", vms.Reconcile)
 
 				// Bootstrap templates can take 10-20 minutes when
 				// downloading all 4 OSes across every online node —
