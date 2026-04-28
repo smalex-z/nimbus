@@ -132,11 +132,12 @@ func (h *GPU) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := h.svc.EnqueueJob(r.Context(), gpu.EnqueueRequest{
-		OwnerID: user.ID,
-		VMID:    req.VMID,
-		Image:   req.Image,
-		Command: req.Command,
-		Env:     req.Env,
+		OwnerID:          user.ID,
+		VMID:             req.VMID,
+		Image:            req.Image,
+		Command:          req.Command,
+		Env:              req.Env,
+		RequesterIsAdmin: user.IsAdmin,
 	})
 	if err != nil {
 		response.FromError(w, err)

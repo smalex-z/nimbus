@@ -21,6 +21,11 @@ type Request struct {
 	GenerateKey bool
 	OwnerID     *uint // nil in Phase 1 (no auth)
 
+	// RequesterIsAdmin bypasses member quotas (MemberMaxVMs) and the tier
+	// allowlist (MemberAllowedTiers). Default false — the safe answer when
+	// a caller forgets to set it. Handlers populate from user.IsAdmin.
+	RequesterIsAdmin bool
+
 	// PublicTunnel asks Nimbus to register a Gopher tunnel for the new VM and
 	// expose it at Subdomain.<gopher-zone>. Silently ignored when GOPHER_API_URL
 	// is unset. TunnelPort is the in-VM target port Gopher should forward to;

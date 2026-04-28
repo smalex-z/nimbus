@@ -101,14 +101,25 @@ func (s *Service) LogPath(jobID uint) string {
 	return filepath.Join(s.logDir, fmt.Sprintf("%d.log", jobID))
 }
 
+// MemberMaxActiveJobs caps how many queued+running GPU jobs a single
+// non-admin user can hold. Beyond this, EnqueueJob returns ConflictError.
+// Admins bypass via EnqueueRequest.RequesterIsAdmin. Var (not const) so
+// tests can override.
+var MemberMaxActiveJobs = 5
+
 // EnqueueRequest is the input to EnqueueJob. Env is encoded to JSON for
 // storage (the worker decodes back to map[string]string at run time).
+//
+// RequesterIsAdmin bypasses the member active-jobs cap. Default false —
+// the safe answer when a caller forgets to set it. Handlers populate
+// from user.IsAdmin.
 type EnqueueRequest struct {
-	OwnerID uint
-	VMID    *uint
-	Image   string
-	Command string
-	Env     map[string]string
+	OwnerID          uint
+	VMID             *uint
+	Image            string
+	Command          string
+	Env              map[string]string
+	RequesterIsAdmin bool
 }
 
 // EnqueueJob inserts a new row in the queued state. Image is required;
@@ -117,6 +128,22 @@ func (s *Service) EnqueueJob(ctx context.Context, req EnqueueRequest) (*db.GPUJo
 	image := strings.TrimSpace(req.Image)
 	if image == "" {
 		return nil, &internalerrors.ValidationError{Field: "image", Message: "image is required"}
+	}
+	// Member quota gate. Skipped for admins. Counts queued + running rows
+	// owned by this caller — terminal states (succeeded/failed/cancelled)
+	// don't count, so the cap is on concurrent active load, not lifetime.
+	if !req.RequesterIsAdmin && req.OwnerID != 0 {
+		var active int64
+		if err := s.db.WithContext(ctx).Model(&db.GPUJob{}).
+			Where("owner_id = ? AND status IN ?", req.OwnerID, []string{StatusQueued, StatusRunning}).
+			Count(&active).Error; err != nil {
+			return nil, fmt.Errorf("count active gpu jobs: %w", err)
+		}
+		if int(active) >= MemberMaxActiveJobs {
+			return nil, &internalerrors.ConflictError{
+				Message: fmt.Sprintf("GPU job quota reached: members may have at most %d queued or running jobs at once", MemberMaxActiveJobs),
+			}
+		}
 	}
 	envJSON := ""
 	if len(req.Env) > 0 {

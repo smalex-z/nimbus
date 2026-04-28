@@ -274,6 +274,27 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		return nil, &internalerrors.ValidationError{Field: "os_template", Message: fmt.Sprintf("unknown os_template %q", req.OSTemplate)}
 	}
 
+	// Member quota gate. Skipped for admins and for legacy/test paths that
+	// don't supply an OwnerID. We check here — before IP reserve and clone —
+	// so a flooding member can't burn cluster resources spinning up rejects.
+	if !req.RequesterIsAdmin && req.OwnerID != nil {
+		if !IsTierMemberAllowed(req.Tier) {
+			return nil, &internalerrors.ValidationError{
+				Field:   "tier",
+				Message: fmt.Sprintf("tier %q is admin-only", req.Tier),
+			}
+		}
+		var owned int64
+		if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("owner_id = ?", *req.OwnerID).Count(&owned).Error; err != nil {
+			return nil, fmt.Errorf("count owned vms: %w", err)
+		}
+		if int(owned) >= MemberMaxVMs {
+			return nil, &internalerrors.ConflictError{
+				Message: fmt.Sprintf("VM quota reached: members may own at most %d VMs at once", MemberMaxVMs),
+			}
+		}
+	}
+
 	// Resolve SSH key. The service may either reuse an existing vault entry
 	// or create a new one (generate / BYO / default-fallback).
 	sshKey, sshPrivateKey, err := s.resolveSSHKey(ctx, req)
