@@ -74,7 +74,15 @@ var errEmptyClusterSnapshot = errors.New("cluster snapshot is empty — refusing
 // Refuses to act if the snapshot returned zero VMs — that's almost always a
 // Proxmox API hiccup and acting on it would wipe every row at once.
 func (s *Service) ReconcileVMs(ctx context.Context) (VMSyncReport, error) {
-	rep := VMSyncReport{SnapshotAt: time.Now().UTC()}
+	// Initialize the slices (rather than leaving them nil) so the JSON
+	// encoder emits "[]" instead of "null" for empty results — the SPA
+	// reads .length on these without a guard.
+	rep := VMSyncReport{
+		Migrated:   []VMMigration{},
+		Missed:     []VMMiss{},
+		Deleted:    []VMDeleted{},
+		SnapshotAt: time.Now().UTC(),
+	}
 
 	cluster, err := s.px.GetClusterVMs(ctx)
 	if err != nil {
