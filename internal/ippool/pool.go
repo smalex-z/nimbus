@@ -86,6 +86,81 @@ func (p *Pool) Seed(ctx context.Context, start, end string) error {
 		Create(&addresses).Error
 }
 
+// Reseed converges the pool to [start, end]: inserts addresses inside the new
+// range that aren't already there, and deletes rows OUTSIDE the new range
+// that are still free. Allocated/reserved/external rows outside the new range
+// are left in place — they'd need explicit operator action (renumber the VM,
+// release the row) before they can be cleaned up.
+//
+// Returns the count of rows added, removed-free, and left-stranded
+// (allocated/reserved outside the new range) for caller logging.
+func (p *Pool) Reseed(ctx context.Context, start, end string) (added, removedFree, stranded int, err error) {
+	startIP := net.ParseIP(start).To4()
+	endIP := net.ParseIP(end).To4()
+	if startIP == nil || endIP == nil {
+		return 0, 0, 0, fmt.Errorf("%w: %q .. %q", ErrInvalidRange, start, end)
+	}
+	if compareIP(endIP, startIP) < 0 {
+		return 0, 0, 0, fmt.Errorf("%w: end %s precedes start %s", ErrInvalidRange, end, start)
+	}
+
+	// Insert any addresses inside the new range that aren't already rows.
+	addresses := make([]IPAllocation, 0, 256)
+	cur := append(net.IP(nil), startIP...)
+	for {
+		addresses = append(addresses, IPAllocation{IP: cur.String(), Status: StatusFree})
+		if cur.Equal(endIP) {
+			break
+		}
+		incrementIP(cur)
+		if len(addresses) > 65536 {
+			return 0, 0, 0, fmt.Errorf("%w: range exceeds 65536 addresses", ErrInvalidRange)
+		}
+	}
+	insertRes := p.db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&addresses)
+	if insertRes.Error != nil {
+		return 0, 0, 0, fmt.Errorf("seed insert: %w", insertRes.Error)
+	}
+	added = int(insertRes.RowsAffected)
+
+	// Delete free rows outside the new range. Allocated/reserved/external
+	// rows outside the range are *kept* — operator-visible debt.
+	delRes := p.db.WithContext(ctx).
+		Where("status = ? AND (ip < ? OR ip > ?)", StatusFree, start, end).
+		Delete(&IPAllocation{})
+	if delRes.Error != nil {
+		return added, 0, 0, fmt.Errorf("prune free rows: %w", delRes.Error)
+	}
+	removedFree = int(delRes.RowsAffected)
+
+	// Count what's left outside the new range so the caller can report it.
+	var strandedCount int64
+	if err := p.db.WithContext(ctx).
+		Model(&IPAllocation{}).
+		Where("ip < ? OR ip > ?", start, end).
+		Count(&strandedCount).Error; err != nil {
+		return added, removedFree, 0, fmt.Errorf("count stranded: %w", err)
+	}
+	stranded = int(strandedCount)
+	return added, removedFree, stranded, nil
+}
+
+// CountFree returns how many rows are currently status=free. Used by the
+// renumber flow to validate that the new pool has enough capacity for every
+// VM we're about to re-IP.
+func (p *Pool) CountFree(ctx context.Context) (int, error) {
+	var n int64
+	if err := p.db.WithContext(ctx).
+		Model(&IPAllocation{}).
+		Where("status = ?", StatusFree).
+		Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("count free: %w", err)
+	}
+	return int(n), nil
+}
+
 // Reserve atomically claims the first free IP and tags it with hostname.
 // Returns ErrPoolExhausted when none is available.
 //

@@ -77,6 +77,7 @@ type ProxmoxClient interface {
 	ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error
 	StartVM(ctx context.Context, node string, vmid int) (string, error)
 	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	RebootVM(ctx context.Context, node string, vmid int) (string, error)
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 }
@@ -144,6 +145,12 @@ type Service struct {
 	gpuMu  sync.Mutex
 	gpuCfg GPUBootstrapConfig
 
+	// gatewayMu guards the live-reloadable gateway IP. Replaces the cfg.GatewayIP
+	// read at clone time so the Settings → Network page can rotate the gateway
+	// without a restart. Initial value is seeded from cfg.GatewayIP in New.
+	gatewayMu sync.RWMutex
+	gatewayIP string
+
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
@@ -161,14 +168,35 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 		cfg.PollInterval = 3 * time.Second
 	}
 	return &Service{
-		px:       px,
-		pool:     pool,
-		verifier: noopVerifier{},
-		db:       database,
-		cipher:   cipher,
-		keys:     keys,
-		cfg:      cfg,
+		px:        px,
+		pool:      pool,
+		verifier:  noopVerifier{},
+		db:        database,
+		cipher:    cipher,
+		keys:      keys,
+		cfg:       cfg,
+		gatewayIP: cfg.GatewayIP,
 	}
+}
+
+// SetGatewayIP rotates the gateway used for new provisions. Live-reloadable
+// from Settings → Network. Empty input is a no-op so the handler can blindly
+// push the persisted value without re-checking. Existing VMs are NOT updated
+// — that requires the explicit force-gateway-update op.
+func (s *Service) SetGatewayIP(ip string) {
+	if ip == "" {
+		return
+	}
+	s.gatewayMu.Lock()
+	defer s.gatewayMu.Unlock()
+	s.gatewayIP = ip
+}
+
+// GatewayIP returns the gateway used for new provisions, under lock.
+func (s *Service) GatewayIP() string {
+	s.gatewayMu.RLock()
+	defer s.gatewayMu.RUnlock()
+	return s.gatewayIP
 }
 
 // SetIPVerifier installs (or replaces) the IP verifier used after each Reserve
@@ -345,7 +373,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	cloudInit := proxmox.CloudInitConfig{
 		CIUser:       username,
 		SSHKeys:      sshPubKey,
-		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.cfg.GatewayIP),
+		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.GatewayIP()),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,

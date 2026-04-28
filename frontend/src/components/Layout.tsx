@@ -149,6 +149,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Gopher Tunnels
                   </NavLink>
+                  <NavLink to="/network" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Network
+                  </NavLink>
                   {/* When S3 is deployed the link is promoted to a top-level
                       navbar item; hiding the dropdown entry avoids duplication. */}
                   {!s3Deployed && (

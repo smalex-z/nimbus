@@ -54,6 +54,7 @@ type fakePVE struct {
 	resizeDisk        func(context.Context, string, int, string, string) error
 	startVM           func(context.Context, string, int) (string, error)
 	stopVM            func(context.Context, string, int) (string, error)
+	rebootVM          func(context.Context, string, int) (string, error)
 	destroyVM         func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 
@@ -119,6 +120,12 @@ func (f *fakePVE) StopVM(ctx context.Context, n string, vmid int) (string, error
 		return "task:stop", nil
 	}
 	return f.stopVM(ctx, n, vmid)
+}
+func (f *fakePVE) RebootVM(ctx context.Context, n string, vmid int) (string, error) {
+	if f.rebootVM == nil {
+		return "task:reboot", nil
+	}
+	return f.rebootVM(ctx, n, vmid)
 }
 func (f *fakePVE) DestroyVM(ctx context.Context, n string, vmid int) (string, error) {
 	if f.destroyVM == nil {

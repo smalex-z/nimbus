@@ -763,4 +763,63 @@ export async function unpairGX10(): Promise<GPUUnpairView> {
   return data
 }
 
+export interface NetworkSettingsView {
+  ip_pool_start: string
+  ip_pool_end: string
+  gateway_ip: string
+}
+
+export interface SaveNetworkSettingsRequest {
+  ip_pool_start?: string
+  ip_pool_end?: string
+  gateway_ip?: string
+}
+
+export async function getNetworkSettings(): Promise<NetworkSettingsView> {
+  const { data } = await api.get<NetworkSettingsView>('/settings/network')
+  return data
+}
+
+export async function saveNetworkSettings(
+  req: SaveNetworkSettingsRequest,
+): Promise<NetworkSettingsView> {
+  const { data } = await api.put<NetworkSettingsView>('/settings/network', req)
+  return data
+}
+
+export interface NetworkOpFailure {
+  vm_row_id: number
+  vmid: number
+  hostname: string
+  error: string
+}
+
+export interface NetworkOpReport {
+  updated: number
+  failures: NetworkOpFailure[]
+}
+
+// renumberAllVMs reassigns every managed VM to a fresh IP from the saved pool
+// and reboots them. The current saved gateway is used. Long-running — every
+// VM bounces in sequence.
+export async function renumberAllVMs(): Promise<NetworkOpReport> {
+  const { data } = await api.post<NetworkOpReport>(
+    '/settings/network/renumber-vms',
+    {},
+    { timeout: 15 * 60 * 1000 },
+  )
+  return data
+}
+
+// forceGatewayUpdate pushes the saved gateway to every managed VM via
+// `qm set --ipconfig0` and reboots them. Each VM keeps its existing IP.
+export async function forceGatewayUpdate(): Promise<NetworkOpReport> {
+  const { data } = await api.post<NetworkOpReport>(
+    '/settings/network/force-gateway-update',
+    {},
+    { timeout: 15 * 60 * 1000 },
+  )
+  return data
+}
+
 export default api

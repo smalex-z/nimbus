@@ -475,6 +475,40 @@ func (s *AuthService) SaveGPUSettings(next db.GPUSettings) error {
 	return s.db.Save(&next).Error
 }
 
+// GetNetworkSettings returns the stored IP pool / gateway configuration.
+// Creates an empty row on first call. Empty strings on the row mean the
+// caller should fall back to env defaults (handled by main.go's seed step).
+func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
+	var settings db.NetworkSettings
+	err := s.db.FirstOrCreate(&settings, db.NetworkSettings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveNetworkSettings persists the IP pool / gateway. Empty fields are treated
+// as "preserve existing" so the UI can rotate one knob without re-sending the
+// others. No validation here — the handler checks that the strings parse as
+// valid IPv4 addresses before invoking this.
+func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
+	existing, err := s.GetNetworkSettings()
+	if err != nil {
+		return err
+	}
+	if next.IPPoolStart == "" {
+		next.IPPoolStart = existing.IPPoolStart
+	}
+	if next.IPPoolEnd == "" {
+		next.IPPoolEnd = existing.IPPoolEnd
+	}
+	if next.GatewayIP == "" {
+		next.GatewayIP = existing.GatewayIP
+	}
+	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"ip_pool_start": next.IPPoolStart,
+		"ip_pool_end":   next.IPPoolEnd,
+		"gateway_ip":    next.GatewayIP,
+	}).Error
+}
+
 // RegenerateGPUWorkerToken mints a fresh 32-byte hex worker token and
 // persists it. Returns the new token so the caller can surface it in the
 // UI exactly once — admins must capture it for the GX10 install command.
