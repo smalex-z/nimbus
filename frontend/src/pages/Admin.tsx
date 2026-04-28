@@ -513,43 +513,72 @@ function NodeCard({
   )
 }
 
-// osLabelFor returns the user-facing OS string for a VM row. Priority:
-//   1. Agent osinfo `version-id` ("22.04") prefixed by distro name from agent
-//      `id` — most accurate, available when qemu-guest-agent is running.
+// osLabelFor returns the SHORT user-facing OS label for a row. Priority is
+// stripped to just distro + version-id, so e.g. "Ubuntu 24.04.3 LTS (Noble
+// Numbat)" collapses to "Ubuntu 24.04". The verbose form lives in the
+// tooltip — see osTooltipFor — so admins can still see kernel / pretty name
+// on hover without polluting the column.
+//
+//   1. Agent osinfo `id` + `version-id` ("ubuntu", "22.04") → "Ubuntu 22.04".
 //   2. Nimbus os_template ("ubuntu-22.04" → "Ubuntu 22.04").
-//   3. Raw Proxmox ostype hint (l26/win10) humanized to "Linux"/"Windows 10".
+//   3. Raw Proxmox ostype hint (l26/win10) humanized.
 //   4. Empty when nothing is known — caller renders a dash.
 function osLabelFor(vm: ClusterVM): string {
   if (vm.os_id && vm.os_version_id) {
     const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
     return `${distro} ${vm.os_version_id}`
   }
-  if (vm.os_pretty) return vm.os_pretty
   if (vm.os_template) return humanizeOSTemplate(vm.os_template)
   return ''
+}
+
+// osTooltipFor returns the verbose OS description shown when the admin
+// hovers the OS cell. Picks the most complete signal available; falls back
+// to the short label when no extra detail exists. Includes kernel +
+// architecture when the agent reported them.
+function osTooltipFor(vm: ClusterVM): string {
+  const head = vm.os_pretty || osLabelFor(vm)
+  const tail: string[] = []
+  if (vm.os_kernel) tail.push(`kernel ${vm.os_kernel}`)
+  if (vm.os_machine) tail.push(vm.os_machine)
+  return tail.length > 0 ? `${head} — ${tail.join(', ')}` : head
+}
+
+// Tooltip copy explaining what each Source bucket means. Surfaced via the
+// SourceLabel's title attribute so admins can hover any chip to learn what
+// the cluster actually knows about that VM and what they can do with it.
+const sourceTooltip: Record<VMSource, string> = {
+  local:
+    'Created by this nimbus instance. Full lifecycle + delete available — the SSH key, IP allocation, and DB row all live here.',
+  foreign:
+    'Created by a different nimbus instance on this cluster (carries the nimbus tag but is not in our DB). You can power-cycle it via Proxmox; remove is disabled because the credentials and ownership belong to the other instance.',
+  external:
+    'Not provisioned by any nimbus instance — a regular Proxmox VM. You can power-cycle it like any other, but nimbus refuses to remove it as a separation-of-powers guard.',
 }
 
 function SourceLabel({ source }: { source: VMSource }) {
   // Three states: local (this Nimbus), foreign (another Nimbus on the same
   // cluster), external (not Nimbus-provisioned). Foreign and local share the
   // green tone since both are Nimbus-managed; foreign carries a sub-label so
-  // admins can tell whose instance owns the credentials.
+  // admins can tell whose instance owns the credentials. Hover any chip for
+  // a longer-form explanation pulled from sourceTooltip.
+  const tip = sourceTooltip[source]
   switch (source) {
     case 'local':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help" title={tip}>
           NIMBUS
         </span>
       )
     case 'foreign':
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-good">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-good cursor-help" title={tip}>
           NIMBUS <span className="text-ink-3">· FOREIGN</span>
         </span>
       )
     default:
       return (
-        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3 cursor-help" title={tip}>
           EXTERNAL
         </span>
       )
@@ -777,7 +806,10 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {osLabel ? (
-                        <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className="inline-flex items-center gap-1.5 cursor-help"
+                          title={osTooltipFor(vm)}
+                        >
                           <OSIcon family={osFamily} className="text-ink-2" />
                           <span className="font-mono text-xs text-ink-2">{osLabel}</span>
                         </span>
