@@ -2,10 +2,15 @@ import { useEffect, useState } from 'react'
 import {
   forceGatewayUpdate,
   getNetworkSettings,
+  reconcileVMs,
   renumberAllVMs,
   saveNetworkSettings,
 } from '@/api/client'
-import type { NetworkOpReport, NetworkSettingsView } from '@/api/client'
+import type {
+  NetworkOpReport,
+  NetworkSettingsView,
+  VMReconcileReport,
+} from '@/api/client'
 
 type DangerKind = 'renumber' | 'force-gateway'
 
@@ -344,6 +349,109 @@ function DangerModal({
   )
 }
 
+function SyncPanel() {
+  const [running, setRunning] = useState(false)
+  const [report, setReport] = useState<VMReconcileReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSync = async () => {
+    setError(null)
+    setReport(null)
+    try {
+      setRunning(true)
+      const rep = await reconcileVMs()
+      setReport(rep)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Reconcile failed')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div
+      className="glass"
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+        Sync DB with cluster
+      </div>
+      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+        Walks every VM row against the live Proxmox cluster. Rows whose VM
+        moved to a different node (manual <code>qm migrate</code>) get their
+        node updated. Rows whose VMID hasn't been observed for 3 consecutive
+        runs get soft-deleted — typically because someone destroyed the VM
+        directly through Proxmox, leaving an orphan here. This runs on the
+        background reconcile loop every minute; the button forces an
+        immediate pass.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button
+          type="button"
+          className="n-btn n-btn-primary"
+          onClick={handleSync}
+          disabled={running}
+          style={{ minWidth: 160 }}
+        >
+          {running ? 'Syncing…' : 'Sync now'}
+        </button>
+        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+      </div>
+      {report && (
+        <div
+          style={{
+            marginTop: 4,
+            padding: '14px 16px',
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            background: 'rgba(20,18,28,0.03)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            fontSize: 13,
+            color: 'var(--ink-body)',
+          }}
+        >
+          <div>
+            Migrated: <strong>{report.migrated.length}</strong> &middot; Soft-deleted:{' '}
+            <strong>{report.deleted.length}</strong> &middot; Going stale:{' '}
+            <strong>{report.missed.length}</strong> &middot; In sync:{' '}
+            <strong>{report.no_ops}</strong>
+          </div>
+          {report.migrated.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {report.migrated.map((m) => (
+                <li key={`mig-${m.vm_row_id}`}>
+                  {m.hostname} (vmid {m.vmid}): {m.from_node} → {m.to_node}
+                </li>
+              ))}
+            </ul>
+          )}
+          {report.deleted.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--err)' }}>
+              {report.deleted.map((d) => (
+                <li key={`del-${d.vm_row_id}`}>
+                  {d.hostname} (vmid {d.vmid} on {d.node}) — soft-deleted
+                </li>
+              ))}
+            </ul>
+          )}
+          {report.missed.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--ink-mute)' }}>
+              {report.missed.map((m) => (
+                <li key={`miss-${m.vm_row_id}`}>
+                  {m.hostname} (vmid {m.vmid} on {m.node}) — missed{' '}
+                  {m.missed_cycles}/3
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Network() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
@@ -360,6 +468,7 @@ export default function Network() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         <div className="lg:col-span-2 flex flex-col gap-6">
           <NetworkPanel />
+          <SyncPanel />
         </div>
       </div>
     </div>

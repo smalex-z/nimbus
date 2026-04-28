@@ -822,4 +822,45 @@ export async function forceGatewayUpdate(): Promise<NetworkOpReport> {
   return data
 }
 
+export interface VMReconcileMigration {
+  vm_row_id: number
+  vmid: number
+  hostname: string
+  from_node: string
+  to_node: string
+}
+
+export interface VMReconcileMiss {
+  vm_row_id: number
+  vmid: number
+  hostname: string
+  node: string
+  missed_cycles: number
+}
+
+export interface VMReconcileDeleted {
+  vm_row_id: number
+  vmid: number
+  hostname: string
+  node: string
+}
+
+export interface VMReconcileReport {
+  migrated: VMReconcileMigration[]
+  missed: VMReconcileMiss[]
+  deleted: VMReconcileDeleted[]
+  no_ops: number
+  snapshot_at: string
+}
+
+// reconcileVMs walks the local vms table against the live Proxmox cluster.
+// Updates rows whose VMs migrated to a different node, soft-deletes rows
+// whose VMID hasn't been seen for the configured miss threshold, and reports
+// rows that are still under threshold so the operator sees them going stale.
+// The backend refuses (400) when Proxmox returns an empty cluster snapshot.
+export async function reconcileVMs(): Promise<VMReconcileReport> {
+  const { data } = await api.post<VMReconcileReport>('/vms/reconcile', {})
+  return data
+}
+
 export default api

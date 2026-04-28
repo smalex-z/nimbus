@@ -378,3 +378,18 @@ func validateCreate(req createVMRequest) error {
 	}
 	return nil
 }
+
+// Reconcile handles POST /api/vms/reconcile (admin only). Walks the local vms
+// table against the live Proxmox cluster snapshot, updates rows whose VMs
+// have migrated to a different node, and soft-deletes rows whose VMID hasn't
+// been observed for vacateMissThreshold consecutive runs. Refuses to act when
+// Proxmox returns an empty cluster snapshot (transient API failure → would
+// otherwise wipe every row).
+func (h *VMs) Reconcile(w http.ResponseWriter, r *http.Request) {
+	rep, err := h.svc.ReconcileVMs(r.Context())
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, rep)
+}
