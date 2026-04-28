@@ -17,6 +17,19 @@ const baseSvgProps = {
   'aria-hidden': true,
 }
 
+// TerminalIcon — bash prompt in a window. Used for the per-VM SSH
+// affordance on both the Admin cluster table and My Machines so the two
+// views agree on what the icon means.
+export function TerminalIcon({ size = 14, className }: IconProps = {}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" strokeWidth={1.6} className={className} {...baseSvgProps}>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <path d="M4 6l2.5 2L4 10" />
+      <path d="M8.5 10.5h3.5" />
+    </svg>
+  )
+}
+
 // NetworkIcon — globe-with-meridians. Used for the per-VM Gopher tunnels
 // affordance on both the Admin cluster table and My Machines.
 export function NetworkIcon({ size = 14, className }: IconProps = {}) {

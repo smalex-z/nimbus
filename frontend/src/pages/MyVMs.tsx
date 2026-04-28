@@ -8,7 +8,7 @@ import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
 import VMActions from '@/components/ui/VMActions'
-import { NetworkIcon } from '@/components/ui/icons'
+import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
 import type { VM } from '@/types'
 
@@ -148,7 +148,7 @@ function VMRow({
             title={`SSH details for ${vm.hostname}`}
             aria-label={`SSH details for ${vm.hostname}`}
           >
-            <span aria-hidden>↗</span>
+            <TerminalIcon />
           </button>
           <VMActions
             hostname={vm.hostname}
