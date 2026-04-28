@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteVM, listVMs } from '@/api/client'
+import { deleteVM, listVMs, vmLifecycle } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import SSHDetailsModal from '@/components/ui/SSHDetailsModal'
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
+import VMActions from '@/components/ui/VMActions'
 import { useAuth } from '@/hooks/useAuth'
 import type { VM } from '@/types'
 
@@ -146,16 +147,16 @@ function VMRow({
             <span aria-hidden>↗</span>
             <span>SSH</span>
           </button>
-          {canDelete && (
-            <button
-              type="button"
-              onClick={() => setDeleteOpen(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] tracking-wider uppercase border border-line-2 bg-white/85 text-bad hover:border-bad transition-colors"
-              title="Destroy this VM and release its resources"
-            >
-              Delete
-            </button>
-          )}
+          <VMActions
+            hostname={vm.hostname}
+            status={vm.status as 'running' | 'stopped' | 'paused' | 'unknown'}
+            canRemove={canDelete}
+            onLifecycle={async (op) => {
+              await vmLifecycle(vm.ID, op)
+              onChanged()
+            }}
+            onRemove={canDelete ? () => setDeleteOpen(true) : undefined}
+          />
         </div>
       </div>
       {sshOpen && (
