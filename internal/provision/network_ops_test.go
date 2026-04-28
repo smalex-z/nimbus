@@ -9,6 +9,25 @@ import (
 	"nimbus/internal/proxmox"
 )
 
+// proxmoxNotRunningErr fakes the 500 body Proxmox returns when reboot is
+// called against a stopped VM. The network-ops code should treat this as a
+// no-op (cloud-init applies on next boot anyway).
+var proxmoxNotRunningErr = &proxmox.HTTPError{
+	Status: 500,
+	Method: "POST",
+	Path:   "/nodes/x/qemu/200/status/reboot",
+	Body:   `{"data":null,"message":"VM 200 not running\n"}`,
+}
+
+// proxmoxConfigMissingErr fakes the 500 body Proxmox returns when the qemu
+// config file is gone — the VM has drifted off this node.
+var proxmoxConfigMissingErr = &proxmox.HTTPError{
+	Status: 500,
+	Method: "POST",
+	Path:   "/nodes/x/qemu/200/config",
+	Body:   `{"message":"Configuration file 'nodes/x/qemu-server/200.conf' does not exist\n","data":null}`,
+}
+
 func seedManagedVM(t *testing.T, database *db.DB, hostname string, vmid int, ip string) {
 	t.Helper()
 	if err := database.Create(&db.VM{
@@ -143,3 +162,47 @@ var errAPIDown = &fakeAPIErr{msg: "proxmox unreachable"}
 type fakeAPIErr struct{ msg string }
 
 func (e *fakeAPIErr) Error() string { return e.msg }
+
+func TestForceGatewayUpdate_StoppedVMCountsAsSuccess(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Proxmox refuses to reboot a stopped VM with 500 + "not running" body.
+	// The cloud-init drive is already updated; the VM picks up the new
+	// gateway on next boot, so this should NOT count as a failure.
+	fake.rebootVM = func(_ context.Context, _ string, _ int) (string, error) {
+		return "", proxmoxNotRunningErr
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "vm-a", 200, "10.0.0.2")
+	seedManagedVM(t, database, "vm-b", 201, "10.0.0.3")
+
+	rep, err := svc.ForceGatewayUpdate(context.Background(), "10.0.0.99")
+	if err != nil {
+		t.Fatalf("ForceGatewayUpdate: %v", err)
+	}
+	if rep.Updated != 2 || len(rep.Failures) != 0 {
+		t.Errorf("rep = %+v; want Updated=2 Failures=0 (stopped VMs are success)", rep)
+	}
+}
+
+func TestForceGatewayUpdate_VMNotPresentOnNodeSurfacesCleanMessage(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.setCloudInit = func(_ context.Context, _ string, _ int, _ proxmox.CloudInitConfig) error {
+		return proxmoxConfigMissingErr
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "vm-stale", 200, "10.0.0.2")
+
+	rep, err := svc.ForceGatewayUpdate(context.Background(), "10.0.0.99")
+	if err != nil {
+		t.Fatalf("ForceGatewayUpdate: %v", err)
+	}
+	if rep.Updated != 0 || len(rep.Failures) != 1 {
+		t.Fatalf("rep = %+v; want Updated=0 Failures=1", rep)
+	}
+	got := rep.Failures[0].Err
+	if !strings.Contains(got, "vm not present on node") || !strings.Contains(got, "out of sync") {
+		t.Errorf("failure message = %q, want clean drift message", got)
+	}
+}
