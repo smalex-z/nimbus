@@ -53,7 +53,10 @@ type Config struct {
 	// the IP pool range (gateway, NAS, IoT, statically-assigned workstations).
 	// Closes a hole in the Proxmox reconciler, which only sees VM-claimed IPs.
 	//
-	// NetscanMode:     off | tcp | both — default "both" (TCP probe + ARP cache read)
+	// NetscanMode:     off | tcp | arp | both — default "arp" (passive ARP cache
+	//                  read only). The active TCP probe (`tcp` or `both`) trips
+	//                  IDS/IPS rules and reads as a horizontal port scan on
+	//                  corporate networks; opt in with `both` on a homelab.
 	// NetscanInterval: scan cadence in seconds — default 300 (5min); 0 disables
 	// NetscanTimeoutMS: per-port TCP dial timeout — default 200
 	// NetscanConcurrency: parallel probes — default 50
@@ -113,7 +116,7 @@ func Load() (*Config, error) {
 		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
 		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
 
-		NetscanMode:         getEnv("NIMBUS_NETSCAN_MODE", "both"),
+		NetscanMode:         getEnv("NIMBUS_NETSCAN_MODE", "arp"),
 		NetscanIntervalSecs: getEnvInt("NIMBUS_NETSCAN_INTERVAL_SECONDS", 300),
 		NetscanTimeoutMS:    getEnvInt("NIMBUS_NETSCAN_TIMEOUT_MS", 200),
 		NetscanConcurrency:  getEnvInt("NIMBUS_NETSCAN_CONCURRENCY", 50),
