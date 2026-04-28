@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { ReactNode, useState } from 'react'
 import NavDropdown from '@/components/ui/NavDropdown'
+import { ForceStopIcon, RestartIcon, TrashIcon } from '@/components/ui/icons'
 import type { VMLifecycleOp } from '@/api/client'
 
 // VMActions renders the per-row power-control surface used in both the admin
@@ -75,12 +76,14 @@ export default function VMActions({
         trigger={<MoreIcon />}
       >
         <MenuItem
+          icon={<RestartIcon />}
           label="Restart"
           disabled={isBusy || !isOn}
           disabledReason={!isOn ? 'VM is not running' : undefined}
           onClick={() => fire('reboot')}
         />
         <MenuItem
+          icon={<ForceStopIcon />}
           label="Force stop"
           disabled={isBusy || !isOn}
           disabledReason={!isOn ? 'VM is already off' : undefined}
@@ -88,6 +91,7 @@ export default function VMActions({
         />
         <div className="my-1 border-t border-line" />
         <MenuItem
+          icon={<TrashIcon />}
           label="Remove"
           danger
           disabled={isBusy || !canRemove || !onRemove}
@@ -104,12 +108,14 @@ export default function VMActions({
 }
 
 function MenuItem({
+  icon,
   label,
   onClick,
   disabled,
   disabledReason,
   danger,
 }: {
+  icon?: ReactNode
   label: string
   onClick: () => void
   disabled?: boolean
@@ -120,7 +126,7 @@ function MenuItem({
   // interactive — bumped to 0.10 for the neutral row and 0.12 for the
   // destructive (Remove) row so the hand-cursor isn't the only feedback.
   const base =
-    'block w-full px-3 py-1.5 text-sm text-left transition-colors cursor-pointer'
+    'flex w-full items-center gap-2.5 px-3 py-1.5 text-sm text-left transition-colors cursor-pointer'
   const cls = disabled
     ? `${base} text-ink-3 cursor-not-allowed`
     : danger
@@ -137,7 +143,8 @@ function MenuItem({
       disabled={disabled}
       title={disabled ? disabledReason : undefined}
     >
-      {label}
+      {icon && <span className="inline-flex w-3.5 justify-center" aria-hidden>{icon}</span>}
+      <span>{label}</span>
     </button>
   )
 }

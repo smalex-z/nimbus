@@ -11,6 +11,7 @@ import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
 import VMActions from '@/components/ui/VMActions'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
+import { NetworkIcon } from '@/components/ui/icons'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes, formatRelativeTime } from '@/lib/format'
 import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, IPSource, IPStatus, NodeView, TierName, VMSource } from '@/types'
@@ -533,16 +534,18 @@ function osLabelFor(vm: ClusterVM): string {
   return ''
 }
 
-// osTooltipFor returns the verbose OS description shown when the admin
-// hovers the OS cell. Picks the most complete signal available; falls back
-// to the short label when no extra detail exists. Includes kernel +
-// architecture when the agent reported them.
+// osTooltipFor returns the friendly distro+version string shown on hover —
+// e.g. "Ubuntu 24.04". The cell text dropped the distro prefix to save
+// width, so the tooltip's job is to put it back. Falls back to os_pretty
+// (verbose) only when neither agent fields nor a recognisable os_template
+// are available, since that's the only signal we have left.
 function osTooltipFor(vm: ClusterVM): string {
-  const head = vm.os_pretty || osLabelFor(vm)
-  const tail: string[] = []
-  if (vm.os_kernel) tail.push(`kernel ${vm.os_kernel}`)
-  if (vm.os_machine) tail.push(vm.os_machine)
-  return tail.length > 0 ? `${head} — ${tail.join(', ')}` : head
+  if (vm.os_id && vm.os_version_id) {
+    const distro = vm.os_id[0].toUpperCase() + vm.os_id.slice(1)
+    return `${distro} ${vm.os_version_id}`
+  }
+  if (vm.os_template) return humanizeOSTemplate(vm.os_template)
+  return vm.os_pretty || osLabelFor(vm)
 }
 
 // Tooltip copy explaining what each Source bucket means. Surfaced via the
@@ -608,26 +611,6 @@ function TerminalIcon() {
       <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
       <path d="M4 6l2.5 2L4 10" />
       <path d="M8.5 10.5h3.5" />
-    </svg>
-  )
-}
-
-function NetworkIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="8" cy="8" r="6" />
-      <ellipse cx="8" cy="8" rx="3" ry="6" />
-      <path d="M2 8h12" />
     </svg>
   )
 }
