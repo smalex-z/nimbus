@@ -116,13 +116,16 @@ function MenuItem({
   disabledReason?: string
   danger?: boolean
 }) {
+  // Hover highlight: 0.05 black on white was too subtle to read as
+  // interactive — bumped to 0.10 for the neutral row and 0.12 for the
+  // destructive (Remove) row so the hand-cursor isn't the only feedback.
   const base =
     'block w-full px-3 py-1.5 text-sm text-left transition-colors cursor-pointer'
   const cls = disabled
     ? `${base} text-ink-3 cursor-not-allowed`
     : danger
-      ? `${base} text-bad hover:bg-[rgba(184,58,58,0.06)]`
-      : `${base} text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink`
+      ? `${base} text-bad hover:bg-[rgba(184,58,58,0.12)] hover:text-bad`
+      : `${base} text-ink-2 hover:bg-[rgba(20,18,28,0.10)] hover:text-ink`
   return (
     <button
       type="button"
