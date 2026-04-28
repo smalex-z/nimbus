@@ -709,13 +709,21 @@ func (s *Service) GetPrivateKey(ctx context.Context, id uint, requesterID *uint)
 }
 
 // Get returns a single VM by row ID.
-func (s *Service) Get(ctx context.Context, id uint) (*db.VM, error) {
+//
+// requesterID enforces ownership — non-nil values must match vm.OwnerID or
+// NotFound is returned (no info leak about other users' VMs). Pass nil for
+// trusted internal callers; handlers always pass the signed-in user. Mirrors
+// GetPrivateKey's gating semantics.
+func (s *Service) Get(ctx context.Context, id uint, requesterID *uint) (*db.VM, error) {
 	var vm db.VM
 	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
 		}
 		return nil, fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if requesterID != nil && (vm.OwnerID == nil || *vm.OwnerID != *requesterID) {
+		return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
 	}
 	return &vm, nil
 }

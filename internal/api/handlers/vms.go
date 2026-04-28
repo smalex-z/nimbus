@@ -246,7 +246,9 @@ func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Get handles GET /api/vms/{id}.
+// Get handles GET /api/vms/{id}. Owner-gated: a non-owning requester gets
+// 404 (not 403) so existence isn't disclosed — same convention as Delete and
+// Lifecycle.
 func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -254,7 +256,12 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid id")
 		return
 	}
-	vm, err := h.svc.Get(r.Context(), uint(id))
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	vm, err := h.svc.Get(r.Context(), uint(id), &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -264,13 +271,19 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 
 // ListTunnels handles GET /api/vms/{id}/tunnels — every Gopher per-port
 // tunnel attached to this VM. Returns an empty array for VMs without a
-// Gopher machine record (and for tunnel-disabled deployments).
+// Gopher machine record (and for tunnel-disabled deployments). Owner-gated
+// to prevent enumeration of another user's tunnel layout.
 func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
 		return
 	}
-	tunnels, err := h.svc.ListVMTunnels(r.Context(), id)
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	tunnels, err := h.svc.ListVMTunnels(r.Context(), id, &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -293,10 +306,16 @@ type createTunnelRequest struct {
 // CreateTunnel handles POST /api/vms/{id}/tunnels — registers a per-port
 // tunnel on this VM's Gopher machine. Mirrors Gopher's POST /api/v1/tunnels
 // body shape; see Gopher's OpenAPI spec for field semantics + UDP/bot-
-// protection coercion rules.
+// protection coercion rules. Owner-gated: only the VM owner may attach
+// internet-facing tunnels to it.
 func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
 	var req createTunnelRequest
@@ -314,7 +333,7 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		BotProtectionTTL:     req.BotProtectionTTL,
 		BotProtectionAllowIP: req.BotProtectionAllowIP,
 		TLSSkipVerify:        req.TLSSkipVerify,
-	})
+	}, &user.ID)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -322,7 +341,7 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	response.Created(w, t)
 }
 
-// DeleteTunnel handles DELETE /api/vms/{id}/tunnels/{tunnelId}.
+// DeleteTunnel handles DELETE /api/vms/{id}/tunnels/{tunnelId}. Owner-gated.
 func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -333,7 +352,12 @@ func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "missing tunnelId")
 		return
 	}
-	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID); err != nil {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID, &user.ID); err != nil {
 		response.FromError(w, err)
 		return
 	}
