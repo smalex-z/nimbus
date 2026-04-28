@@ -11,7 +11,7 @@ import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
 import VMActions from '@/components/ui/VMActions'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
-import { NetworkIcon } from '@/components/ui/icons'
+import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes, formatRelativeTime } from '@/lib/format'
 import type { ClusterStats, ClusterVM, ClusterVMStatus, IPAllocation, IPSource, IPStatus, NodeView, TierName, VMSource } from '@/types'
@@ -592,29 +592,6 @@ function SourceLabel({ source }: { source: VMSource }) {
         </span>
       )
   }
-}
-
-// Small inline icons for the per-row action buttons. Kept inline (not a
-// shared component) because they're styled exactly for the 14×14 button
-// slot and don't carry over anywhere else in the app.
-function TerminalIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-      <path d="M4 6l2.5 2L4 10" />
-      <path d="M8.5 10.5h3.5" />
-    </svg>
-  )
 }
 
 // ForeignWarningIcon flags rows whose VM exists on the cluster with a nimbus
