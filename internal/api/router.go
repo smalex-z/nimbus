@@ -174,6 +174,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
+				// Power operations on any cluster VM (local / foreign /
+				// external). Routed by (node, vmid) so foreign + external
+				// rows that have no nimbus DB id are still reachable.
+				// Reboot waits on a Proxmox task — give it some headroom.
+				r.With(middleware.Timeout(2*time.Minute)).
+					Post("/cluster/vms/{node}/{vmid}/{op}", cluster.VMLifecycle)
 				r.Get("/cluster/stats", cluster.Stats)
 
 				// Reconcile can run a few seconds on a busy cluster
@@ -255,6 +261,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 					r.Delete("/{id}", vms.Delete)
+					// Power operations on the caller's own VM. Reboot
+					// waits on a Proxmox task — give it some room.
+					r.With(middleware.Timeout(2*time.Minute)).
+						Post("/{id}/{op:start|shutdown|stop|reboot}", vms.Lifecycle)
 					// Per-port tunnels on top of the VM's Gopher machine —
 					// the post-provision Networks surface.
 					r.Get("/{id}/tunnels", vms.ListTunnels)

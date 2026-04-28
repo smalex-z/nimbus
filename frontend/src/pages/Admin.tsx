@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { adminDeleteVM, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { adminDeleteVM, adminVMLifecycle, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -9,6 +9,7 @@ import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal
 import StatusBadge from '@/components/ui/StatusBadge'
 import TunnelsModal from '@/components/ui/TunnelsModal'
 import UsageBar from '@/components/ui/UsageBar'
+import VMActions from '@/components/ui/VMActions'
 import VMDetailsPopover from '@/components/ui/VMDetailsPopover'
 import { humanizeOSTemplate, resolveOSId } from '@/lib/os'
 import { formatBytes, formatRelativeTime } from '@/lib/format'
@@ -32,6 +33,9 @@ interface AdminData {
   // admin delete, so the table reflects the change immediately instead of
   // waiting for the next 15s poll.
   removeVM: (id: number) => void
+  // updateVMStatus stamps a row's status optimistically after a lifecycle
+  // op. Keyed by (node, vmid) since foreign/external rows lack a nimbus id.
+  updateVMStatus: (node: string, vmid: number, status: ClusterVMStatus) => void
 }
 
 // pollEachWith fires `fn` immediately, then every `intervalMs`, until the
@@ -112,7 +116,19 @@ function useAdminData(): AdminData {
     setVMs((prev) => prev.filter((v) => v.id !== id))
   }, [])
 
-  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM }
+  // updateVMStatus stamps a row's status optimistically after a lifecycle
+  // op. Keyed by (node, vmid) since foreign/external rows lack a nimbus id.
+  // The 15 s poll above corrects any drift.
+  const updateVMStatus = useCallback(
+    (node: string, vmid: number, status: ClusterVMStatus) => {
+      setVMs((prev) =>
+        prev.map((v) => (v.node === node && v.vmid === vmid ? { ...v, status } : v)),
+      )
+    },
+    [],
+  )
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus }
 }
 
 interface FilterState {
@@ -127,7 +143,7 @@ const headerCellClass =
   'text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap'
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -251,6 +267,7 @@ export default function Admin() {
               hasFilters={hasFilters}
               onClearFilters={clearFilters}
               onVMDeleted={removeVM}
+              onVMStatusChanged={updateVMStatus}
             />
           )}
 
@@ -582,26 +599,6 @@ function NetworkIcon() {
   )
 }
 
-function TrashIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M3 4h10" />
-      <path d="M6 4V2.75A.75.75 0 0 1 6.75 2h2.5a.75.75 0 0 1 .75.75V4" />
-      <path d="M4.5 4l.75 9a1 1 0 0 0 1 .9h3.5a1 1 0 0 0 1-.9L11.5 4" />
-      <path d="M6.5 7v4M9.5 7v4" />
-    </svg>
-  )
-}
 
 function VMTable({
   vms,
@@ -613,6 +610,7 @@ function VMTable({
   hasFilters,
   onClearFilters,
   onVMDeleted,
+  onVMStatusChanged,
 }: {
   vms: ClusterVM[]
   allVMs: ClusterVM[]
@@ -623,6 +621,7 @@ function VMTable({
   hasFilters: boolean
   onClearFilters: () => void
   onVMDeleted: (id: number) => void
+  onVMStatusChanged: (node: string, vmid: number, status: ClusterVMStatus) => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
@@ -816,35 +815,40 @@ function VMTable({
                       ) : dash}
                     </td>
                     <td className="px-4 py-3">
-                      {vm.source === 'local' && vm.id !== undefined ? (
-                        <div className="flex gap-1.5">
-                          {vm.tunnel_url && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setTunnelsTarget({
-                                  vmId: vm.id!,
-                                  hostname: vm.hostname || vm.name,
-                                })
-                              }
-                              className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
-                              title="Manage Gopher tunnels for this VM"
-                              aria-label={`Manage tunnels for ${vm.hostname || vm.name}`}
-                            >
-                              <NetworkIcon />
-                            </button>
-                          )}
+                      <div className="flex gap-1.5 items-center">
+                        {vm.source === 'local' && vm.id !== undefined && vm.tunnel_url && (
                           <button
                             type="button"
-                            onClick={() => setEditTarget(vm)}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-bad hover:border-bad hover:bg-[rgba(184,58,58,0.06)] transition-colors"
-                            title={`Delete ${vm.hostname || vm.name}`}
-                            aria-label={`Delete ${vm.hostname || vm.name}`}
+                            onClick={() =>
+                              setTunnelsTarget({
+                                vmId: vm.id!,
+                                hostname: vm.hostname || vm.name,
+                              })
+                            }
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink hover:border-ink transition-colors"
+                            title="Manage Gopher tunnels for this VM"
+                            aria-label={`Manage tunnels for ${vm.hostname || vm.name}`}
                           >
-                            <TrashIcon />
+                            <NetworkIcon />
                           </button>
-                        </div>
-                      ) : dash}
+                        )}
+                        <VMActions
+                          hostname={vm.hostname || vm.name}
+                          status={vm.status}
+                          canRemove={vm.source === 'local' && vm.id !== undefined}
+                          onLifecycle={async (op) => {
+                            await adminVMLifecycle(vm.node, vm.vmid, op)
+                            const next: ClusterVMStatus =
+                              op === 'start' || op === 'reboot' ? 'running' : 'stopped'
+                            onVMStatusChanged(vm.node, vm.vmid, next)
+                          }}
+                          onRemove={
+                            vm.source === 'local' && vm.id !== undefined
+                              ? () => setEditTarget(vm)
+                              : undefined
+                          }
+                        />
+                      </div>
                     </td>
                   </tr>
                 )

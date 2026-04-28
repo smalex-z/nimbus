@@ -256,6 +256,27 @@ export async function adminDeleteVM(id: number): Promise<void> {
   await api.delete(`/cluster/vms/${id}`)
 }
 
+export type VMLifecycleOp = 'start' | 'shutdown' | 'stop' | 'reboot'
+
+// vmLifecycle issues a power op against the caller's own VM. Owner-gated;
+// requesting ops on someone else's VM returns 404. Reboots can take ~30s
+// while the Proxmox task drains, so the timeout is generous.
+export async function vmLifecycle(id: number, op: VMLifecycleOp): Promise<void> {
+  await api.post(`/vms/${id}/${op}`, undefined, { timeout: 2 * 60 * 1000 })
+}
+
+// adminVMLifecycle issues a power op against any cluster VM (local /
+// foreign / external) by (node, vmid). Admin-only.
+export async function adminVMLifecycle(
+  node: string,
+  vmid: number,
+  op: VMLifecycleOp,
+): Promise<void> {
+  await api.post(`/cluster/vms/${encodeURIComponent(node)}/${vmid}/${op}`, undefined, {
+    timeout: 2 * 60 * 1000,
+  })
+}
+
 export interface VMTunnel {
   id: string
   machine_id: string

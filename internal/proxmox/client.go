@@ -543,6 +543,20 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 	return taskID, nil
 }
 
+// ShutdownVM asks Proxmox to stop a VM gracefully — talks to the guest agent
+// (or sends ACPI when no agent) so the OS can flush filesystems and exit
+// cleanly. The Proxmox endpoint falls back to forceStop after its own
+// configured timeout, so a hung guest still ends up off without our caller
+// babysitting. Used for the user-facing "Shutdown" button.
+func (c *Client) ShutdownVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/shutdown", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
 // RebootVM triggers a graceful reboot through the guest agent (or ACPI when
 // no agent is present). Used after a cloud-init network change so the VM picks
 // up the new ipconfig0 on next boot. Returns the task UPID.
