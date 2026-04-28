@@ -8,6 +8,7 @@ import (
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/provision"
+	"nimbus/internal/proxmox"
 )
 
 // seedOwnedVM seeds a vms row owned by ownerID at the given (vmid, node, ip).
@@ -115,5 +116,93 @@ func TestAdminLifecycleByVMID_StampsStatusOnLocalRow(t *testing.T) {
 	}
 	if got.Status != "stopped" {
 		t.Errorf("local status after admin shutdown = %q, want stopped", got.Status)
+	}
+}
+
+func TestListWithLiveStatus_OverwritesWhenProxmoxDisagrees(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 200, Node: "alpha", Status: "stopped"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	owner := uint(42)
+	seedOwnedVM(t, database, owner, "vm-a", 200, "alpha")
+
+	got, err := svc.ListWithLiveStatus(context.Background(), &owner)
+	if err != nil {
+		t.Fatalf("ListWithLiveStatus: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != "stopped" {
+		t.Fatalf("status = %+v, want one row with status=stopped", got)
+	}
+}
+
+func TestListWithLiveStatus_KeepsDBStatusWhenProxmoxSilent(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return nil, nil // VM not yet visible to Proxmox (e.g. mid-provision)
+	}
+	svc, _, database := newTestService(t, fake)
+	owner := uint(42)
+	row := &db.VM{
+		VMID: 200, Hostname: "vm-a", Node: "alpha",
+		Tier: "small", OSTemplate: "ubuntu-24.04",
+		Status: "provisioning", OwnerID: &owner,
+	}
+	if err := database.Create(row).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := svc.ListWithLiveStatus(context.Background(), &owner)
+	if err != nil {
+		t.Fatalf("ListWithLiveStatus: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != "provisioning" {
+		t.Fatalf("status = %+v, want one row with status=provisioning", got)
+	}
+}
+
+func TestListWithLiveStatus_FallsBackOnProxmoxError(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return nil, errors.New("proxmox boom")
+	}
+	svc, _, database := newTestService(t, fake)
+	owner := uint(42)
+	seedOwnedVM(t, database, owner, "vm-a", 200, "alpha")
+
+	got, err := svc.ListWithLiveStatus(context.Background(), &owner)
+	if err != nil {
+		t.Fatalf("ListWithLiveStatus: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != "running" {
+		t.Fatalf("status = %+v, want DB-side running on Proxmox failure", got)
+	}
+}
+
+func TestListWithLiveStatus_ScopedToOwner(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{
+			{VMID: 200, Node: "alpha", Status: "stopped"},
+			{VMID: 201, Node: "alpha", Status: "stopped"},
+		}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	mine := uint(42)
+	other := uint(99)
+	seedOwnedVM(t, database, mine, "mine", 200, "alpha")
+	seedOwnedVM(t, database, other, "theirs", 201, "alpha")
+
+	got, err := svc.ListWithLiveStatus(context.Background(), &mine)
+	if err != nil {
+		t.Fatalf("ListWithLiveStatus: %v", err)
+	}
+	if len(got) != 1 || got[0].VMID != 200 {
+		t.Fatalf("got = %+v, want only owner=42's row", got)
 	}
 }
