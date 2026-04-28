@@ -403,7 +403,7 @@ in `internal/tunnel/client.go` handles both — confirmed against
 | `NIMBUS_VM_DISK_STORAGE` | `local-lvm` | Proxmox storage pool the disk gate checks for free space; empty disables the disk gate (scorer reverts to mem+cpu) |
 | `NIMBUS_MEM_BUFFER_MIB` | 256 | RAM headroom required above the tier's request — avoids packing a node to literal zero free |
 | `NIMBUS_CPU_LOAD_FACTOR` | 0.5 | Share of a fresh VM's vCPUs the soft score assumes consumed (range 0.25–1.0) |
-| `NIMBUS_NETSCAN_MODE` | `both` | `off` / `tcp` / `both` — netscan probe mode |
+| `NIMBUS_NETSCAN_MODE` | `arp` | `off` / `tcp` / `arp` / `both` — `arp` is passive (reads `/proc/net/arp`); `tcp` / `both` actively probe and read as a port scan to network IDS, opt in only on networks where you control the monitoring |
 | `NIMBUS_NETSCAN_INTERVAL_SECONDS` | 300 | Netscan loop cadence; 0 disables |
 | `NIMBUS_NETSCAN_TIMEOUT_MS` | 200 | Per-port TCP dial timeout for netscan |
 | `NIMBUS_NETSCAN_CONCURRENCY` | 50 | Parallel probes during a netscan sweep |
