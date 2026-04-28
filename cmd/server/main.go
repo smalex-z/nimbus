@@ -116,7 +116,7 @@ func main() {
 
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
-		&db.GPUSettings{}, &db.GPUJob{},
+		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		ippool.Model(),
 	)
@@ -152,8 +152,44 @@ func main() {
 		log.Printf("backfill: promoted oldest user to admin (no admin existed)")
 	}
 
+	// Network settings: env vars seed the DB row on first boot; after that the
+	// Settings → Network page is the source of truth and live-rotates the
+	// gateway/pool without a restart. Same pattern as Gopher.
+	netSettings, err := authSvc.GetNetworkSettings()
+	if err != nil {
+		log.Fatalf("failed to load network settings: %v", err)
+	}
+	if netSettings.IPPoolStart == "" && netSettings.IPPoolEnd == "" && netSettings.GatewayIP == "" &&
+		(cfg.IPPoolStart != "" || cfg.IPPoolEnd != "" || cfg.GatewayIP != "") {
+		if err := authSvc.SaveNetworkSettings(db.NetworkSettings{
+			IPPoolStart: cfg.IPPoolStart,
+			IPPoolEnd:   cfg.IPPoolEnd,
+			GatewayIP:   cfg.GatewayIP,
+		}); err != nil {
+			log.Printf("warning: failed to seed network settings from env: %v", err)
+		} else {
+			log.Printf("seeded network settings from env vars (one-time migration)")
+			netSettings.IPPoolStart = cfg.IPPoolStart
+			netSettings.IPPoolEnd = cfg.IPPoolEnd
+			netSettings.GatewayIP = cfg.GatewayIP
+		}
+	}
+	// DB wins after seeding; the live values feed pool seed + provision gateway.
+	effectivePoolStart := netSettings.IPPoolStart
+	effectivePoolEnd := netSettings.IPPoolEnd
+	effectiveGateway := netSettings.GatewayIP
+	if effectivePoolStart == "" {
+		effectivePoolStart = cfg.IPPoolStart
+	}
+	if effectivePoolEnd == "" {
+		effectivePoolEnd = cfg.IPPoolEnd
+	}
+	if effectiveGateway == "" {
+		effectiveGateway = cfg.GatewayIP
+	}
+
 	pool := ippool.New(database.DB)
-	if err := pool.Seed(context.Background(), cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
+	if err := pool.Seed(context.Background(), effectivePoolStart, effectivePoolEnd); err != nil {
 		log.Fatalf("failed to seed IP pool: %v", err)
 	}
 
@@ -228,7 +264,7 @@ func main() {
 	provSvc := provision.New(pveClient, pool, database.DB, cipher, keysSvc, provision.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
-		GatewayIP:        cfg.GatewayIP,
+		GatewayIP:        effectiveGateway,
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,

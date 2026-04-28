@@ -67,7 +67,10 @@ func NewRouter(d Deps) http.Handler {
 		WithTunnelAppliers(d.Provision).
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
-		WithNimbusAppURL(d.Config.AppURL)
+		WithNimbusAppURL(d.Config.AppURL).
+		WithNetworkAppliers(d.Provision).
+		WithNetworkOps(d.Provision).
+		WithPoolReseeder(d.Pool)
 	if d.SelfBootstrap != nil {
 		settingsBuilder = settingsBuilder.WithSelfBootstrap(d.SelfBootstrap)
 	}
@@ -196,6 +199,14 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/gopher", settings.SaveGopher)
 				r.Get("/settings/gopher/self-bootstrap", settings.SelfBootstrapStatus)
 				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
+				r.Get("/settings/network", settings.GetNetwork)
+				r.Put("/settings/network", settings.SaveNetwork)
+				// Disruptive batch ops — generous timeout because each VM
+				// reboot waits on a Proxmox task.
+				r.With(middleware.Timeout(15*time.Minute)).
+					Post("/settings/network/renumber-vms", settings.RenumberVMs)
+				r.With(middleware.Timeout(15*time.Minute)).
+					Post("/settings/network/force-gateway-update", settings.ForceGatewayUpdate)
 				r.Get("/tunnels", tunnels.List)
 
 				// S3 storage (singleton MinIO VM) — admin-only.

@@ -278,3 +278,15 @@ type S3Storage struct {
 
 // TableName pins the table name; without this GORM would pluralize to "s3_storages".
 func (S3Storage) TableName() string { return "s3_storage" }
+
+// NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
+// single row (ID=1) is used. The columns mirror the env vars they replace
+// (IP_POOL_START / IP_POOL_END / GATEWAY_IP) — env vars now act as first-boot
+// defaults only; once the row is populated, the DB is the source of truth and
+// admins manage these from Settings → Network.
+type NetworkSettings struct {
+	ID          uint   `gorm:"primaryKey"`
+	IPPoolStart string `gorm:"default:''"`
+	IPPoolEnd   string `gorm:"default:''"`
+	GatewayIP   string `gorm:"default:''"`
+}

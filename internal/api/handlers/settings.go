@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +36,27 @@ type GPUConfigApplier interface {
 	SetGPUBootstrapConfig(provision.GPUBootstrapConfig)
 }
 
+// NetworkApplier is implemented by anything that needs to be told the live
+// gateway IP after a Settings → Network save. provision.Service satisfies via
+// SetGatewayIP.
+type NetworkApplier interface {
+	SetGatewayIP(string)
+}
+
+// NetworkOps performs the disruptive renumber + force-gateway batch ops.
+// provision.Service satisfies this; the handler keeps it as an interface so
+// tests can inject a fake without booting the whole orchestrator.
+type NetworkOps interface {
+	RenumberAllVMs(ctx context.Context, gateway string) (provision.NetworkOpReport, error)
+	ForceGatewayUpdate(ctx context.Context, gateway string) (provision.NetworkOpReport, error)
+}
+
+// PoolReseeder is what the network handler uses to converge the IP pool table
+// to the new range after a save. *ippool.Pool satisfies it.
+type PoolReseeder interface {
+	Reseed(ctx context.Context, start, end string) (added, removedFree, stranded int, err error)
+}
+
 // SelfBootstrap is implemented by selftunnel.Service. SaveGopher fires
 // Start in a goroutine after a successful credential save, and the
 // /self-bootstrap status/start endpoints proxy to it.
@@ -49,12 +71,15 @@ type SelfBootstrap interface {
 
 // Settings handles admin-only configuration endpoints.
 type Settings struct {
-	auth          *service.AuthService
-	appliers      []TunnelClientApplier
-	tunnels       TunnelInfoSetter
-	gpuAppliers   []GPUConfigApplier
-	nimbusAppURL  string // captured at construction so SaveGPU can build NimbusGPUAPI URL
-	selfBootstrap SelfBootstrap
+	auth            *service.AuthService
+	appliers        []TunnelClientApplier
+	tunnels         TunnelInfoSetter
+	gpuAppliers     []GPUConfigApplier
+	nimbusAppURL    string // captured at construction so SaveGPU can build NimbusGPUAPI URL
+	selfBootstrap   SelfBootstrap
+	networkAppliers []NetworkApplier
+	networkOps      NetworkOps
+	pool            PoolReseeder
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -95,6 +120,27 @@ func (s *Settings) WithNimbusAppURL(u string) *Settings {
 // something to talk to.
 func (s *Settings) WithSelfBootstrap(b SelfBootstrap) *Settings {
 	s.selfBootstrap = b
+	return s
+}
+
+// WithNetworkAppliers registers components that need to be told the live
+// gateway IP after a network settings save (provision.Service mainly).
+func (s *Settings) WithNetworkAppliers(a ...NetworkApplier) *Settings {
+	s.networkAppliers = append(s.networkAppliers, a...)
+	return s
+}
+
+// WithNetworkOps wires the renumber / force-gateway batch operator.
+// provision.Service satisfies it.
+func (s *Settings) WithNetworkOps(o NetworkOps) *Settings {
+	s.networkOps = o
+	return s
+}
+
+// WithPoolReseeder wires the IP pool so SaveNetwork can converge the
+// allocation table to the new range. *ippool.Pool satisfies it.
+func (s *Settings) WithPoolReseeder(p PoolReseeder) *Settings {
+	s.pool = p
 	return s
 }
 
@@ -483,6 +529,176 @@ func (s *Settings) SelfBootstrapStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, map[string]string{"state": "started"})
+}
+
+// networkSettingsView is what GET / PUT /api/settings/network return.
+type networkSettingsView struct {
+	IPPoolStart string `json:"ip_pool_start"`
+	IPPoolEnd   string `json:"ip_pool_end"`
+	GatewayIP   string `json:"gateway_ip"`
+}
+
+// GetNetwork handles GET /api/settings/network (admin only). Returns the live
+// IP pool range and gateway. Used by the Settings → Network panel and as the
+// canonical source for the renumber / force-gateway confirmation modals.
+func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
+	settings, err := s.auth.GetNetworkSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load network settings")
+		return
+	}
+	response.Success(w, networkSettingsView{
+		IPPoolStart: settings.IPPoolStart,
+		IPPoolEnd:   settings.IPPoolEnd,
+		GatewayIP:   settings.GatewayIP,
+	})
+}
+
+type saveNetworkRequest struct {
+	IPPoolStart string `json:"ip_pool_start"`
+	IPPoolEnd   string `json:"ip_pool_end"`
+	GatewayIP   string `json:"gateway_ip"`
+}
+
+// SaveNetwork handles PUT /api/settings/network (admin only). Persists the
+// supplied values, then reseeds the IP pool to converge to the new range and
+// pushes the live gateway to every registered NetworkApplier. Existing VMs
+// are NOT touched — that requires the explicit RenumberVMs / ForceGatewayUpdate
+// endpoints.
+func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
+	var req saveNetworkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	start := strings.TrimSpace(req.IPPoolStart)
+	end := strings.TrimSpace(req.IPPoolEnd)
+	gw := strings.TrimSpace(req.GatewayIP)
+
+	for label, v := range map[string]string{"ip_pool_start": start, "ip_pool_end": end, "gateway_ip": gw} {
+		if v == "" {
+			continue // empty = preserve existing
+		}
+		if ip := net.ParseIP(v); ip == nil || ip.To4() == nil {
+			response.BadRequest(w, label+" is not a valid IPv4 address")
+			return
+		}
+	}
+
+	if err := s.auth.SaveNetworkSettings(db.NetworkSettings{
+		IPPoolStart: start,
+		IPPoolEnd:   end,
+		GatewayIP:   gw,
+	}); err != nil {
+		response.InternalError(w, "failed to save network settings")
+		return
+	}
+
+	settings, err := s.auth.GetNetworkSettings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+
+	if s.pool != nil && settings.IPPoolStart != "" && settings.IPPoolEnd != "" {
+		if _, _, _, err := s.pool.Reseed(r.Context(), settings.IPPoolStart, settings.IPPoolEnd); err != nil {
+			response.BadRequest(w, "saved, but pool reseed failed: "+err.Error())
+			return
+		}
+	}
+	for _, a := range s.networkAppliers {
+		a.SetGatewayIP(settings.GatewayIP)
+	}
+
+	response.Success(w, networkSettingsView{
+		IPPoolStart: settings.IPPoolStart,
+		IPPoolEnd:   settings.IPPoolEnd,
+		GatewayIP:   settings.GatewayIP,
+	})
+}
+
+// networkOpResponse is the JSON shape returned by the renumber / force-gateway
+// endpoints — Updated count + per-VM failures the UI can surface.
+type networkOpResponse struct {
+	Updated  int                    `json:"updated"`
+	Failures []networkOpFailureView `json:"failures"`
+}
+
+type networkOpFailureView struct {
+	VMRowID  uint   `json:"vm_row_id"`
+	VMID     int    `json:"vmid"`
+	Hostname string `json:"hostname"`
+	Error    string `json:"error"`
+}
+
+func toNetworkOpResponse(rep provision.NetworkOpReport) networkOpResponse {
+	out := networkOpResponse{
+		Updated:  rep.Updated,
+		Failures: make([]networkOpFailureView, 0, len(rep.Failures)),
+	}
+	for _, f := range rep.Failures {
+		out.Failures = append(out.Failures, networkOpFailureView{
+			VMRowID:  f.VMRowID,
+			VMID:     f.VMID,
+			Hostname: f.Hostname,
+			Error:    f.Err,
+		})
+	}
+	return out
+}
+
+// ForceGatewayUpdate handles POST /api/settings/network/force-gateway-update
+// (admin only). Pushes the currently-saved gateway to every managed VM via
+// `qm set --ipconfig0` and reboots running VMs so the change takes effect.
+// Disruptive — every running VM bounces.
+func (s *Settings) ForceGatewayUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.networkOps == nil {
+		response.InternalError(w, "network ops not wired")
+		return
+	}
+	settings, err := s.auth.GetNetworkSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load network settings")
+		return
+	}
+	if settings.GatewayIP == "" {
+		response.BadRequest(w, "gateway_ip is not set; save network settings first")
+		return
+	}
+	rep, err := s.networkOps.ForceGatewayUpdate(r.Context(), settings.GatewayIP)
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, toNetworkOpResponse(rep))
+}
+
+// RenumberVMs handles POST /api/settings/network/renumber-vms (admin only).
+// Reserves a fresh IP from the saved pool for every managed VM, updates each
+// VM's cloud-init, reboots it, and releases the old IP. Disruptive.
+//
+// Refuses with 400 if the pool has fewer free addresses than the number of
+// VMs to renumber — operator must widen the pool first.
+func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
+	if s.networkOps == nil {
+		response.InternalError(w, "network ops not wired")
+		return
+	}
+	settings, err := s.auth.GetNetworkSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load network settings")
+		return
+	}
+	if settings.GatewayIP == "" {
+		response.BadRequest(w, "gateway_ip is not set; save network settings first")
+		return
+	}
+	rep, err := s.networkOps.RenumberAllVMs(r.Context(), settings.GatewayIP)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, toNetworkOpResponse(rep))
 }
 
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).

@@ -11,6 +11,7 @@ import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
 import GPUHost from '@/pages/GPUHost'
 import Keys from '@/pages/Keys'
+import Network from '@/pages/Network'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import S3 from '@/pages/S3'
@@ -88,6 +89,7 @@ export default function App() {
                       <Route path="/gpu" element={<GPU />} />
                       <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
                       <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
+                      <Route path="/network" element={<RequireAdmin><Network /></RequireAdmin>} />
                       <Route path="/s3" element={<RequireAdmin><S3 /></RequireAdmin>} />
                       <Route path="/gpu-host" element={<RequireAdmin><GPUHost /></RequireAdmin>} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />

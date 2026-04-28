@@ -543,6 +543,18 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 	return taskID, nil
 }
 
+// RebootVM triggers a graceful reboot through the guest agent (or ACPI when
+// no agent is present). Used after a cloud-init network change so the VM picks
+// up the new ipconfig0 on next boot. Returns the task UPID.
+func (c *Client) RebootVM(ctx context.Context, node string, vmid int) (string, error) {
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/reboot", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodPost, path, url.Values{}, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
 // DestroyVM removes a VM from Proxmox.
 //
 //   - purge=1 also clears job/replication/HA references (otherwise stale
