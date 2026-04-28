@@ -10,7 +10,7 @@ export interface User {
 
 export type TierName = 'small' | 'medium' | 'large' | 'xl'
 export type OSTemplate = 'ubuntu-24.04' | 'ubuntu-22.04' | 'debian-12' | 'debian-11'
-export type VMStatus = 'provisioning' | 'running' | 'failed'
+export type VMStatus = 'provisioning' | 'running' | 'stopped' | 'paused' | 'failed' | 'unknown'
 
 export interface Tier {
   name: TierName
