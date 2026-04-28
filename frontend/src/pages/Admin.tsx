@@ -470,7 +470,9 @@ function NodeCard({
               {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
             </div>
             <div className="font-mono text-[11px] text-ink-3 mt-0.5">
-              {n.vm_count} VM{n.vm_count !== 1 ? 's' : ''}
+              <span title={`${n.vm_count} running of ${n.vm_count_total} total VM${n.vm_count_total === 1 ? '' : 's'}`}>
+                {n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+              </span>
               {active && <span className="text-ink ml-2">· filtered</span>}
             </div>
           </div>
