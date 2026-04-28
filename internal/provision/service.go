@@ -669,6 +669,41 @@ func (s *Service) List(ctx context.Context, ownerID *uint) ([]db.VM, error) {
 	return vms, nil
 }
 
+// ListWithLiveStatus is List enriched with live Proxmox power state so a VM
+// stopped/paused outside Nimbus surfaces correctly on the user's dashboard.
+// The DB-side `vm.status` is otherwise only written when Nimbus itself drives
+// a lifecycle op, so it goes stale the moment someone uses the Proxmox UI or
+// the VM crashes.
+//
+// Rows with no matching Proxmox record keep their DB status unchanged — that
+// preserves "provisioning" mid-clone (the VM doesn't exist on Proxmox yet)
+// and "failed" rows that never got past clone. If the Proxmox call fails the
+// DB rows are returned as-is so a transient outage doesn't blank the page.
+func (s *Service) ListWithLiveStatus(ctx context.Context, ownerID *uint) ([]db.VM, error) {
+	vms, err := s.List(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if len(vms) == 0 {
+		return vms, nil
+	}
+	cluster, err := s.px.GetClusterVMs(ctx)
+	if err != nil {
+		log.Printf("list vms: live status lookup failed, returning DB status: %v", err)
+		return vms, nil
+	}
+	live := make(map[int]string, len(cluster))
+	for _, c := range cluster {
+		live[c.VMID] = c.Status
+	}
+	for i := range vms {
+		if status, ok := live[vms[i].VMID]; ok && status != "" {
+			vms[i].Status = status
+		}
+	}
+	return vms, nil
+}
+
 // BackfillOwnership assigns every VM with a NULL owner_id to the
 // lowest-ID admin on the instance. Pre-ownership-tracking VMs (provisioned
 // before this feature shipped) get bound to the original setup admin so
