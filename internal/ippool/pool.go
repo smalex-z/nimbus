@@ -242,6 +242,32 @@ func (p *Pool) Release(ctx context.Context, ip string) error {
 	return nil
 }
 
+// Drop removes the row for an IP entirely (DELETE, not soft-delete). Used by
+// the renumber path to evict allocated rows that fall outside the new pool
+// range — Release would just mark them free, which then re-pollutes Reserve's
+// "lowest free IP" pick. Idempotent: missing rows return nil.
+func (p *Pool) Drop(ctx context.Context, ip string) error {
+	if err := p.db.WithContext(ctx).
+		Where("ip = ?", ip).
+		Delete(&IPAllocation{}).Error; err != nil {
+		return fmt.Errorf("drop %s: %w", ip, err)
+	}
+	return nil
+}
+
+// InRange reports whether ip falls within the inclusive [start, end] IPv4
+// range. Returns false on parse error so callers treat malformed inputs as
+// out-of-range (safe default — a Drop is reversible by re-Seeding).
+func InRange(ip, start, end string) bool {
+	a := net.ParseIP(ip).To4()
+	s := net.ParseIP(start).To4()
+	e := net.ParseIP(end).To4()
+	if a == nil || s == nil || e == nil {
+		return false
+	}
+	return compareIP(a, s) >= 0 && compareIP(a, e) <= 0
+}
+
 // List returns all IP allocations ordered by IP. Useful for the admin UI and
 // debugging.
 func (p *Pool) List(ctx context.Context) ([]IPAllocation, error) {

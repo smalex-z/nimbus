@@ -120,8 +120,65 @@ func TestRenumberAllVMs_RejectsWhenPoolTooSmall(t *testing.T) {
 	seedManagedVM(t, database, "vm-b", 201, "10.0.0.3")
 	seedManagedVM(t, database, "vm-c", 202, "10.0.0.4")
 
-	if _, err := svc.RenumberAllVMs(context.Background(), "10.0.0.1"); err == nil {
+	if _, err := svc.RenumberAllVMs(context.Background(), "10.0.0.1", "10.0.0.1", "10.0.0.5"); err == nil {
 		t.Error("expected error when pool capacity < vm count, got nil")
+	}
+}
+
+func TestRenumberAllVMs_DropsStrandedOldIPsSoTheyDoNotPolluteReserve(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	svc, pool, database := newTestService(t, fake)
+
+	// newTestService seeds the pool with 10.0.0.1..5. To simulate the user's
+	// scenario, adopt a stranded "old-pool" address (192.168.0.151) into the
+	// table the same way Reseed would have left it after a pool migration.
+	// First we have to inject the row.
+	if err := pool.Seed(context.Background(), "192.168.0.151", "192.168.0.151"); err != nil {
+		t.Fatalf("seed stranded: %v", err)
+	}
+	// Allocate it to a VM that's about to be renumbered.
+	seedManagedVM(t, database, "vm-stranded", 200, "192.168.0.151")
+	if err := pool.AdoptAllocation(context.Background(), "192.168.0.151", 200, "vm-stranded"); err != nil {
+		t.Fatalf("adopt stranded: %v", err)
+	}
+
+	// Renumber into the new pool [10.0.0.1, 10.0.0.5]. With the bug, the loop
+	// would Release 192.168.0.151 back to free, and a *subsequent* Reserve
+	// would pick it (lex < 10.0.0.x in 4-byte comparison? actually 10.0.0.x <
+	// 192.168.0.x, so this case wouldn't reproduce — flip ranges to match the
+	// real-world incident).
+	// The user hit it with pool 192.168.50.* and stranded 192.168.0.* which
+	// IS lex-lower than 192.168.50.* so freed-stranded-row WAS picked up.
+	// Use that exact shape here:
+	if _, _, _, err := pool.Reseed(context.Background(), "192.168.50.1", "192.168.50.5"); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+
+	rep, err := svc.RenumberAllVMs(context.Background(), "192.168.50.1", "192.168.50.1", "192.168.50.5")
+	if err != nil {
+		t.Fatalf("RenumberAllVMs: %v", err)
+	}
+	if rep.Updated != 1 || len(rep.Failures) != 0 {
+		t.Fatalf("rep = %+v; want Updated=1 Failures=0", rep)
+	}
+
+	// The stranded row must be GONE from the pool table — not lingering as
+	// status=free where the next Reserve would pick it up.
+	if _, err := pool.GetByIP(context.Background(), "192.168.0.151"); err == nil {
+		t.Errorf("192.168.0.151 still in pool — should have been dropped on renumber")
+	}
+
+	// And the VM should now hold a 192.168.50.* address.
+	var got db.VM
+	if err := database.WithContext(context.Background()).First(&got, "vmid = ?", 200).Error; err != nil {
+		t.Fatalf("re-read vm: %v", err)
+	}
+	if got.IP == "192.168.0.151" {
+		t.Errorf("vm.IP = %q, expected to have moved into the new pool", got.IP)
+	}
+	if !strings.HasPrefix(got.IP, "192.168.50.") {
+		t.Errorf("vm.IP = %q, want a 192.168.50.x address from the new pool", got.IP)
 	}
 }
 
@@ -132,7 +189,7 @@ func TestRenumberAllVMs_HappyPathReassignsIPsAndUpdatesDB(t *testing.T) {
 	seedManagedVM(t, database, "vm-a", 200, "10.0.0.2")
 	seedManagedVM(t, database, "vm-b", 201, "10.0.0.3")
 
-	rep, err := svc.RenumberAllVMs(context.Background(), "10.0.0.1")
+	rep, err := svc.RenumberAllVMs(context.Background(), "10.0.0.1", "10.0.0.1", "10.0.0.5")
 	if err != nil {
 		t.Fatalf("RenumberAllVMs: %v", err)
 	}

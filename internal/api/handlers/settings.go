@@ -47,7 +47,7 @@ type NetworkApplier interface {
 // provision.Service satisfies this; the handler keeps it as an interface so
 // tests can inject a fake without booting the whole orchestrator.
 type NetworkOps interface {
-	RenumberAllVMs(ctx context.Context, gateway string) (provision.NetworkOpReport, error)
+	RenumberAllVMs(ctx context.Context, gateway, poolStart, poolEnd string) (provision.NetworkOpReport, error)
 	ForceGatewayUpdate(ctx context.Context, gateway string) (provision.NetworkOpReport, error)
 }
 
@@ -689,11 +689,11 @@ func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to load network settings")
 		return
 	}
-	if settings.GatewayIP == "" {
-		response.BadRequest(w, "gateway_ip is not set; save network settings first")
+	if settings.GatewayIP == "" || settings.IPPoolStart == "" || settings.IPPoolEnd == "" {
+		response.BadRequest(w, "network settings (gateway_ip + ip_pool_start + ip_pool_end) must all be saved before renumbering")
 		return
 	}
-	rep, err := s.networkOps.RenumberAllVMs(r.Context(), settings.GatewayIP)
+	rep, err := s.networkOps.RenumberAllVMs(r.Context(), settings.GatewayIP, settings.IPPoolStart, settings.IPPoolEnd)
 	if err != nil {
 		response.BadRequest(w, err.Error())
 		return

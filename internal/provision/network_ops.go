@@ -100,14 +100,20 @@ func (s *Service) ForceGatewayUpdate(ctx context.Context, gateway string) (Netwo
 // pool, updating cloud-init and rebooting each VM in turn. The new pool must
 // already be saved (Reseed run) and have at least len(vms) free addresses.
 //
-// On success, each VM's old IP is released back to the pool (may then be
-// pruned if outside the new range) and the vms.ip column is updated.
+// poolStart / poolEnd describe the *new* pool range. They're used to decide
+// what to do with each VM's old IP after the swap: in-range → Release (return
+// to free pool, can be reused by a later iteration), out-of-range → Drop
+// (delete the row entirely so it never reappears as "free" and pollutes
+// Reserve's lowest-free pick).
 //
 // Disruptive — every VM bounces. Per-VM failures roll back that one VM's
 // reservation but don't abort the batch.
-func (s *Service) RenumberAllVMs(ctx context.Context, gateway string) (NetworkOpReport, error) {
+func (s *Service) RenumberAllVMs(ctx context.Context, gateway, poolStart, poolEnd string) (NetworkOpReport, error) {
 	if gateway == "" {
 		return NetworkOpReport{}, errors.New("gateway is required")
+	}
+	if poolStart == "" || poolEnd == "" {
+		return NetworkOpReport{}, errors.New("pool range is required")
 	}
 	vms, err := s.managedVMsForNetworkOp(ctx)
 	if err != nil {
@@ -176,8 +182,17 @@ func (s *Service) RenumberAllVMs(ctx context.Context, gateway string) (NetworkOp
 			continue
 		}
 		if oldIP != "" {
-			if err := s.pool.Release(ctx, oldIP); err != nil {
-				log.Printf("renumber: release old ip %s vmid=%d: %v", oldIP, vm.VMID, err)
+			// In-range old IPs return to the free pool (can be reused by a
+			// later iteration). Out-of-range old IPs would re-pollute
+			// Reserve's lex-lowest pick if marked free, so drop them outright.
+			if ippool.InRange(oldIP, poolStart, poolEnd) {
+				if err := s.pool.Release(ctx, oldIP); err != nil {
+					log.Printf("renumber: release old ip %s vmid=%d: %v", oldIP, vm.VMID, err)
+				}
+			} else {
+				if err := s.pool.Drop(ctx, oldIP); err != nil {
+					log.Printf("renumber: drop stranded ip %s vmid=%d: %v", oldIP, vm.VMID, err)
+				}
 			}
 		}
 		rep.Updated++
