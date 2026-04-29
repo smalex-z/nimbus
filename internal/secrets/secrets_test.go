@@ -105,3 +105,98 @@ func TestLoadOrCreateKey_ReusesExisting(t *testing.T) {
 		t.Fatal("LoadOrCreateKey did not return existing env key")
 	}
 }
+
+// TestLoadOrCreateKey_ReadsFromFileWhenEnvMissing covers the systemd-isn't-
+// the-only-caller case. A manual `nimbus` invocation outside the systemd
+// unit doesn't get NIMBUS_ENCRYPTION_KEY pre-loaded, but the env file may
+// already hold the canonical key — falling through to fresh-generate would
+// silently rotate the at-rest encryption key. The fix consults the file
+// before generating.
+func TestLoadOrCreateKey_ReadsFromFileWhenEnvMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/nimbus.env"
+
+	raw := bytes.Repeat([]byte{0x42}, KeyLen)
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	if err := os.WriteFile(path, []byte("NIMBUS_ENCRYPTION_KEY="+encoded+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvVar, "")
+
+	key, err := LoadOrCreateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey: %v", err)
+	}
+	if !bytes.Equal(key, raw) {
+		t.Fatal("did not return existing key from file")
+	}
+
+	// File should still contain exactly one key line — fresh-generate path
+	// must not have fired.
+	got, _ := os.ReadFile(path)
+	if want := "NIMBUS_ENCRYPTION_KEY=" + encoded + "\n"; string(got) != want {
+		t.Errorf("file changed unexpectedly:\n got: %q\nwant: %q", string(got), want)
+	}
+}
+
+// TestLoadOrCreateKey_DedupesFile is the regression for the production env
+// file we found with three duplicate NIMBUS_ENCRYPTION_KEY lines. The first
+// is canonical (systemd's EnvironmentFile dedupe takes the first
+// occurrence, and that's what the existing vault is encrypted under); the
+// extras are leftovers from earlier append-on-cold-start cycles. Loading
+// must keep the first and drop the rest.
+func TestLoadOrCreateKey_DedupesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/nimbus.env"
+
+	first := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, KeyLen))
+	second := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, KeyLen))
+	third := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x33}, KeyLen))
+	contents := "OTHER=keep\n" +
+		"NIMBUS_ENCRYPTION_KEY=" + first + "\n" +
+		"NIMBUS_ENCRYPTION_KEY=" + second + "\n" +
+		"# comment\n" +
+		"NIMBUS_ENCRYPTION_KEY=" + third + "\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvVar, "")
+
+	key, err := LoadOrCreateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey: %v", err)
+	}
+	wantRaw, _ := base64.StdEncoding.DecodeString(first)
+	if !bytes.Equal(key, wantRaw) {
+		t.Errorf("returned key isn't the first one in the file")
+	}
+
+	got, _ := os.ReadFile(path)
+	wantContents := "OTHER=keep\n" +
+		"NIMBUS_ENCRYPTION_KEY=" + first + "\n" +
+		"# comment\n"
+	if string(got) != wantContents {
+		t.Errorf("dedup wrong:\n got: %q\nwant: %q", string(got), wantContents)
+	}
+}
+
+// TestLoadOrCreateKey_GeneratesWhenAbsent covers the truly-fresh-install
+// case. No env var, no existing file → generate, persist, set env. Same
+// flow as before; just guarding against accidental regression.
+func TestLoadOrCreateKey_GeneratesWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/nimbus.env"
+	t.Setenv(EnvVar, "")
+
+	key, err := LoadOrCreateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey: %v", err)
+	}
+	if len(key) != KeyLen {
+		t.Errorf("len(key) = %d, want %d", len(key), KeyLen)
+	}
+	got, _ := os.ReadFile(path)
+	if !bytes.Contains(got, []byte("NIMBUS_ENCRYPTION_KEY=")) {
+		t.Errorf("file did not get the new key persisted: %q", string(got))
+	}
+}
