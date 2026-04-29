@@ -510,8 +510,11 @@ func (c *Client) SetClusterTagStyle(ctx context.Context, tagStyle string) error 
 	return c.do(ctx, http.MethodPut, "/cluster/options", params, nil)
 }
 
-// ResizeDisk grows a disk on a stopped VM. size is the Proxmox-style delta —
-// "+10G" adds 10 gigabytes.
+// ResizeDisk grows a disk. size accepts either an absolute target (e.g.
+// "15G") or a delta ("+5G"); the absolute form is preferred at provision
+// time because it doesn't bake in an assumption about the cloud image's
+// base size. Shrinking is rejected by Proxmox — passing a value smaller
+// than the current size returns an error.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
 	params := url.Values{}
 	params.Set("disk", disk)

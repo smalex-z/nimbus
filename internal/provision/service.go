@@ -463,11 +463,15 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		log.Printf("set description vmid=%d: %v (continuing)", newVMID, err)
 	}
 
-	// Step 5: resize the disk to tier spec. The cloud image ships at a small
-	// size; we *grow* it by the difference. (Proxmox accepts +<n>G deltas.)
-	resizeDelta := tier.DiskGB - 10 // cloud images are typically 10G base
-	if resizeDelta > 0 {
-		if err := s.px.ResizeDisk(ctx, target, newVMID, "scsi0", fmt.Sprintf("+%dG", resizeDelta)); err != nil {
+	// Step 5: resize the disk to tier spec. Proxmox accepts both absolute
+	// (e.g. "15G") and additive ("+5G") sizes; we use absolute. The earlier
+	// "+(tier - 10)" form quietly assumed every cloud image shipped at a
+	// 10 GiB base, but Ubuntu noble actually ships at 3.5 GiB — so a
+	// "small" (15 GiB) tier was coming up at 8.5 GiB, large at 53.5 GiB,
+	// etc. Absolute sizing makes the result match the tier regardless of
+	// which image we cloned from.
+	if tier.DiskGB > 0 {
+		if err := s.px.ResizeDisk(ctx, target, newVMID, "scsi0", fmt.Sprintf("%dG", tier.DiskGB)); err != nil {
 			return nil, fmt.Errorf("resize disk: %w", err)
 		}
 	}
