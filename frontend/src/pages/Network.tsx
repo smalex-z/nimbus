@@ -116,30 +116,45 @@ function NetworkPanel() {
           />
         </div>
         <div className="n-field">
-          <label className="n-label" htmlFor="net-gateway">Gateway IP</label>
-          <input
-            id="net-gateway"
-            className="n-input"
-            type="text"
-            placeholder="192.168.0.1"
-            value={gateway}
-            onChange={(e) => setGateway(e.target.value)}
-          />
-        </div>
-        <div className="n-field">
-          <label className="n-label" htmlFor="net-prefix">Subnet prefix length</label>
-          <input
-            id="net-prefix"
-            className="n-input"
-            type="number"
-            min={1}
-            max={32}
-            placeholder="24"
-            value={prefixLen}
-            onChange={(e) => setPrefixLen(Number(e.target.value))}
-          />
+          <label className="n-label" htmlFor="net-gateway">Gateway IP / subnet prefix</label>
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
+            <input
+              id="net-gateway"
+              className="n-input"
+              type="text"
+              placeholder="192.168.0.1"
+              value={gateway}
+              onChange={(e) => setGateway(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <span
+              aria-hidden="true"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                padding: '0 6px',
+                color: 'var(--ink-mute)',
+                fontSize: 16,
+                fontFamily: 'var(--font-mono, monospace)',
+              }}
+            >
+              /
+            </span>
+            <input
+              id="net-prefix"
+              className="n-input"
+              type="number"
+              min={1}
+              max={32}
+              placeholder="24"
+              value={prefixLen}
+              onChange={(e) => setPrefixLen(Number(e.target.value))}
+              aria-label="Subnet prefix length"
+              style={{ width: 88, textAlign: 'center' }}
+            />
+          </div>
           <span style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 4 }}>
-            CIDR netmask Nimbus stamps into every VM's cloud-init (e.g. <code>24</code> for /24, <code>16</code> for /16). Applies to new VMs only — existing VMs keep their prefix until you explicitly renumber.
+            Default route + CIDR netmask Nimbus stamps into every VM's cloud-init (e.g. <code>192.168.0.1 / 24</code>, <code>10.0.0.1 / 16</code>). Applies to new VMs only — existing VMs keep their config until you push it with the action below.
           </span>
         </div>
 
@@ -184,7 +199,7 @@ function NetworkPanel() {
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button
             type="button"
-            className="n-btn"
+            className="n-btn n-btn-secondary"
             disabled={dirty}
             onClick={() => {
               setReport(null)
@@ -193,11 +208,11 @@ function NetworkPanel() {
             }}
             title={dirty ? 'Save your changes first' : ''}
           >
-            Force gateway on every VM…
+            Force gateway + subnet on every VM
           </button>
           <button
             type="button"
-            className="n-btn"
+            className="n-btn n-btn-secondary"
             disabled={dirty}
             onClick={() => {
               setReport(null)
@@ -206,7 +221,7 @@ function NetworkPanel() {
             }}
             title={dirty ? 'Save your changes first' : ''}
           >
-            Renumber every VM into new pool…
+            Renumber every VM into new pool
           </button>
         </div>
       </div>
@@ -225,7 +240,7 @@ function NetworkPanel() {
           }}
         >
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-            {reportKind === 'renumber' ? 'Renumber complete' : 'Gateway update complete'}
+            {reportKind === 'renumber' ? 'Renumber complete' : 'Network config push complete'}
           </div>
           <div style={{ fontSize: 13, color: 'var(--ink-body)' }}>
             {report.updated} VM{report.updated === 1 ? '' : 's'} updated.{' '}
@@ -273,7 +288,7 @@ function DangerModal({
   onDone: (rep: NetworkOpReport, kind: DangerKind) => void
 }) {
   const required =
-    kind === 'renumber' ? 'RENUMBER ALL VMS' : 'CHANGE GATEWAY ON ALL VMS'
+    kind === 'renumber' ? 'RENUMBER ALL VMS' : 'CHANGE NETWORK ON ALL VMS'
   const [typed, setTyped] = useState('')
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -281,7 +296,7 @@ function DangerModal({
   const title =
     kind === 'renumber'
       ? 'Renumber every nimbus-managed VM'
-      : 'Force the new gateway on every VM'
+      : 'Force gateway + subnet on every VM'
 
   const description =
     kind === 'renumber'
@@ -290,7 +305,9 @@ function DangerModal({
         } – ${settings?.ip_pool_end ?? '?'} and rebooted. The new pool must have at least as many free addresses as you have VMs. Any open SSH sessions will drop. This cannot be cleanly undone — the old IPs are released back to the pool.`
       : `Every nimbus-managed VM will be reconfigured to use ${
           settings?.gateway_ip ?? '?'
-        } as its default gateway and rebooted. If the new gateway is not yet reachable on your network, every VM will lose connectivity until the network is fixed. Any open SSH sessions will drop.`
+        } as its default gateway with a /${
+          settings?.prefix_len && settings.prefix_len > 0 ? settings.prefix_len : 24
+        } subnet, then rebooted. If the new gateway is not yet reachable on your network, every VM will lose connectivity until the network is fixed. Any open SSH sessions will drop.`
 
   const handleConfirm = async () => {
     setError(null)
@@ -362,7 +379,7 @@ function DangerModal({
             disabled={running || typed !== required}
             style={{ background: 'var(--err)', borderColor: 'var(--err)' }}
           >
-            {running ? 'Working…' : kind === 'renumber' ? 'Renumber all VMs' : 'Force gateway'}
+            {running ? 'Working…' : kind === 'renumber' ? 'Renumber all VMs' : 'Force gateway + subnet'}
           </button>
         </div>
       </div>
