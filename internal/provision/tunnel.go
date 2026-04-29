@@ -144,6 +144,10 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		// systemd unit actually came up and surface its journal if not, so
 		// future failures land in tunnel_error instead of disappearing.
 		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+		// Newline-separated, NOT "; "-joined — bash rejects `then; echo` as a
+		// syntax error because `then` expects a command before any separator.
+		// Plain newlines work in both bash and dash and keep the script
+		// readable in the journal when it does fail.
 		cmd := strings.Join([]string{
 			"set -e",
 			"_T=$(mktemp)",
@@ -161,7 +165,7 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 			"  exit 1",
 			"fi",
 			"exit $_RC",
-		}, "; ")
+		}, "\n")
 
 		// Bound the exec separately from the dial. If the bootstrap genuinely
 		// runs longer than tunnelBootstrapExecTimeout, close the session to
