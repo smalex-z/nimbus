@@ -362,4 +362,4 @@ GitHub Actions builds Linux amd64/arm64 + macOS amd64 binaries and creates a rel
 
 ## License
 
-[MIT](./LICENSE)
+[Apache 2.0](./LICENSE)
