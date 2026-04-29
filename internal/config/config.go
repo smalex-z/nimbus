@@ -28,9 +28,16 @@ type Config struct {
 	ExcludedNodes           []string
 
 	// Networking
-	IPPoolStart  string
-	IPPoolEnd    string
-	GatewayIP    string
+	IPPoolStart string
+	IPPoolEnd   string
+	GatewayIP   string
+	// VMPrefixLen is the netmask length applied to every VM's cloud-init
+	// ipconfig0. Default 24 matches the historical hardcoded value, so
+	// existing deployments keep their current behaviour without touching
+	// .env. Set to 16 (or whatever) when the cluster's VM bridge is on a
+	// larger network than a single /24. After first boot, the DB owns the
+	// effective value (see db.NetworkSettings); env is seed-only.
+	VMPrefixLen  int
 	Nameserver   string
 	SearchDomain string
 
@@ -107,6 +114,7 @@ func Load() (*Config, error) {
 		IPPoolStart:             os.Getenv("IP_POOL_START"),
 		IPPoolEnd:               os.Getenv("IP_POOL_END"),
 		GatewayIP:               os.Getenv("GATEWAY_IP"),
+		VMPrefixLen:             getEnvInt("VM_PREFIX_LEN", 24),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
 		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v3"),
@@ -156,9 +164,15 @@ type EnvValues struct {
 	IPPoolStart        string
 	IPPoolEnd          string
 	GatewayIP          string
-	Nameserver         string
-	SearchDomain       string
-	Port               string
+	// VMPrefixLen is the netmask length applied to every VM's cloud-init
+	// ipconfig0 (24, 16, etc.). Captured by the wizard so the operator
+	// chooses their subnet upfront. Zero is treated as "use default 24"
+	// by callers (the wizard handler defaults; the env loader uses
+	// getEnvInt with a 24 fallback).
+	VMPrefixLen  int
+	Nameserver   string
+	SearchDomain string
+	Port         string
 	// Optional Gopher tunnel credentials — collected from the wizard's
 	// "optional" section. Empty when the operator hasn't configured them.
 	// Seeded into db.GopherSettings on first boot (see main.go); after that,
@@ -184,6 +198,10 @@ func EnvFilePath() string {
 
 // WriteEnvFile writes v to path as KEY=VALUE pairs, replacing any existing file.
 func WriteEnvFile(path string, v EnvValues) error {
+	prefix := v.VMPrefixLen
+	if prefix < 1 || prefix > 32 {
+		prefix = 24
+	}
 	content := fmt.Sprintf(
 		"# Nimbus configuration — written by setup wizard.\n"+
 			"PROXMOX_HOST=%s\n"+
@@ -192,6 +210,7 @@ func WriteEnvFile(path string, v EnvValues) error {
 			"IP_POOL_START=%s\n"+
 			"IP_POOL_END=%s\n"+
 			"GATEWAY_IP=%s\n"+
+			"VM_PREFIX_LEN=%d\n"+
 			"NAMESERVER=%s\n"+
 			"SEARCH_DOMAIN=%s\n"+
 			"PORT=%s\n"+
@@ -199,6 +218,7 @@ func WriteEnvFile(path string, v EnvValues) error {
 			"GOPHER_API_KEY=%s\n",
 		v.ProxmoxHost, v.ProxmoxTokenID, v.ProxmoxTokenSecret,
 		v.IPPoolStart, v.IPPoolEnd, v.GatewayIP,
+		prefix,
 		v.Nameserver, v.SearchDomain, v.Port,
 		v.GopherAPIURL, v.GopherAPIKey,
 	)

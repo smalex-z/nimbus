@@ -37,10 +37,11 @@ type GPUConfigApplier interface {
 }
 
 // NetworkApplier is implemented by anything that needs to be told the live
-// gateway IP after a Settings → Network save. provision.Service satisfies via
-// SetGatewayIP.
+// gateway IP and cloud-init prefix length after a Settings → Network save.
+// provision.Service satisfies via SetGatewayIP / SetPrefixLen.
 type NetworkApplier interface {
 	SetGatewayIP(string)
+	SetPrefixLen(int)
 }
 
 // NetworkOps performs the disruptive renumber + force-gateway batch ops.
@@ -536,11 +537,13 @@ type networkSettingsView struct {
 	IPPoolStart string `json:"ip_pool_start"`
 	IPPoolEnd   string `json:"ip_pool_end"`
 	GatewayIP   string `json:"gateway_ip"`
+	PrefixLen   int    `json:"prefix_len"`
 }
 
 // GetNetwork handles GET /api/settings/network (admin only). Returns the live
-// IP pool range and gateway. Used by the Settings → Network panel and as the
-// canonical source for the renumber / force-gateway confirmation modals.
+// IP pool range, gateway, and cloud-init prefix length. Used by the Settings
+// → Network panel and as the canonical source for the renumber /
+// force-gateway confirmation modals.
 func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
 	settings, err := s.auth.GetNetworkSettings()
 	if err != nil {
@@ -551,6 +554,7 @@ func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
 		IPPoolStart: settings.IPPoolStart,
 		IPPoolEnd:   settings.IPPoolEnd,
 		GatewayIP:   settings.GatewayIP,
+		PrefixLen:   settings.PrefixLen,
 	})
 }
 
@@ -558,13 +562,14 @@ type saveNetworkRequest struct {
 	IPPoolStart string `json:"ip_pool_start"`
 	IPPoolEnd   string `json:"ip_pool_end"`
 	GatewayIP   string `json:"gateway_ip"`
+	PrefixLen   int    `json:"prefix_len"`
 }
 
 // SaveNetwork handles PUT /api/settings/network (admin only). Persists the
 // supplied values, then reseeds the IP pool to converge to the new range and
-// pushes the live gateway to every registered NetworkApplier. Existing VMs
-// are NOT touched — that requires the explicit RenumberVMs / ForceGatewayUpdate
-// endpoints.
+// pushes the live gateway + prefix to every registered NetworkApplier.
+// Existing VMs are NOT touched — that requires the explicit RenumberVMs /
+// ForceGatewayUpdate endpoints.
 func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	var req saveNetworkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -584,11 +589,19 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Prefix: 0 = preserve existing (caller didn't include the field).
+	// Otherwise must be a sane IPv4 mask length. /1..32 covers everything;
+	// callers that want /0 should be loudly told no.
+	if req.PrefixLen != 0 && (req.PrefixLen < 1 || req.PrefixLen > 32) {
+		response.BadRequest(w, "prefix_len must be between 1 and 32")
+		return
+	}
 
 	if err := s.auth.SaveNetworkSettings(db.NetworkSettings{
 		IPPoolStart: start,
 		IPPoolEnd:   end,
 		GatewayIP:   gw,
+		PrefixLen:   req.PrefixLen,
 	}); err != nil {
 		response.InternalError(w, "failed to save network settings")
 		return
@@ -608,12 +621,14 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, a := range s.networkAppliers {
 		a.SetGatewayIP(settings.GatewayIP)
+		a.SetPrefixLen(settings.PrefixLen)
 	}
 
 	response.Success(w, networkSettingsView{
 		IPPoolStart: settings.IPPoolStart,
 		IPPoolEnd:   settings.IPPoolEnd,
 		GatewayIP:   settings.GatewayIP,
+		PrefixLen:   settings.PrefixLen,
 	})
 }
 
