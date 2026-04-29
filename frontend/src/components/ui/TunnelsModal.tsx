@@ -3,12 +3,14 @@ import { createPortal } from 'react-dom'
 import {
   createVMTunnel,
   deleteVMTunnel,
+  getTunnelInfo,
   listVMTunnels,
   type VMTunnel,
 } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import CopyButton from '@/components/ui/CopyButton'
+import { formatTunnelPublic } from '@/lib/tunnel'
 
 interface TunnelsModalProps {
   vmId: number
@@ -18,6 +20,11 @@ interface TunnelsModalProps {
 
 export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalProps) {
   const [tunnels, setTunnels] = useState<VMTunnel[] | null>(null)
+  // gatewayHost is Gopher's routable hostname (from /api/tunnels/info). Used
+  // to render "host:server_port" for tunnels that don't have a subdomain
+  // URL — port-only TCP, UDP, or HTTP tunnels Gopher created without one.
+  // Without it those rows fall back to the bare hex id, which is unhelpful.
+  const [gatewayHost, setGatewayHost] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [port, setPort] = useState('')
@@ -38,6 +45,13 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
 
   useEffect(() => {
     void load()
+    // Tunnel info lives on a separate endpoint and rarely changes — fetch
+    // once at mount so port-only tunnel rows can render "host:port" instead
+    // of the bare hex id. Failures here are non-fatal: the row will degrade
+    // to subdomain or id, which is the pre-fix behavior.
+    void getTunnelInfo()
+      .then((info) => setGatewayHost(info.host))
+      .catch(() => undefined)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
@@ -145,7 +159,14 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
           {tunnels !== null && tunnels.length > 0 && (
             <div className="grid gap-2">
               {tunnels.map((t) => (
-                <TunnelRow key={t.id} tunnel={t} hostname={hostname} busy={busy} onDelete={onDelete} />
+                <TunnelRow
+                  key={t.id}
+                  tunnel={t}
+                  hostname={hostname}
+                  gatewayHost={gatewayHost}
+                  busy={busy}
+                  onDelete={onDelete}
+                />
               ))}
             </div>
           )}
@@ -287,12 +308,13 @@ export default function TunnelsModal({ vmId, hostname, onClose }: TunnelsModalPr
 interface TunnelRowProps {
   tunnel: VMTunnel
   hostname: string
+  gatewayHost: string | undefined
   busy: boolean
   onDelete: (id: string) => void
 }
 
-function TunnelRow({ tunnel, hostname, busy, onDelete }: TunnelRowProps) {
-  const display = tunnel.tunnel_url || tunnel.subdomain || tunnel.id
+function TunnelRow({ tunnel, hostname, gatewayHost, busy, onDelete }: TunnelRowProps) {
+  const display = formatTunnelPublic(tunnel, gatewayHost)
   const isFailed = tunnel.status === 'failed'
   // The SSH base tunnel maps the public host's :port to the guest's
   // sshd. Spelling out "→ {hostname}:localhost:{port}" makes that
