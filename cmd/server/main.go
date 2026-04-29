@@ -154,7 +154,7 @@ func main() {
 
 	// Network settings: env vars seed the DB row on first boot; after that the
 	// Settings → Network page is the source of truth and live-rotates the
-	// gateway/pool without a restart. Same pattern as Gopher.
+	// gateway/pool/prefix without a restart. Same pattern as Gopher.
 	netSettings, err := authSvc.GetNetworkSettings()
 	if err != nil {
 		log.Fatalf("failed to load network settings: %v", err)
@@ -165,6 +165,7 @@ func main() {
 			IPPoolStart: cfg.IPPoolStart,
 			IPPoolEnd:   cfg.IPPoolEnd,
 			GatewayIP:   cfg.GatewayIP,
+			PrefixLen:   cfg.VMPrefixLen,
 		}); err != nil {
 			log.Printf("warning: failed to seed network settings from env: %v", err)
 		} else {
@@ -172,12 +173,14 @@ func main() {
 			netSettings.IPPoolStart = cfg.IPPoolStart
 			netSettings.IPPoolEnd = cfg.IPPoolEnd
 			netSettings.GatewayIP = cfg.GatewayIP
+			netSettings.PrefixLen = cfg.VMPrefixLen
 		}
 	}
-	// DB wins after seeding; the live values feed pool seed + provision gateway.
+	// DB wins after seeding; the live values feed pool seed + provision gateway/prefix.
 	effectivePoolStart := netSettings.IPPoolStart
 	effectivePoolEnd := netSettings.IPPoolEnd
 	effectiveGateway := netSettings.GatewayIP
+	effectivePrefix := netSettings.PrefixLen
 	if effectivePoolStart == "" {
 		effectivePoolStart = cfg.IPPoolStart
 	}
@@ -186,6 +189,14 @@ func main() {
 	}
 	if effectiveGateway == "" {
 		effectiveGateway = cfg.GatewayIP
+	}
+	if effectivePrefix < 1 || effectivePrefix > 32 {
+		// AutoMigrate creates the column with default 24; a fresh row before
+		// the first save can read 0 anyway, so guard with the same default.
+		effectivePrefix = cfg.VMPrefixLen
+		if effectivePrefix < 1 || effectivePrefix > 32 {
+			effectivePrefix = 24
+		}
 	}
 
 	pool := ippool.New(database.DB)
@@ -309,6 +320,7 @@ func main() {
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
 		ExcludedNodes:    cfg.ExcludedNodes,
 		GatewayIP:        effectiveGateway,
+		PrefixLen:        effectivePrefix,
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,

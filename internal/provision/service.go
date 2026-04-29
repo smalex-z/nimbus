@@ -90,8 +90,13 @@ type Config struct {
 	TemplateBaseVMID int
 	ExcludedNodes    []string
 	GatewayIP        string
-	Nameserver       string
-	SearchDomain     string
+	// PrefixLen is the netmask length applied to every VM's cloud-init
+	// ipconfig0 (24 → /24, 16 → /16, etc.). 0 falls back to the historical
+	// 24 default; explicit values are passed through verbatim. Live-rotated
+	// from the Settings → Network page via SetPrefixLen.
+	PrefixLen    int
+	Nameserver   string
+	SearchDomain string
 	// CPUType is the Proxmox CPU model applied to each clone. Empty leaves
 	// whatever the template set, which on default Proxmox installs is the
 	// AVX-less kvm64/x86-64-v2-AES — see config.VMCPUType for the default
@@ -146,11 +151,15 @@ type Service struct {
 	gpuMu  sync.Mutex
 	gpuCfg GPUBootstrapConfig
 
-	// gatewayMu guards the live-reloadable gateway IP. Replaces the cfg.GatewayIP
-	// read at clone time so the Settings → Network page can rotate the gateway
-	// without a restart. Initial value is seeded from cfg.GatewayIP in New.
+	// gatewayMu guards the live-reloadable gateway IP + cloud-init prefix
+	// length. Both are seeded from Config in New and overwritten by the
+	// Settings → Network page without a restart. The prefix is the netmask
+	// length applied to every cloud-init ipconfig0 (24 for /24, 16 for /16,
+	// etc.) — wrong values here cause VMs to come up with a mask that
+	// doesn't reach their gateway.
 	gatewayMu sync.RWMutex
 	gatewayIP string
+	prefixLen int
 
 	// unreachableNodes is the per-cycle reachability probe consulted by
 	// ReconcileVMs. nil → no guard (legacy reap-on-miss behaviour). Set via
@@ -174,6 +183,13 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
+	prefix := cfg.PrefixLen
+	if prefix < 1 || prefix > 32 {
+		// Default + safety: keep historical /24 behaviour when the caller
+		// hasn't configured a prefix. Out-of-range explicit values are
+		// treated as unset rather than letting cloud-init choke later.
+		prefix = 24
+	}
 	return &Service{
 		px:        px,
 		pool:      pool,
@@ -183,6 +199,7 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 		keys:      keys,
 		cfg:       cfg,
 		gatewayIP: cfg.GatewayIP,
+		prefixLen: prefix,
 	}
 }
 
@@ -204,6 +221,27 @@ func (s *Service) GatewayIP() string {
 	s.gatewayMu.RLock()
 	defer s.gatewayMu.RUnlock()
 	return s.gatewayIP
+}
+
+// SetPrefixLen rotates the cloud-init prefix length applied to new VMs.
+// Live-reloadable from Settings → Network. Out-of-range values (0 or
+// outside 1..32) are dropped with a no-op so the handler can blindly push
+// the persisted value without re-checking.
+func (s *Service) SetPrefixLen(n int) {
+	if n < 1 || n > 32 {
+		return
+	}
+	s.gatewayMu.Lock()
+	defer s.gatewayMu.Unlock()
+	s.prefixLen = n
+}
+
+// PrefixLen returns the cloud-init prefix length used for new provisions,
+// under lock. Always returns a value in 1..32; never zero.
+func (s *Service) PrefixLen() int {
+	s.gatewayMu.RLock()
+	defer s.gatewayMu.RUnlock()
+	return s.prefixLen
 }
 
 // SetIPVerifier installs (or replaces) the IP verifier used after each Reserve
@@ -401,7 +439,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	cloudInit := proxmox.CloudInitConfig{
 		CIUser:       username,
 		SSHKeys:      sshPubKey,
-		IPConfig0:    fmt.Sprintf("ip=%s/24,gw=%s", ip, s.GatewayIP()),
+		IPConfig0:    fmt.Sprintf("ip=%s/%d,gw=%s", ip, s.PrefixLen(), s.GatewayIP()),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
