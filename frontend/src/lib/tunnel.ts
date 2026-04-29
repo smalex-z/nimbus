@@ -17,7 +17,7 @@ import type { VMTunnel } from '@/api/client'
 //   4. tunnel.id               — last-resort hex id; almost always means we
 //                                haven't fetched /api/tunnels/info yet.
 export function formatTunnelPublic(t: VMTunnel, host: string | undefined): string {
-  if (t.tunnel_url) return t.tunnel_url
+  if (t.tunnel_url) return t.tunnel_url.replace(/^https?:\/\//, '')
   if (host && t.server_port) return `${host}:${t.server_port}`
   if (t.subdomain) return t.subdomain
   return t.id
