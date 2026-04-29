@@ -440,6 +440,7 @@ export interface SaveConfigRequest {
   ip_pool_start: string
   ip_pool_end: string
   gateway_ip: string
+  vm_prefix_len?: number
   nameserver?: string
   search_domain?: string
   port?: string
@@ -788,12 +789,14 @@ export interface NetworkSettingsView {
   ip_pool_start: string
   ip_pool_end: string
   gateway_ip: string
+  prefix_len: number
 }
 
 export interface SaveNetworkSettingsRequest {
   ip_pool_start?: string
   ip_pool_end?: string
   gateway_ip?: string
+  prefix_len?: number
 }
 
 export async function getNetworkSettings(): Promise<NetworkSettingsView> {

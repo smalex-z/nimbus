@@ -19,6 +19,7 @@ function NetworkPanel() {
   const [poolStart, setPoolStart] = useState('')
   const [poolEnd, setPoolEnd] = useState('')
   const [gateway, setGateway] = useState('')
+  const [prefixLen, setPrefixLen] = useState(24)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -33,6 +34,7 @@ function NetworkPanel() {
         setPoolStart(s.ip_pool_start)
         setPoolEnd(s.ip_pool_end)
         setGateway(s.gateway_ip)
+        setPrefixLen(s.prefix_len > 0 ? s.prefix_len : 24)
       })
       .catch(() => setError('Failed to load network settings'))
   }, [])
@@ -48,11 +50,13 @@ function NetworkPanel() {
         ip_pool_start: poolStart,
         ip_pool_end: poolEnd,
         gateway_ip: gateway,
+        prefix_len: prefixLen,
       })
       setSettings(next)
       setPoolStart(next.ip_pool_start)
       setPoolEnd(next.ip_pool_end)
       setGateway(next.gateway_ip)
+      setPrefixLen(next.prefix_len > 0 ? next.prefix_len : 24)
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
     } catch (err) {
@@ -66,7 +70,8 @@ function NetworkPanel() {
     !!settings &&
     (poolStart !== settings.ip_pool_start ||
       poolEnd !== settings.ip_pool_end ||
-      gateway !== settings.gateway_ip)
+      gateway !== settings.gateway_ip ||
+      prefixLen !== (settings.prefix_len > 0 ? settings.prefix_len : 24))
 
   return (
     <div
@@ -120,6 +125,22 @@ function NetworkPanel() {
             value={gateway}
             onChange={(e) => setGateway(e.target.value)}
           />
+        </div>
+        <div className="n-field">
+          <label className="n-label" htmlFor="net-prefix">Subnet prefix length</label>
+          <input
+            id="net-prefix"
+            className="n-input"
+            type="number"
+            min={1}
+            max={32}
+            placeholder="24"
+            value={prefixLen}
+            onChange={(e) => setPrefixLen(Number(e.target.value))}
+          />
+          <span style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 4 }}>
+            CIDR netmask Nimbus stamps into every VM's cloud-init (e.g. <code>24</code> for /24, <code>16</code> for /16). Applies to new VMs only — existing VMs keep their prefix until you explicitly renumber.
+          </span>
         </div>
 
         {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
