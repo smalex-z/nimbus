@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteVM, listVMs, vmLifecycle } from '@/api/client'
+import {
+  deleteVM,
+  getTunnelInfo,
+  listVMTunnels,
+  listVMs,
+  vmLifecycle,
+  type VMTunnel,
+} from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -10,6 +17,7 @@ import TunnelsModal from '@/components/ui/TunnelsModal'
 import VMActions from '@/components/ui/VMActions'
 import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
+import { formatTunnelMapping, formatTunnelPublic } from '@/lib/tunnel'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
@@ -17,6 +25,11 @@ export default function MyVMs() {
   const [vms, setVms] = useState<VM[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Gopher's gateway hostname — fetched once and shared across every VM card
+  // so port-only tunnel rows (no subdomain URL) can render "host:port".
+  // Optional: a missing host degrades each row to its tunnel_url/subdomain
+  // fallback (the pre-mapping behavior), never blocks the page.
+  const [gatewayHost, setGatewayHost] = useState<string | undefined>(undefined)
 
   const refresh = useCallback(async () => {
     try {
@@ -41,6 +54,11 @@ export default function MyVMs() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
+    void getTunnelInfo()
+      .then((info) => {
+        if (!cancelled) setGatewayHost(info.host)
+      })
+      .catch(() => undefined)
     return () => {
       cancelled = true
     }
@@ -84,6 +102,7 @@ export default function MyVMs() {
             key={vm.ID}
             vm={vm}
             currentUserId={user?.id}
+            gatewayHost={gatewayHost}
             onChanged={refresh}
           />
         ))}
@@ -95,20 +114,45 @@ export default function MyVMs() {
 function VMRow({
   vm,
   currentUserId,
+  gatewayHost,
   onChanged,
 }: {
   vm: VM
   currentUserId: number | undefined
+  gatewayHost: string | undefined
   onChanged: () => void
 }) {
   const [sshOpen, setSshOpen] = useState(false)
   const [tunnelsOpen, setTunnelsOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [tunnels, setTunnels] = useState<VMTunnel[] | null>(null)
   const hasTunnel = Boolean(vm.tunnel_url)
   // Only show Delete on VMs the current user provisioned. Legacy rows
   // (owner_id null, pre-ownership) and VMs created by other users render
   // without the button — they're not deletable through this UI.
   const canDelete = currentUserId !== undefined && vm.owner_id === currentUserId
+
+  // Pull the full tunnel list for each VM so we can show every public
+  // exposure as "host:port → localhost:target", not just the SSH base. We
+  // gate on hasTunnel so VMs without a Gopher machine don't issue a 404
+  // round-trip per render.
+  useEffect(() => {
+    if (!hasTunnel) {
+      setTunnels(null)
+      return
+    }
+    let cancelled = false
+    listVMTunnels(vm.ID)
+      .then((rows) => {
+        if (!cancelled) setTunnels(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setTunnels(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hasTunnel, vm.ID])
 
   return (
     <Card className="p-5">
@@ -118,10 +162,52 @@ function VMRow({
           <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
-          {vm.tunnel_url && (
-            <div className="font-mono text-[11px] text-good mt-1 truncate inline-flex items-center gap-1.5" title={vm.tunnel_url}>
-              <NetworkIcon size={11} />
-              <span className="truncate">{vm.tunnel_url}</span>
+          {hasTunnel && (
+            <div className="mt-1.5 flex flex-col gap-0.5">
+              {/*
+                SSH base mapping is synthesized from vm.tunnel_url, not the
+                tunnels list. Gopher's /api/v1/tunnels is per-port only —
+                the SSH exposure lives on the machine record (returned at
+                provision time as public_ssh_host:port and stored on vm).
+                Without this line, SSH-only VMs would render zero rows.
+              */}
+              {vm.tunnel_url && (
+                <div
+                  className="font-mono text-[11px] text-good inline-flex items-center gap-1.5"
+                  title={`${vm.tunnel_url} → localhost:22`}
+                >
+                  <NetworkIcon size={11} />
+                  <span className="truncate">{vm.tunnel_url} → localhost:22</span>
+                </div>
+              )}
+              {tunnels?.map((t) => {
+                const publicPart = formatTunnelPublic(t, gatewayHost)
+                const tail = ` → localhost:${t.target_port}`
+                return (
+                  <div
+                    key={t.id}
+                    className="font-mono text-[11px] text-good inline-flex items-center gap-1.5"
+                    title={formatTunnelMapping(t, gatewayHost)}
+                  >
+                    <NetworkIcon size={11} />
+                    <span className="truncate">
+                      {t.tunnel_url ? (
+                        <a
+                          href={t.tunnel_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline hover:text-ink"
+                        >
+                          {publicPart}
+                        </a>
+                      ) : (
+                        publicPart
+                      )}
+                      {tail}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
