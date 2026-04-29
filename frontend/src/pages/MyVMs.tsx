@@ -17,7 +17,7 @@ import TunnelsModal from '@/components/ui/TunnelsModal'
 import VMActions from '@/components/ui/VMActions'
 import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { useAuth } from '@/hooks/useAuth'
-import { formatTunnelMapping } from '@/lib/tunnel'
+import { formatTunnelMapping, formatTunnelPublic } from '@/lib/tunnel'
 import type { VM } from '@/types'
 
 export default function MyVMs() {
@@ -181,15 +181,30 @@ function VMRow({
                 </div>
               )}
               {tunnels?.map((t) => {
-                const mapping = formatTunnelMapping(t, gatewayHost)
+                const publicPart = formatTunnelPublic(t, gatewayHost)
+                const tail = ` → localhost:${t.target_port}`
                 return (
                   <div
                     key={t.id}
                     className="font-mono text-[11px] text-good inline-flex items-center gap-1.5"
-                    title={mapping}
+                    title={formatTunnelMapping(t, gatewayHost)}
                   >
                     <NetworkIcon size={11} />
-                    <span className="truncate">{mapping}</span>
+                    <span className="truncate">
+                      {t.tunnel_url ? (
+                        <a
+                          href={t.tunnel_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline hover:text-ink"
+                        >
+                          {publicPart}
+                        </a>
+                      ) : (
+                        publicPart
+                      )}
+                      {tail}
+                    </span>
                   </div>
                 )
               })}
