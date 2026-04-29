@@ -88,11 +88,15 @@ type saveConfigRequest struct {
 	IPPoolStart        string `json:"ip_pool_start"`
 	IPPoolEnd          string `json:"ip_pool_end"`
 	GatewayIP          string `json:"gateway_ip"`
-	Nameserver         string `json:"nameserver"`
-	SearchDomain       string `json:"search_domain"`
-	Port               string `json:"port"`
-	GopherAPIURL       string `json:"gopher_api_url"`
-	GopherAPIKey       string `json:"gopher_api_key"`
+	// VMPrefixLen is the netmask length the wizard captures so the operator
+	// picks /16 vs /24 vs whatever upfront. 0 falls back to the historical
+	// default of 24 in the env writer below.
+	VMPrefixLen  int    `json:"vm_prefix_len"`
+	Nameserver   string `json:"nameserver"`
+	SearchDomain string `json:"search_domain"`
+	Port         string `json:"port"`
+	GopherAPIURL string `json:"gopher_api_url"`
+	GopherAPIKey string `json:"gopher_api_key"`
 }
 
 // Save handles POST /api/setup/save — validates, writes the env file,
@@ -137,6 +141,12 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 	if req.Port == "" {
 		req.Port = "8080"
 	}
+	if req.VMPrefixLen == 0 {
+		req.VMPrefixLen = 24
+	} else if req.VMPrefixLen < 1 || req.VMPrefixLen > 32 {
+		response.BadRequest(w, "vm_prefix_len must be between 1 and 32")
+		return
+	}
 
 	envPath := config.EnvFilePath()
 	if err := config.WriteEnvFile(envPath, config.EnvValues{
@@ -146,6 +156,7 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 		IPPoolStart:        req.IPPoolStart,
 		IPPoolEnd:          req.IPPoolEnd,
 		GatewayIP:          req.GatewayIP,
+		VMPrefixLen:        req.VMPrefixLen,
 		Nameserver:         req.Nameserver,
 		SearchDomain:       req.SearchDomain,
 		Port:               req.Port,
@@ -163,6 +174,7 @@ func (h *Setup) Save(w http.ResponseWriter, r *http.Request) {
 	_ = os.Setenv("IP_POOL_START", req.IPPoolStart)
 	_ = os.Setenv("IP_POOL_END", req.IPPoolEnd)
 	_ = os.Setenv("GATEWAY_IP", req.GatewayIP)
+	_ = os.Setenv("VM_PREFIX_LEN", strconv.Itoa(req.VMPrefixLen))
 	_ = os.Setenv("NAMESERVER", req.Nameserver)
 	_ = os.Setenv("SEARCH_DOMAIN", req.SearchDomain)
 	_ = os.Setenv("PORT", req.Port)

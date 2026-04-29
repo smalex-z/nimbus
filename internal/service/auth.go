@@ -484,10 +484,11 @@ func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
 	return &settings, err
 }
 
-// SaveNetworkSettings persists the IP pool / gateway. Empty fields are treated
-// as "preserve existing" so the UI can rotate one knob without re-sending the
-// others. No validation here — the handler checks that the strings parse as
-// valid IPv4 addresses before invoking this.
+// SaveNetworkSettings persists the IP pool / gateway / prefix. Empty fields
+// (and zero PrefixLen) are treated as "preserve existing" so the UI can
+// rotate one knob without re-sending the others. No validation here — the
+// handler checks that strings parse as valid IPv4 addresses before invoking
+// this and that PrefixLen is in the legal /1..32 range.
 func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 	existing, err := s.GetNetworkSettings()
 	if err != nil {
@@ -502,10 +503,14 @@ func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 	if next.GatewayIP == "" {
 		next.GatewayIP = existing.GatewayIP
 	}
+	if next.PrefixLen == 0 {
+		next.PrefixLen = existing.PrefixLen
+	}
 	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
 		"ip_pool_start": next.IPPoolStart,
 		"ip_pool_end":   next.IPPoolEnd,
 		"gateway_ip":    next.GatewayIP,
+		"prefix_len":    next.PrefixLen,
 	}).Error
 }
 

@@ -25,6 +25,7 @@ interface NetworkFields {
   ipPoolStart: string
   ipPoolEnd: string
   gatewayIp: string
+  vmPrefixLen: string
   nameserver: string
   searchDomain: string
   port: string
@@ -49,6 +50,7 @@ export default function Setup() {
     ipPoolStart: '',
     ipPoolEnd: '',
     gatewayIp: '',
+    vmPrefixLen: '24',
     nameserver: '',
     searchDomain: '',
     port: '',
@@ -127,6 +129,10 @@ export default function Setup() {
       ip_pool_start: network.ipPoolStart,
       ip_pool_end: network.ipPoolEnd,
       gateway_ip: network.gatewayIp,
+    }
+    const prefix = Number(network.vmPrefixLen)
+    if (Number.isFinite(prefix) && prefix >= 1 && prefix <= 32) {
+      req.vm_prefix_len = prefix
     }
     if (network.nameserver) req.nameserver = network.nameserver
     if (network.searchDomain) req.search_domain = network.searchDomain
@@ -543,6 +549,14 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
           onChange={(e) => onChange('gatewayIp', e.target.value)}
           hint="Your router's LAN IP — the default route injected into every VM via cloud-init. Usually ends in .1."
         />
+        <Input
+          label="Subnet prefix length"
+          type="number"
+          placeholder="24"
+          value={fields.vmPrefixLen}
+          onChange={(e) => onChange('vmPrefixLen', e.target.value)}
+          hint="CIDR netmask stamped into every VM's cloud-init (24 for /24, 16 for /16, etc.). Default 24 is right for most homelabs; bump it up if your VM bridge spans a larger network."
+        />
       </Card>
 
       {/* Optional fields */}
@@ -797,6 +811,7 @@ function ReviewStep({ proxmox, network, admin, onBack, onSave, saving, saveError
         <SectionLabel className="mt-6">Network</SectionLabel>
         <ReviewRow label="IP pool" value={`${network.ipPoolStart} – ${network.ipPoolEnd}`} />
         <ReviewRow label="Gateway" value={network.gatewayIp} />
+        <ReviewRow label="Subnet prefix" value={`/${network.vmPrefixLen || '24'}`} />
         <ReviewRow label="Nameserver" value={network.nameserver || '1.1.1.1 8.8.8.8'} />
         <ReviewRow label="Search domain" value={network.searchDomain || 'local'} />
         <ReviewRow label="Port" value={network.port || '8080'} />
