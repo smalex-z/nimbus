@@ -162,9 +162,25 @@ function VMRow({
           <div className="font-mono text-[11px] text-ink-3 mt-1 tracking-wide">
             {vm.ip} · vmid {vm.vmid} · node {vm.node} · {vm.os_template}
           </div>
-          {hasTunnel && tunnels !== null && tunnels.length > 0 && (
+          {hasTunnel && (
             <div className="mt-1.5 flex flex-col gap-0.5">
-              {tunnels.map((t) => {
+              {/*
+                SSH base mapping is synthesized from vm.tunnel_url, not the
+                tunnels list. Gopher's /api/v1/tunnels is per-port only —
+                the SSH exposure lives on the machine record (returned at
+                provision time as public_ssh_host:port and stored on vm).
+                Without this line, SSH-only VMs would render zero rows.
+              */}
+              {vm.tunnel_url && (
+                <div
+                  className="font-mono text-[11px] text-good inline-flex items-center gap-1.5"
+                  title={`${vm.tunnel_url} → localhost:22`}
+                >
+                  <NetworkIcon size={11} />
+                  <span className="truncate">{vm.tunnel_url} → localhost:22</span>
+                </div>
+              )}
+              {tunnels?.map((t) => {
                 const mapping = formatTunnelMapping(t, gatewayHost)
                 return (
                   <div
@@ -177,12 +193,6 @@ function VMRow({
                   </div>
                 )
               })}
-            </div>
-          )}
-          {hasTunnel && tunnels === null && vm.tunnel_url && (
-            <div className="font-mono text-[11px] text-good mt-1 truncate inline-flex items-center gap-1.5" title={vm.tunnel_url}>
-              <NetworkIcon size={11} />
-              <span className="truncate">{vm.tunnel_url}</span>
             </div>
           )}
         </div>
