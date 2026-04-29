@@ -286,12 +286,19 @@ func (S3Storage) TableName() string { return "s3_storage" }
 
 // NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
 // single row (ID=1) is used. The columns mirror the env vars they replace
-// (IP_POOL_START / IP_POOL_END / GATEWAY_IP) — env vars now act as first-boot
-// defaults only; once the row is populated, the DB is the source of truth and
-// admins manage these from Settings → Network.
+// (IP_POOL_START / IP_POOL_END / GATEWAY_IP / VM_PREFIX_LEN) — env vars now
+// act as first-boot defaults only; once the row is populated, the DB is the
+// source of truth and admins manage these from Settings → Network.
+//
+// PrefixLen is the netmask length applied to every VM's cloud-init ipconfig0
+// (e.g. 24 for /24, 16 for /16). Default 24 matches the historical
+// hardcoded value, so existing deployments keep their current behaviour.
+// Set to 16 (or whatever) when the cluster's VM bridge is on a larger
+// network than a single /24.
 type NetworkSettings struct {
 	ID          uint   `gorm:"primaryKey"`
 	IPPoolStart string `gorm:"default:''"`
 	IPPoolEnd   string `gorm:"default:''"`
 	GatewayIP   string `gorm:"default:''"`
+	PrefixLen   int    `gorm:"default:24"`
 }

@@ -68,7 +68,7 @@ func (s *Service) ForceGatewayUpdate(ctx context.Context, gateway string) (Netwo
 			})
 			continue
 		}
-		ipconfig := fmt.Sprintf("ip=%s/24,gw=%s", vm.IP, gateway)
+		ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", vm.IP, s.PrefixLen(), gateway)
 		if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
 			IPConfig0: ipconfig,
 		}); err != nil {
@@ -145,7 +145,7 @@ func (s *Service) RenumberAllVMs(ctx context.Context, gateway, poolStart, poolEn
 			continue
 		}
 
-		ipconfig := fmt.Sprintf("ip=%s/24,gw=%s", newIP, gateway)
+		ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", newIP, s.PrefixLen(), gateway)
 		if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
 			IPConfig0: ipconfig,
 		}); err != nil {
