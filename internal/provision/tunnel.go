@@ -133,8 +133,35 @@ func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL,
 		// Set GOPHER_MACHINE_NAME on the receiving shell — the script reads
 		// it before it would otherwise prompt over /dev/tty (which doesn't
 		// exist on a non-PTY SSH session).
+		//
+		// Download then exec, instead of `curl ... | sh`. The pipe form was
+		// silently masking curl failures: if curl exits non-zero (4xx, DNS
+		// blip, expired URL) the `| sh` still runs on empty input, exits
+		// 0, and the SSH session reports success — leaving the machine
+		// permanently `pending` on Gopher with no log on either side. POSIX
+		// pipefail isn't available on dash (which is /bin/sh on Ubuntu),
+		// so we split the pipeline. After the install, sanity-check the
+		// systemd unit actually came up and surface its journal if not, so
+		// future failures land in tunnel_error instead of disappearing.
 		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-		cmd := fmt.Sprintf("curl -fsSL %s | GOPHER_MACHINE_NAME=%s sh", quote(bootstrapURL), quote(machineName))
+		cmd := strings.Join([]string{
+			"set -e",
+			"_T=$(mktemp)",
+			fmt.Sprintf("curl -fsSL %s -o \"$_T\"", quote(bootstrapURL)),
+			fmt.Sprintf("GOPHER_MACHINE_NAME=%s sh \"$_T\"", quote(machineName)),
+			"_RC=$?",
+			"rm -f \"$_T\"",
+			// Verify the rathole client unit came up. Without this the
+			// caller has no signal — the install script is one-shot, and
+			// a failure to fetch / start the binary leaves no trace on
+			// Gopher's side until the 60s poll timeout fires.
+			"if ! systemctl is-active --quiet rathole-client; then",
+			"  echo 'gopher bootstrap completed but rathole-client is not active:' >&2",
+			"  journalctl -u rathole-client --no-pager -n 30 >&2 || true",
+			"  exit 1",
+			"fi",
+			"exit $_RC",
+		}, "; ")
 
 		// Bound the exec separately from the dial. If the bootstrap genuinely
 		// runs longer than tunnelBootstrapExecTimeout, close the session to
