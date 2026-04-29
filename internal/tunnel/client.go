@@ -127,7 +127,7 @@ func (c *Client) DeleteMachine(ctx context.Context, id string) error {
 	if err == nil {
 		return nil
 	}
-	var he *httpError
+	var he *HTTPError
 	if errors.As(err, &he) && he.Status == http.StatusNotFound {
 		return nil
 	}
@@ -216,7 +216,7 @@ func (c *Client) DeleteTunnel(ctx context.Context, id string) error {
 	if err == nil {
 		return nil
 	}
-	var he *httpError
+	var he *HTTPError
 	if errors.As(err, &he) && he.Status == http.StatusNotFound {
 		return nil
 	}
@@ -253,13 +253,19 @@ func (c *Client) ListTunnelsForMachine(ctx context.Context, machineID string) ([
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-// httpError carries a non-2xx response so callers can branch on status code.
-type httpError struct {
+// HTTPError carries a non-2xx response so callers can branch on status code.
+// Body is the Gopher envelope's `error` field when one was returned, or the
+// raw response body otherwise — usable verbatim as a user-facing message.
+//
+// Exported so callers (notably internal/api/response.FromError) can pattern-
+// match and pass Gopher's status + message through to the SPA instead of
+// coercing every Gopher 4xx into an opaque 500.
+type HTTPError struct {
 	Status int
 	Body   string
 }
 
-func (e *httpError) Error() string {
+func (e *HTTPError) Error() string {
 	return fmt.Sprintf("tunnel: gopher returned HTTP %d: %s", e.Status, e.Body)
 }
 
@@ -334,5 +340,5 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if body4xx == "" {
 		body4xx = strings.TrimSpace(string(respBody))
 	}
-	return &httpError{Status: resp.StatusCode, Body: body4xx}
+	return &HTTPError{Status: resp.StatusCode, Body: body4xx}
 }
