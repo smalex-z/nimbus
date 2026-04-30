@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
+  deleteUser,
   getAccessCode,
   getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
   getOAuthSettings,
   listUsers,
+  promoteUser,
   regenerateAccessCode,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
@@ -17,6 +19,8 @@ import type {
   OAuthSettingsView,
   UserManagementView,
 } from '@/api/client'
+import NavDropdown from '@/components/ui/NavDropdown'
+import { useAuth } from '@/hooks/useAuth'
 
 interface ProviderPanelProps {
   name: string
@@ -771,10 +775,15 @@ function GitHubOrgsSection() {
 // stay reachable but live behind a click since most operators only touch
 // them once at setup. Pushing them down/behind a modal keeps the access
 // code + users-list — which admins actually look at — above the fold.
+// editingProvider tracks which (if any) per-provider modal is open. Using
+// a discrete identifier rather than a boolean lets the modal render the
+// right provider's panel without the parent juggling two flags.
+type EditingProvider = 'google' | 'github' | null
+
 export default function Users() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [providersOpen, setProvidersOpen] = useState(false)
+  const [editingProvider, setEditingProvider] = useState<EditingProvider>(null)
 
   useEffect(() => {
     getOAuthSettings()
@@ -826,15 +835,16 @@ export default function Users() {
           <AccessCodePanel />
           <ProvidersSummary
             settings={settings}
-            onConfigure={() => setProvidersOpen(true)}
+            onEdit={(p) => setEditingProvider(p)}
           />
         </div>
       </div>
 
-      {providersOpen && settings && (
-        <OAuthProvidersModal
+      {editingProvider && settings && (
+        <OAuthProviderModal
+          provider={editingProvider}
           settings={settings}
-          onClose={() => setProvidersOpen(false)}
+          onClose={() => setEditingProvider(null)}
           onSaveGitHub={handleSaveGitHub}
           onSaveGoogle={handleSaveGoogle}
         />
@@ -848,14 +858,27 @@ export default function Users() {
 // status follows the live policy (admin / authorized domain / org / code
 // match) so the column reflects what would happen on the user's next
 // request, not a snapshot at sign-up.
+// pendingAction tracks which row + modal are currently open. Single
+// state object so we can't accidentally show both modals at once.
+type PendingAction =
+  | { kind: 'promote'; user: UserManagementView }
+  | { kind: 'delete'; user: UserManagementView }
+  | null
+
 function UsersTable() {
+  const { user: me } = useAuth()
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState<PendingAction>(null)
 
-  useEffect(() => {
+  const reload = () => {
     listUsers()
       .then(setRows)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }
+
+  useEffect(() => {
+    reload()
   }, [])
 
   return (
@@ -892,6 +915,7 @@ function UsersTable() {
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Joined</th>
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Sign-in</th>
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
+                <th style={{ padding: '8px 8px', fontWeight: 500, width: 1 }} aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
@@ -915,13 +939,348 @@ function UsersTable() {
                   <td style={{ padding: '10px 8px' }}>
                     <UserStatusPills user={u} />
                   </td>
+                  <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                    <UserRowActions
+                      user={u}
+                      isSelf={me?.id === u.id}
+                      onPromote={() => setPending({ kind: 'promote', user: u })}
+                      onDelete={() => setPending({ kind: 'delete', user: u })}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      {pending?.kind === 'promote' && (
+        <PromoteUserModal
+          user={pending.user}
+          onClose={() => setPending(null)}
+          onPromoted={() => {
+            setPending(null)
+            reload()
+          }}
+        />
+      )}
+      {pending?.kind === 'delete' && (
+        <DeleteUserModal
+          user={pending.user}
+          onClose={() => setPending(null)}
+          onDeleted={() => {
+            setPending(null)
+            reload()
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+// UserRowActions shows the per-row "..." menu. The trigger button is
+// always rendered (so column widths don't jump when self-row vs not),
+// but its menu is empty-only when the row is the requester themselves —
+// admins can't promote or delete themselves through this UI.
+function UserRowActions({
+  user,
+  isSelf,
+  onPromote,
+  onDelete,
+}: {
+  user: UserManagementView
+  isSelf: boolean
+  onPromote: () => void
+  onDelete: () => void
+}) {
+  if (isSelf) {
+    return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
+  }
+  return (
+    <NavDropdown
+      placement="bottom-end"
+      triggerOn="click"
+      triggerClassName="inline-flex items-center justify-center rounded-md border border-line-2 bg-white/85 hover:border-ink transition-colors"
+      panelClassName="rounded-lg border border-line bg-white py-1 min-w-[180px] shadow-lg"
+      trigger={
+        <span style={{ display: 'inline-flex', width: 28, height: 28, alignItems: 'center', justifyContent: 'center', color: 'var(--ink-2)', fontSize: 16, fontWeight: 700 }}>
+          ⋯
+        </span>
+      }
+    >
+      {!user.is_admin && (
+        <button
+          type="button"
+          onClick={onPromote}
+          className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
+        >
+          Promote to admin
+        </button>
+      )}
+      {user.is_admin && (
+        <span className="block w-full text-left px-3 py-1.5 text-[13px] text-ink-3 cursor-default">
+          Already an admin
+        </span>
+      )}
+      <div className="my-1 border-t border-line" />
+      <button
+        type="button"
+        onClick={onDelete}
+        className="block w-full text-left px-3 py-1.5 text-[13px] text-bad hover:bg-[rgba(184,55,55,0.06)] cursor-pointer"
+      >
+        Delete user…
+      </button>
+    </NavDropdown>
+  )
+}
+
+// PromoteUserModal collects the requesting admin's password and POSTs
+// to /api/users/:id/promote. The password input is the same gate the
+// backend enforces — the UI doesn't pre-validate it (would leak whether
+// the password is right against the wrong account); the server returns
+// 401 on mismatch and we surface that.
+function PromoteUserModal({
+  user,
+  onClose,
+  onPromoted,
+}: {
+  user: UserManagementView
+  onClose: () => void
+  onPromoted: () => void
+}) {
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose, busy])
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      await promoteUser(user.id, password)
+      onPromoted()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Promote failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Promote ${user.name || user.email} to admin`}
+      onClick={busy ? undefined : onClose}
+    >
+      <div
+        className="glass"
+        style={{ width: '100%', maxWidth: 460, padding: '28px 32px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="eyebrow">Promote to admin</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>
+          {user.name || user.email}
+        </h3>
+        <p style={{ margin: '0 0 18px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          Grants full admin access — cluster observability, settings, and
+          user management. Confirm with your password.
+        </p>
+
+        <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="n-field">
+            <label className="n-label" htmlFor="promote-password">Your password</label>
+            <input
+              id="promote-password"
+              className="n-input"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              autoFocus
+            />
+          </div>
+          {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button type="button" className="n-btn" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" className="n-btn n-btn-primary" disabled={busy || !password}>
+              {busy ? 'Promoting…' : 'Promote'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+// DeleteUserModal is the destructive flow. The VM-disposition radio
+// always shows even when the user has no VMs — it's the only safety
+// step on this action and we want the operator to consciously choose,
+// not have it auto-skipped because the count happened to be zero this
+// minute. Dropping their VMs is *strictly* more destructive than
+// dropping just the user record, so the default selection is "transfer".
+function DeleteUserModal({
+  user,
+  onClose,
+  onDeleted,
+}: {
+  user: UserManagementView
+  onClose: () => void
+  onDeleted: () => void
+}) {
+  const [vmAction, setVmAction] = useState<'transfer' | 'delete'>('transfer')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose, busy])
+
+  const submit = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      await deleteUser(user.id, vmAction)
+      onDeleted()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Delete ${user.name || user.email}`}
+      onClick={busy ? undefined : onClose}
+    >
+      <div
+        className="glass"
+        style={{ width: '100%', maxWidth: 480, padding: '28px 32px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="eyebrow" style={{ color: 'var(--err)' }}>Delete user</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>
+          {user.name || user.email}
+        </h3>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          Removes this user, their sessions, and (per the option below) their
+          VMs and SSH keys. This cannot be undone.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+          <DispositionOption
+            checked={vmAction === 'transfer'}
+            onSelect={() => setVmAction('transfer')}
+            title="Take ownership of their VMs"
+            description="VMs and SSH keys are reparented to your account. They keep running; you'll see them on My machines."
+          />
+          <DispositionOption
+            checked={vmAction === 'delete'}
+            onSelect={() => setVmAction('delete')}
+            title="Delete their VMs"
+            description="VMs are destroyed on Proxmox and their SSH keys + GPU job history are removed. Slow if they own many VMs."
+          />
+        </div>
+
+        {error && <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--err)' }}>{error}</p>}
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" className="n-btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="n-btn"
+            onClick={submit}
+            disabled={busy}
+            style={{ borderColor: 'var(--err)', color: 'var(--err)' }}
+          >
+            {busy
+              ? 'Deleting…'
+              : vmAction === 'transfer'
+                ? 'Delete user, take their VMs'
+                : 'Delete user and their VMs'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function DispositionOption({
+  checked,
+  onSelect,
+  title,
+  description,
+}: {
+  checked: boolean
+  onSelect: () => void
+  title: string
+  description: string
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        gap: 10,
+        alignItems: 'flex-start',
+        padding: '12px 14px',
+        border: `1px solid ${checked ? 'var(--ink)' : 'var(--line)'}`,
+        background: checked ? 'rgba(20,18,28,0.04)' : 'rgba(20,18,28,0.02)',
+        borderRadius: 10,
+        cursor: 'pointer',
+      }}
+    >
+      <input
+        type="radio"
+        name="vm-action"
+        checked={checked}
+        onChange={onSelect}
+        style={{ marginTop: 3 }}
+      />
+      <span>
+        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+          {title}
+        </span>
+        <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
+          {description}
+        </span>
+      </span>
+    </label>
   )
 }
 
@@ -1009,89 +1368,127 @@ function formatJoined(iso: string): string {
 }
 
 // ProvidersSummary is the compact replacement for the old big OAuth
-// section. Shows a one-line status for Google and GitHub plus the
-// "Configure" button that opens the modal with the full provider +
-// bypass configuration.
+// section. Shows a one-line status for Google and GitHub plus a pencil
+// button per row. Pressing a pencil opens a modal scoped to *that*
+// provider — no shared "Configure" surface, since most operators only
+// touch one provider per visit.
 function ProvidersSummary({
   settings,
-  onConfigure,
+  onEdit,
 }: {
   settings: OAuthSettingsView | null
-  onConfigure: () => void
+  onEdit: (provider: 'google' | 'github') => void
 }) {
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-          Sign-in providers
-        </span>
-        <button
-          type="button"
-          className="n-btn"
-          style={{ padding: '6px 12px', fontSize: 12 }}
-          onClick={onConfigure}
-        >
-          Configure
-        </button>
-      </div>
+      <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+        Sign-in providers
+      </span>
       <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
         OAuth client IDs + the access-code bypass lists (authorized Google
-        domains, GitHub orgs).
+        domains, GitHub orgs). Click the pencil to edit one.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <ProviderRow
           icon={<GoogleIcon size={16} />}
           name="Google"
           configured={settings?.google_configured}
+          onEdit={() => onEdit('google')}
         />
         <ProviderRow
           icon={<GithubIcon size={16} />}
           name="GitHub"
           configured={settings?.github_configured}
+          onEdit={() => onEdit('github')}
         />
       </div>
     </div>
   )
 }
 
-function ProviderRow({ icon, name, configured }: { icon: React.ReactNode; name: string; configured: boolean | undefined }) {
+function ProviderRow({
+  icon,
+  name,
+  configured,
+  onEdit,
+}: {
+  icon: React.ReactNode
+  name: string
+  configured: boolean | undefined
+  onEdit: () => void
+}) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(20,18,28,0.03)', border: '1px solid var(--line)', borderRadius: 8 }}>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--ink)' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(20,18,28,0.03)', border: '1px solid var(--line)', borderRadius: 8, gap: 8 }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--ink)', flex: 1, minWidth: 0 }}>
         {icon}
         {name}
       </span>
-      {configured ? (
-        <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
-          <span className="n-pill-dot" />
-          configured
-        </span>
-      ) : (
-        <span
-          className="n-pill"
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        {configured ? (
+          <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+            <span className="n-pill-dot" />
+            configured
+          </span>
+        ) : (
+          <span
+            className="n-pill"
+            style={{
+              fontSize: 10,
+              color: 'var(--ink-mute)',
+              background: 'rgba(20,18,28,0.04)',
+              border: '1px solid var(--line)',
+            }}
+          >
+            not configured
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onEdit}
+          aria-label={`Edit ${name} sign-in provider`}
+          title={`Edit ${name}`}
           style={{
-            fontSize: 10,
-            color: 'var(--ink-mute)',
-            background: 'rgba(20,18,28,0.04)',
+            background: 'transparent',
             border: '1px solid var(--line)',
+            borderRadius: 6,
+            padding: '4px 6px',
+            cursor: 'pointer',
+            color: 'var(--ink-mute)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
           }}
         >
-          not configured
-        </span>
-      )}
+          <PencilIcon />
+        </button>
+      </span>
     </div>
   )
 }
 
-// OAuthProvidersModal wraps the existing ProviderPanel + Domains / Orgs
-// sections. The full configuration UI is unchanged — only the surface
-// it lives on moved.
-function OAuthProvidersModal({
+// PencilIcon is a small inline edit glyph, matching the visual weight
+// of the existing icons in this file (Eye, Copy, Refresh).
+function PencilIcon() {
+  return (
+    <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  )
+}
+
+// OAuthProviderModal renders one provider's full panel — picker + bypass
+// list — scoped to the provider the user clicked. Keeps the existing
+// ProviderPanel + Section components unchanged; only the framing shell
+// moved.
+function OAuthProviderModal({
+  provider,
   settings,
   onClose,
   onSaveGitHub,
   onSaveGoogle,
 }: {
+  provider: 'google' | 'github'
   settings: OAuthSettingsView
   onClose: () => void
   onSaveGitHub: (clientId: string, clientSecret: string) => Promise<unknown>
@@ -1110,27 +1507,29 @@ function OAuthProvidersModal({
     }
   }, [onClose])
 
+  const isGoogle = provider === 'google'
+  const titleName = isGoogle ? 'Google' : 'GitHub'
+
   return createPortal(
     <div
       className="fixed inset-0 z-[60] grid place-items-center p-4"
       style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
       role="dialog"
       aria-modal="true"
-      aria-label="Sign-in providers"
+      aria-label={`${titleName} sign-in provider`}
       onClick={onClose}
     >
       <div
         className="glass"
-        style={{ width: '100%', maxWidth: 760, maxHeight: 'calc(100vh - 2rem)', overflowY: 'auto', padding: '28px 32px' }}
+        style={{ width: '100%', maxWidth: 720, maxHeight: 'calc(100vh - 2rem)', overflowY: 'auto', padding: '28px 32px' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
           <div>
-            <div className="eyebrow">Authentication</div>
-            <h3 style={{ fontSize: 22, margin: '4px 0 0' }}>Sign-in providers</h3>
+            <div className="eyebrow">Sign-in provider</div>
+            <h3 style={{ fontSize: 22, margin: '4px 0 0' }}>{titleName}</h3>
             <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-              OAuth client IDs and the bypass lists (Google domains, GitHub
-              orgs) that skip the access code on sign-in.
+              OAuth client ID/secret and the access-code bypass list for {titleName}.
             </p>
           </div>
           <button
@@ -1143,7 +1542,7 @@ function OAuthProvidersModal({
           </button>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {isGoogle ? (
           <ProviderPanel
             name="Google"
             icon={<GoogleIcon size={20} />}
@@ -1155,6 +1554,7 @@ function OAuthProvidersModal({
           >
             <GoogleDomainsSection />
           </ProviderPanel>
+        ) : (
           <ProviderPanel
             name="GitHub"
             icon={<GithubIcon size={20} />}
@@ -1166,7 +1566,7 @@ function OAuthProvidersModal({
           >
             <GitHubOrgsSection />
           </ProviderPanel>
-        </div>
+        )}
       </div>
     </div>,
     document.body,

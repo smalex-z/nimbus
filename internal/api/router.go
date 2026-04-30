@@ -61,7 +61,7 @@ func NewRouter(d Deps) http.Handler {
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
-	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision)
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
 	settingsBuilder := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).
@@ -169,6 +169,13 @@ func NewRouter(d Deps) http.Handler {
 			// Admin and Authentication pages are admin-only in the SPA too.
 			r.Group(func(r chi.Router) {
 				r.Use(requireAdmin)
+
+				// Admin-only user management — promote/delete. The
+				// list endpoint above is shared (admins see everyone,
+				// members see themselves); these mutations are admin
+				// only.
+				r.Post("/users/{id}/promote", auth.PromoteUser)
+				r.Delete("/users/{id}", auth.DeleteUser)
 
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)

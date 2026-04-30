@@ -26,6 +26,7 @@ var (
 	ErrAccessCodeNotPresent = errors.New("access code not configured")
 	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
 	ErrOrgNotAuthorized     = errors.New("github org not authorized")
+	ErrUserNotFound         = errors.New("user not found")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -180,6 +181,109 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 	}
 
 	return sessionID, userToView(&user), nil
+}
+
+// VerifyPassword confirms the supplied password matches the user's hash.
+// Returns ErrInvalidCredentials when wrong, or when the user has no
+// password set (OAuth-only accounts can't be used for password gating).
+// Used by sensitive admin actions (promote-to-admin) where we want a
+// re-authentication step that doesn't issue a fresh session.
+func (s *AuthService) VerifyPassword(userID uint, password string) error {
+	var user db.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrInvalidCredentials
+		}
+		return err
+	}
+	if user.PasswordHash == "" {
+		return ErrInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// PromoteToAdmin flips a member account to admin. Idempotent — promoting
+// an already-admin returns no error. Caller is responsible for any
+// authorization gate (password re-auth, requester is admin, etc.) since
+// this method is intentionally policy-free at the service layer.
+func (s *AuthService) PromoteToAdmin(targetID uint) error {
+	res := s.db.Model(&db.User{}).Where("id = ?", targetID).Update("is_admin", true)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Either the user doesn't exist or was already admin — both
+		// terminal cases. Disambiguate with an explicit existence check
+		// so the handler can return 404 vs 200 correctly.
+		var count int64
+		if err := s.db.Model(&db.User{}).Where("id = ?", targetID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrUserNotFound
+		}
+	}
+	return nil
+}
+
+// CleanupUserDBResources removes or transfers the DB-resident records
+// owned by a user — sessions (always deleted), SSH keys, and GPU jobs.
+// Wraps the writes in a transaction so a partial failure leaves the
+// database consistent.
+//
+// VMs are intentionally NOT touched here. The caller orchestrates VM
+// deletion (which involves Proxmox HTTP calls) before invoking this so
+// rollback semantics stay sane — this method only takes responsibility
+// for state it can roll back atomically.
+//
+// When transferTo is non-nil, ssh_keys and gpu_jobs are reparented to
+// that user, with is_default cleared on the keys to avoid colliding
+// with the recipient's existing default. When nil, both are hard-
+// deleted along with everything else the user owns.
+func (s *AuthService) CleanupUserDBResources(targetID uint, transferTo *uint) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", targetID).Delete(&db.Session{}).Error; err != nil {
+			return fmt.Errorf("delete sessions: %w", err)
+		}
+		if transferTo != nil {
+			if err := tx.Model(&db.SSHKey{}).
+				Where("owner_id = ?", targetID).
+				Updates(map[string]interface{}{"owner_id": *transferTo, "is_default": false}).
+				Error; err != nil {
+				return fmt.Errorf("transfer ssh keys: %w", err)
+			}
+			if err := tx.Model(&db.GPUJob{}).
+				Where("owner_id = ?", targetID).
+				Update("owner_id", *transferTo).Error; err != nil {
+				return fmt.Errorf("transfer gpu jobs: %w", err)
+			}
+		} else {
+			if err := tx.Where("owner_id = ?", targetID).Delete(&db.SSHKey{}).Error; err != nil {
+				return fmt.Errorf("delete ssh keys: %w", err)
+			}
+			if err := tx.Where("owner_id = ?", targetID).Delete(&db.GPUJob{}).Error; err != nil {
+				return fmt.Errorf("delete gpu jobs: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteUserRecord removes the User row itself. Always run this last,
+// after VMs and CleanupUserDBResources have completed. Returns
+// ErrUserNotFound when the row is already gone.
+func (s *AuthService) DeleteUserRecord(targetID uint) error {
+	res := s.db.Delete(&db.User{}, targetID)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 // UpsertOAuthUser finds a user by email or creates one if none exists.
