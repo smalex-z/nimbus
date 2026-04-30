@@ -996,6 +996,18 @@ function UserRowActions({
   if (isSelf) {
     return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
   }
+  // NavDropdown's open state is internal — clicks on items inside its panel
+  // are ignored by its document-mousedown close handler (panel.contains
+  // returns true). For an *action* menu we want the panel to dismiss as
+  // soon as the user picks something, so we synthesize a mousedown on
+  // document before invoking the handler. The synthetic event's target is
+  // outside the panel, which trips NavDropdown's existing close path.
+  // Without this the menu stays mounted at z-1000 and visibly floats
+  // above the modal backdrop.
+  const dismissAndDo = (fn: () => void) => () => {
+    document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    fn()
+  }
   return (
     <NavDropdown
       placement="bottom-end"
@@ -1011,7 +1023,7 @@ function UserRowActions({
       {!user.is_admin && (
         <button
           type="button"
-          onClick={onPromote}
+          onClick={dismissAndDo(onPromote)}
           className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
         >
           Promote to admin
@@ -1025,7 +1037,7 @@ function UserRowActions({
       <div className="my-1 border-t border-line" />
       <button
         type="button"
-        onClick={onDelete}
+        onClick={dismissAndDo(onDelete)}
         className="block w-full text-left px-3 py-1.5 text-[13px] text-bad hover:bg-[rgba(184,55,55,0.06)] cursor-pointer"
       >
         Delete user…
@@ -1081,7 +1093,7 @@ function PromoteUserModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      className="fixed inset-0 z-[1010] grid place-items-center p-4"
       style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
       role="dialog"
       aria-modal="true"
@@ -1179,7 +1191,7 @@ function DeleteUserModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      className="fixed inset-0 z-[1010] grid place-items-center p-4"
       style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
       role="dialog"
       aria-modal="true"
@@ -1512,7 +1524,7 @@ function OAuthProviderModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      className="fixed inset-0 z-[1010] grid place-items-center p-4"
       style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
       role="dialog"
       aria-modal="true"
