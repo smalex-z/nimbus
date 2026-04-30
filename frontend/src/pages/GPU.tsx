@@ -84,7 +84,12 @@ export default function GPU() {
     <div>
       <div className="mb-8">
         <div className="eyebrow">GPU plane</div>
-        <h2 className="text-3xl">Jobs</h2>
+        <h2 className="text-3xl inline-flex items-center gap-2.5">
+          Jobs
+          <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-0.5 rounded">
+            Alpha
+          </span>
+        </h2>
         <p className="text-base text-ink-2 mt-2">
           Monitor training jobs running on the GX10. Submit jobs from your VM
           with{' '}
