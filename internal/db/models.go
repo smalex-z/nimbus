@@ -29,9 +29,27 @@ type User struct {
 	GitHubOrgs string `gorm:"default:''" json:"-"`
 	// GoogleConnected is a boolean flag set on every successful Google
 	// OAuth login. Used as the "Google account linked" marker on the
-	// /account page and by the passwordless-mode straggler check. We
-	// don't store the Google email/sub today — just the yes/no.
-	GoogleConnected bool `gorm:"default:false" json:"-"`
+	// /account page and by the passwordless-mode straggler check.
+	// GoogleSub holds the Google account's stable per-user identifier
+	// (the JWT `sub` claim) so subsequent sign-ins match by identity
+	// rather than email — needed when the user's Google email differs
+	// from their Nimbus email.
+	GoogleConnected bool   `gorm:"default:false" json:"-"`
+	GoogleSub       string `gorm:"column:google_sub;index;default:''" json:"-"`
+	// GitHubID is the GitHub account's stable numeric user id (stored
+	// as a string for uniformity with GoogleSub). Same role: identity
+	// matching across email changes. GitHubOrgs continues to track org
+	// membership for the dynamic bypass; GitHubID is purely about
+	// "who is this Nimbus user."
+	GitHubID string `gorm:"column:github_id;index;default:''" json:"-"`
+	// Suspended locks an account out of every sign-in path (password,
+	// Google, GitHub) without deleting their data. Used by the
+	// passwordless transition: an admin can suspend password-only
+	// users in bulk so the OAuth-only toggle stops being blocked,
+	// then unsuspend later (or the user recovers via a future
+	// email-based flow). Suspended users' sessions are revoked at
+	// suspend time.
+	Suspended bool `gorm:"default:false;index" json:"-"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.

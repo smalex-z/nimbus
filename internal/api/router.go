@@ -183,6 +183,8 @@ func NewRouter(d Deps) http.Handler {
 				// members see themselves); these mutations are admin
 				// only.
 				r.Post("/users/{id}/promote", auth.PromoteUser)
+				r.Post("/users/{id}/suspend-status", auth.SetSuspended)
+				r.Post("/users/suspend-unlinked", auth.SuspendUnlinked)
 				r.Delete("/users/{id}", auth.DeleteUser)
 				r.Get("/settings/oauth/passwordless", auth.PasswordlessStatus)
 				r.Put("/settings/oauth/passwordless", auth.SetPasswordlessAuth)

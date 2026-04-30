@@ -15,6 +15,8 @@ import {
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
   setPasswordlessAuth,
+  setUserSuspended,
+  suspendUnlinkedUsers,
 } from '@/api/client'
 import type {
   AccessCodeView,
@@ -926,7 +928,7 @@ function UsersTable() {
               {rows.map((u) => (
                 <tr
                   key={u.id}
-                  style={{ borderTop: '1px solid var(--line)' }}
+                  style={{ borderTop: '1px solid var(--line)', opacity: u.suspended ? 0.55 : 1 }}
                 >
                   <td style={{ padding: '10px 8px', color: 'var(--ink)', fontWeight: 500 }}>
                     {u.name || <span style={{ color: 'var(--ink-mute)' }}>—</span>}
@@ -949,6 +951,14 @@ function UsersTable() {
                       isSelf={me?.id === u.id}
                       onPromote={() => setPending({ kind: 'promote', user: u })}
                       onDelete={() => setPending({ kind: 'delete', user: u })}
+                      onSuspend={async () => {
+                        try {
+                          await setUserSuspended(u.id, !u.suspended)
+                          reload()
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'failed')
+                        }
+                      }}
                     />
                   </td>
                 </tr>
@@ -991,11 +1001,13 @@ function UserRowActions({
   isSelf,
   onPromote,
   onDelete,
+  onSuspend,
 }: {
   user: UserManagementView
   isSelf: boolean
   onPromote: () => void
   onDelete: () => void
+  onSuspend: () => void
 }) {
   if (isSelf) {
     return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
@@ -1034,6 +1046,13 @@ function UserRowActions({
           Already an admin
         </span>
       )}
+      <button
+        type="button"
+        onClick={dismissAndDo(onSuspend)}
+        className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
+      >
+        {user.suspended ? 'Unsuspend' : 'Suspend'}
+      </button>
       <div className="my-1 border-t border-line" />
       <button
         type="button"
@@ -1345,7 +1364,26 @@ function UserStatusPills({ user }: { user: UserManagementView }) {
           admin
         </span>
       ) : null}
-      {user.verified ? (
+      {user.suspended ? (
+        // suspended dominates the status column — verified state is
+        // moot when the user can't sign in.
+        <span
+          className="font-mono"
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+            padding: '2px 6px',
+            borderRadius: 4,
+            color: 'var(--err)',
+            background: 'rgba(184,55,55,0.08)',
+            border: '1px solid rgba(184,55,55,0.25)',
+          }}
+        >
+          suspended
+        </span>
+      ) : user.verified ? (
         <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
           <span className="n-pill-dot" />
           verified
@@ -1489,12 +1527,14 @@ function PencilIcon() {
   )
 }
 
-// PasswordlessPanel surfaces the admin's "remove password sign-in"
-// preference and the live stragglers count. Toggling on while the
-// requesting admin has no OAuth linked is rejected by the backend
-// (returns 409 with ErrRequesterNotLinked) — we surface the message
-// inline so they understand what to do next: link their own account
-// first via /account.
+// PasswordlessPanel surfaces the OAuth-only-sign-in toggle. The
+// backend hard-gates enabling: the requesting admin must have OAuth
+// linked themselves AND zero active password-only users can remain.
+// We surface the rejection messages verbatim from the server (409
+// with the service error string) so the admin sees exactly what's
+// blocking the toggle, and we offer a one-click "Suspend stragglers"
+// affordance so they can clear the gate without manually walking
+// every row in the table.
 function PasswordlessPanel() {
   const [status, setStatus] = useState<PasswordlessStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1522,36 +1562,44 @@ function PasswordlessPanel() {
     }
   }
 
+  const bulkSuspend = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      const { suspended } = await suspendUnlinkedUsers()
+      reload()
+      // Best-effort UX: surface the count so the admin knows the
+      // bulk action ran. We use the error slot rendered in green-ish
+      // tone — but realistically use a transient inline message.
+      if (suspended === 0) {
+        setError('No users needed suspending.')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
           Passwordless sign-in
         </span>
-        {status?.password_active === false && (
+        {status?.passwordless_goal && (
           <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
             <span className="n-pill-dot" />
             active
           </span>
         )}
-        {status?.passwordless_goal && status?.password_active && (
-          <span
-            className="n-pill"
-            style={{
-              fontSize: 10,
-              color: 'var(--warn)',
-              background: 'rgba(184,101,15,0.10)',
-              border: '1px solid rgba(184,101,15,0.25)',
-            }}
-          >
-            transitioning
-          </span>
-        )}
       </div>
       <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
-        When enabled, the sign-in page hides the password form once every
-        user has linked an OAuth provider. Until then, password sign-in
-        stays available so users can sign in to add their OAuth link.
+        Hides the password form on the sign-in page so only Google /
+        GitHub buttons remain. Can only be enabled once every active
+        user has linked an OAuth provider — link your own account from
+        the Account page first, then suspend or delete the stragglers
+        below.
       </p>
 
       {status && (
@@ -1580,13 +1628,26 @@ function PasswordlessPanel() {
             </span>
             <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
               {status.passwordless_goal
-                ? status.stragglers === 0
-                  ? 'All users have linked OAuth. Password sign-in is hidden on the login page.'
-                  : `${status.stragglers} user${status.stragglers === 1 ? '' : 's'} still need${status.stragglers === 1 ? 's' : ''} to link OAuth or be removed before password sign-in disappears from the login page.`
-                : 'Password sign-in is currently allowed alongside OAuth.'}
+                ? 'Password form is hidden on the sign-in page.'
+                : status.stragglers === 0
+                  ? 'Every active user has OAuth linked. Toggle on to hide the password form.'
+                  : `${status.stragglers} active user${status.stragglers === 1 ? '' : 's'} still depend${status.stragglers === 1 ? 's' : ''} on password sign-in. Suspend or delete them before enabling.`}
             </span>
           </span>
         </label>
+      )}
+
+      {status && !status.passwordless_goal && status.stragglers > 0 && (
+        <button
+          type="button"
+          className="n-btn"
+          onClick={bulkSuspend}
+          disabled={busy}
+          style={{ alignSelf: 'flex-start', fontSize: 12, padding: '6px 12px' }}
+          title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
+        >
+          {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
+        </button>
       )}
 
       {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}

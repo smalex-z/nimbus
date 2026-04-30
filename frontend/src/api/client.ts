@@ -583,10 +583,11 @@ export interface UserManagementView {
   is_admin: boolean
   created_at: string
   verified: boolean
-  // Best-effort sign-in providers the user has used at least once. May
-  // contain "password" (email/password registered), "github" (GitHub OAuth
-  // login captured), and/or "google" (inferred when neither password nor
-  // github is set — Google OAuth doesn't leave a per-user marker today).
+  suspended: boolean
+  // Sign-in paths the user has at least touched: "password" (set),
+  // "github" (one or more handshakes), "google" (one or more
+  // handshakes). Now derived from explicit per-provider flags rather
+  // than absence-inference.
   providers: string[]
 }
 
@@ -600,6 +601,22 @@ export async function listUsers(): Promise<UserManagementView[]> {
 // 401-translated "incorrect password" message when the gate fails.
 export async function promoteUser(id: number, password: string): Promise<{ id: number; is_admin: boolean }> {
   const { data } = await api.post<{ id: number; is_admin: boolean }>(`/users/${id}/promote`, { password })
+  return data
+}
+
+// setUserSuspended flips one user's suspended flag. Suspending also
+// kills every session they have so the change applies on the next
+// request rather than waiting for cookies to expire.
+export async function setUserSuspended(id: number, suspended: boolean): Promise<{ id: number; suspended: boolean }> {
+  const { data } = await api.post<{ id: number; suspended: boolean }>(`/users/${id}/suspend-status`, { suspended })
+  return data
+}
+
+// suspendUnlinkedUsers is the bulk version: suspends every active user
+// without OAuth (excluding the requester). Used by the passwordless
+// toggle's "Suspend stragglers" button.
+export async function suspendUnlinkedUsers(): Promise<{ suspended: number }> {
+  const { data } = await api.post<{ suspended: number }>('/users/suspend-unlinked')
   return data
 }
 

@@ -238,6 +238,10 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Invalid email or password")
 		return
 	}
+	if errors.Is(err, service.ErrUserSuspended) {
+		response.Error(w, http.StatusForbidden, "Account suspended. Contact your admin.")
+		return
+	}
 	if err != nil {
 		response.InternalError(w, "Failed to sign in")
 		return
@@ -491,9 +495,12 @@ func (a *Auth) Account(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetPasswordlessAuth handles PUT /api/settings/oauth/passwordless —
-// admin-only toggle for the "remove password sign-in once everyone
-// has OAuth" intent. The service guards against the requester
-// locking themselves out (must have OAuth linked first).
+// admin-only toggle for the OAuth-only-sign-in setting. Hard gate:
+// the service rejects with ErrRequesterNotLinked when the admin
+// hasn't linked OAuth themselves and ErrStragglersBlock when any
+// active password-only user remains. Both surface as 409 with the
+// service error message so the admin can act on it (link your own
+// account, then suspend or delete the stragglers).
 type passwordlessToggleRequest struct {
 	Enabled bool `json:"enabled"`
 }
@@ -510,7 +517,7 @@ func (a *Auth) SetPasswordlessAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.SetRequirePasswordlessAuth(requester.ID, body.Enabled); err != nil {
-		if errors.Is(err, service.ErrRequesterNotLinked) {
+		if errors.Is(err, service.ErrRequesterNotLinked) || errors.Is(err, service.ErrStragglersBlock) {
 			response.Error(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -533,6 +540,62 @@ func (a *Auth) SetPasswordlessAuth(w http.ResponseWriter, r *http.Request) {
 		"stragglers":        stragglers,
 		"password_active":   active,
 	})
+}
+
+// SuspendUnlinked handles POST /api/users/suspend-unlinked — bulk
+// action that suspends every active user without OAuth (excluding the
+// requester). Used by the passwordless toggle's "Suspend stragglers"
+// button to clear the gate in one click.
+func (a *Auth) SuspendUnlinked(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	count, err := a.auth.SuspendUnlinkedUsers(requester.ID)
+	if err != nil {
+		log.Printf("suspend unlinked: %v", err)
+		response.InternalError(w, "failed to suspend users")
+		return
+	}
+	response.Success(w, map[string]any{"suspended": count})
+}
+
+// suspendRequest is the body of POST /api/users/{id}/suspend-status —
+// a single-user version of the bulk action above.
+type suspendRequest struct {
+	Suspended bool `json:"suspended"`
+}
+
+func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	targetID, err := parseUserID(r)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	var body suspendRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := a.auth.SetUserSuspended(targetID, requester.ID, body.Suspended); err != nil {
+		switch {
+		case errors.Is(err, service.ErrUserNotFound):
+			response.NotFound(w, "user not found")
+		case errors.Is(err, service.ErrCannotSuspendSelf), errors.Is(err, service.ErrCannotSuspendLastAdmin):
+			response.Error(w, http.StatusConflict, err.Error())
+		default:
+			log.Printf("set suspended: %v", err)
+			response.InternalError(w, "failed to update suspension")
+		}
+		return
+	}
+	response.Success(w, map[string]any{"id": targetID, "suspended": body.Suspended})
 }
 
 // PasswordlessStatus handles GET /api/settings/oauth/passwordless —
@@ -788,6 +851,21 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/auth/callback?error=link_unauthenticated&provider=github", http.StatusTemporaryRedirect)
 			return
 		}
+		// Conflict guard: if this GitHub identity is already bound to
+		// a different Nimbus user, refuse the link rather than silently
+		// overwriting either side's binding.
+		if userInfo.ProviderID != "" {
+			existing, err := a.auth.FindUserByOAuthIdentity("github", userInfo.ProviderID)
+			if err != nil {
+				log.Printf("github link: lookup by id: %v", err)
+				http.Redirect(w, r, "/account?error=link_failed&provider=github", http.StatusTemporaryRedirect)
+				return
+			}
+			if existing != nil && existing.ID != current.ID {
+				http.Redirect(w, r, "/account?error=already_linked_other&provider=github", http.StatusTemporaryRedirect)
+				return
+			}
+		}
 		// Update the user's org snapshot (so the dynamic org bypass
 		// reflects this login) without minting a session. We touch the
 		// row directly rather than going through UpsertGitHubOAuthUser
@@ -798,7 +876,12 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := a.auth.UpdateGitHubLinkSnapshot(current.ID, orgs); err != nil {
 			log.Printf("github link: update snapshot: %v", err)
-			http.Redirect(w, r, "/auth/callback?error=link_failed&provider=github", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, "/account?error=link_failed&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+		if err := a.auth.MarkGitHubConnected(current.ID, userInfo.ProviderID); err != nil {
+			log.Printf("github link: mark connected: %v", err)
+			http.Redirect(w, r, "/account?error=link_failed&provider=github", http.StatusTemporaryRedirect)
 			return
 		}
 		http.Redirect(w, r, "/account?linked=github", http.StatusTemporaryRedirect)
@@ -808,8 +891,12 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// allowCreate is intentionally permissive here — the gate above already
 	// rejected unauthorized users when the gate is on. When the gate is off,
 	// new accounts are allowed (and will fall into the access code flow).
-	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.Orgs, nil)
+	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID, userInfo.Orgs, nil)
 	if err != nil {
+		if errors.Is(err, service.ErrUserSuspended) {
+			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
 		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=github", http.StatusTemporaryRedirect)
 		return
 	}
@@ -909,25 +996,46 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/auth/callback?error=link_unauthenticated&provider=google", http.StatusTemporaryRedirect)
 			return
 		}
-		if err := a.auth.MarkGoogleConnected(current.ID); err != nil {
+		// Refuse to link a Google identity that's already bound to a
+		// different Nimbus account — would silently steal sign-in
+		// from the other user. Also surfaced on the /account page so
+		// the operator gets a clear message about the conflict.
+		if userInfo.ProviderID != "" {
+			existing, err := a.auth.FindUserByOAuthIdentity("google", userInfo.ProviderID)
+			if err != nil {
+				log.Printf("google link: lookup by sub: %v", err)
+				http.Redirect(w, r, "/account?error=link_failed&provider=google", http.StatusTemporaryRedirect)
+				return
+			}
+			if existing != nil && existing.ID != current.ID {
+				http.Redirect(w, r, "/account?error=already_linked_other&provider=google", http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		if err := a.auth.MarkGoogleConnected(current.ID, userInfo.ProviderID); err != nil {
 			log.Printf("google link: mark connected: %v", err)
-			http.Redirect(w, r, "/auth/callback?error=link_failed&provider=google", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, "/account?error=link_failed&provider=google", http.StatusTemporaryRedirect)
 			return
 		}
 		http.Redirect(w, r, "/account?linked=google", http.StatusTemporaryRedirect)
 		return
 	}
 
-	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
+	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID)
 	if err != nil {
+		if errors.Is(err, service.ErrUserSuspended) {
+			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
 		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
 		return
 	}
 
 	// Sign-in mode also records the connection — every Google login,
-	// new or returning, sets google_connected=true so the /account
-	// page and the passwordless straggler check see consistent state.
-	if err := a.auth.MarkGoogleConnected(user.ID); err != nil {
+	// new or returning, sets google_connected=true and stamps the
+	// google_sub so the /account page, the passwordless straggler
+	// check, and the next sign-in's identity lookup all stay in sync.
+	if err := a.auth.MarkGoogleConnected(user.ID, userInfo.ProviderID); err != nil {
 		log.Printf("google sign-in: mark connected: %v", err)
 		// Non-fatal; sign-in continues.
 	}
