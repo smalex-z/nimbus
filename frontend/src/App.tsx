@@ -15,7 +15,7 @@ import Network from '@/pages/Network'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import S3 from '@/pages/S3'
-import Settings from '@/pages/Settings'
+import Users from '@/pages/Users'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
@@ -87,7 +87,11 @@ export default function App() {
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/gpu" element={<GPU />} />
-                      <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
+                      <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
+                      {/* Old /settings URL kept around so any existing
+                          bookmarks / pasted links still resolve to the
+                          rebranded user management page. */}
+                      <Route path="/settings" element={<Navigate to="/users" replace />} />
                       <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
                       <Route path="/network" element={<RequireAdmin><Network /></RequireAdmin>} />
                       <Route path="/s3" element={<RequireAdmin><S3 /></RequireAdmin>} />

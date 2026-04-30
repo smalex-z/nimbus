@@ -212,11 +212,13 @@ func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListUsers handles GET /api/users.
-// Admins receive every account; non-admins receive only their own.
+// Admins receive every account in the richer management shape (with
+// signup time, verification status, and provider hints); non-admins
+// receive only their own self-view (no list of peers).
 func (a *Auth) ListUsers(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user.IsAdmin {
-		users, err := a.auth.ListAllUsers()
+		users, err := a.auth.ListAllUsersForManagement()
 		if err != nil {
 			response.InternalError(w, "Failed to list users")
 			return

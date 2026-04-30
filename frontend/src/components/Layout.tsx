@@ -149,8 +149,8 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-ink-3 font-semibold">
                     Control Panel
                   </div>
-                  <NavLink to="/settings" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Authentication
+                  <NavLink to="/users" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Users
                   </NavLink>
                   <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Gopher Tunnels
