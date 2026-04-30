@@ -503,6 +503,46 @@ export async function createAdminAccount(req: CreateAdminRequest): Promise<{ id:
 export interface OAuthProviders {
   github: boolean
   google: boolean
+  // password is true when the sign-in page should still render the
+  // email/password form. Stays true unless the admin has set
+  // passwordless_goal AND every user has linked an OAuth provider.
+  password: boolean
+  // passwordless_goal is the admin's stated intent. When true but
+  // password is also still true, the system is in transition (some
+  // users haven't linked yet); the UI uses both fields to render the
+  // explanatory banner.
+  passwordless_goal: boolean
+}
+
+export interface AccountView {
+  id: number
+  name: string
+  email: string
+  is_admin: boolean
+  has_password: boolean
+  google_connected: boolean
+  github_connected: boolean
+}
+
+export async function getAccount(): Promise<AccountView> {
+  const { data } = await api.get<AccountView>('/account')
+  return data
+}
+
+export interface PasswordlessStatus {
+  passwordless_goal: boolean
+  stragglers: number
+  password_active: boolean
+}
+
+export async function getPasswordlessStatus(): Promise<PasswordlessStatus> {
+  const { data } = await api.get<PasswordlessStatus>('/settings/oauth/passwordless')
+  return data
+}
+
+export async function setPasswordlessAuth(enabled: boolean): Promise<PasswordlessStatus> {
+  const { data } = await api.put<PasswordlessStatus>('/settings/oauth/passwordless', { enabled })
+  return data
 }
 
 export interface OAuthSettingsView {

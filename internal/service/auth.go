@@ -27,6 +27,7 @@ var (
 	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
 	ErrOrgNotAuthorized     = errors.New("github org not authorized")
 	ErrUserNotFound         = errors.New("user not found")
+	ErrRequesterNotLinked   = errors.New("link an OAuth provider on your own account before requiring passwordless sign-in")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -320,6 +321,118 @@ func (s *AuthService) UpsertOAuthUserWithCheck(
 		return nil, false, err
 	}
 	return userToView(&user), true, nil
+}
+
+// UpdateGitHubLinkSnapshot writes the user's GitHub orgs snapshot
+// without going through UpsertGitHubOAuthUser, which keys on email
+// and would risk splitting the row if the GitHub email differs from
+// the Nimbus email. Used by the /account link flow where the current
+// session's user is already established and we just want to record
+// "this user has now linked GitHub."
+func (s *AuthService) UpdateGitHubLinkSnapshot(userID uint, orgsCSV string) error {
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).Update("github_orgs", orgsCSV)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// GetUserByID returns the raw User row by primary key. Used by the
+// /account endpoint which needs fields beyond UserView (password hash
+// presence + Google connected flag) to render the Connect buttons.
+func (s *AuthService) GetUserByID(id uint) (*db.User, error) {
+	var u db.User
+	if err := s.db.First(&u, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+// MarkGoogleConnected flips the user's google_connected flag to true.
+// Idempotent. Called on every successful Google OAuth login (sign-in
+// or link), giving the /account page and the passwordless-mode
+// straggler check a single source of truth: "this user has completed
+// at least one Google OAuth dance against this Nimbus instance."
+func (s *AuthService) MarkGoogleConnected(userID uint) error {
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).Update("google_connected", true)
+	return res.Error
+}
+
+// HasOAuthLinked reports whether the named user has completed at
+// least one OAuth dance — Google flag set or GitHub orgs snapshot
+// non-empty. The signal both /account and the passwordless setter use
+// to decide "is this user reachable without a password."
+func (s *AuthService) HasOAuthLinked(userID uint) (bool, error) {
+	var u db.User
+	if err := s.db.First(&u, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, ErrUserNotFound
+		}
+		return false, err
+	}
+	return u.GoogleConnected || u.GitHubOrgs != "", nil
+}
+
+// CountUnlinkedUsers returns how many accounts have no OAuth provider
+// linked — i.e. would be locked out if password sign-in disappeared
+// today. The admin sees this number on /users so they know how many
+// stragglers stand between them and a clean OAuth-only login page.
+func (s *AuthService) CountUnlinkedUsers() (int64, error) {
+	var n int64
+	err := s.db.Model(&db.User{}).
+		Where("google_connected = ? AND github_orgs = ?", false, "").
+		Count(&n).Error
+	return n, err
+}
+
+// IsPasswordSignInActive returns true when the login page should still
+// show the password form. The form stays available until two
+// conditions are both met: the admin has set
+// RequirePasswordlessAuth=true *and* every account has linked at
+// least one OAuth provider. Otherwise we'd lock out password-only
+// users from ever being able to sign in to add OAuth — exactly the
+// bootstrap problem the user flagged.
+func (s *AuthService) IsPasswordSignInActive() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return true, err
+	}
+	if !settings.RequirePasswordlessAuth {
+		return true, nil
+	}
+	stragglers, err := s.CountUnlinkedUsers()
+	if err != nil {
+		return true, err
+	}
+	return stragglers > 0, nil
+}
+
+// SetRequirePasswordlessAuth flips the admin's stated intent. The
+// requester must have OAuth linked themselves — otherwise they'd hit
+// the locked-out gate the moment the last straggler clears. Toggling
+// off is unrestricted (you can always go back to allowing passwords).
+func (s *AuthService) SetRequirePasswordlessAuth(requesterID uint, enabled bool) error {
+	if enabled {
+		linked, err := s.HasOAuthLinked(requesterID)
+		if err != nil {
+			return err
+		}
+		if !linked {
+			return ErrRequesterNotLinked
+		}
+	}
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.RequirePasswordlessAuth = enabled
+	return s.db.Save(&settings).Error
 }
 
 // HasAuthorizedGoogleDomains reports whether the admin has configured at

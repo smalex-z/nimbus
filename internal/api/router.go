@@ -144,6 +144,13 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/auth/google", auth.GoogleStart)
 		r.Get("/auth/google/callback", auth.GoogleCallback)
 		r.Get("/auth/providers", auth.Providers)
+		// Link-mode entry points share the OAuth callback handlers
+		// above; they're separate endpoints only at the start to set
+		// the link-intent cookie. Callbacks consult that cookie to
+		// branch behavior. Auth check is inline (the dance returns
+		// here mid-flight, before the new session would exist).
+		r.Get("/auth/github/link", auth.GitHubLinkStart)
+		r.Get("/auth/google/link", auth.GoogleLinkStart)
 
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {
@@ -151,6 +158,7 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
+			r.Get("/account", auth.Account)
 
 			// Access-code endpoints — must be reachable WITHOUT being verified,
 			// so the unverified user can submit their code from the Verify page.
@@ -176,6 +184,8 @@ func NewRouter(d Deps) http.Handler {
 				// only.
 				r.Post("/users/{id}/promote", auth.PromoteUser)
 				r.Delete("/users/{id}", auth.DeleteUser)
+				r.Get("/settings/oauth/passwordless", auth.PasswordlessStatus)
+				r.Put("/settings/oauth/passwordless", auth.SetPasswordlessAuth)
 
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)

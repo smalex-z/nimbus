@@ -42,7 +42,9 @@ export default function SignUp() {
   const { displayed, done: typingDone } = useTypingEffect(HEADING_FULL)
 
   useEffect(() => {
-    getProviders().then(setProviders).catch(() => setProviders({ github: false, google: false }))
+    getProviders()
+      .then(setProviders)
+      .catch(() => setProviders({ github: false, google: false, password: true, passwordless_goal: false }))
   }, [])
 
   const plainVisible = displayed.slice(0, HEADING_PLAIN.length)

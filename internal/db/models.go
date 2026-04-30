@@ -22,8 +22,16 @@ type User struct {
 	// user belonged to at their last GitHub OAuth login. Used by the
 	// authorized-orgs bypass: IsUserVerified intersects this against the
 	// admin's current authorized-orgs list dynamically. Empty for users who
-	// have never signed in via GitHub.
+	// have never signed in via GitHub. Also doubles as the
+	// GitHub-connected indicator — a non-empty string means the user has
+	// completed at least one GitHub OAuth login (org list may be "-" if
+	// they belong to no orgs).
 	GitHubOrgs string `gorm:"default:''" json:"-"`
+	// GoogleConnected is a boolean flag set on every successful Google
+	// OAuth login. Used as the "Google account linked" marker on the
+	// /account page and by the passwordless-mode straggler check. We
+	// don't store the Google email/sub today — just the yes/no.
+	GoogleConnected bool `gorm:"default:false" json:"-"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.
@@ -56,6 +64,13 @@ type OAuthSettings struct {
 	// org logins. Members of any of these orgs bypass the access code on
 	// GitHub OAuth sign-in. Empty list disables the GitHub bypass.
 	AuthorizedGitHubOrgs string `gorm:"default:''"`
+	// RequirePasswordlessAuth is the admin's declared intent to remove
+	// password sign-in once every user has linked an OAuth provider. The
+	// flag itself doesn't immediately disable the password form — that
+	// would lock out users who still need to link. Instead it gates a
+	// dynamic check: when this is true AND no users still have only
+	// password access, the sign-in page hides the password form.
+	RequirePasswordlessAuth bool `gorm:"default:false"`
 }
 
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single

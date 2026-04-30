@@ -7,16 +7,19 @@ import {
   getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
   getOAuthSettings,
+  getPasswordlessStatus,
   listUsers,
   promoteUser,
   regenerateAccessCode,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
+  setPasswordlessAuth,
 } from '@/api/client'
 import type {
   AccessCodeView,
   OAuthSettingsView,
+  PasswordlessStatus,
   UserManagementView,
 } from '@/api/client'
 import NavDropdown from '@/components/ui/NavDropdown'
@@ -837,6 +840,7 @@ export default function Users() {
             settings={settings}
             onEdit={(p) => setEditingProvider(p)}
           />
+          <PasswordlessPanel />
         </div>
       </div>
 
@@ -1482,6 +1486,111 @@ function PencilIcon() {
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
+  )
+}
+
+// PasswordlessPanel surfaces the admin's "remove password sign-in"
+// preference and the live stragglers count. Toggling on while the
+// requesting admin has no OAuth linked is rejected by the backend
+// (returns 409 with ErrRequesterNotLinked) — we surface the message
+// inline so they understand what to do next: link their own account
+// first via /account.
+function PasswordlessPanel() {
+  const [status, setStatus] = useState<PasswordlessStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const reload = () => {
+    getPasswordlessStatus()
+      .then(setStatus)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }
+
+  useEffect(reload, [])
+
+  const toggle = async () => {
+    if (!status) return
+    setError(null)
+    setBusy(true)
+    try {
+      const next = await setPasswordlessAuth(!status.passwordless_goal)
+      setStatus(next)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          Passwordless sign-in
+        </span>
+        {status?.password_active === false && (
+          <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+            <span className="n-pill-dot" />
+            active
+          </span>
+        )}
+        {status?.passwordless_goal && status?.password_active && (
+          <span
+            className="n-pill"
+            style={{
+              fontSize: 10,
+              color: 'var(--warn)',
+              background: 'rgba(184,101,15,0.10)',
+              border: '1px solid rgba(184,101,15,0.25)',
+            }}
+          >
+            transitioning
+          </span>
+        )}
+      </div>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+        When enabled, the sign-in page hides the password form once every
+        user has linked an OAuth provider. Until then, password sign-in
+        stays available so users can sign in to add their OAuth link.
+      </p>
+
+      {status && (
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 10,
+            padding: '10px 12px',
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            cursor: busy ? 'wait' : 'pointer',
+            background: status.passwordless_goal ? 'rgba(20,18,28,0.05)' : 'rgba(20,18,28,0.02)',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={status.passwordless_goal}
+            disabled={busy}
+            onChange={toggle}
+            style={{ marginTop: 3 }}
+          />
+          <span>
+            <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+              Require OAuth sign-in
+            </span>
+            <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
+              {status.passwordless_goal
+                ? status.stragglers === 0
+                  ? 'All users have linked OAuth. Password sign-in is hidden on the login page.'
+                  : `${status.stragglers} user${status.stragglers === 1 ? '' : 's'} still need${status.stragglers === 1 ? 's' : ''} to link OAuth or be removed before password sign-in disappears from the login page.`
+                : 'Password sign-in is currently allowed alongside OAuth.'}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
+    </div>
   )
 }
 

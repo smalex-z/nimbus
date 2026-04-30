@@ -6,6 +6,7 @@ import Layout from '@/components/Layout'
 import RequireAdmin from '@/components/RequireAdmin'
 import RequireAuth from '@/components/RequireAuth'
 import RequireVerified from '@/components/RequireVerified'
+import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
 import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
@@ -88,6 +89,7 @@ export default function App() {
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/gpu" element={<GPU />} />
                       <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
+                      <Route path="/account" element={<Account />} />
                       {/* Old /settings URL kept around so any existing
                           bookmarks / pasted links still resolve to the
                           rebranded user management page. */}

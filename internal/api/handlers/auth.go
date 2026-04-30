@@ -27,6 +27,13 @@ import (
 const (
 	sessionCookieName = "nimbus_sid"
 	oauthStateCookie  = "nimbus_oauth_state"
+	// oauthIntentCookie distinguishes a sign-in OAuth dance from a
+	// link-to-existing-account dance. Set alongside the state cookie at
+	// /api/auth/{provider}/start (intent="signin") or
+	// /api/auth/{provider}/link-start (intent="link"); read by the
+	// shared callback so it can either upsert-by-email or attach the
+	// identity to the current session's user.
+	oauthIntentCookie = "nimbus_oauth_intent"
 )
 
 // loginReconciler is the small interface the Auth handler uses to kick a
@@ -115,18 +122,29 @@ func (a *Auth) googleProvider() oauth.Provider {
 	}
 }
 
-// Providers handles GET /api/auth/providers — public endpoint that tells the
-// frontend which OAuth providers have credentials configured in the DB.
+// Providers handles GET /api/auth/providers — public endpoint the
+// sign-in page consumes. Returns which OAuth providers have
+// credentials configured AND whether the password form should still
+// render. Password sign-in stays available unless the admin has
+// turned on RequirePasswordlessAuth and zero users still depend on
+// password access — see service.IsPasswordSignInActive for the rule.
 func (a *Auth) Providers(w http.ResponseWriter, r *http.Request) {
 	settings, err := a.auth.GetOAuthSettings()
-	if err != nil {
-		response.Success(w, map[string]bool{"github": false, "google": false})
-		return
+	out := map[string]any{
+		"github":            false,
+		"google":            false,
+		"password":          true,
+		"passwordless_goal": false,
 	}
-	response.Success(w, map[string]bool{
-		"github": settings.GitHubClientID != "" && settings.GitHubClientSecret != "",
-		"google": settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
-	})
+	if err == nil {
+		out["github"] = settings.GitHubClientID != "" && settings.GitHubClientSecret != ""
+		out["google"] = settings.GoogleClientID != "" && settings.GoogleClientSecret != ""
+		out["passwordless_goal"] = settings.RequirePasswordlessAuth
+	}
+	if active, err := a.auth.IsPasswordSignInActive(); err == nil {
+		out["password"] = active
+	}
+	response.Success(w, out)
 }
 
 // --- cookie helpers ---------------------------------------------------------
@@ -433,6 +451,121 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]any{"id": targetID, "vm_action": body.VMAction, "vms_handled": len(owned)})
 }
 
+// accountView is the shape returned by GET /api/account — what the
+// current user sees about themselves on the /account page. Includes
+// the linked-providers flags so the page can render Connect / Connected
+// pills without duplicating the heuristic.
+type accountView struct {
+	ID              uint   `json:"id"`
+	Name            string `json:"name"`
+	Email           string `json:"email"`
+	IsAdmin         bool   `json:"is_admin"`
+	HasPassword     bool   `json:"has_password"`
+	GoogleConnected bool   `json:"google_connected"`
+	GithubConnected bool   `json:"github_connected"`
+}
+
+// Account handles GET /api/account — current user's profile + the
+// linked-providers state so the /account page can decide which
+// Connect buttons to render.
+func (a *Auth) Account(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	row, err := a.auth.GetUserByID(user.ID)
+	if err != nil {
+		response.InternalError(w, "Failed to load account")
+		return
+	}
+	response.Success(w, accountView{
+		ID:              row.ID,
+		Name:            row.Name,
+		Email:           row.Email,
+		IsAdmin:         row.IsAdmin,
+		HasPassword:     row.PasswordHash != "",
+		GoogleConnected: row.GoogleConnected,
+		GithubConnected: row.GitHubOrgs != "",
+	})
+}
+
+// SetPasswordlessAuth handles PUT /api/settings/oauth/passwordless —
+// admin-only toggle for the "remove password sign-in once everyone
+// has OAuth" intent. The service guards against the requester
+// locking themselves out (must have OAuth linked first).
+type passwordlessToggleRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (a *Auth) SetPasswordlessAuth(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	var body passwordlessToggleRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	if err := a.auth.SetRequirePasswordlessAuth(requester.ID, body.Enabled); err != nil {
+		if errors.Is(err, service.ErrRequesterNotLinked) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		log.Printf("set passwordless: %v", err)
+		response.InternalError(w, "failed to update setting")
+		return
+	}
+	stragglers, err := a.auth.CountUnlinkedUsers()
+	if err != nil {
+		log.Printf("set passwordless: count stragglers: %v", err)
+		stragglers = 0
+	}
+	active, err := a.auth.IsPasswordSignInActive()
+	if err != nil {
+		log.Printf("set passwordless: is password active: %v", err)
+		active = true
+	}
+	response.Success(w, map[string]any{
+		"passwordless_goal": body.Enabled,
+		"stragglers":        stragglers,
+		"password_active":   active,
+	})
+}
+
+// PasswordlessStatus handles GET /api/settings/oauth/passwordless —
+// admin-only read of the current setting + straggler count, so the
+// /users page can render the toggle and the explanatory banner.
+func (a *Auth) PasswordlessStatus(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	settings, err := a.auth.GetOAuthSettings()
+	if err != nil {
+		response.InternalError(w, "Failed to load settings")
+		return
+	}
+	stragglers, err := a.auth.CountUnlinkedUsers()
+	if err != nil {
+		log.Printf("passwordless status: count stragglers: %v", err)
+		stragglers = 0
+	}
+	active, err := a.auth.IsPasswordSignInActive()
+	if err != nil {
+		log.Printf("passwordless status: active: %v", err)
+		active = true
+	}
+	response.Success(w, map[string]any{
+		"passwordless_goal": settings.RequirePasswordlessAuth,
+		"stragglers":        stragglers,
+		"password_active":   active,
+	})
+}
+
 // VerifyStatus handles GET /api/access-code/status — returns whether the
 // authenticated user is verified against the current access code version.
 func (a *Auth) VerifyStatus(w http.ResponseWriter, r *http.Request) {
@@ -490,9 +623,11 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 
 // --- shared OAuth helpers ---------------------------------------------------
 
-// oauthStart generates a CSRF state, stores it in a short-lived cookie, and
-// redirects the browser to the provider's authorization URL.
-func (a *Auth) oauthStart(provider oauth.Provider) http.HandlerFunc {
+// oauthStart generates a CSRF state, stores it in a short-lived cookie
+// alongside the intent ("signin" or "link"), and redirects the browser
+// to the provider's authorization URL. The callback reads the intent
+// to decide whether to mint a new session or attach to the current one.
+func (a *Auth) oauthStart(provider oauth.Provider, intent string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if provider == nil {
 			response.Error(w, http.StatusServiceUnavailable, "OAuth provider not configured")
@@ -511,14 +646,67 @@ func (a *Auth) oauthStart(provider oauth.Provider) http.HandlerFunc {
 			SameSite: http.SameSiteLaxMode,
 			MaxAge:   600,
 		})
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthIntentCookie,
+			Value:    intent,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   600,
+		})
 		http.Redirect(w, r, provider.AuthURL(state), http.StatusTemporaryRedirect)
 	}
+}
+
+// currentSessionUser inspects the session cookie and returns the
+// matching user, or nil when the cookie is missing or invalid. The
+// OAuth callback routes are public (sign-in mode runs them with no
+// pre-existing session), so this lookup happens inside the handler
+// rather than via requireAuth middleware.
+func (a *Auth) currentSessionUser(r *http.Request) *service.UserView {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return nil
+	}
+	user, err := a.auth.GetUserBySessionID(c.Value)
+	if err != nil {
+		return nil
+	}
+	return user
+}
+
+// readOAuthIntent fetches the intent cookie. Falls back to "signin" if
+// the cookie is missing — backwards-compat for any in-flight OAuth
+// dances started before this code shipped.
+func readOAuthIntent(r *http.Request) string {
+	c, err := r.Cookie(oauthIntentCookie)
+	if err != nil {
+		return "signin"
+	}
+	if c.Value == "link" {
+		return "link"
+	}
+	return "signin"
+}
+
+// clearOAuthIntent zeroes the intent cookie alongside the state cookie
+// at the end of every callback.
+func clearOAuthIntent(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: oauthIntentCookie, Value: "", Path: "/", MaxAge: -1})
 }
 
 // --- GitHub OAuth -----------------------------------------------------------
 
 func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
-	a.oauthStart(a.githubProvider())(w, r)
+	a.oauthStart(a.githubProvider(), "signin")(w, r)
+}
+
+// GitHubLinkStart kicks off a GitHub OAuth dance whose callback will
+// attach the resulting identity to the current session's user instead
+// of creating/finding a user by email. Requires an authenticated
+// session — middleware enforces that at the route level.
+func (a *Auth) GitHubLinkStart(w http.ResponseWriter, r *http.Request) {
+	a.oauthStart(a.githubProvider(), "link")(w, r)
 }
 
 // GitHubCallback wraps the OAuth flow with the authorized-orgs check. New
@@ -585,6 +773,38 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	intent := readOAuthIntent(r)
+	clearOAuthIntent(w)
+
+	// Link mode attaches the just-completed identity to the
+	// already-signed-in user — UpsertGitHubOAuthUser still runs (it's
+	// idempotent for existing accounts and refreshes the org snapshot)
+	// but we route success through the /account page instead of the
+	// sign-in callback. A link request with no current session is a
+	// misuse — the route requires auth — but check defensively.
+	if intent == "link" {
+		current := a.currentSessionUser(r)
+		if current == nil {
+			http.Redirect(w, r, "/auth/callback?error=link_unauthenticated&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+		// Update the user's org snapshot (so the dynamic org bypass
+		// reflects this login) without minting a session. We touch the
+		// row directly rather than going through UpsertGitHubOAuthUser
+		// so we can't accidentally split the user record by email.
+		orgs := strings.Join(userInfo.Orgs, ",")
+		if orgs == "" {
+			orgs = "-" // sentinel — distinguishes "linked, no orgs" from "never linked"
+		}
+		if err := a.auth.UpdateGitHubLinkSnapshot(current.ID, orgs); err != nil {
+			log.Printf("github link: update snapshot: %v", err)
+			http.Redirect(w, r, "/auth/callback?error=link_failed&provider=github", http.StatusTemporaryRedirect)
+			return
+		}
+		http.Redirect(w, r, "/account?linked=github", http.StatusTemporaryRedirect)
+		return
+	}
+
 	// allowCreate is intentionally permissive here — the gate above already
 	// rejected unauthorized users when the gate is on. When the gate is off,
 	// new accounts are allowed (and will fall into the access code flow).
@@ -612,7 +832,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 // --- Google OAuth -----------------------------------------------------------
 
 func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
-	a.oauthStart(a.googleProvider())(w, r)
+	a.oauthStart(a.googleProvider(), "signin")(w, r)
+}
+
+// GoogleLinkStart is the link-mode counterpart of GoogleStart; the
+// callback attaches the identity to the current session's user. See
+// GitHubLinkStart for the rationale.
+func (a *Auth) GoogleLinkStart(w http.ResponseWriter, r *http.Request) {
+	a.oauthStart(a.googleProvider(), "link")(w, r)
 }
 
 // GoogleCallback wraps the shared OAuth callback flow with the
@@ -673,10 +900,36 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	intent := readOAuthIntent(r)
+	clearOAuthIntent(w)
+
+	if intent == "link" {
+		current := a.currentSessionUser(r)
+		if current == nil {
+			http.Redirect(w, r, "/auth/callback?error=link_unauthenticated&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+		if err := a.auth.MarkGoogleConnected(current.ID); err != nil {
+			log.Printf("google link: mark connected: %v", err)
+			http.Redirect(w, r, "/auth/callback?error=link_failed&provider=google", http.StatusTemporaryRedirect)
+			return
+		}
+		http.Redirect(w, r, "/account?linked=google", http.StatusTemporaryRedirect)
+		return
+	}
+
 	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email)
 	if err != nil {
 		http.Redirect(w, r, "/auth/callback?error=user_failed&provider=google", http.StatusTemporaryRedirect)
 		return
+	}
+
+	// Sign-in mode also records the connection — every Google login,
+	// new or returning, sets google_connected=true so the /account
+	// page and the passwordless straggler check see consistent state.
+	if err := a.auth.MarkGoogleConnected(user.ID); err != nil {
+		log.Printf("google sign-in: mark connected: %v", err)
+		// Non-fatal; sign-in continues.
 	}
 
 	// No DB write for the domain bypass — IsUserVerified consults the
