@@ -536,6 +536,25 @@ export async function saveOAuthSettings(
   return data
 }
 
+export interface UserManagementView {
+  id: number
+  name: string
+  email: string
+  is_admin: boolean
+  created_at: string
+  verified: boolean
+  // Best-effort sign-in providers the user has used at least once. May
+  // contain "password" (email/password registered), "github" (GitHub OAuth
+  // login captured), and/or "google" (inferred when neither password nor
+  // github is set — Google OAuth doesn't leave a per-user marker today).
+  providers: string[]
+}
+
+export async function listUsers(): Promise<UserManagementView[]> {
+  const { data } = await api.get<UserManagementView[]>('/users')
+  return data
+}
+
 export interface AccessCodeView {
   access_code: string
   version: number

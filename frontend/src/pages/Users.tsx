@@ -1,16 +1,22 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
   getAccessCode,
   getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
   getOAuthSettings,
+  listUsers,
   regenerateAccessCode,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
 } from '@/api/client'
-import type { AccessCodeView, OAuthSettingsView } from '@/api/client'
+import type {
+  AccessCodeView,
+  OAuthSettingsView,
+  UserManagementView,
+} from '@/api/client'
 
 interface ProviderPanelProps {
   name: string
@@ -753,9 +759,22 @@ function GitHubOrgsSection() {
 }
 
 
-export default function Settings() {
+// Users — admin-facing user management + access policy.
+//
+// Page layout, top-down:
+//   1. Access code panel + Users table (the things admins reach for daily).
+//   2. Sign-in providers summary card (Google + GitHub status pills, plus
+//      a "Configure providers" button that opens the full OAuth + bypass
+//      configuration in a modal).
+//
+// The OAuth provider panels were the bulk of the old /settings page; they
+// stay reachable but live behind a click since most operators only touch
+// them once at setup. Pushing them down/behind a modal keeps the access
+// code + users-list — which admins actually look at — above the fold.
+export default function Users() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [providersOpen, setProvidersOpen] = useState(false)
 
   useEffect(() => {
     getOAuthSettings()
@@ -787,10 +806,11 @@ export default function Settings() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
         <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
-          Authentication
+          Users
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
-          Manage the access code and OAuth providers users can sign in with.
+          Every account that has signed up, plus the access code and sign-in
+          providers gating new sign-ins.
         </p>
       </div>
 
@@ -800,37 +820,355 @@ export default function Settings() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         <div className="lg:col-span-2 flex flex-col gap-6">
-          {settings && (
-            <>
-              <ProviderPanel
-                name="Google"
-                icon={<GoogleIcon size={20} />}
-                clientId={settings.google_client_id}
-                configured={settings.google_configured}
-                instructionsUrl="https://console.cloud.google.com/apis/credentials"
-                instructionsLabel="Google Cloud Console"
-                onSave={handleSaveGoogle}
-              >
-                <GoogleDomainsSection />
-              </ProviderPanel>
-              <ProviderPanel
-                name="GitHub"
-                icon={<GithubIcon size={20} />}
-                clientId={settings.github_client_id}
-                configured={settings.github_configured}
-                instructionsUrl="https://github.com/settings/applications/new"
-                instructionsLabel="github.com/settings/applications/new"
-                onSave={handleSaveGitHub}
-              >
-                <GitHubOrgsSection />
-              </ProviderPanel>
-            </>
-          )}
+          <UsersTable />
         </div>
-        <div className="lg:col-span-1">
+        <div className="lg:col-span-1 flex flex-col gap-6">
           <AccessCodePanel />
+          <ProvidersSummary
+            settings={settings}
+            onConfigure={() => setProvidersOpen(true)}
+          />
         </div>
       </div>
+
+      {providersOpen && settings && (
+        <OAuthProvidersModal
+          settings={settings}
+          onClose={() => setProvidersOpen(false)}
+          onSaveGitHub={handleSaveGitHub}
+          onSaveGoogle={handleSaveGoogle}
+        />
+      )}
     </div>
+  )
+}
+
+// UsersTable renders every account the admin can see. Sorted server-side
+// by created_at desc, so the most recent sign-up shows first. Verified
+// status follows the live policy (admin / authorized domain / org / code
+// match) so the column reflects what would happen on the user's next
+// request, not a snapshot at sign-up.
+function UsersTable() {
+  const [rows, setRows] = useState<UserManagementView[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    listUsers()
+      .then(setRows)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }, [])
+
+  return (
+    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          Accounts
+        </span>
+        {rows !== null && (
+          <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
+            {rows.length} {rows.length === 1 ? 'user' : 'users'}
+          </span>
+        )}
+      </div>
+
+      {rows === null && !error && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+      )}
+      {error && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>
+      )}
+      {rows !== null && rows.length === 0 && !error && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
+          No accounts yet.
+        </p>
+      )}
+      {rows !== null && rows.length > 0 && (
+        <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
+          <table className="w-full text-left" style={{ fontSize: 13, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: 'var(--ink-mute)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Name</th>
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Email</th>
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Joined</th>
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Sign-in</th>
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((u) => (
+                <tr
+                  key={u.id}
+                  style={{ borderTop: '1px solid var(--line)' }}
+                >
+                  <td style={{ padding: '10px 8px', color: 'var(--ink)', fontWeight: 500 }}>
+                    {u.name || <span style={{ color: 'var(--ink-mute)' }}>—</span>}
+                  </td>
+                  <td style={{ padding: '10px 8px', color: 'var(--ink-body)', fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
+                    {u.email}
+                  </td>
+                  <td style={{ padding: '10px 8px', color: 'var(--ink-body)', whiteSpace: 'nowrap' }}>
+                    {formatJoined(u.created_at)}
+                  </td>
+                  <td style={{ padding: '10px 8px' }}>
+                    <ProviderChips providers={u.providers} />
+                  </td>
+                  <td style={{ padding: '10px 8px' }}>
+                    <UserStatusPills user={u} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProviderChips({ providers }: { providers: string[] }) {
+  if (!providers || providers.length === 0) {
+    return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+      {providers.map((p) => (
+        <span
+          key={p}
+          style={{
+            fontSize: 10,
+            fontFamily: 'Geist Mono, monospace',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+            padding: '2px 6px',
+            borderRadius: 4,
+            background: 'rgba(20,18,28,0.05)',
+            border: '1px solid var(--line)',
+            color: 'var(--ink-body)',
+          }}
+        >
+          {p}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function UserStatusPills({ user }: { user: UserManagementView }) {
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
+      {user.is_admin ? (
+        <span
+          className="font-mono"
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+            padding: '2px 6px',
+            borderRadius: 4,
+            color: '#9a5c2e',
+            background: 'rgba(248,175,130,0.15)',
+            border: '1px solid rgba(248,175,130,0.4)',
+          }}
+        >
+          admin
+        </span>
+      ) : null}
+      {user.verified ? (
+        <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+          <span className="n-pill-dot" />
+          verified
+        </span>
+      ) : (
+        <span
+          className="n-pill"
+          style={{
+            fontSize: 10,
+            color: 'var(--ink-mute)',
+            background: 'rgba(20,18,28,0.04)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          unverified
+        </span>
+      )}
+    </span>
+  )
+}
+
+// formatJoined renders a relative-ish "joined" string. Recent times show
+// as "today" / "Xd ago"; anything older falls back to a short date.
+function formatJoined(iso: string): string {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return '—'
+  const ms = Date.now() - t
+  const days = Math.floor(ms / 86_400_000)
+  if (days < 1) return 'today'
+  if (days < 30) return `${days}d ago`
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// ProvidersSummary is the compact replacement for the old big OAuth
+// section. Shows a one-line status for Google and GitHub plus the
+// "Configure" button that opens the modal with the full provider +
+// bypass configuration.
+function ProvidersSummary({
+  settings,
+  onConfigure,
+}: {
+  settings: OAuthSettingsView | null
+  onConfigure: () => void
+}) {
+  return (
+    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          Sign-in providers
+        </span>
+        <button
+          type="button"
+          className="n-btn"
+          style={{ padding: '6px 12px', fontSize: 12 }}
+          onClick={onConfigure}
+        >
+          Configure
+        </button>
+      </div>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+        OAuth client IDs + the access-code bypass lists (authorized Google
+        domains, GitHub orgs).
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <ProviderRow
+          icon={<GoogleIcon size={16} />}
+          name="Google"
+          configured={settings?.google_configured}
+        />
+        <ProviderRow
+          icon={<GithubIcon size={16} />}
+          name="GitHub"
+          configured={settings?.github_configured}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ProviderRow({ icon, name, configured }: { icon: React.ReactNode; name: string; configured: boolean | undefined }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(20,18,28,0.03)', border: '1px solid var(--line)', borderRadius: 8 }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--ink)' }}>
+        {icon}
+        {name}
+      </span>
+      {configured ? (
+        <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+          <span className="n-pill-dot" />
+          configured
+        </span>
+      ) : (
+        <span
+          className="n-pill"
+          style={{
+            fontSize: 10,
+            color: 'var(--ink-mute)',
+            background: 'rgba(20,18,28,0.04)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          not configured
+        </span>
+      )}
+    </div>
+  )
+}
+
+// OAuthProvidersModal wraps the existing ProviderPanel + Domains / Orgs
+// sections. The full configuration UI is unchanged — only the surface
+// it lives on moved.
+function OAuthProvidersModal({
+  settings,
+  onClose,
+  onSaveGitHub,
+  onSaveGoogle,
+}: {
+  settings: OAuthSettingsView
+  onClose: () => void
+  onSaveGitHub: (clientId: string, clientSecret: string) => Promise<unknown>
+  onSaveGoogle: (clientId: string, clientSecret: string) => Promise<unknown>
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[60] grid place-items-center p-4"
+      style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Sign-in providers"
+      onClick={onClose}
+    >
+      <div
+        className="glass"
+        style={{ width: '100%', maxWidth: 760, maxHeight: 'calc(100vh - 2rem)', overflowY: 'auto', padding: '28px 32px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+          <div>
+            <div className="eyebrow">Authentication</div>
+            <h3 style={{ fontSize: 22, margin: '4px 0 0' }}>Sign-in providers</h3>
+            <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+              OAuth client IDs and the bypass lists (Google domains, GitHub
+              orgs) that skip the access code on sign-in.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{ background: 'none', border: 'none', fontSize: 22, lineHeight: 1, color: 'var(--ink-mute)', cursor: 'pointer', padding: 4, marginRight: -4, marginTop: -4 }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <ProviderPanel
+            name="Google"
+            icon={<GoogleIcon size={20} />}
+            clientId={settings.google_client_id}
+            configured={settings.google_configured}
+            instructionsUrl="https://console.cloud.google.com/apis/credentials"
+            instructionsLabel="Google Cloud Console"
+            onSave={onSaveGoogle}
+          >
+            <GoogleDomainsSection />
+          </ProviderPanel>
+          <ProviderPanel
+            name="GitHub"
+            icon={<GithubIcon size={20} />}
+            clientId={settings.github_client_id}
+            configured={settings.github_configured}
+            instructionsUrl="https://github.com/settings/applications/new"
+            instructionsLabel="github.com/settings/applications/new"
+            onSave={onSaveGitHub}
+          >
+            <GitHubOrgsSection />
+          </ProviderPanel>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }

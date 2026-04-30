@@ -59,6 +59,73 @@ func userToView(u *db.User) *UserView {
 	return &UserView{ID: u.ID, Name: u.Name, Email: u.Email, IsAdmin: u.IsAdmin}
 }
 
+// UserManagementView is the admin-facing user list shape: UserView plus
+// signup time, verification status, and provider hints. Returned by
+// /api/users so the management page can render a meaningful table without
+// N+1 calls. Provider hints are best-effort — Google OAuth doesn't leave
+// a per-user marker on the User row, so a user who signed in only via
+// Google shows "google" inferred from the absence of password + github.
+type UserManagementView struct {
+	*UserView
+	CreatedAt time.Time `json:"created_at"`
+	// Verified follows the same rules as IsUserVerified — admins are
+	// always verified, then dynamic Google-domain / GitHub-org bypasses,
+	// then the explicit access-code match.
+	Verified  bool     `json:"verified"`
+	Providers []string `json:"providers"`
+}
+
+func userToManagementView(u *db.User, settings *db.OAuthSettings) *UserManagementView {
+	v := &UserManagementView{
+		UserView:  userToView(u),
+		CreatedAt: u.CreatedAt,
+		Providers: detectProviders(u),
+	}
+	v.Verified = isUserVerifiedFromSettings(u, settings)
+	return v
+}
+
+// detectProviders is a best-effort sniff of how the user has signed in
+// at least once. PasswordHash != "" means email/password registration;
+// GitHubOrgs is set (even to "-") on every successful GitHub OAuth login.
+// A user with neither is presumed Google-only — we don't store a
+// per-user Google marker today, so the heuristic is "neither password
+// nor github → google". Order is stable: password, github, google.
+func detectProviders(u *db.User) []string {
+	out := make([]string, 0, 2)
+	if u.PasswordHash != "" {
+		out = append(out, "password")
+	}
+	if u.GitHubOrgs != "" {
+		out = append(out, "github")
+	}
+	if len(out) == 0 {
+		out = append(out, "google")
+	}
+	return out
+}
+
+// isUserVerifiedFromSettings mirrors IsUserVerified but takes a
+// pre-fetched OAuthSettings so a caller iterating over many users avoids
+// the N+1. Decision policy is intentionally identical — keep these in
+// sync if IsUserVerified ever changes.
+func isUserVerifiedFromSettings(u *db.User, settings *db.OAuthSettings) bool {
+	if u.IsAdmin {
+		return true
+	}
+	if domain := emailDomain(u.Email); domain != "" {
+		for _, d := range splitDomains(settings.AuthorizedGoogleDomains) {
+			if d == domain {
+				return true
+			}
+		}
+	}
+	if hasOrgIntersection(u.GitHubOrgs, settings.AuthorizedGitHubOrgs) {
+		return true
+	}
+	return u.VerifiedCodeVersion == settings.AccessCodeVersion && settings.AccessCodeVersion > 0
+}
+
 // Register creates a new user account with a bcrypt-hashed password.
 // Returns ErrEmailTaken if the email is already in use.
 func (s *AuthService) Register(p RegisterParams) (*UserView, error) {
@@ -913,4 +980,24 @@ func (s *AuthService) ListAllUsers() ([]*UserView, error) {
 		views[i] = userToView(&users[i])
 	}
 	return views, nil
+}
+
+// ListAllUsersForManagement returns the richer admin-facing shape:
+// CreatedAt + Verified + provider hints, computed against a single
+// OAuthSettings fetch so this stays O(1) DB reads regardless of user
+// count.
+func (s *AuthService) ListAllUsersForManagement() ([]*UserManagementView, error) {
+	var users []db.User
+	if err := s.db.Order("created_at DESC").Find(&users).Error; err != nil {
+		return nil, err
+	}
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*UserManagementView, len(users))
+	for i := range users {
+		out[i] = userToManagementView(&users[i], settings)
+	}
+	return out, nil
 }
