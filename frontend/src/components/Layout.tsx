@@ -110,12 +110,18 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               </NavLink>
               {user?.is_admin && s3Deployed && (
                 <NavLink to="/s3" className={navLinkClass}>
-                  S3
+                  <span className="inline-flex items-center gap-1.5">
+                    S3
+                    <AlphaPill />
+                  </span>
                 </NavLink>
               )}
               {gpuPlaneEnabled && (
                 <NavLink to="/gpu" className={navLinkClass}>
-                  GPU
+                  <span className="inline-flex items-center gap-1.5">
+                    GPU
+                    <AlphaPill />
+                  </span>
                 </NavLink>
               )}
               {!user?.is_admin && (
@@ -156,11 +162,17 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                       navbar item; hiding the dropdown entry avoids duplication. */}
                   {!s3Deployed && (
                     <NavLink to="/s3" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                      S3 Storage
+                      <span className="inline-flex items-center gap-1.5">
+                        S3 Storage
+                        <AlphaPill />
+                      </span>
                     </NavLink>
                   )}
                   <NavLink to="/gpu-host" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    GX10 GPU
+                    <span className="inline-flex items-center gap-1.5">
+                      GPU hosts
+                      <AlphaPill />
+                    </span>
                   </NavLink>
                   <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Keys
@@ -199,5 +211,16 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
         {children}
       </main>
     </div>
+  )
+}
+
+// AlphaPill — small uppercase chip for surfaces that aren't yet stable.
+// Same colour family the in-modal "Alpha" badge already uses (warn/orange),
+// kept here so the navbar and dropdown stay consistent without a CSS round-trip.
+function AlphaPill() {
+  return (
+    <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded">
+      Alpha
+    </span>
   )
 }

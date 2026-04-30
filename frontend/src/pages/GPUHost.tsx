@@ -7,18 +7,22 @@ import {
 } from '@/api/client'
 import type { GPUSettingsView } from '@/types'
 
-// GPUHost — pairing-first GX10 onboarding.
+// GPUHost — pairing-first onboarding for GPU classes Nimbus supports.
 //
-// The Add GX10 button mints a 5-min pairing token and hands back a
+// Currently only the NVIDIA GX10 path is implemented end-to-end. The page
+// is laid out as a list of GPU classes so adding the Jetson Orin / Nano
+// flow later is a matter of swapping out the placeholder card; the
+// existing GX10 pairing logic stays untouched.
+//
+// GX10 flow: Add GX10 mints a 5-min pairing token and hands back a
 // pre-baked `curl ... | sudo bash` line. The operator pastes that on the
 // GX10; the install script self-registers, gets a worker token, picks up
 // inference base URL from the GX10's reported IP, and brings up both
-// systemd units.
-//
-// Post-pairing the page shows what registered (hostname + base URL + model)
-// and lets admins edit base URL / model in case the GX10 has multiple NICs
-// or they want to swap the default vLLM model later. Re-pair by clicking
-// Add GX10 again — the new pairing wipes the prior worker token.
+// systemd units. Post-pairing the page shows what registered (hostname +
+// base URL + model) and lets admins edit base URL / model in case the
+// GX10 has multiple NICs or they want to swap the default vLLM model.
+// Re-pair by clicking Add GX10 again — the new pairing wipes the prior
+// worker token.
 export default function GPUHost() {
   const [settings, setSettings] = useState<GPUSettingsView | null>(null)
   const [baseURL, setBaseURL] = useState('')
@@ -124,17 +128,27 @@ export default function GPUHost() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
-        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
-          GX10 GPU plane
+        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px', display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+          GPU hosts
+          <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-0.5 rounded">
+            Alpha
+          </span>
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
-          Pair a GX10 (or any aarch64 NVIDIA host) with this Nimbus instance.
-          Once paired, every VM gets <code className="n-mono">OPENAI_BASE_URL</code> +
-          a <code className="n-mono">gx10</code> CLI helper, and the GPU jobs
-          tab appears for everyone.
+          Pair a GPU host with this Nimbus instance to expose inference + a
+          batch-job queue to every VM. Pick the device class below; pairing
+          is a one-shot curl on the host.
         </p>
       </div>
 
+      <div>
+        <div className="eyebrow" style={{ marginBottom: 10, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          NVIDIA GX10
+          <span className="n-pill n-pill-ok" style={{ fontSize: 9 }}>
+            <span className="n-pill-dot" />
+            supported
+          </span>
+        </div>
       <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
@@ -314,6 +328,62 @@ export default function GPUHost() {
           </form>
         </div>
       )}
+      </div>
+
+      {/*
+        Jetson Orin / Nano placeholder. The Orin and Nano (Orin Nano)
+        share JetPack-based deployment, so they're collapsed into one
+        coming-soon card rather than two. When the worker installer
+        learns to detect Jetson hardware and install the Jetson-flavoured
+        vLLM build, this card swaps out for a real pairing flow modeled
+        on the GX10 one above.
+      */}
+      <div>
+        <div className="eyebrow" style={{ marginBottom: 10, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          NVIDIA Jetson (Orin / Nano)
+          <span
+            className="n-pill"
+            style={{
+              fontSize: 9,
+              color: 'var(--ink-mute)',
+              background: 'rgba(20,18,28,0.04)',
+              border: '1px solid var(--line)',
+            }}
+          >
+            coming soon
+          </span>
+        </div>
+        <div
+          className="glass"
+          style={{
+            padding: '24px 28px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            opacity: 0.85,
+          }}
+        >
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+            Jetson hosts
+          </span>
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+            Pairing for Jetson Orin AGX / NX / Nano (JetPack 6+) lands in a
+            future release. Both classes will share the same
+            <code className="n-mono"> curl … | sudo bash </code>flow as the
+            GX10, but with a Jetson-specific worker build (CUDA 12 + Jetson
+            vLLM wheels). Until then, run jobs on the GX10 path.
+          </p>
+          <button
+            type="button"
+            className="n-btn"
+            disabled
+            style={{ alignSelf: 'flex-start', cursor: 'not-allowed', opacity: 0.6 }}
+            title="Jetson pairing isn't shipped yet — track the GPU plane roadmap for ETA."
+          >
+            Add Jetson host
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
