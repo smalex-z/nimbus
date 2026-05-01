@@ -897,3 +897,58 @@ func TestClient_DestroyVM(t *testing.T) {
 		t.Errorf("taskID = %q", taskID)
 	}
 }
+
+// TestClient_ResizeDisk_RetriesWorkerSpawn verifies the targeted retry
+// for "got no worker upid" failures: a flaky pvedaemon should produce
+// at most one user-facing failure when the second attempt succeeds.
+// The mock server fails the first PUT with the specific Proxmox error
+// signature, then succeeds on the second.
+//
+// Note: the retry backoff sleeps 1s before the second attempt, so this
+// test takes ~1s. Acceptable for CI; skipped under `-short`.
+func TestClient_ResizeDisk_RetriesWorkerSpawn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping retry test in short mode (sleeps 1s between attempts)")
+	}
+	t.Parallel()
+	var attempts atomic.Int32
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"data":null,"message":"got no worker upid - start worker failed\n"}`)
+			return
+		}
+		writeEnvelope(w, nil)
+	})
+
+	if err := c.ResizeDisk(context.Background(), "node1", 156, "scsi0", "15G"); err != nil {
+		t.Fatalf("ResizeDisk: want nil after retry, got %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2 (1 transient + 1 success)", got)
+	}
+}
+
+// TestClient_ResizeDisk_NonRetriableErrorFailsFast verifies the retry
+// is targeted: 500s that aren't the worker-spawn signature (e.g.
+// "no need to extend disk to same size") propagate after a single
+// attempt without a retry. Otherwise we'd burn 4 seconds and a couple
+// of redundant API calls on every legitimate Proxmox error.
+func TestClient_ResizeDisk_NonRetriableErrorFailsFast(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"data":null,"message":"500 no need to extend disk to same size or smaller"}`)
+	})
+
+	err := c.ResizeDisk(context.Background(), "node1", 156, "scsi0", "5G")
+	if err == nil {
+		t.Fatal("ResizeDisk: want error for non-retriable 500, got nil")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry on non-matching 500)", got)
+	}
+}
