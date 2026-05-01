@@ -18,15 +18,15 @@ import (
 )
 
 var (
-	ErrEmailTaken           = errors.New("email already registered")
-	ErrInvalidCredentials   = errors.New("invalid credentials")
-	ErrSessionNotFound      = errors.New("session not found or expired")
-	ErrAdminAlreadyClaimed  = errors.New("admin already claimed")
-	ErrUsersExist           = errors.New("users already exist")
-	ErrInvalidAccessCode    = errors.New("invalid access code")
-	ErrAccessCodeNotPresent = errors.New("access code not configured")
-	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
-	ErrOrgNotAuthorized     = errors.New("github org not authorized")
+	ErrEmailTaken             = errors.New("email already registered")
+	ErrInvalidCredentials     = errors.New("invalid credentials")
+	ErrSessionNotFound        = errors.New("session not found or expired")
+	ErrAdminAlreadyClaimed    = errors.New("admin already claimed")
+	ErrUsersExist             = errors.New("users already exist")
+	ErrInvalidAccessCode      = errors.New("invalid access code")
+	ErrAccessCodeNotPresent   = errors.New("access code not configured")
+	ErrDomainNotAuthorized    = errors.New("email domain not authorized")
+	ErrOrgNotAuthorized       = errors.New("github org not authorized")
 	ErrUserNotFound           = errors.New("user not found")
 	ErrRequesterNotLinked     = errors.New("link an OAuth provider on your own account before requiring passwordless sign-in")
 	ErrUserSuspended          = errors.New("account suspended")
@@ -34,6 +34,9 @@ var (
 	ErrCannotSuspendLastAdmin = errors.New("cannot suspend the last unsuspended admin")
 	ErrStragglersBlock        = errors.New("password-only accounts must be suspended or removed before passwordless sign-in can be required")
 	ErrCipherUnavailable      = errors.New("encryption cipher not available; restart the server with NIMBUS_ENCRYPTION_KEY configured")
+	ErrLoginTokenInvalid      = errors.New("login token invalid")
+	ErrLoginTokenExpired      = errors.New("login token expired")
+	ErrLoginTokenUsed         = errors.New("login token already used")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
@@ -943,14 +946,14 @@ func subtleConstantTimeEq(a, b string) bool {
 // The encrypted password ciphertext stays inside the service; the UI
 // only sees whether a password is set, not the value.
 type SMTPSettingsView struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	Username     string `json:"username"`
-	HasPassword  bool   `json:"has_password"`
-	FromAddress  string `json:"from_address"`
-	Encryption   string `json:"encryption"`
-	Enabled      bool   `json:"enabled"`
-	Configured   bool   `json:"configured"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	HasPassword bool   `json:"has_password"`
+	FromAddress string `json:"from_address"`
+	Encryption  string `json:"encryption"`
+	Enabled     bool   `json:"enabled"`
+	Configured  bool   `json:"configured"`
 }
 
 // SaveSMTPRequest mirrors the form on /email. An empty password leaves
@@ -1032,6 +1035,109 @@ func (s *AuthService) SaveSMTPSettings(req SaveSMTPRequest) (*SMTPSettingsView, 
 		return nil, err
 	}
 	return s.GetSMTPSettings()
+}
+
+// LoadSMTPRow returns the raw SMTPSettings row including encrypted
+// password ciphertext. Used by the mail subsystem at send time so it
+// can decrypt the password through the cipher attached to AuthService.
+// The view-returning GetSMTPSettings deliberately strips ciphertext;
+// this method is the back-channel.
+func (s *AuthService) LoadSMTPRow() (*db.SMTPSettings, error) {
+	var row db.SMTPSettings
+	if err := s.db.FirstOrCreate(&row, db.SMTPSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// Cipher returns the secrets.Cipher attached via WithCipher, or nil if
+// none was set. Exposed so a peer service (e.g. the mail handler) can
+// decrypt SMTP credentials without re-implementing the bootstrap
+// dance.
+func (s *AuthService) Cipher() *secrets.Cipher {
+	return s.cipher
+}
+
+// MintLoginToken creates a single-use, opaque token bound to userID
+// for the named purpose with the given TTL. The token is 32 hex chars
+// (128 bits of entropy) — enough collision-resistance that we don't
+// also key on user_id at lookup time. Returns the token string.
+func (s *AuthService) MintLoginToken(userID uint, purpose string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		return "", errors.New("login token ttl must be positive")
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("mint login token: %w", err)
+	}
+	token := hex.EncodeToString(buf)
+	row := db.LoginToken{
+		Token:     token,
+		UserID:    userID,
+		Purpose:   purpose,
+		ExpiresAt: time.Now().Add(ttl),
+	}
+	if err := s.db.Create(&row).Error; err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConsumeLoginToken atomically marks a token used and returns the
+// associated userID. Refuses tokens that don't exist, are expired,
+// have a different purpose, or have already been consumed. Single-use
+// is enforced by `WHERE used_at IS NULL` in the UPDATE — a concurrent
+// second redeem hits zero rows affected.
+func (s *AuthService) ConsumeLoginToken(token, purpose string) (uint, error) {
+	var row db.LoginToken
+	err := s.db.Where("token = ?", token).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, ErrLoginTokenInvalid
+	}
+	if err != nil {
+		return 0, err
+	}
+	if row.Purpose != purpose {
+		return 0, ErrLoginTokenInvalid
+	}
+	if row.UsedAt != nil {
+		return 0, ErrLoginTokenUsed
+	}
+	if time.Now().After(row.ExpiresAt) {
+		return 0, ErrLoginTokenExpired
+	}
+	now := time.Now()
+	res := s.db.Model(&db.LoginToken{}).
+		Where("token = ? AND used_at IS NULL", token).
+		Update("used_at", now)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Lost a race against another redeem — treat as already-used.
+		return 0, ErrLoginTokenUsed
+	}
+	return row.UserID, nil
+}
+
+// PurgeExpiredLoginTokens deletes tokens whose expires_at is in the
+// past. Idempotent; safe to call from a startup sweep.
+func (s *AuthService) PurgeExpiredLoginTokens() (int64, error) {
+	res := s.db.Where("expires_at < ?", time.Now()).Delete(&db.LoginToken{})
+	return res.RowsAffected, res.Error
+}
+
+// ListUnlinkedActiveUsers returns every active (non-suspended) account
+// without OAuth — the same straggler set CountUnlinkedUsers counts.
+// Used by the bulk email-stragglers handler to know whom to mint
+// magic-links for. Excludes the requester so an admin issuing the
+// command doesn't email themselves a recovery link.
+func (s *AuthService) ListUnlinkedActiveUsers(excludeID uint) ([]db.User, error) {
+	var users []db.User
+	err := s.db.
+		Where("google_connected = ? AND git_hub_orgs = ? AND suspended = ? AND id <> ?", false, "", false, excludeID).
+		Find(&users).Error
+	return users, err
 }
 
 // GetGopherSettings returns the stored Gopher tunnel credentials. Creates a

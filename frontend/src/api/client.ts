@@ -573,6 +573,33 @@ export async function saveSMTPSettings(req: SaveSMTPRequest): Promise<SMTPSettin
   return data
 }
 
+// sendTestEmail dials the configured SMTP server and delivers a short
+// test message to the calling admin's own email address. Useful as a
+// confidence check after filling in the form on /email — verifies host,
+// auth, and TLS handshake without committing to a bulk send.
+export async function sendTestEmail(): Promise<{ sent: boolean; to: string }> {
+  // SMTP timeouts are 30s on the server; give axios a hair more so the
+  // retry path surfaces a useful error rather than a generic axios timeout.
+  const { data } = await api.post<{ sent: boolean; to: string }>('/settings/smtp/test', null, { timeout: 35_000 })
+  return data
+}
+
+export interface EmailUnlinkedResult {
+  sent: number
+  failed: number
+  failures?: string[]
+}
+
+// emailUnlinkedUsers mints magic-link tokens for every active password-only
+// account and sends each user a recovery email. Returns the per-user
+// counts; failures are descriptive strings (`alice@example.com: ...`).
+export async function emailUnlinkedUsers(): Promise<EmailUnlinkedResult> {
+  // Long timeout: with N stragglers the server makes N synchronous SMTP
+  // sessions. Give it room to finish a small batch.
+  const { data } = await api.post<EmailUnlinkedResult>('/users/email-unlinked', null, { timeout: 120_000 })
+  return data
+}
+
 export async function getPasswordlessStatus(): Promise<PasswordlessStatus> {
   const { data } = await api.get<PasswordlessStatus>('/settings/oauth/passwordless')
   return data

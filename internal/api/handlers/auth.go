@@ -20,6 +20,7 @@ import (
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/ippool"
+	"nimbus/internal/mail"
 	"nimbus/internal/oauth"
 	"nimbus/internal/service"
 )
@@ -681,6 +682,236 @@ func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, view)
+}
+
+// magicLinkPurpose tags magic-link tokens. Single value today; the
+// purpose column on db.LoginToken keeps room for future flows
+// (password reset, invite) without colliding.
+const magicLinkPurpose = "magic_link"
+
+// magicLinkTTL is how long a recovery email's link stays valid. 24h
+// balances "user might not check email immediately" against "we've
+// kept a sign-in token live for too long." Longer than typical
+// password-reset tokens because the linked user already has an
+// account; the worst case of a stolen link is that an attacker who
+// reads the user's mailbox can sign in as them, which they could
+// already do via password reset on most sites.
+const magicLinkTTL = 24 * time.Hour
+
+// SendTestEmail handles POST /api/settings/smtp/test — admin-only
+// dry-run that delivers a short test message to the admin's own email
+// address. Used as a confidence check after filling in the /email
+// form: if the dial / auth / TLS handshake works for the requester,
+// the bulk magic-link send will too.
+func (a *Auth) SendTestEmail(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	if requester.Email == "" {
+		response.BadRequest(w, "your account has no email address to send to")
+		return
+	}
+	row, err := a.auth.LoadSMTPRow()
+	if err != nil {
+		log.Printf("smtp test: load row: %v", err)
+		response.InternalError(w, "failed to load SMTP settings")
+		return
+	}
+	cfg, err := mail.Resolve(row, a.auth.Cipher())
+	if err != nil {
+		if errors.Is(err, mail.ErrNotConfigured) {
+			response.Error(w, http.StatusConflict, "configure SMTP host and from-address first")
+			return
+		}
+		if errors.Is(err, mail.ErrCipherUnavailable) {
+			response.Error(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		log.Printf("smtp test: resolve: %v", err)
+		response.InternalError(w, "failed to resolve SMTP config")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	msg := mail.Message{
+		To:      requester.Email,
+		Subject: "Nimbus SMTP test",
+		Body: fmt.Sprintf(
+			"This is a test email from Nimbus.\r\n\r\nIf you're seeing this, %s:%d is configured correctly and outbound mail is reaching your inbox.\r\n",
+			row.Host, row.Port,
+		),
+	}
+	if err := mail.Send(ctx, cfg, msg); err != nil {
+		// Surface the dial / auth error string verbatim — admins
+		// debugging SMTP need the underlying message ("authentication
+		// failed", "no such host", etc.) more than a sanitised one.
+		response.Error(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	response.Success(w, map[string]any{"sent": true, "to": requester.Email})
+}
+
+// MagicLinkSignIn handles GET /api/auth/magic/{token} — public,
+// single-use entry point for password-only users recovering their
+// account. Validates the token, mints a session, unsuspends the user
+// if needed, and redirects them to /account so they can connect an
+// OAuth provider. Bad/expired/used tokens redirect to a sign-in page
+// with an explanatory query param.
+func (a *Auth) MagicLinkSignIn(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	if token == "" {
+		http.Redirect(w, r, "/login?magic=invalid", http.StatusTemporaryRedirect)
+		return
+	}
+	userID, err := a.auth.ConsumeLoginToken(token, magicLinkPurpose)
+	if err != nil {
+		var reason string
+		switch {
+		case errors.Is(err, service.ErrLoginTokenExpired):
+			reason = "expired"
+		case errors.Is(err, service.ErrLoginTokenUsed):
+			reason = "used"
+		case errors.Is(err, service.ErrLoginTokenInvalid):
+			reason = "invalid"
+		default:
+			log.Printf("magic-link: consume: %v", err)
+			reason = "error"
+		}
+		http.Redirect(w, r, "/login?magic="+reason, http.StatusTemporaryRedirect)
+		return
+	}
+	// If the user was suspended (e.g. caught by the bulk-suspend that
+	// preceded the email send), unsuspend them now so the freshly
+	// minted session isn't immediately rejected by GetUserBySessionID's
+	// suspended check.
+	if err := a.auth.SetUserSuspended(userID, userID, false); err != nil {
+		// Self-target self-unsuspend isn't a cannot-suspend-self case
+		// (that gate only fires for `suspended=true`), but log just
+		// in case the gate evolves.
+		log.Printf("magic-link: unsuspend uid=%d: %v", userID, err)
+	}
+	sessionID, err := a.auth.CreateSession(userID)
+	if err != nil {
+		log.Printf("magic-link: create session uid=%d: %v", userID, err)
+		http.Redirect(w, r, "/login?magic=error", http.StatusTemporaryRedirect)
+		return
+	}
+	setSessionCookie(w, sessionID)
+	http.Redirect(w, r, "/account?from=magic", http.StatusTemporaryRedirect)
+}
+
+// EmailUnlinkedResult is the response shape for POST
+// /api/users/email-unlinked. Counts let the UI render
+// "Sent N · failed M" without a second round-trip, and Failures
+// carries the bad-recipient list so the admin can decide whether to
+// retry or investigate (most failures are transient SMTP rejects).
+type EmailUnlinkedResult struct {
+	Sent     int      `json:"sent"`
+	Failed   int      `json:"failed"`
+	Failures []string `json:"failures,omitempty"`
+}
+
+// EmailUnlinked handles POST /api/users/email-unlinked — mints a
+// magic-link token per active password-only user (excluding the
+// requester) and sends each one a recovery email. Returns the per-
+// user result. The first SMTP failure aborts the whole batch on the
+// theory that "host unreachable" or "auth failed" affects everyone
+// equally, but per-recipient rejects (mailbox doesn't exist, etc.)
+// are recorded and we move on.
+func (a *Auth) EmailUnlinked(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	row, err := a.auth.LoadSMTPRow()
+	if err != nil {
+		log.Printf("email unlinked: load row: %v", err)
+		response.InternalError(w, "failed to load SMTP settings")
+		return
+	}
+	if !row.Enabled {
+		response.Error(w, http.StatusConflict, "SMTP is configured but disabled — flip Enable on /email first")
+		return
+	}
+	cfg, err := mail.Resolve(row, a.auth.Cipher())
+	if err != nil {
+		if errors.Is(err, mail.ErrNotConfigured) {
+			response.Error(w, http.StatusConflict, "configure SMTP host and from-address first")
+			return
+		}
+		if errors.Is(err, mail.ErrCipherUnavailable) {
+			response.Error(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		log.Printf("email unlinked: resolve: %v", err)
+		response.InternalError(w, "failed to resolve SMTP config")
+		return
+	}
+	targets, err := a.auth.ListUnlinkedActiveUsers(requester.ID)
+	if err != nil {
+		log.Printf("email unlinked: list: %v", err)
+		response.InternalError(w, "failed to list unlinked users")
+		return
+	}
+	if len(targets) == 0 {
+		response.Success(w, EmailUnlinkedResult{})
+		return
+	}
+
+	out := EmailUnlinkedResult{}
+	for i := range targets {
+		t := &targets[i]
+		if t.Email == "" {
+			out.Failed++
+			out.Failures = append(out.Failures, fmt.Sprintf("uid %d: no email", t.ID))
+			continue
+		}
+		token, err := a.auth.MintLoginToken(t.ID, magicLinkPurpose, magicLinkTTL)
+		if err != nil {
+			out.Failed++
+			out.Failures = append(out.Failures, fmt.Sprintf("%s: mint token: %v", t.Email, err))
+			continue
+		}
+		link := strings.TrimRight(a.appURL, "/") + "/api/auth/magic/" + url.PathEscape(token)
+		body := buildMagicLinkBody(t.Name, link)
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		err = mail.Send(ctx, cfg, mail.Message{
+			To:      t.Email,
+			Subject: "Connect Google or GitHub to your Nimbus account",
+			Body:    body,
+		})
+		cancel()
+		if err != nil {
+			out.Failed++
+			out.Failures = append(out.Failures, fmt.Sprintf("%s: %v", t.Email, err))
+			// Continue rather than abort — one bad mailbox shouldn't
+			// hold up the rest. The admin can retry-with-failures
+			// after triaging the failed list.
+			continue
+		}
+		out.Sent++
+	}
+	response.Success(w, out)
+}
+
+// buildMagicLinkBody composes the recovery-email body. Plain text
+// only; the link is on its own line so receivers that auto-linkify
+// pick it up cleanly.
+func buildMagicLinkBody(displayName, link string) string {
+	greeting := "Hi,"
+	if displayName != "" {
+		greeting = "Hi " + displayName + ","
+	}
+	return greeting + "\r\n\r\n" +
+		"Your Nimbus admin asked you to connect a Google or GitHub account to your sign-in. " +
+		"Click the link below within 24 hours to sign in and link a provider:\r\n\r\n" +
+		link + "\r\n\r\n" +
+		"After you've connected, you can sign in by clicking 'Continue with Google' " +
+		"or 'Continue with GitHub' on the sign-in page — no password needed.\r\n\r\n" +
+		"If you didn't expect this email, ignore it. The link expires in 24 hours and works only once.\r\n"
 }
 
 // VerifyStatus handles GET /api/access-code/status — returns whether the

@@ -151,6 +151,11 @@ func NewRouter(d Deps) http.Handler {
 		// here mid-flight, before the new session would exist).
 		r.Get("/auth/github/link", auth.GitHubLinkStart)
 		r.Get("/auth/google/link", auth.GoogleLinkStart)
+		// Magic-link sign-in for password-only users coming back from
+		// a recovery email. Public — the token in the URL IS the auth.
+		// Validation is inside the handler; bad/expired/used tokens
+		// redirect to /login with an explanatory query param.
+		r.Get("/auth/magic/{token}", auth.MagicLinkSignIn)
 
 		// Protected routes — require a valid session cookie
 		r.Group(func(r chi.Router) {
@@ -190,6 +195,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/oauth/passwordless", auth.SetPasswordlessAuth)
 				r.Get("/settings/smtp", auth.GetSMTP)
 				r.Put("/settings/smtp", auth.SaveSMTP)
+				r.Post("/settings/smtp/test", auth.SendTestEmail)
+				r.Post("/users/email-unlinked", auth.EmailUnlinked)
 
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)
