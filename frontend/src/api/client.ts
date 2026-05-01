@@ -555,6 +555,29 @@ export async function listUsers(): Promise<UserManagementView[]> {
   return data
 }
 
+// promoteUser flips a member to admin after re-confirming the requesting
+// admin's password. Returns the upgraded user or rejects with a
+// 401-translated "incorrect password" message when the gate fails.
+export async function promoteUser(id: number, password: string): Promise<{ id: number; is_admin: boolean }> {
+  const { data } = await api.post<{ id: number; is_admin: boolean }>(`/users/${id}/promote`, { password })
+  return data
+}
+
+// deleteUser removes a user with the chosen VM disposition: "delete"
+// destroys their VMs on Proxmox, "transfer" reassigns ownership to the
+// requesting admin. SSH keys + GPU jobs follow the same disposition so
+// transferred VMs keep working.
+export async function deleteUser(
+  id: number,
+  vmAction: 'delete' | 'transfer',
+): Promise<{ id: number; vm_action: string; vms_handled: number }> {
+  const { data } = await api.delete<{ id: number; vm_action: string; vms_handled: number }>(
+    `/users/${id}`,
+    { data: { vm_action: vmAction } },
+  )
+  return data
+}
+
 export interface AccessCodeView {
   access_code: string
   version: number

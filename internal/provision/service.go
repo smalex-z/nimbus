@@ -1045,6 +1045,21 @@ func (s *Service) AdminDelete(ctx context.Context, id uint) error {
 	return s.deleteVM(ctx, &vm)
 }
 
+// TransferUserVMs reparents every VM currently owned by fromID to toID.
+// Used by the user-deletion flow when the admin opts to take ownership
+// of the deleted user's VMs instead of destroying them. Returns the
+// number of rows updated. No Proxmox interaction — this is purely a
+// metadata change in the local DB.
+func (s *Service) TransferUserVMs(ctx context.Context, fromID, toID uint) (int64, error) {
+	res := s.db.WithContext(ctx).Model(&db.VM{}).
+		Where("owner_id = ?", fromID).
+		Update("owner_id", toID)
+	if res.Error != nil {
+		return 0, fmt.Errorf("transfer vms %d -> %d: %w", fromID, toID, res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // deleteVM holds the shared destroy sequence used by both the user-scoped
 // Delete and the admin-scoped AdminDelete. Order: stop on Proxmox if running,
 // destroy with disk purge, release the IP back to the pool, hard-delete the
