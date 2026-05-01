@@ -474,9 +474,10 @@ func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
 
 // SaveGopherSettings persists Gopher credentials. Empty fields are treated as
 // "preserve existing" so the UI can rotate just the API key without
-// re-entering the URL (and vice versa). Only the URL/key columns are
-// touched; CloudTunnel* fields are owned by selftunnel.Service and managed
-// separately via SaveCloudTunnelState.
+// re-entering the URL (and vice versa). The same rule applies to
+// CloudSubdomain — empty means keep what's stored. Only the credential +
+// subdomain columns are touched; CloudTunnel* fields are owned by
+// selftunnel.Service and managed separately via SaveCloudTunnelState.
 func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	existing, err := s.GetGopherSettings()
 	if err != nil {
@@ -488,9 +489,13 @@ func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	if next.APIKey == "" {
 		next.APIKey = existing.APIKey
 	}
+	if next.CloudSubdomain == "" {
+		next.CloudSubdomain = existing.CloudSubdomain
+	}
 	return s.db.Model(&db.GopherSettings{}).Where("id = ?", 1).Updates(map[string]any{
-		"api_url": next.APIURL,
-		"api_key": next.APIKey,
+		"api_url":         next.APIURL,
+		"api_key":         next.APIKey,
+		"cloud_subdomain": next.CloudSubdomain,
 	}).Error
 }
 

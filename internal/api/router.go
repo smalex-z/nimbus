@@ -68,6 +68,7 @@ func NewRouter(d Deps) http.Handler {
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
 		WithNimbusAppURL(d.Config.AppURL).
+		WithAppURLResolver(auth).
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
 		WithPoolReseeder(d.Pool)
