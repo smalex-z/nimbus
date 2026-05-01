@@ -972,6 +972,176 @@ func buildMagicLinkBody(displayName, link string) string {
 		"If you didn't expect this email, ignore it. The link expires in 24 hours and works only once.\r\n"
 }
 
+// QuotaSettingsView is the JSON shape for the /api/settings/quotas
+// endpoints. Same field names the frontend uses; the backend struct
+// (db.QuotaSettings) exposes ID we don't need to leak.
+type QuotaSettingsView struct {
+	MemberMaxVMs        int `json:"member_max_vms"`
+	MemberMaxActiveJobs int `json:"member_max_active_jobs"`
+}
+
+// GetQuotas handles GET /api/settings/quotas — admin-only read of
+// the workspace quota defaults (caps that apply when a user has no
+// per-row override set).
+func (a *Auth) GetQuotas(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	row, err := a.auth.GetQuotaSettings()
+	if err != nil {
+		log.Printf("get quotas: %v", err)
+		response.InternalError(w, "failed to load quota settings")
+		return
+	}
+	response.Success(w, QuotaSettingsView{
+		MemberMaxVMs:        row.MemberMaxVMs,
+		MemberMaxActiveJobs: row.MemberMaxActiveJobs,
+	})
+}
+
+// SaveQuotas handles PUT /api/settings/quotas — admin-only update of
+// the workspace defaults. Request body matches QuotaSettingsView.
+// Either field can be omitted to leave it untouched, but a field
+// present with a negative value is a 400 (the service rejects).
+func (a *Auth) SaveQuotas(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	// Use pointers so a missing field stays at the persisted value.
+	var body struct {
+		MemberMaxVMs        *int `json:"member_max_vms"`
+		MemberMaxActiveJobs *int `json:"member_max_active_jobs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	current, err := a.auth.GetQuotaSettings()
+	if err != nil {
+		log.Printf("save quotas: load current: %v", err)
+		response.InternalError(w, "failed to load quota settings")
+		return
+	}
+	maxVMs := current.MemberMaxVMs
+	maxJobs := current.MemberMaxActiveJobs
+	if body.MemberMaxVMs != nil {
+		maxVMs = *body.MemberMaxVMs
+	}
+	if body.MemberMaxActiveJobs != nil {
+		maxJobs = *body.MemberMaxActiveJobs
+	}
+	updated, err := a.auth.SaveQuotaSettings(maxVMs, maxJobs)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, QuotaSettingsView{
+		MemberMaxVMs:        updated.MemberMaxVMs,
+		MemberMaxActiveJobs: updated.MemberMaxActiveJobs,
+	})
+}
+
+// userQuotaRequest is the body of PUT /api/users/{id}/quota. Each
+// field is *int: nil means "leave that override alone"; setting it
+// to a JSON null clears the override (revert to workspace default);
+// a number sets an explicit cap. JSON's distinction between
+// "null" / absent / value lines up with the three semantics — we
+// use json.RawMessage to preserve null vs absent.
+type userQuotaRequest struct {
+	VMQuotaOverride     json.RawMessage `json:"vm_quota_override"`
+	GPUJobQuotaOverride json.RawMessage `json:"gpu_job_quota_override"`
+}
+
+// SetUserQuota handles PUT /api/users/{id}/quota — admin-only patch
+// of one user's quota override columns. See userQuotaRequest for the
+// three-state JSON semantics.
+func (a *Auth) SetUserQuota(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	targetID, err := parseUserID(r)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	var body userQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+
+	setVM, vmVal, clearVM, err := decodeQuotaPatch(body.VMQuotaOverride, "vm_quota_override")
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	setGPU, gpuVal, clearGPU, err := decodeQuotaPatch(body.GPUJobQuotaOverride, "gpu_job_quota_override")
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+
+	// Apply set + clear separately. Set first so a request that does
+	// {clear vm, set gpu} ends with both intents recognised even if
+	// the user wrote them in reverse order.
+	if setVM || setGPU {
+		var vmPtr, gpuPtr *int
+		if setVM {
+			vmPtr = &vmVal
+		}
+		if setGPU {
+			gpuPtr = &gpuVal
+		}
+		if err := a.auth.SetUserQuotaOverride(targetID, vmPtr, gpuPtr); err != nil {
+			if errors.Is(err, service.ErrUserNotFound) {
+				response.NotFound(w, "user not found")
+				return
+			}
+			log.Printf("set user quota: %v", err)
+			response.InternalError(w, "failed to set quota")
+			return
+		}
+	}
+	if clearVM || clearGPU {
+		if err := a.auth.ClearUserQuotaOverride(targetID, clearVM, clearGPU); err != nil {
+			if errors.Is(err, service.ErrUserNotFound) {
+				response.NotFound(w, "user not found")
+				return
+			}
+			log.Printf("clear user quota: %v", err)
+			response.InternalError(w, "failed to clear quota")
+			return
+		}
+	}
+	response.Success(w, map[string]any{"id": targetID, "ok": true})
+}
+
+// decodeQuotaPatch reduces the three-state JSON to a (set, value,
+// clear) triple. Returns (false, 0, false, nil) when the field was
+// absent — caller should leave the column untouched.
+func decodeQuotaPatch(raw json.RawMessage, field string) (set bool, value int, clear bool, err error) {
+	if len(raw) == 0 {
+		return false, 0, false, nil
+	}
+	if string(raw) == "null" {
+		return false, 0, true, nil
+	}
+	var n int
+	if e := json.Unmarshal(raw, &n); e != nil {
+		return false, 0, false, fmt.Errorf("%s must be a non-negative integer or null", field)
+	}
+	if n < 0 {
+		return false, 0, false, fmt.Errorf("%s must be non-negative", field)
+	}
+	return true, n, false, nil
+}
+
 // VerifyStatus handles GET /api/access-code/status — returns whether the
 // authenticated user is verified against the current access code version.
 func (a *Auth) VerifyStatus(w http.ResponseWriter, r *http.Request) {

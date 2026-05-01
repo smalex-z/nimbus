@@ -271,6 +271,15 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   ground-truth column names. The new fields added in the same schema
   bump (`google_sub`, `github_id`) are pinned with explicit `column:`
   tags for that reason.
+- **`FirstOrCreate` with non-zero conditions filters by them.** Calling
+  `db.FirstOrCreate(&row, db.X{ID: 1, Foo: 5})` builds a
+  `WHERE id = 1 AND foo = 5` clause, *not* "find id=1, default Foo to 5
+  on create." After any subsequent UPDATE that changes Foo, the next
+  call's WHERE no longer matches the row → it attempts an INSERT with
+  `id = 1` and trips the uniqueness constraint. Use the explicit form
+  for any column that has a useful default but is also writable
+  afterwards: `db.Where(&db.X{ID: 1}).Attrs(&db.X{Foo: 5}).FirstOrCreate(&row)`.
+  `Attrs` only applies on create, never narrows the read.
 
 ## When you change reconciliation, verification, or the IP pool
 

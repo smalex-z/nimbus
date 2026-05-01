@@ -68,6 +68,15 @@ type Service struct {
 	db     *gorm.DB
 	logDir string
 	clock  func() time.Time
+	quota  QuotaResolver // optional; nil falls back to MemberMaxActiveJobs
+}
+
+// QuotaResolver is the slice of service.AuthService the GPU enqueue
+// gate consults. Same shape and contract as
+// provision.QuotaResolver — defined here so the GPU package doesn't
+// take a cross-package dependency.
+type QuotaResolver interface {
+	EffectiveGPUJobQuota(userID uint) (int, error)
 }
 
 // Option tunes a Service at construction.
@@ -79,6 +88,17 @@ func WithClock(f func() time.Time) Option {
 		if f != nil {
 			s.clock = f
 		}
+	}
+}
+
+// WithQuotaResolver wires a QuotaResolver onto the Service so
+// EnqueueJob's member gate consults per-user overrides + the
+// workspace default rather than the legacy MemberMaxActiveJobs
+// constant. main.go passes service.AuthService here; tests can
+// leave it unset and rely on the constant.
+func WithQuotaResolver(q QuotaResolver) Option {
+	return func(s *Service) {
+		s.quota = q
 	}
 }
 
@@ -139,9 +159,17 @@ func (s *Service) EnqueueJob(ctx context.Context, req EnqueueRequest) (*db.GPUJo
 			Count(&active).Error; err != nil {
 			return nil, fmt.Errorf("count active gpu jobs: %w", err)
 		}
-		if int(active) >= MemberMaxActiveJobs {
+		quotaCap := MemberMaxActiveJobs
+		if s.quota != nil {
+			c, err := s.quota.EffectiveGPUJobQuota(req.OwnerID)
+			if err != nil {
+				return nil, fmt.Errorf("resolve effective gpu job quota: %w", err)
+			}
+			quotaCap = c
+		}
+		if int(active) >= quotaCap {
 			return nil, &internalerrors.ConflictError{
-				Message: fmt.Sprintf("GPU job quota reached: members may have at most %d queued or running jobs at once", MemberMaxActiveJobs),
+				Message: fmt.Sprintf("GPU job quota reached: members may have at most %d queued or running jobs at once", quotaCap),
 			}
 		}
 	}

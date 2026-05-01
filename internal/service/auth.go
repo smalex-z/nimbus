@@ -98,16 +98,38 @@ type UserManagementView struct {
 	// muted row + a Suspended pill, and the actions menu can swap
 	// "Suspend" for "Unsuspend".
 	Suspended bool `json:"suspended"`
+	// VMQuotaOverride / GPUJobQuotaOverride are nullable: nil means
+	// "use the workspace default." EffectiveVMQuota and
+	// EffectiveGPUJobQuota fold the override + default into the
+	// number that actually applies, so the UI can render either
+	// "default · 5" or "override · 10" without the frontend
+	// re-implementing the resolution.
+	VMQuotaOverride      *int `json:"vm_quota_override"`
+	GPUJobQuotaOverride  *int `json:"gpu_job_quota_override"`
+	EffectiveVMQuota     int  `json:"effective_vm_quota"`
+	EffectiveGPUJobQuota int  `json:"effective_gpu_job_quota"`
 }
 
-func userToManagementView(u *db.User, settings *db.OAuthSettings) *UserManagementView {
+func userToManagementView(u *db.User, settings *db.OAuthSettings, quotas *db.QuotaSettings) *UserManagementView {
 	v := &UserManagementView{
-		UserView:  userToView(u),
-		CreatedAt: u.CreatedAt,
-		Providers: detectProviders(u),
-		Suspended: u.Suspended,
+		UserView:            userToView(u),
+		CreatedAt:           u.CreatedAt,
+		Providers:           detectProviders(u),
+		Suspended:           u.Suspended,
+		VMQuotaOverride:     u.VMQuotaOverride,
+		GPUJobQuotaOverride: u.GPUJobQuotaOverride,
 	}
 	v.Verified = isUserVerifiedFromSettings(u, settings)
+	if u.VMQuotaOverride != nil {
+		v.EffectiveVMQuota = *u.VMQuotaOverride
+	} else if quotas != nil {
+		v.EffectiveVMQuota = quotas.MemberMaxVMs
+	}
+	if u.GPUJobQuotaOverride != nil {
+		v.EffectiveGPUJobQuota = *u.GPUJobQuotaOverride
+	} else if quotas != nil {
+		v.EffectiveGPUJobQuota = quotas.MemberMaxActiveJobs
+	}
 	return v
 }
 
@@ -1140,6 +1162,145 @@ func (s *AuthService) ListUnlinkedActiveUsers(excludeID uint) ([]db.User, error)
 	return users, err
 }
 
+// GetQuotaSettings returns the stored workspace quota defaults,
+// creating the singleton row on first call. Defaults match the legacy
+// hardcoded constants (MemberMaxVMs=5, MemberMaxActiveJobs=5) so an
+// upgrade against an existing DB doesn't change observed behaviour.
+//
+// The Where() + Attrs() split is load-bearing: passing the defaults
+// inside the conditions struct would make GORM filter by them too, so
+// after a SaveQuotaSettings(11, 12) the next read's WHERE wouldn't
+// match the now-updated row and FirstOrCreate would try to INSERT a
+// second id=1 row, hitting the uniqueness constraint.
+func (s *AuthService) GetQuotaSettings() (*db.QuotaSettings, error) {
+	var row db.QuotaSettings
+	err := s.db.Where(&db.QuotaSettings{ID: 1}).
+		Attrs(&db.QuotaSettings{MemberMaxVMs: 5, MemberMaxActiveJobs: 5}).
+		FirstOrCreate(&row).Error
+	return &row, err
+}
+
+// SaveQuotaSettings updates the workspace defaults. Both fields are
+// validated to be non-negative; zero is allowed and means "members
+// can't provision / submit." Negative values are rejected as a likely
+// caller bug.
+func (s *AuthService) SaveQuotaSettings(maxVMs, maxJobs int) (*db.QuotaSettings, error) {
+	if maxVMs < 0 || maxJobs < 0 {
+		return nil, fmt.Errorf("quota values must be non-negative")
+	}
+	if _, err := s.GetQuotaSettings(); err != nil {
+		return nil, err
+	}
+	if err := s.db.Model(&db.QuotaSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"member_max_vms":         maxVMs,
+		"member_max_active_jobs": maxJobs,
+	}).Error; err != nil {
+		return nil, err
+	}
+	return s.GetQuotaSettings()
+}
+
+// SetUserQuotaOverride writes per-user quota overrides. Pass a non-nil
+// pointer to set an explicit cap (zero is allowed and meaningful);
+// pass nil to clear the override and revert that user to the
+// workspace default. Either field can be nil to leave it untouched.
+//
+// The two fields are split (vs. a single struct) so the handler can
+// patch one dimension without requiring the caller to know the other's
+// current value.
+func (s *AuthService) SetUserQuotaOverride(userID uint, vmQuota, gpuJobQuota *int) error {
+	updates := map[string]any{}
+	if vmQuota != nil {
+		updates["vm_quota_override"] = *vmQuota
+	}
+	if gpuJobQuota != nil {
+		updates["gpu_job_quota_override"] = *gpuJobQuota
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// ClearUserQuotaOverride sets one or both override columns back to NULL,
+// reverting the user to the workspace default. GORM's Updates won't
+// write nil through the map[string]any path, so this uses a typed
+// struct write with explicit Select clauses to force the update.
+func (s *AuthService) ClearUserQuotaOverride(userID uint, clearVM, clearGPU bool) error {
+	cols := make([]string, 0, 2)
+	if clearVM {
+		cols = append(cols, "vm_quota_override")
+	}
+	if clearGPU {
+		cols = append(cols, "gpu_job_quota_override")
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	// Use Select + Updates with a struct of nil pointers so GORM sees
+	// "user wants to write NULL." map[string]any{"col": nil} also
+	// works on most drivers but the typed path is unambiguous.
+	res := s.db.Model(&db.User{}).
+		Where("id = ?", userID).
+		Select(cols).
+		Updates(db.User{VMQuotaOverride: nil, GPUJobQuotaOverride: nil})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// EffectiveVMQuota returns the cap that should apply to the named user
+// — override when set, workspace default otherwise. The user row is
+// loaded from the DB; passing pre-loaded user data isn't supported
+// because the typical caller (provision gate) only has a UserID.
+func (s *AuthService) EffectiveVMQuota(userID uint) (int, error) {
+	var user db.User
+	if err := s.db.Select("vm_quota_override").First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, ErrUserNotFound
+		}
+		return 0, err
+	}
+	if user.VMQuotaOverride != nil {
+		return *user.VMQuotaOverride, nil
+	}
+	settings, err := s.GetQuotaSettings()
+	if err != nil {
+		return 0, err
+	}
+	return settings.MemberMaxVMs, nil
+}
+
+// EffectiveGPUJobQuota mirrors EffectiveVMQuota for GPU jobs.
+func (s *AuthService) EffectiveGPUJobQuota(userID uint) (int, error) {
+	var user db.User
+	if err := s.db.Select("gpu_job_quota_override").First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, ErrUserNotFound
+		}
+		return 0, err
+	}
+	if user.GPUJobQuotaOverride != nil {
+		return *user.GPUJobQuotaOverride, nil
+	}
+	settings, err := s.GetQuotaSettings()
+	if err != nil {
+		return 0, err
+	}
+	return settings.MemberMaxActiveJobs, nil
+}
+
 // GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
 // default empty row on first call.
 func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
@@ -1664,9 +1825,9 @@ func (s *AuthService) ListAllUsers() ([]*UserView, error) {
 }
 
 // ListAllUsersForManagement returns the richer admin-facing shape:
-// CreatedAt + Verified + provider hints, computed against a single
-// OAuthSettings fetch so this stays O(1) DB reads regardless of user
-// count.
+// CreatedAt + Verified + provider hints + effective quotas, computed
+// against a single OAuthSettings + QuotaSettings fetch so the call
+// stays O(1) DB reads regardless of user count.
 func (s *AuthService) ListAllUsersForManagement() ([]*UserManagementView, error) {
 	var users []db.User
 	if err := s.db.Order("created_at DESC").Find(&users).Error; err != nil {
@@ -1676,9 +1837,13 @@ func (s *AuthService) ListAllUsersForManagement() ([]*UserManagementView, error)
 	if err != nil {
 		return nil, err
 	}
+	quotas, err := s.GetQuotaSettings()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]*UserManagementView, len(users))
 	for i := range users {
-		out[i] = userToManagementView(&users[i], settings)
+		out[i] = userToManagementView(&users[i], settings, quotas)
 	}
 	return out, nil
 }

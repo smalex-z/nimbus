@@ -175,6 +175,20 @@ type Service struct {
 	// guards concurrent provisions from racing on cluster/nextid by
 	// serializing the clone path. SQLite already serializes ippool.Reserve.
 	cloneMu sync.Mutex
+
+	// quota resolves a user's effective VM cap (per-user override or
+	// workspace default) at gate-time. nil falls back to the package
+	// constant MemberMaxVMs — preserves the path tests use without
+	// booting auth.
+	quota QuotaResolver
+}
+
+// SetQuotaResolver wires a QuotaResolver onto the Service so the
+// member quota gate can consult per-user overrides + workspace
+// defaults rather than the legacy MemberMaxVMs constant. Idempotent;
+// pass nil to revert to the constant fallback.
+func (s *Service) SetQuotaResolver(q QuotaResolver) {
+	s.quota = q
 }
 
 // New constructs a Service. The verifier defaults to a noop that always
@@ -334,9 +348,17 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("owner_id = ?", *req.OwnerID).Count(&owned).Error; err != nil {
 			return nil, fmt.Errorf("count owned vms: %w", err)
 		}
-		if int(owned) >= MemberMaxVMs {
+		quotaCap := MemberMaxVMs
+		if s.quota != nil {
+			c, err := s.quota.EffectiveVMQuota(*req.OwnerID)
+			if err != nil {
+				return nil, fmt.Errorf("resolve effective vm quota: %w", err)
+			}
+			quotaCap = c
+		}
+		if int(owned) >= quotaCap {
 			return nil, &internalerrors.ConflictError{
-				Message: fmt.Sprintf("VM quota reached: members may own at most %d VMs at once", MemberMaxVMs),
+				Message: fmt.Sprintf("VM quota reached: members may own at most %d VMs at once", quotaCap),
 			}
 		}
 	}

@@ -668,10 +668,55 @@ export interface UserManagementView {
   // handshakes). Now derived from explicit per-provider flags rather
   // than absence-inference.
   providers: string[]
+  // Per-user quota overrides — null when the user inherits the
+  // workspace default. effective_* folds the override + default into
+  // the number that actually applies, so the UI can render either
+  // "default · 5" or "override · 10" without re-implementing the
+  // resolution.
+  vm_quota_override: number | null
+  gpu_job_quota_override: number | null
+  effective_vm_quota: number
+  effective_gpu_job_quota: number
 }
 
 export async function listUsers(): Promise<UserManagementView[]> {
   const { data } = await api.get<UserManagementView[]>('/users')
+  return data
+}
+
+export interface QuotaSettingsView {
+  member_max_vms: number
+  member_max_active_jobs: number
+}
+
+// getQuotaSettings returns the workspace-wide default caps. Members
+// hit these unless they have a per-user override; admins always
+// bypass.
+export async function getQuotaSettings(): Promise<QuotaSettingsView> {
+  const { data } = await api.get<QuotaSettingsView>('/settings/quotas')
+  return data
+}
+
+// saveQuotaSettings updates one or both workspace defaults. Either
+// field can be omitted (undefined) to leave it unchanged. The server
+// rejects negative values.
+export async function saveQuotaSettings(
+  req: { member_max_vms?: number; member_max_active_jobs?: number },
+): Promise<QuotaSettingsView> {
+  const { data } = await api.put<QuotaSettingsView>('/settings/quotas', req)
+  return data
+}
+
+// setUserQuota patches one user's quota override columns. Each field
+// has three states:
+//   - undefined → leave that override alone
+//   - null      → clear the override (revert to workspace default)
+//   - number    → set an explicit cap (zero is allowed)
+export async function setUserQuota(
+  id: number,
+  req: { vm_quota_override?: number | null; gpu_job_quota_override?: number | null },
+): Promise<{ id: number; ok: boolean }> {
+  const { data } = await api.put<{ id: number; ok: boolean }>(`/users/${id}/quota`, req)
   return data
 }
 
