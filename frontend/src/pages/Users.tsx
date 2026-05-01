@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
@@ -884,17 +884,66 @@ type PendingAction =
 // want the user to have to refresh to see that. refreshTick is the
 // inbound counterpart: when another panel mutates, the parent bumps
 // the tick and we re-fetch.
+// Each chip narrows the visible set; chips combine with AND (so e.g.
+// Admins + Unverified shows admins who haven't completed access-code
+// verification). A user is "password-only" when their providers slice
+// is exactly ["password"] — having Google or GitHub also linked moves
+// them out of straggler territory.
+type ChipFilter = 'admins' | 'suspended' | 'unverified' | 'passwordOnly'
+
+const CHIPS: { id: ChipFilter; label: string }[] = [
+  { id: 'admins', label: 'Admins' },
+  { id: 'suspended', label: 'Suspended' },
+  { id: 'unverified', label: 'Unverified' },
+  { id: 'passwordOnly', label: 'Password-only' },
+]
+
+function rowMatchesFilters(u: UserManagementView, search: string, active: Set<ChipFilter>): boolean {
+  if (active.has('admins') && !u.is_admin) return false
+  if (active.has('suspended') && !u.suspended) return false
+  if (active.has('unverified') && u.verified) return false
+  if (active.has('passwordOnly')) {
+    const onlyPassword = u.providers.length === 1 && u.providers[0] === 'password'
+    if (!onlyPassword) return false
+  }
+  if (search) {
+    const q = search.toLowerCase()
+    if (!u.name.toLowerCase().includes(q) && !u.email.toLowerCase().includes(q)) return false
+  }
+  return true
+}
+
 function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
   const { user: me } = useAuth()
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction>(null)
+  const [search, setSearch] = useState('')
+  const [activeChips, setActiveChips] = useState<Set<ChipFilter>>(new Set())
 
   useEffect(() => {
     listUsers()
       .then(setRows)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
   }, [refreshTick])
+
+  const filteredRows = useMemo(() => {
+    if (!rows) return null
+    return rows.filter((u) => rowMatchesFilters(u, search.trim(), activeChips))
+  }, [rows, search, activeChips])
+
+  const toggleChip = (id: ChipFilter) => {
+    setActiveChips((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const filteredCount = filteredRows?.length ?? 0
+  const totalCount = rows?.length ?? 0
+  const filtersActive = search.trim() !== '' || activeChips.size > 0
 
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -904,10 +953,77 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
         </span>
         {rows !== null && (
           <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-            {rows.length} {rows.length === 1 ? 'user' : 'users'}
+            {filtersActive ? `${filteredCount} of ${totalCount}` : `${totalCount} ${totalCount === 1 ? 'user' : 'users'}`}
           </span>
         )}
       </div>
+
+      {rows !== null && rows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input
+            type="search"
+            className="n-input"
+            placeholder="Search by name or email…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ height: 36, fontSize: 13 }}
+          />
+          <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 6 }}>
+            {CHIPS.map((c) => {
+              const active = activeChips.has(c.id)
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => toggleChip(c.id)}
+                  className="n-btn-ghost"
+                  style={{
+                    fontSize: 11,
+                    fontFamily: 'Geist Mono, monospace',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.06em',
+                    padding: '4px 10px',
+                    height: 26,
+                    borderRadius: 999,
+                    border: '1px solid',
+                    borderColor: active ? 'var(--ink)' : 'var(--line-strong)',
+                    background: active ? 'var(--ink)' : 'transparent',
+                    color: active ? '#FCFBFA' : 'var(--ink-body)',
+                    cursor: 'pointer',
+                    transition: 'all 0.12s ease',
+                  }}
+                >
+                  {c.label}
+                </button>
+              )
+            })}
+            {filtersActive && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch('')
+                  setActiveChips(new Set())
+                }}
+                className="n-btn-ghost"
+                style={{
+                  fontSize: 11,
+                  fontFamily: 'Geist Mono, monospace',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.06em',
+                  padding: '4px 10px',
+                  height: 26,
+                  cursor: 'pointer',
+                  color: 'var(--ink-mute)',
+                  background: 'transparent',
+                  border: 'none',
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {rows === null && !error && (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
@@ -920,7 +1036,12 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
           No accounts yet.
         </p>
       )}
-      {rows !== null && rows.length > 0 && (
+      {rows !== null && rows.length > 0 && filteredRows !== null && filteredRows.length === 0 && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
+          No accounts match the active filters.
+        </p>
+      )}
+      {filteredRows !== null && filteredRows.length > 0 && (
         <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
           <table className="w-full text-left" style={{ fontSize: 13, borderCollapse: 'collapse' }}>
             <thead>
@@ -934,7 +1055,7 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
               </tr>
             </thead>
             <tbody>
-              {rows.map((u) => (
+              {filteredRows.map((u) => (
                 <tr
                   key={u.id}
                   style={{ borderTop: '1px solid var(--line)', opacity: u.suspended ? 0.55 : 1 }}
