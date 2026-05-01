@@ -261,6 +261,16 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   uses `subtle.ConstantTimeCompare` against the stored hex. Don't add
   shortcut comparisons elsewhere; rotate the token via the Settings page,
   never by hand-editing the DB.
+- **GORM splits camel-case acronyms when deriving column names.**
+  `User.GitHubOrgs` becomes `git_hub_orgs` on disk, *not* `github_orgs`
+  — GORM treats every uppercase boundary as a word boundary. Raw
+  `Where("github_orgs = ?")` runs but errors at query time with
+  `no such column`. Fix: either use the actual column (`git_hub_orgs`)
+  or pin the name with a struct tag (`gorm:"column:github_orgs"`). When
+  in doubt, check `sqlite3 nimbus.db ".schema users"` for the
+  ground-truth column names. The new fields added in the same schema
+  bump (`google_sub`, `github_id`) are pinned with explicit `column:`
+  tags for that reason.
 
 ## When you change reconciliation, verification, or the IP pool
 

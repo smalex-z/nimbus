@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
@@ -7,16 +7,21 @@ import {
   getAuthorizedGitHubOrgs,
   getAuthorizedGoogleDomains,
   getOAuthSettings,
+  getPasswordlessStatus,
   listUsers,
   promoteUser,
   regenerateAccessCode,
   saveAuthorizedGitHubOrgs,
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
+  setPasswordlessAuth,
+  setUserSuspended,
+  suspendUnlinkedUsers,
 } from '@/api/client'
 import type {
   AccessCodeView,
   OAuthSettingsView,
+  PasswordlessStatus,
   UserManagementView,
 } from '@/api/client'
 import NavDropdown from '@/components/ui/NavDropdown'
@@ -874,6 +879,13 @@ export default function Users() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editingProvider, setEditingProvider] = useState<EditingProvider>(null)
+  // refreshTick is the parent-owned signal that mutations from one
+  // panel (e.g. the user-row "Suspend" action) need to invalidate the
+  // other (the PasswordlessPanel's straggler count). Both children
+  // re-fetch when this ticks. Using a counter rather than a callback
+  // bus keeps each panel's own load logic local.
+  const [refreshTick, setRefreshTick] = useState(0)
+  const refreshAll = useCallback(() => setRefreshTick((t) => t + 1), [])
 
   useEffect(() => {
     getOAuthSettings()
@@ -919,13 +931,15 @@ export default function Users() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         <div className="lg:col-span-2 flex flex-col gap-6">
-          <UsersTable />
+          <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
         </div>
         <div className="lg:col-span-1 flex flex-col gap-6">
           <AccessCodePanel />
           <ProvidersSummary
             settings={settings}
             onEdit={(p) => setEditingProvider(p)}
+            refreshTick={refreshTick}
+            onMutated={refreshAll}
           />
         </div>
       </div>
@@ -955,21 +969,90 @@ type PendingAction =
   | { kind: 'delete'; user: UserManagementView }
   | null
 
-function UsersTable() {
+// onMutated bubbles every successful row-action up to the parent so the
+// PasswordlessPanel's straggler count stays in sync — suspending a row
+// here changes whether the OAuth-only toggle is reachable, and we don't
+// want the user to have to refresh to see that. refreshTick is the
+// inbound counterpart: when another panel mutates, the parent bumps
+// the tick and we re-fetch.
+// Filter dimensions — each is a dropdown with an "any" sentinel that
+// disables filtering on that axis. Combinations AND together: pick
+// "Members" + "Unverified" + "Password-only" to find members who
+// haven't verified and have no OAuth, the typical straggler set.
+type RoleFilter = 'any' | 'admin' | 'member'
+type StatusFilter = 'any' | 'active' | 'suspended'
+type VerifiedFilter = 'any' | 'verified' | 'unverified'
+type ProviderFilter = 'any' | 'password-only' | 'has-oauth'
+
+interface UserFilters {
+  role: RoleFilter
+  status: StatusFilter
+  verified: VerifiedFilter
+  provider: ProviderFilter
+  search: string
+}
+
+const DEFAULT_FILTERS: UserFilters = {
+  role: 'any',
+  status: 'any',
+  verified: 'any',
+  provider: 'any',
+  search: '',
+}
+
+function rowMatchesFilters(u: UserManagementView, f: UserFilters): boolean {
+  if (f.role === 'admin' && !u.is_admin) return false
+  if (f.role === 'member' && u.is_admin) return false
+  if (f.status === 'active' && u.suspended) return false
+  if (f.status === 'suspended' && !u.suspended) return false
+  if (f.verified === 'verified' && !u.verified) return false
+  if (f.verified === 'unverified' && u.verified) return false
+  if (f.provider === 'password-only') {
+    const onlyPassword = u.providers.length === 1 && u.providers[0] === 'password'
+    if (!onlyPassword) return false
+  }
+  if (f.provider === 'has-oauth') {
+    const hasOAuth = u.providers.includes('google') || u.providers.includes('github')
+    if (!hasOAuth) return false
+  }
+  if (f.search) {
+    const q = f.search.toLowerCase()
+    if (!u.name.toLowerCase().includes(q) && !u.email.toLowerCase().includes(q)) return false
+  }
+  return true
+}
+
+function filtersAreActive(f: UserFilters): boolean {
+  return (
+    f.role !== 'any' ||
+    f.status !== 'any' ||
+    f.verified !== 'any' ||
+    f.provider !== 'any' ||
+    f.search.trim() !== ''
+  )
+}
+
+function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
   const { user: me } = useAuth()
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction>(null)
+  const [filters, setFilters] = useState<UserFilters>(DEFAULT_FILTERS)
 
-  const reload = () => {
+  useEffect(() => {
     listUsers()
       .then(setRows)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
-  }
+  }, [refreshTick])
 
-  useEffect(() => {
-    reload()
-  }, [])
+  const filteredRows = useMemo(() => {
+    if (!rows) return null
+    return rows.filter((u) => rowMatchesFilters(u, filters))
+  }, [rows, filters])
+
+  const filteredCount = filteredRows?.length ?? 0
+  const totalCount = rows?.length ?? 0
+  const filtersActive = filtersAreActive(filters)
 
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -979,10 +1062,97 @@ function UsersTable() {
         </span>
         {rows !== null && (
           <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-            {rows.length} {rows.length === 1 ? 'user' : 'users'}
+            {filtersActive ? `${filteredCount} of ${totalCount}` : `${totalCount} ${totalCount === 1 ? 'user' : 'users'}`}
           </span>
         )}
       </div>
+
+      {rows !== null && rows.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          {/* Filter row: four compact dropdowns then a flex-growing
+              search input as the last column. flex-wrap lets the search
+              drop to its own line on narrow viewports rather than
+              squeezing everything. Combinations AND across axes; "Any …"
+              disables that axis. */}
+          <FilterSelect
+            ariaLabel="Role"
+            value={filters.role}
+            onChange={(v) => setFilters((f) => ({ ...f, role: v as RoleFilter }))}
+            options={[
+              { value: 'any', label: 'Any role' },
+              { value: 'admin', label: 'Admins' },
+              { value: 'member', label: 'Members' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Status"
+            value={filters.status}
+            onChange={(v) => setFilters((f) => ({ ...f, status: v as StatusFilter }))}
+            options={[
+              { value: 'any', label: 'Any status' },
+              { value: 'active', label: 'Active' },
+              { value: 'suspended', label: 'Suspended' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Verification"
+            value={filters.verified}
+            onChange={(v) => setFilters((f) => ({ ...f, verified: v as VerifiedFilter }))}
+            options={[
+              { value: 'any', label: 'Any verification' },
+              { value: 'verified', label: 'Verified' },
+              { value: 'unverified', label: 'Unverified' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Sign-in"
+            value={filters.provider}
+            onChange={(v) => setFilters((f) => ({ ...f, provider: v as ProviderFilter }))}
+            options={[
+              { value: 'any', label: 'Any sign-in' },
+              { value: 'has-oauth', label: 'OAuth-linked' },
+              { value: 'password-only', label: 'Password-only' },
+            ]}
+          />
+          <input
+            type="search"
+            placeholder="Search by name or email…"
+            value={filters.search}
+            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+            style={{
+              flex: 1,
+              minWidth: 160,
+              height: 28,
+              fontSize: 12,
+              padding: '0 10px',
+              borderRadius: 6,
+              border: '1px solid var(--line-strong)',
+              background: 'var(--surface)',
+              color: 'var(--ink)',
+              outline: 'none',
+            }}
+          />
+          {filtersActive && (
+            <button
+              type="button"
+              onClick={() => setFilters(DEFAULT_FILTERS)}
+              className="n-btn-ghost"
+              style={{
+                fontSize: 11,
+                fontFamily: 'Geist Mono, monospace',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                padding: '4px 8px',
+                height: 28,
+                cursor: 'pointer',
+                color: 'var(--ink-mute)',
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {rows === null && !error && (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
@@ -995,7 +1165,12 @@ function UsersTable() {
           No accounts yet.
         </p>
       )}
-      {rows !== null && rows.length > 0 && (
+      {rows !== null && rows.length > 0 && filteredRows !== null && filteredRows.length === 0 && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
+          No accounts match the active filters.
+        </p>
+      )}
+      {filteredRows !== null && filteredRows.length > 0 && (
         <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
           <table className="w-full text-left" style={{ fontSize: 13, borderCollapse: 'collapse' }}>
             <thead>
@@ -1009,10 +1184,10 @@ function UsersTable() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((u) => (
+              {filteredRows.map((u) => (
                 <tr
                   key={u.id}
-                  style={{ borderTop: '1px solid var(--line)' }}
+                  style={{ borderTop: '1px solid var(--line)', opacity: u.suspended ? 0.55 : 1 }}
                 >
                   <td style={{ padding: '10px 8px', color: 'var(--ink)', fontWeight: 500 }}>
                     {u.name || <span style={{ color: 'var(--ink-mute)' }}>—</span>}
@@ -1035,6 +1210,14 @@ function UsersTable() {
                       isSelf={me?.id === u.id}
                       onPromote={() => setPending({ kind: 'promote', user: u })}
                       onDelete={() => setPending({ kind: 'delete', user: u })}
+                      onSuspend={async () => {
+                        try {
+                          await setUserSuspended(u.id, !u.suspended)
+                          onMutated()
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'failed')
+                        }
+                      }}
                     />
                   </td>
                 </tr>
@@ -1050,7 +1233,7 @@ function UsersTable() {
           onClose={() => setPending(null)}
           onPromoted={() => {
             setPending(null)
-            reload()
+            onMutated()
           }}
         />
       )}
@@ -1060,7 +1243,7 @@ function UsersTable() {
           onClose={() => setPending(null)}
           onDeleted={() => {
             setPending(null)
-            reload()
+            onMutated()
           }}
         />
       )}
@@ -1077,11 +1260,13 @@ function UserRowActions({
   isSelf,
   onPromote,
   onDelete,
+  onSuspend,
 }: {
   user: UserManagementView
   isSelf: boolean
   onPromote: () => void
   onDelete: () => void
+  onSuspend: () => void
 }) {
   if (isSelf) {
     return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
@@ -1120,6 +1305,13 @@ function UserRowActions({
           Already an admin
         </span>
       )}
+      <button
+        type="button"
+        onClick={dismissAndDo(onSuspend)}
+        className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
+      >
+        {user.suspended ? 'Unsuspend' : 'Suspend'}
+      </button>
       <div className="my-1 border-t border-line" />
       <button
         type="button"
@@ -1431,7 +1623,26 @@ function UserStatusPills({ user }: { user: UserManagementView }) {
           admin
         </span>
       ) : null}
-      {user.verified ? (
+      {user.suspended ? (
+        // suspended dominates the status column — verified state is
+        // moot when the user can't sign in.
+        <span
+          className="font-mono"
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+            padding: '2px 6px',
+            borderRadius: 4,
+            color: 'var(--err)',
+            background: 'rgba(184,55,55,0.08)',
+            border: '1px solid rgba(184,55,55,0.25)',
+          }}
+        >
+          suspended
+        </span>
+      ) : user.verified ? (
         <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
           <span className="n-pill-dot" />
           verified
@@ -1470,13 +1681,63 @@ function formatJoined(iso: string): string {
 // button per row. Pressing a pencil opens a modal scoped to *that*
 // provider — no shared "Configure" surface, since most operators only
 // touch one provider per visit.
+// ProvidersSummary now also hosts the passwordless-sign-in toggle —
+// it's the same conceptual scope (sign-in providers + which sign-in
+// surfaces are exposed on the login page), so giving it its own card
+// was overkill. The toggle and bulk-suspend live in a divided second
+// section so the OAuth client config stays the visual anchor.
 function ProvidersSummary({
   settings,
   onEdit,
+  refreshTick,
+  onMutated,
 }: {
   settings: OAuthSettingsView | null
   onEdit: (provider: 'google' | 'github') => void
+  refreshTick: number
+  onMutated: () => void
 }) {
+  const [status, setStatus] = useState<PasswordlessStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    getPasswordlessStatus()
+      .then(setStatus)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }, [refreshTick])
+
+  const toggle = async () => {
+    if (!status) return
+    setError(null)
+    setBusy(true)
+    try {
+      const next = await setPasswordlessAuth(!status.passwordless_goal)
+      setStatus(next)
+      onMutated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const bulkSuspend = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      const { suspended } = await suspendUnlinkedUsers()
+      onMutated()
+      if (suspended === 0) {
+        setError('No users needed suspending.')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
       <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
@@ -1500,6 +1761,92 @@ function ProvidersSummary({
           onEdit={() => onEdit('github')}
         />
       </div>
+
+      <div style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+          Passwordless sign-in
+        </span>
+        {status?.passwordless_goal && (
+          <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+            <span className="n-pill-dot" />
+            active
+          </span>
+        )}
+      </div>
+
+      {status && (
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 10,
+            padding: '10px 12px',
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            cursor: busy ? 'wait' : 'pointer',
+            background: status.passwordless_goal ? 'rgba(20,18,28,0.05)' : 'rgba(20,18,28,0.02)',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={status.passwordless_goal}
+            disabled={busy}
+            onChange={toggle}
+            style={{ marginTop: 3 }}
+          />
+          <span>
+            <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+              Require OAuth sign-in
+            </span>
+            <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
+              {status.passwordless_goal
+                ? 'Password form is hidden on the sign-in page.'
+                : status.stragglers === 0
+                  ? 'Every active user has OAuth linked. Toggle on to hide the password form.'
+                  : `${status.stragglers} active user${status.stragglers === 1 ? '' : 's'} still depend${status.stragglers === 1 ? 's' : ''} on password sign-in. Suspend or delete them before enabling.`}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {status && !status.passwordless_goal && status.stragglers > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button
+            type="button"
+            className="n-btn"
+            onClick={bulkSuspend}
+            disabled={busy}
+            style={{ fontSize: 12, padding: '6px 12px', height: 32 }}
+            title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
+          >
+            {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
+          </button>
+          {/* Email-stragglers button. Always disabled today — the send
+              pipeline ships in a follow-up release. Tooltip routes the
+              admin to /email so they can configure SMTP in the meantime;
+              once SMTP is configured + enabled the button stays disabled
+              but shows "Email coming soon" instead of the configure
+              prompt. The first version of the click action will mint
+              magic-link tokens and send recovery emails. */}
+          <button
+            type="button"
+            className="n-btn"
+            disabled
+            style={{ fontSize: 12, padding: '6px 12px', height: 32, cursor: 'not-allowed' }}
+            title={
+              status.smtp_ready
+                ? 'Email recovery is in preview — magic-link send lands in a follow-up release.'
+                : 'SMTP not configured — set up Email in the Control Panel to enable.'
+            }
+          >
+            Email {status.stragglers} unlinked user{status.stragglers === 1 ? '' : 's'}
+          </button>
+        </div>
+      )}
+
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
     </div>
   )
 }
@@ -1572,6 +1919,65 @@ function PencilIcon() {
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
+  )
+}
+
+// FilterSelect is a small, dense dropdown for the row of axis filters
+// above the user table. Native <select> for accessibility (keyboard
+// open, screen-reader announce) styled inline. The "Any …" option
+// always sits at the top of every list — picking it disables that
+// axis.
+//
+// Active state is signalled by a stronger border and a faint tint,
+// not by flipping the whole control to a dark fill. The dark-fill
+// approach broke on browsers that don't fully honour `appearance:
+// none` for selects (Firefox/Win, some Chromium configs render the
+// OS-native "filled select" chrome — a striped/zigzag pattern —
+// over our background, looking horrific). Keeping the surface white
+// dodges the issue entirely.
+function FilterSelect({
+  ariaLabel,
+  value,
+  onChange,
+  options,
+}: {
+  ariaLabel: string
+  value: string
+  onChange: (next: string) => void
+  options: { value: string; label: string }[]
+}) {
+  const isDefault = options[0]?.value === value
+  return (
+    <select
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        height: 28,
+        fontSize: 12,
+        padding: '0 24px 0 10px',
+        borderRadius: 6,
+        border: `1px solid ${isDefault ? 'var(--line-strong)' : 'var(--ink)'}`,
+        backgroundColor: isDefault ? 'var(--surface)' : 'rgba(20, 18, 28, 0.05)',
+        color: 'var(--ink)',
+        fontWeight: isDefault ? 400 : 500,
+        cursor: 'pointer',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+        MozAppearance: 'none',
+        // Inline caret so the dropdown reads as a select without the
+        // OS-native chrome. Always dark — we never invert.
+        backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='none' stroke='%2363606E' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1l4 4 4-4'/></svg>")`,
+        backgroundRepeat: 'no-repeat',
+        backgroundPosition: 'right 8px center',
+      }}
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   )
 }
 

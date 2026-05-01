@@ -152,6 +152,17 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/users" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Users
                   </NavLink>
+                  <NavLink to="/email" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    <span className="inline-flex items-center gap-1.5">
+                      Email
+                      <span
+                        className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded"
+                        title="Preview — config saves but the send pipeline ships in a follow-up release"
+                      >
+                        Preview
+                      </span>
+                    </span>
+                  </NavLink>
                   <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Gopher Tunnels
                   </NavLink>
@@ -180,6 +191,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
 
                   <div className="my-1 border-t border-line" />
 
+                  <NavLink to="/account" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Account
+                  </NavLink>
                   <button
                     type="button"
                     onClick={handleSignOut}
@@ -190,17 +204,29 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   </button>
                 </NavDropdown>
               ) : user ? (
-                <>
-                  <span className="px-2.5 py-2 text-sm text-ink-2 font-mono">
-                    {user.name}
-                  </span>
+                <NavDropdown
+                  placement="bottom-end"
+                  triggerClassName="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors flex items-center gap-1.5 cursor-pointer"
+                  trigger={
+                    <>
+                      <span className="font-mono">{user.name}</span>
+                      <span className="text-xl text-ink-2 leading-none ml-0.5" aria-hidden="true">▾</span>
+                    </>
+                  }
+                >
+                  <NavLink to="/account" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Account
+                  </NavLink>
+                  <div className="my-1 border-t border-line" />
                   <button
+                    type="button"
                     onClick={handleSignOut}
-                    className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors"
+                    style={{ cursor: 'pointer' }}
+                    className="block w-full px-3 py-1.5 text-sm text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors text-left cursor-pointer"
                   >
                     Sign out
                   </button>
-                </>
+                </NavDropdown>
               ) : null}
             </div>
           </div>

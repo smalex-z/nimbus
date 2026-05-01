@@ -39,8 +39,17 @@ export default function SignIn() {
   const { displayed, done } = useTypingEffect(HEADING_FULL)
 
   useEffect(() => {
-    getProviders().then(setProviders).catch(() => setProviders({ github: false, google: false }))
+    getProviders()
+      .then(setProviders)
+      .catch(() => setProviders({ github: false, google: false, password: true, passwordless_goal: false }))
   }, [])
+
+  // passwordActive defaults to true while providers are still loading,
+  // so the email/password form doesn't briefly disappear and pop back.
+  // Once the response arrives, we honour what the server tells us:
+  // password sign-in is hidden only when the admin has set the
+  // passwordless goal AND no users are blocking it.
+  const passwordActive = providers ? providers.password : true
 
   const plainVisible = displayed.slice(0, HEADING_PLAIN.length)
   const italicVisible = displayed.slice(HEADING_PLAIN.length)
@@ -130,7 +139,7 @@ export default function SignIn() {
                   </button>
                 )}
               </div>
-              <div className="n-divider" style={{ marginBottom: 20 }}>or</div>
+              {passwordActive && <div className="n-divider" style={{ marginBottom: 20 }}>or</div>}
             </>
           )}
 
@@ -150,51 +159,62 @@ export default function SignIn() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div className="n-field">
-              <label className="n-label" htmlFor="signin-email">Email</label>
-              <input
-                id="signin-email"
-                className="n-input"
-                type="email"
-                placeholder="you@example.com"
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
+          {passwordActive && (
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div className="n-field">
+                <label className="n-label" htmlFor="signin-email">Email</label>
+                <input
+                  id="signin-email"
+                  className="n-input"
+                  type="email"
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </div>
 
-            <div className="n-field">
-              <label className="n-label" htmlFor="signin-password">Password</label>
-              <input
-                id="signin-password"
-                className="n-input"
-                type="password"
-                placeholder="••••••••"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
+              <div className="n-field">
+                <label className="n-label" htmlFor="signin-password">Password</label>
+                <input
+                  id="signin-password"
+                  className="n-input"
+                  type="password"
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
 
-            <button
-              className="n-btn n-btn-primary n-btn-block"
-              type="submit"
-              disabled={loading}
-              style={{ marginTop: 4 }}
-            >
-              {loading ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
+              <button
+                className="n-btn n-btn-primary n-btn-block"
+                type="submit"
+                disabled={loading}
+                style={{ marginTop: 4 }}
+              >
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+            </form>
+          )}
 
-          <p style={{ marginTop: 20, textAlign: 'center', fontSize: 13, color: 'var(--ink-mute)' }}>
-            Don&apos;t have an account?{' '}
-            <Link to="/signup" className="n-link" style={{ fontWeight: 500 }}>
-              Create one
-            </Link>
-          </p>
+          {!passwordActive && (
+            <p style={{ marginTop: 8, fontSize: 13, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+              This workspace requires sign-in via Google or GitHub. Pick a
+              provider above to continue.
+            </p>
+          )}
+
+          {passwordActive && (
+            <p style={{ marginTop: 20, textAlign: 'center', fontSize: 13, color: 'var(--ink-mute)' }}>
+              Don&apos;t have an account?{' '}
+              <Link to="/signup" className="n-link" style={{ fontWeight: 500 }}>
+                Create one
+              </Link>
+            </p>
+          )}
         </div>
 
         <NimbusFooter

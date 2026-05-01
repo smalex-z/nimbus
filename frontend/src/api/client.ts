@@ -509,6 +509,84 @@ export async function createAdminAccount(req: CreateAdminRequest): Promise<{ id:
 export interface OAuthProviders {
   github: boolean
   google: boolean
+  // password is true when the sign-in page should still render the
+  // email/password form. Stays true unless the admin has set
+  // passwordless_goal AND every user has linked an OAuth provider.
+  password: boolean
+  // passwordless_goal is the admin's stated intent. When true but
+  // password is also still true, the system is in transition (some
+  // users haven't linked yet); the UI uses both fields to render the
+  // explanatory banner.
+  passwordless_goal: boolean
+}
+
+export interface AccountView {
+  id: number
+  name: string
+  email: string
+  is_admin: boolean
+  has_password: boolean
+  google_connected: boolean
+  github_connected: boolean
+}
+
+export async function getAccount(): Promise<AccountView> {
+  const { data } = await api.get<AccountView>('/account')
+  return data
+}
+
+export interface PasswordlessStatus {
+  passwordless_goal: boolean
+  stragglers: number
+  password_active: boolean
+  // smtp_ready is true when SMTP is both configured (host + from
+  // address present) AND the admin has flipped the Enabled switch on
+  // /email. The "Email N unlinked users" button on /users gates on
+  // this. Send pipeline itself is still pending.
+  smtp_ready: boolean
+}
+
+export interface SMTPSettingsView {
+  host: string
+  port: number
+  username: string
+  has_password: boolean
+  from_address: string
+  encryption: 'starttls' | 'tls' | 'none' | string
+  enabled: boolean
+  configured: boolean
+}
+
+export interface SaveSMTPRequest {
+  host: string
+  port: number
+  username: string
+  // Omit to leave the existing password untouched. Empty string clears
+  // the stored password. Non-empty replaces.
+  password?: string
+  from_address: string
+  encryption: 'starttls' | 'tls' | 'none'
+  enabled: boolean
+}
+
+export async function getSMTPSettings(): Promise<SMTPSettingsView> {
+  const { data } = await api.get<SMTPSettingsView>('/settings/smtp')
+  return data
+}
+
+export async function saveSMTPSettings(req: SaveSMTPRequest): Promise<SMTPSettingsView> {
+  const { data } = await api.put<SMTPSettingsView>('/settings/smtp', req)
+  return data
+}
+
+export async function getPasswordlessStatus(): Promise<PasswordlessStatus> {
+  const { data } = await api.get<PasswordlessStatus>('/settings/oauth/passwordless')
+  return data
+}
+
+export async function setPasswordlessAuth(enabled: boolean): Promise<PasswordlessStatus> {
+  const { data } = await api.put<PasswordlessStatus>('/settings/oauth/passwordless', { enabled })
+  return data
 }
 
 export interface OAuthSettingsView {
@@ -557,10 +635,11 @@ export interface UserManagementView {
   is_admin: boolean
   created_at: string
   verified: boolean
-  // Best-effort sign-in providers the user has used at least once. May
-  // contain "password" (email/password registered), "github" (GitHub OAuth
-  // login captured), and/or "google" (inferred when neither password nor
-  // github is set — Google OAuth doesn't leave a per-user marker today).
+  suspended: boolean
+  // Sign-in paths the user has at least touched: "password" (set),
+  // "github" (one or more handshakes), "google" (one or more
+  // handshakes). Now derived from explicit per-provider flags rather
+  // than absence-inference.
   providers: string[]
 }
 
@@ -574,6 +653,22 @@ export async function listUsers(): Promise<UserManagementView[]> {
 // 401-translated "incorrect password" message when the gate fails.
 export async function promoteUser(id: number, password: string): Promise<{ id: number; is_admin: boolean }> {
   const { data } = await api.post<{ id: number; is_admin: boolean }>(`/users/${id}/promote`, { password })
+  return data
+}
+
+// setUserSuspended flips one user's suspended flag. Suspending also
+// kills every session they have so the change applies on the next
+// request rather than waiting for cookies to expire.
+export async function setUserSuspended(id: number, suspended: boolean): Promise<{ id: number; suspended: boolean }> {
+  const { data } = await api.post<{ id: number; suspended: boolean }>(`/users/${id}/suspend-status`, { suspended })
+  return data
+}
+
+// suspendUnlinkedUsers is the bulk version: suspends every active user
+// without OAuth (excluding the requester). Used by the passwordless
+// toggle's "Suspend stragglers" button.
+export async function suspendUnlinkedUsers(): Promise<{ suspended: number }> {
+  const { data } = await api.post<{ suspended: number }>('/users/suspend-unlinked')
   return data
 }
 

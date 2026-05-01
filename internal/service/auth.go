@@ -11,34 +11,51 @@ import (
 	"time"
 
 	"nimbus/internal/db"
+	"nimbus/internal/secrets"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
 var (
-	ErrEmailTaken           = errors.New("email already registered")
-	ErrInvalidCredentials   = errors.New("invalid credentials")
-	ErrSessionNotFound      = errors.New("session not found or expired")
-	ErrAdminAlreadyClaimed  = errors.New("admin already claimed")
-	ErrUsersExist           = errors.New("users already exist")
-	ErrInvalidAccessCode    = errors.New("invalid access code")
-	ErrAccessCodeNotPresent = errors.New("access code not configured")
-	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
-	ErrOrgNotAuthorized     = errors.New("github org not authorized")
-	ErrUserNotFound         = errors.New("user not found")
+	ErrEmailTaken             = errors.New("email already registered")
+	ErrInvalidCredentials     = errors.New("invalid credentials")
+	ErrSessionNotFound        = errors.New("session not found or expired")
+	ErrAdminAlreadyClaimed    = errors.New("admin already claimed")
+	ErrUsersExist             = errors.New("users already exist")
+	ErrInvalidAccessCode      = errors.New("invalid access code")
+	ErrAccessCodeNotPresent   = errors.New("access code not configured")
+	ErrDomainNotAuthorized    = errors.New("email domain not authorized")
+	ErrOrgNotAuthorized       = errors.New("github org not authorized")
+	ErrUserNotFound           = errors.New("user not found")
+	ErrRequesterNotLinked     = errors.New("link an OAuth provider on your own account before requiring passwordless sign-in")
+	ErrUserSuspended          = errors.New("account suspended")
+	ErrCannotSuspendSelf      = errors.New("cannot suspend yourself")
+	ErrCannotSuspendLastAdmin = errors.New("cannot suspend the last unsuspended admin")
+	ErrStragglersBlock        = errors.New("password-only accounts must be suspended or removed before passwordless sign-in can be required")
+	ErrCipherUnavailable      = errors.New("encryption cipher not available; restart the server with NIMBUS_ENCRYPTION_KEY configured")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
 
 // AuthService handles account creation and credential verification.
 type AuthService struct {
-	db *db.DB
+	db     *db.DB
+	cipher *secrets.Cipher
 }
 
 // NewAuthService creates a new AuthService.
 func NewAuthService(database *db.DB) *AuthService {
 	return &AuthService{db: database}
+}
+
+// WithCipher attaches the secrets.Cipher used to encrypt SMTP
+// credentials at rest. Optional — services that don't store
+// secret-bearing settings (tests, the setup wizard) leave it nil.
+// SMTP save returns ErrCipherUnavailable when called without one.
+func (s *AuthService) WithCipher(c *secrets.Cipher) *AuthService {
+	s.cipher = c
+	return s
 }
 
 // RegisterParams holds the input for creating a new account.
@@ -74,6 +91,10 @@ type UserManagementView struct {
 	// then the explicit access-code match.
 	Verified  bool     `json:"verified"`
 	Providers []string `json:"providers"`
+	// Suspended echoes the user row's flag so the table can render a
+	// muted row + a Suspended pill, and the actions menu can swap
+	// "Suspend" for "Unsuspend".
+	Suspended bool `json:"suspended"`
 }
 
 func userToManagementView(u *db.User, settings *db.OAuthSettings) *UserManagementView {
@@ -81,26 +102,26 @@ func userToManagementView(u *db.User, settings *db.OAuthSettings) *UserManagemen
 		UserView:  userToView(u),
 		CreatedAt: u.CreatedAt,
 		Providers: detectProviders(u),
+		Suspended: u.Suspended,
 	}
 	v.Verified = isUserVerifiedFromSettings(u, settings)
 	return v
 }
 
-// detectProviders is a best-effort sniff of how the user has signed in
-// at least once. PasswordHash != "" means email/password registration;
-// GitHubOrgs is set (even to "-") on every successful GitHub OAuth login.
-// A user with neither is presumed Google-only — we don't store a
-// per-user Google marker today, so the heuristic is "neither password
-// nor github → google". Order is stable: password, github, google.
+// detectProviders reports every sign-in path the user has at least
+// touched. PasswordHash != "" means an email/password registration;
+// GitHubOrgs != "" means a GitHub OAuth handshake (the "-" sentinel is
+// non-empty so it counts); GoogleConnected is set on every successful
+// Google handshake. Order is stable: password, github, google.
 func detectProviders(u *db.User) []string {
-	out := make([]string, 0, 2)
+	out := make([]string, 0, 3)
 	if u.PasswordHash != "" {
 		out = append(out, "password")
 	}
 	if u.GitHubOrgs != "" {
 		out = append(out, "github")
 	}
-	if len(out) == 0 {
+	if u.GoogleConnected {
 		out = append(out, "google")
 	}
 	return out
@@ -173,6 +194,10 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return "", nil, ErrInvalidCredentials
+	}
+
+	if user.Suspended {
+		return "", nil, ErrUserSuspended
 	}
 
 	sessionID, err := s.CreateSession(user.ID)
@@ -286,31 +311,51 @@ func (s *AuthService) DeleteUserRecord(targetID uint) error {
 	return nil
 }
 
-// UpsertOAuthUser finds a user by email or creates one if none exists.
-// Used by OAuth providers where a password hash is not applicable.
-func (s *AuthService) UpsertOAuthUser(name, email string) (*UserView, error) {
-	view, _, err := s.UpsertOAuthUserWithCheck(name, email, nil)
+// UpsertOAuthUser finds a user by Google sub (when supplied) or email,
+// creating one if neither matches. Used by the Google sign-in path
+// where there's no domain gate; pass the sub through so the lookup
+// matches on stable identity even if the user's Google email later
+// differs from their Nimbus email.
+func (s *AuthService) UpsertOAuthUser(name, email, providerSub string) (*UserView, error) {
+	view, _, err := s.UpsertOAuthUserWithCheck(name, email, providerSub, nil)
 	return view, err
 }
 
 // UpsertOAuthUserWithCheck behaves like UpsertOAuthUser but invokes
 // allowCreate before creating a brand-new account. Returns
-// ErrDomainNotAuthorized when allowCreate returns false. The bool return
-// indicates whether the user already existed prior to this call.
+// ErrDomainNotAuthorized when allowCreate returns false, or
+// ErrUserSuspended when the matched account is suspended. The bool
+// return indicates whether the user already existed prior to this
+// call.
+//
+// providerSub, when non-empty, lets the lookup match on google_sub
+// before falling back to email. That gives a user whose Google email
+// differs from their Nimbus email a stable binding once they've linked
+// their Google account from /account.
 func (s *AuthService) UpsertOAuthUserWithCheck(
-	name, email string,
+	name, email, providerSub string,
 	allowCreate func(email string) bool,
 ) (*UserView, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	name = strings.TrimSpace(name)
 
 	var user db.User
+	if providerSub != "" {
+		if err := s.db.Where("google_sub = ?", providerSub).First(&user).Error; err == nil {
+			if user.Suspended {
+				return nil, true, ErrUserSuspended
+			}
+			return userToView(&user), true, nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, err
+		}
+	}
 	err := s.db.Where("email = ?", email).First(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		if allowCreate != nil && !allowCreate(email) {
 			return nil, false, ErrDomainNotAuthorized
 		}
-		user = db.User{Name: name, Email: email}
+		user = db.User{Name: name, Email: email, GoogleSub: providerSub}
 		if err := s.db.Create(&user).Error; err != nil {
 			return nil, false, err
 		}
@@ -319,7 +364,290 @@ func (s *AuthService) UpsertOAuthUserWithCheck(
 	if err != nil {
 		return nil, false, err
 	}
+	if user.Suspended {
+		return nil, true, ErrUserSuspended
+	}
 	return userToView(&user), true, nil
+}
+
+// UpdateGitHubLinkSnapshot writes the user's GitHub orgs snapshot
+// without going through UpsertGitHubOAuthUser, which keys on email
+// and would risk splitting the row if the GitHub email differs from
+// the Nimbus email. Used by the /account link flow where the current
+// session's user is already established and we just want to record
+// "this user has now linked GitHub."
+func (s *AuthService) UpdateGitHubLinkSnapshot(userID uint, orgsCSV string) error {
+	// Column is git_hub_orgs — GORM splits on each uppercase boundary
+	// (GitHubOrgs → git_hub_orgs). Hard-coding the column name here
+	// matches the rest of the file (UpsertGitHubOAuthUser does the
+	// same) so we sidestep a UpdateColumn-vs-Update gotcha if the
+	// struct field ever gets renamed.
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).UpdateColumn("git_hub_orgs", orgsCSV)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// GetUserByID returns the raw User row by primary key. Used by the
+// /account endpoint which needs fields beyond UserView (password hash
+// presence + Google connected flag) to render the Connect buttons.
+func (s *AuthService) GetUserByID(id uint) (*db.User, error) {
+	var u db.User
+	if err := s.db.First(&u, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+// MarkGoogleConnected flips google_connected and stores the Google
+// `sub` so subsequent sign-ins can match by identity rather than email.
+// Idempotent — re-marking with the same sub is fine; calling with an
+// empty sub leaves the column untouched (so a partial provider response
+// can't wipe an existing binding).
+func (s *AuthService) MarkGoogleConnected(userID uint, sub string) error {
+	updates := map[string]interface{}{"google_connected": true}
+	if sub != "" {
+		updates["google_sub"] = sub
+	}
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).Updates(updates)
+	return res.Error
+}
+
+// MarkGitHubConnected stores the GitHub user id so subsequent sign-ins
+// match by identity. The orgs snapshot is updated separately via
+// UpdateGitHubLinkSnapshot since it changes on every login regardless
+// of whether this is the first link or the hundredth.
+func (s *AuthService) MarkGitHubConnected(userID uint, githubID string) error {
+	if githubID == "" {
+		return nil
+	}
+	return s.db.Model(&db.User{}).Where("id = ?", userID).Update("github_id", githubID).Error
+}
+
+// FindUserByOAuthIdentity looks up a user by the provider-side stable
+// identifier — Google `sub` or GitHub user id. Returns nil + nil error
+// when no user matches (caller falls back to email-based lookup).
+// Returns the row directly rather than UserView because callers need
+// the suspended flag too.
+func (s *AuthService) FindUserByOAuthIdentity(provider, providerID string) (*db.User, error) {
+	if providerID == "" {
+		return nil, nil
+	}
+	var col string
+	switch provider {
+	case "google":
+		col = "google_sub"
+	case "github":
+		col = "github_id"
+	default:
+		return nil, nil
+	}
+	var u db.User
+	err := s.db.Where(col+" = ?", providerID).First(&u).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// IsUserSuspended returns true when the named user's suspended flag is
+// set. Used by the login + OAuth callback paths so a suspended account
+// can't sign in regardless of how they authenticate.
+func (s *AuthService) IsUserSuspended(userID uint) (bool, error) {
+	var u db.User
+	if err := s.db.Select("suspended").First(&u, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, ErrUserNotFound
+		}
+		return false, err
+	}
+	return u.Suspended, nil
+}
+
+// SetUserSuspended flips the target's suspended flag. Suspending also
+// deletes every session the target had so the change takes effect on
+// the next request rather than waiting for sessions to expire.
+// Unsuspending leaves any other state untouched — the user just signs
+// in normally next time.
+//
+// Refuses to suspend the requester themselves (would log the admin
+// out mid-call) and refuses to suspend the last remaining un-suspended
+// admin (no admin coverage = nobody can unsuspend later).
+func (s *AuthService) SetUserSuspended(targetID, requesterID uint, suspended bool) error {
+	if targetID == requesterID && suspended {
+		return ErrCannotSuspendSelf
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var target db.User
+		if err := tx.First(&target, targetID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrUserNotFound
+			}
+			return err
+		}
+		if suspended && target.IsAdmin {
+			var others int64
+			if err := tx.Model(&db.User{}).
+				Where("is_admin = ? AND suspended = ? AND id <> ?", true, false, target.ID).
+				Count(&others).Error; err != nil {
+				return err
+			}
+			if others == 0 {
+				return ErrCannotSuspendLastAdmin
+			}
+		}
+		if err := tx.Model(&db.User{}).Where("id = ?", targetID).Update("suspended", suspended).Error; err != nil {
+			return err
+		}
+		if suspended {
+			if err := tx.Where("user_id = ?", targetID).Delete(&db.Session{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// SuspendUnlinkedUsers suspends every active (non-suspended) user who
+// has no OAuth provider linked, EXCEPT the requester themselves. Used
+// by the passwordless toggle's "suspend stragglers" affordance — the
+// admin clicks once to clear the path to OAuth-only sign-in, and the
+// system bulk-suspends in a single transaction. Returns the count of
+// users actually suspended (so the UI can confirm "N accounts
+// suspended").
+//
+// The requester is excluded from the bulk action even if they
+// themselves have no OAuth — they'll be caught by the explicit
+// per-toggle pre-check elsewhere (SetRequirePasswordlessAuth requires
+// the requester have OAuth linked) and we never want a bulk action to
+// log out the admin issuing it.
+func (s *AuthService) SuspendUnlinkedUsers(requesterID uint) (int64, error) {
+	var count int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var targets []db.User
+		if err := tx.
+			Where("google_connected = ? AND git_hub_orgs = ? AND suspended = ? AND id <> ?", false, "", false, requesterID).
+			Find(&targets).Error; err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			return nil
+		}
+		ids := make([]uint, len(targets))
+		for i, t := range targets {
+			ids[i] = t.ID
+		}
+		if err := tx.Model(&db.User{}).Where("id IN ?", ids).Update("suspended", true).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id IN ?", ids).Delete(&db.Session{}).Error; err != nil {
+			return err
+		}
+		count = int64(len(targets))
+		return nil
+	})
+	return count, err
+}
+
+// HasOAuthLinked reports whether the named user has completed at
+// least one OAuth dance — Google flag set or GitHub orgs snapshot
+// non-empty. The signal both /account and the passwordless setter use
+// to decide "is this user reachable without a password."
+func (s *AuthService) HasOAuthLinked(userID uint) (bool, error) {
+	var u db.User
+	if err := s.db.First(&u, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, ErrUserNotFound
+		}
+		return false, err
+	}
+	return u.GoogleConnected || u.GitHubOrgs != "", nil
+}
+
+// CountUnlinkedUsers returns how many *active* accounts have no OAuth
+// provider linked — i.e. accounts that would be locked out if password
+// sign-in disappeared. Suspended users are excluded: they're already
+// locked out and don't block the passwordless toggle. The admin sees
+// this number on /users alongside the toggle so they know how many
+// stragglers stand between them and OAuth-only sign-in.
+func (s *AuthService) CountUnlinkedUsers() (int64, error) {
+	var n int64
+	err := s.db.Model(&db.User{}).
+		Where("google_connected = ? AND git_hub_orgs = ? AND suspended = ?", false, "", false).
+		Count(&n).Error
+	return n, err
+}
+
+// IsPasswordSignInActive returns true when the login page should still
+// show the password form. With the hard-gate semantics
+// SetRequirePasswordlessAuth enforces, this is now a simple read of
+// the persisted flag — we can trust that a true value means every
+// active user has OAuth linked, because the setter rejected the
+// transition otherwise. The function still exists (rather than reading
+// the flag everywhere) so a future relaxation of the semantics has a
+// single point of change.
+func (s *AuthService) IsPasswordSignInActive() (bool, error) {
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return true, err
+	}
+	if !settings.RequirePasswordlessAuth {
+		return true, nil
+	}
+	// Defence in depth — even though the setter blocks the toggle
+	// when stragglers exist, also verify here so a hand-edited DB
+	// can't lock the cluster out.
+	stragglers, err := s.CountUnlinkedUsers()
+	if err != nil {
+		return true, err
+	}
+	return stragglers > 0, nil
+}
+
+// SetRequirePasswordlessAuth flips the OAuth-only-sign-in setting.
+// Hard gate when enabling: the requester must have OAuth linked
+// themselves AND no active (non-suspended) user can be password-only.
+// Suspended users don't count — they're already locked out. Active
+// password-only users would be left un-recoverable, so the setter
+// rejects with ErrStragglersBlock and the admin must suspend or
+// delete them first (see SuspendUnlinkedUsers and the existing
+// /api/users delete endpoint).
+//
+// Toggling off is unrestricted; you can always re-enable password
+// sign-in.
+func (s *AuthService) SetRequirePasswordlessAuth(requesterID uint, enabled bool) error {
+	if enabled {
+		linked, err := s.HasOAuthLinked(requesterID)
+		if err != nil {
+			return err
+		}
+		if !linked {
+			return ErrRequesterNotLinked
+		}
+		stragglers, err := s.CountUnlinkedUsers()
+		if err != nil {
+			return err
+		}
+		if stragglers > 0 {
+			return ErrStragglersBlock
+		}
+	}
+	settings, err := s.GetOAuthSettings()
+	if err != nil {
+		return err
+	}
+	settings.RequirePasswordlessAuth = enabled
+	return s.db.Save(&settings).Error
 }
 
 // HasAuthorizedGoogleDomains reports whether the admin has configured at
@@ -402,16 +730,45 @@ func (s *AuthService) SaveAuthorizedGitHubOrgs(orgs []string) error {
 }
 
 // UpsertGitHubOAuthUser is the GitHub-specific upsert that also snapshots
-// the user's current org memberships into the user row. Mirrors
-// UpsertOAuthUserWithCheck for the allowCreate semantics.
+// the user's current org memberships into the user row and binds the
+// stable GitHub user id (githubID) for identity-based sign-in. Mirrors
+// UpsertOAuthUserWithCheck for the allowCreate semantics. Returns
+// ErrUserSuspended when a matching account is suspended so the caller
+// can short-circuit the OAuth dance.
 func (s *AuthService) UpsertGitHubOAuthUser(
-	name, email string,
+	name, email, githubID string,
 	orgs []string,
 	allowCreate func(orgs []string) bool,
 ) (*UserView, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	name = strings.TrimSpace(name)
 	orgsCSV := joinDomains(normalizeDomains(orgs))
+	if orgsCSV == "" {
+		// "-" sentinel marks "linked but no orgs" so the connected
+		// flag isn't ambiguous with "never linked." Match the link
+		// path that records the same value.
+		orgsCSV = "-"
+	}
+
+	// Identity-first lookup: if we've stored this GitHub user id
+	// before, route to that account regardless of email changes.
+	if githubID != "" {
+		var hit db.User
+		err := s.db.Where("github_id = ?", githubID).First(&hit).Error
+		if err == nil {
+			if hit.Suspended {
+				return nil, true, ErrUserSuspended
+			}
+			if err := s.db.Model(&hit).UpdateColumn("git_hub_orgs", orgsCSV).Error; err != nil {
+				return nil, true, err
+			}
+			hit.GitHubOrgs = orgsCSV
+			return userToView(&hit), true, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, err
+		}
+	}
 
 	var user db.User
 	err := s.db.Where("email = ?", email).First(&user).Error
@@ -419,7 +776,7 @@ func (s *AuthService) UpsertGitHubOAuthUser(
 		if allowCreate != nil && !allowCreate(orgs) {
 			return nil, false, ErrOrgNotAuthorized
 		}
-		user = db.User{Name: name, Email: email, GitHubOrgs: orgsCSV}
+		user = db.User{Name: name, Email: email, GitHubOrgs: orgsCSV, GitHubID: githubID}
 		if err := s.db.Create(&user).Error; err != nil {
 			return nil, false, err
 		}
@@ -428,15 +785,23 @@ func (s *AuthService) UpsertGitHubOAuthUser(
 	if err != nil {
 		return nil, false, err
 	}
+	if user.Suspended {
+		return nil, true, ErrUserSuspended
+	}
 	// Refresh the org snapshot on every login so the bypass tracks the
-	// user's current memberships. Using UpdateColumn with the actual DB
-	// column (git_hub_orgs — GORM splits on each uppercase boundary) avoids
-	// hooks and zero-value skipping; an empty orgsCSV is a legitimate value
-	// when the user has no orgs.
-	if err := s.db.Model(&user).UpdateColumn("git_hub_orgs", orgsCSV).Error; err != nil {
+	// user's current memberships, and stamp the github_id so future
+	// sign-ins find this user by identity.
+	updates := map[string]interface{}{"git_hub_orgs": orgsCSV}
+	if githubID != "" && user.GitHubID == "" {
+		updates["github_id"] = githubID
+	}
+	if err := s.db.Model(&user).Updates(updates).Error; err != nil {
 		return nil, true, err
 	}
 	user.GitHubOrgs = orgsCSV
+	if githubID != "" && user.GitHubID == "" {
+		user.GitHubID = githubID
+	}
 	return userToView(&user), true, nil
 }
 
@@ -516,6 +881,9 @@ func (s *AuthService) CreateSession(userID uint) (string, error) {
 }
 
 // GetUserBySessionID returns the user for a valid, non-expired session.
+// Suspended users get treated as no-session — middleware will surface
+// the same 401 they'd see for an expired cookie, kicking them back to
+// the sign-in page.
 func (s *AuthService) GetUserBySessionID(sessionID string) (*UserView, error) {
 	var session db.Session
 	err := s.db.Where("id = ? AND expires_at > ?", sessionID, time.Now()).First(&session).Error
@@ -529,6 +897,9 @@ func (s *AuthService) GetUserBySessionID(sessionID string) (*UserView, error) {
 	var user db.User
 	if err := s.db.First(&user, session.UserID).Error; err != nil {
 		return nil, err
+	}
+	if user.Suspended {
+		return nil, ErrSessionNotFound
 	}
 
 	return userToView(&user), nil
@@ -566,6 +937,101 @@ func subtleConstantTimeEq(a, b string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// SMTPSettingsView is the safe-to-serialize projection of SMTPSettings.
+// The encrypted password ciphertext stays inside the service; the UI
+// only sees whether a password is set, not the value.
+type SMTPSettingsView struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	HasPassword bool   `json:"has_password"`
+	FromAddress string `json:"from_address"`
+	Encryption  string `json:"encryption"`
+	Enabled     bool   `json:"enabled"`
+	Configured  bool   `json:"configured"`
+}
+
+// SaveSMTPRequest mirrors the form on /email. An empty password leaves
+// the existing ciphertext intact (so the admin can edit host/port
+// without re-entering credentials); a non-empty password is encrypted
+// and replaces the stored value.
+type SaveSMTPRequest struct {
+	Host        string  `json:"host"`
+	Port        int     `json:"port"`
+	Username    string  `json:"username"`
+	Password    *string `json:"password,omitempty"`
+	FromAddress string  `json:"from_address"`
+	Encryption  string  `json:"encryption"`
+	Enabled     bool    `json:"enabled"`
+}
+
+// GetSMTPSettings returns the persisted SMTP configuration as a view.
+// Creates a default empty row on first call so /email loads with sane
+// defaults instead of a nil shape. Configured = "host + from address
+// are filled" — that's the bare minimum to attempt a send.
+func (s *AuthService) GetSMTPSettings() (*SMTPSettingsView, error) {
+	var row db.SMTPSettings
+	if err := s.db.FirstOrCreate(&row, db.SMTPSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	return &SMTPSettingsView{
+		Host:        row.Host,
+		Port:        row.Port,
+		Username:    row.Username,
+		HasPassword: len(row.PasswordCT) > 0,
+		FromAddress: row.FromAddress,
+		Encryption:  row.Encryption,
+		Enabled:     row.Enabled,
+		Configured:  row.Host != "" && row.FromAddress != "",
+	}, nil
+}
+
+// SaveSMTPSettings persists the SMTP form. The password (when supplied)
+// is encrypted with the service's secrets.Cipher before storage —
+// callers without a cipher get ErrCipherUnavailable. Encryption mode
+// defaults to "starttls" when blank; port defaults to 587.
+func (s *AuthService) SaveSMTPSettings(req SaveSMTPRequest) (*SMTPSettingsView, error) {
+	var row db.SMTPSettings
+	if err := s.db.FirstOrCreate(&row, db.SMTPSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	row.Host = strings.TrimSpace(req.Host)
+	row.Username = strings.TrimSpace(req.Username)
+	row.FromAddress = strings.TrimSpace(req.FromAddress)
+	row.Port = req.Port
+	if row.Port == 0 {
+		row.Port = 587
+	}
+	row.Encryption = req.Encryption
+	if row.Encryption == "" {
+		row.Encryption = "starttls"
+	}
+	row.Enabled = req.Enabled
+	if req.Password != nil {
+		if *req.Password == "" {
+			// Explicit empty password → clear the stored ciphertext.
+			// (Distinct from omitting the field, which leaves it
+			// untouched — the *string omitempty distinguishes them.)
+			row.PasswordCT = nil
+			row.PasswordNonce = nil
+		} else {
+			if s.cipher == nil {
+				return nil, ErrCipherUnavailable
+			}
+			ct, nonce, err := s.cipher.Encrypt([]byte(*req.Password))
+			if err != nil {
+				return nil, fmt.Errorf("encrypt smtp password: %w", err)
+			}
+			row.PasswordCT = ct
+			row.PasswordNonce = nonce
+		}
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		return nil, err
+	}
+	return s.GetSMTPSettings()
 }
 
 // GetGopherSettings returns the stored Gopher tunnel credentials. Creates a
