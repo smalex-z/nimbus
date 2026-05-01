@@ -1722,16 +1722,38 @@ function ProvidersSummary({
       )}
 
       {status && !status.passwordless_goal && status.stragglers > 0 && (
-        <button
-          type="button"
-          className="n-btn"
-          onClick={bulkSuspend}
-          disabled={busy}
-          style={{ alignSelf: 'flex-start', fontSize: 12, padding: '6px 12px', height: 32 }}
-          title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
-        >
-          {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
-        </button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button
+            type="button"
+            className="n-btn"
+            onClick={bulkSuspend}
+            disabled={busy}
+            style={{ fontSize: 12, padding: '6px 12px', height: 32 }}
+            title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
+          >
+            {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
+          </button>
+          {/* Email-stragglers button. Always disabled today — the send
+              pipeline ships in a follow-up release. Tooltip routes the
+              admin to /email so they can configure SMTP in the meantime;
+              once SMTP is configured + enabled the button stays disabled
+              but shows "Email coming soon" instead of the configure
+              prompt. The first version of the click action will mint
+              magic-link tokens and send recovery emails. */}
+          <button
+            type="button"
+            className="n-btn"
+            disabled
+            style={{ fontSize: 12, padding: '6px 12px', height: 32, cursor: 'not-allowed' }}
+            title={
+              status.smtp_ready
+                ? 'Email recovery is in preview — magic-link send lands in a follow-up release.'
+                : 'SMTP not configured — set up Email in the Control Panel to enable.'
+            }
+          >
+            Email {status.stragglers} unlinked user{status.stragglers === 1 ? '' : 's'}
+          </button>
+        </div>
       )}
 
       {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}

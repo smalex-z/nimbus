@@ -188,6 +188,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Delete("/users/{id}", auth.DeleteUser)
 				r.Get("/settings/oauth/passwordless", auth.PasswordlessStatus)
 				r.Put("/settings/oauth/passwordless", auth.SetPasswordlessAuth)
+				r.Get("/settings/smtp", auth.GetSMTP)
+				r.Put("/settings/smtp", auth.SaveSMTP)
 
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)

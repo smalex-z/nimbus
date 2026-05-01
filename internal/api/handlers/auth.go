@@ -599,8 +599,10 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 }
 
 // PasswordlessStatus handles GET /api/settings/oauth/passwordless —
-// admin-only read of the current setting + straggler count, so the
-// /users page can render the toggle and the explanatory banner.
+// admin-only read of the current setting, straggler count, and SMTP
+// readiness. The Users page uses these to render the toggle, the
+// straggler explanation, the bulk-suspend button, and the (currently
+// disabled) "Email N unlinked users" button.
 func (a *Auth) PasswordlessStatus(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -622,11 +624,63 @@ func (a *Auth) PasswordlessStatus(w http.ResponseWriter, r *http.Request) {
 		log.Printf("passwordless status: active: %v", err)
 		active = true
 	}
+	smtp, err := a.auth.GetSMTPSettings()
+	if err != nil {
+		log.Printf("passwordless status: smtp: %v", err)
+	}
+	smtpReady := smtp != nil && smtp.Configured && smtp.Enabled
 	response.Success(w, map[string]any{
 		"passwordless_goal": settings.RequirePasswordlessAuth,
 		"stragglers":        stragglers,
 		"password_active":   active,
+		"smtp_ready":        smtpReady,
 	})
+}
+
+// GetSMTP handles GET /api/settings/smtp. Admin-only. Returns the
+// SMTPSettingsView (no ciphertext, just `has_password: bool` so the
+// /email form can render "(unchanged)" placeholder copy).
+func (a *Auth) GetSMTP(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	view, err := a.auth.GetSMTPSettings()
+	if err != nil {
+		log.Printf("get smtp: %v", err)
+		response.InternalError(w, "failed to load SMTP settings")
+		return
+	}
+	response.Success(w, view)
+}
+
+// SaveSMTP handles PUT /api/settings/smtp. Admin-only. The request
+// body's password field follows the standard "edit secrets" pattern:
+// omitting the field leaves the existing ciphertext untouched, sending
+// an empty string clears it, sending a non-empty string replaces it.
+func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
+	requester := ctxutil.User(r.Context())
+	if requester == nil || !requester.IsAdmin {
+		response.Error(w, http.StatusForbidden, "admin only")
+		return
+	}
+	var body service.SaveSMTPRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	view, err := a.auth.SaveSMTPSettings(body)
+	if err != nil {
+		if errors.Is(err, service.ErrCipherUnavailable) {
+			response.Error(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		log.Printf("save smtp: %v", err)
+		response.InternalError(w, "failed to save SMTP settings")
+		return
+	}
+	response.Success(w, view)
 }
 
 // VerifyStatus handles GET /api/access-code/status — returns whether the

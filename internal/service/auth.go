@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nimbus/internal/db"
+	"nimbus/internal/secrets"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -32,18 +33,29 @@ var (
 	ErrCannotSuspendSelf      = errors.New("cannot suspend yourself")
 	ErrCannotSuspendLastAdmin = errors.New("cannot suspend the last unsuspended admin")
 	ErrStragglersBlock        = errors.New("password-only accounts must be suspended or removed before passwordless sign-in can be required")
+	ErrCipherUnavailable      = errors.New("encryption cipher not available; restart the server with NIMBUS_ENCRYPTION_KEY configured")
 )
 
 const sessionDuration = 7 * 24 * time.Hour
 
 // AuthService handles account creation and credential verification.
 type AuthService struct {
-	db *db.DB
+	db     *db.DB
+	cipher *secrets.Cipher
 }
 
 // NewAuthService creates a new AuthService.
 func NewAuthService(database *db.DB) *AuthService {
 	return &AuthService{db: database}
+}
+
+// WithCipher attaches the secrets.Cipher used to encrypt SMTP
+// credentials at rest. Optional — services that don't store
+// secret-bearing settings (tests, the setup wizard) leave it nil.
+// SMTP save returns ErrCipherUnavailable when called without one.
+func (s *AuthService) WithCipher(c *secrets.Cipher) *AuthService {
+	s.cipher = c
+	return s
 }
 
 // RegisterParams holds the input for creating a new account.
@@ -925,6 +937,101 @@ func subtleConstantTimeEq(a, b string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// SMTPSettingsView is the safe-to-serialize projection of SMTPSettings.
+// The encrypted password ciphertext stays inside the service; the UI
+// only sees whether a password is set, not the value.
+type SMTPSettingsView struct {
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	Username     string `json:"username"`
+	HasPassword  bool   `json:"has_password"`
+	FromAddress  string `json:"from_address"`
+	Encryption   string `json:"encryption"`
+	Enabled      bool   `json:"enabled"`
+	Configured   bool   `json:"configured"`
+}
+
+// SaveSMTPRequest mirrors the form on /email. An empty password leaves
+// the existing ciphertext intact (so the admin can edit host/port
+// without re-entering credentials); a non-empty password is encrypted
+// and replaces the stored value.
+type SaveSMTPRequest struct {
+	Host        string  `json:"host"`
+	Port        int     `json:"port"`
+	Username    string  `json:"username"`
+	Password    *string `json:"password,omitempty"`
+	FromAddress string  `json:"from_address"`
+	Encryption  string  `json:"encryption"`
+	Enabled     bool    `json:"enabled"`
+}
+
+// GetSMTPSettings returns the persisted SMTP configuration as a view.
+// Creates a default empty row on first call so /email loads with sane
+// defaults instead of a nil shape. Configured = "host + from address
+// are filled" — that's the bare minimum to attempt a send.
+func (s *AuthService) GetSMTPSettings() (*SMTPSettingsView, error) {
+	var row db.SMTPSettings
+	if err := s.db.FirstOrCreate(&row, db.SMTPSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	return &SMTPSettingsView{
+		Host:        row.Host,
+		Port:        row.Port,
+		Username:    row.Username,
+		HasPassword: len(row.PasswordCT) > 0,
+		FromAddress: row.FromAddress,
+		Encryption:  row.Encryption,
+		Enabled:     row.Enabled,
+		Configured:  row.Host != "" && row.FromAddress != "",
+	}, nil
+}
+
+// SaveSMTPSettings persists the SMTP form. The password (when supplied)
+// is encrypted with the service's secrets.Cipher before storage —
+// callers without a cipher get ErrCipherUnavailable. Encryption mode
+// defaults to "starttls" when blank; port defaults to 587.
+func (s *AuthService) SaveSMTPSettings(req SaveSMTPRequest) (*SMTPSettingsView, error) {
+	var row db.SMTPSettings
+	if err := s.db.FirstOrCreate(&row, db.SMTPSettings{ID: 1}).Error; err != nil {
+		return nil, err
+	}
+	row.Host = strings.TrimSpace(req.Host)
+	row.Username = strings.TrimSpace(req.Username)
+	row.FromAddress = strings.TrimSpace(req.FromAddress)
+	row.Port = req.Port
+	if row.Port == 0 {
+		row.Port = 587
+	}
+	row.Encryption = req.Encryption
+	if row.Encryption == "" {
+		row.Encryption = "starttls"
+	}
+	row.Enabled = req.Enabled
+	if req.Password != nil {
+		if *req.Password == "" {
+			// Explicit empty password → clear the stored ciphertext.
+			// (Distinct from omitting the field, which leaves it
+			// untouched — the *string omitempty distinguishes them.)
+			row.PasswordCT = nil
+			row.PasswordNonce = nil
+		} else {
+			if s.cipher == nil {
+				return nil, ErrCipherUnavailable
+			}
+			ct, nonce, err := s.cipher.Encrypt([]byte(*req.Password))
+			if err != nil {
+				return nil, fmt.Errorf("encrypt smtp password: %w", err)
+			}
+			row.PasswordCT = ct
+			row.PasswordNonce = nonce
+		}
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		return nil, err
+	}
+	return s.GetSMTPSettings()
 }
 
 // GetGopherSettings returns the stored Gopher tunnel credentials. Creates a

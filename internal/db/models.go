@@ -91,6 +91,39 @@ type OAuthSettings struct {
 	RequirePasswordlessAuth bool `gorm:"default:false"`
 }
 
+// SMTPSettings holds outbound-mail configuration. Singleton (ID=1).
+// Used by the planned magic-link recovery flow that emails password-only
+// users when an admin moves the workspace to OAuth-only sign-in. The
+// admin populates host/port/from/credentials on the /email page; the
+// password is encrypted at rest via the same secrets.Cipher used for
+// SSH key vault entries (NIMBUS_ENCRYPTION_KEY-derived AES-256-GCM).
+//
+// Today the saved config is dormant — no code reads it for sending yet.
+// The "Email N unlinked users" button on the Sign-in providers card
+// stays disabled until both this is configured AND the send pipeline
+// lands in a follow-up release. Storing now (vs. later) guarantees the
+// schema doesn't need a destructive migration when send arrives.
+type SMTPSettings struct {
+	ID            uint   `gorm:"primaryKey"`
+	Host          string `gorm:"default:''"`
+	Port          int    `gorm:"default:587"`
+	Username      string `gorm:"default:''"`
+	PasswordCT    []byte `gorm:"column:password_ct"`
+	PasswordNonce []byte `gorm:"column:password_nonce"`
+	// FromAddress is the envelope sender. Required for sending — until
+	// it's set we treat SMTP as "not configured" regardless of host.
+	FromAddress string `gorm:"default:''"`
+	// Encryption is "starttls" / "tls" / "none". starttls is the right
+	// default for port 587 (submission); tls for 465 (smtps); none is
+	// only for unauthenticated relays inside trusted networks.
+	Encryption string `gorm:"default:'starttls'"`
+	// Enabled is the admin's manual on/off switch — flipping it off
+	// keeps the credentials but stops the (future) send pipeline from
+	// using them. Useful for temporary outages or migrations without
+	// wiping the form.
+	Enabled bool `gorm:"default:false"`
+}
+
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single
 // row (ID=1) is used. Empty APIURL means tunnel integration is disabled.
 //

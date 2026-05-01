@@ -115,7 +115,8 @@ func main() {
 	}
 
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.GopherSettings{},
+		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.SMTPSettings{},
+		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		ippool.Model(),
@@ -215,6 +216,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init secrets cipher: %v", err)
 	}
+	// Late-bind the cipher onto the auth service so SMTP credentials
+	// (the only secret-bearing field on AuthService today) can be
+	// encrypted before storage. AuthService was constructed earlier
+	// for the Gopher seed step, which doesn't need a cipher.
+	authSvc.WithCipher(cipher)
 
 	// Long timeout: the bootstrap path makes calls that wait on Proxmox tasks
 	// (image downloads) which can run for several minutes. The HTTP server

@@ -152,6 +152,17 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/users" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Users
                   </NavLink>
+                  <NavLink to="/email" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    <span className="inline-flex items-center gap-1.5">
+                      Email
+                      <span
+                        className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded"
+                        title="Preview — config saves but the send pipeline ships in a follow-up release"
+                      >
+                        Preview
+                      </span>
+                    </span>
+                  </NavLink>
                   <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Gopher Tunnels
                   </NavLink>

@@ -533,6 +533,44 @@ export interface PasswordlessStatus {
   passwordless_goal: boolean
   stragglers: number
   password_active: boolean
+  // smtp_ready is true when SMTP is both configured (host + from
+  // address present) AND the admin has flipped the Enabled switch on
+  // /email. The "Email N unlinked users" button on /users gates on
+  // this. Send pipeline itself is still pending.
+  smtp_ready: boolean
+}
+
+export interface SMTPSettingsView {
+  host: string
+  port: number
+  username: string
+  has_password: boolean
+  from_address: string
+  encryption: 'starttls' | 'tls' | 'none' | string
+  enabled: boolean
+  configured: boolean
+}
+
+export interface SaveSMTPRequest {
+  host: string
+  port: number
+  username: string
+  // Omit to leave the existing password untouched. Empty string clears
+  // the stored password. Non-empty replaces.
+  password?: string
+  from_address: string
+  encryption: 'starttls' | 'tls' | 'none'
+  enabled: boolean
+}
+
+export async function getSMTPSettings(): Promise<SMTPSettingsView> {
+  const { data } = await api.get<SMTPSettingsView>('/settings/smtp')
+  return data
+}
+
+export async function saveSMTPSettings(req: SaveSMTPRequest): Promise<SMTPSettingsView> {
+  const { data } = await api.put<SMTPSettingsView>('/settings/smtp', req)
+  return data
 }
 
 export async function getPasswordlessStatus(): Promise<PasswordlessStatus> {
