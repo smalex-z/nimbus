@@ -365,7 +365,12 @@ func (s *AuthService) UpsertOAuthUserWithCheck(
 // session's user is already established and we just want to record
 // "this user has now linked GitHub."
 func (s *AuthService) UpdateGitHubLinkSnapshot(userID uint, orgsCSV string) error {
-	res := s.db.Model(&db.User{}).Where("id = ?", userID).Update("github_orgs", orgsCSV)
+	// Column is git_hub_orgs — GORM splits on each uppercase boundary
+	// (GitHubOrgs → git_hub_orgs). Hard-coding the column name here
+	// matches the rest of the file (UpsertGitHubOAuthUser does the
+	// same) so we sidestep a UpdateColumn-vs-Update gotcha if the
+	// struct field ever gets renamed.
+	res := s.db.Model(&db.User{}).Where("id = ?", userID).UpdateColumn("git_hub_orgs", orgsCSV)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -519,7 +524,7 @@ func (s *AuthService) SuspendUnlinkedUsers(requesterID uint) (int64, error) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var targets []db.User
 		if err := tx.
-			Where("google_connected = ? AND github_orgs = ? AND suspended = ? AND id <> ?", false, "", false, requesterID).
+			Where("google_connected = ? AND git_hub_orgs = ? AND suspended = ? AND id <> ?", false, "", false, requesterID).
 			Find(&targets).Error; err != nil {
 			return err
 		}
@@ -566,7 +571,7 @@ func (s *AuthService) HasOAuthLinked(userID uint) (bool, error) {
 func (s *AuthService) CountUnlinkedUsers() (int64, error) {
 	var n int64
 	err := s.db.Model(&db.User{}).
-		Where("google_connected = ? AND github_orgs = ? AND suspended = ?", false, "", false).
+		Where("google_connected = ? AND git_hub_orgs = ? AND suspended = ?", false, "", false).
 		Count(&n).Error
 	return n, err
 }
