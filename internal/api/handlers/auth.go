@@ -53,10 +53,10 @@ type Auth struct {
 	vms        userVMActor // optional; when nil, /api/users/:id DELETE returns 503
 }
 
-// NewAuth creates a new Auth handler. appURL is used for the Google OAuth
-// redirect URI. reconciler may be nil — when set, a successful login kicks an
-// async reconcile so the IP pool catches up with cross-instance changes
-// without the user waiting on background-loop cadence.
+// NewAuth creates a new Auth handler. appURL is the env-configured fallback
+// for the OAuth redirect URI; the resolver also consults the live
+// GopherSettings.CloudTunnelURL and the inbound request host so a properly
+// self-bootstrapped Nimbus doesn't need APP_URL set in env.
 func NewAuth(auth *service.AuthService, appURL string, reconciler loginReconciler) *Auth {
 	return &Auth{auth: auth, appURL: appURL, reconciler: reconciler}
 }
@@ -102,8 +102,10 @@ func (a *Auth) githubProvider() oauth.Provider {
 }
 
 // googleProvider loads Google OAuth credentials from the DB on each call.
-// Returns nil if credentials are not configured.
-func (a *Auth) googleProvider() oauth.Provider {
+// Returns nil if credentials are not configured. The redirect URI is
+// resolved from the request so the same binary works whether the operator
+// reaches Nimbus via raw IP, APP_URL, or the Gopher self-tunnel hostname.
+func (a *Auth) googleProvider(r *http.Request) oauth.Provider {
 	settings, err := a.auth.GetOAuthSettings()
 	if err != nil || settings.GoogleClientID == "" || settings.GoogleClientSecret == "" {
 		return nil
@@ -111,8 +113,64 @@ func (a *Auth) googleProvider() oauth.Provider {
 	return &oauth.Google{
 		ClientID:     settings.GoogleClientID,
 		ClientSecret: settings.GoogleClientSecret,
-		RedirectURI:  a.appURL + "/api/auth/google/callback",
+		RedirectURI:  a.ResolveAppURL(r) + "/api/auth/google/callback",
 	}
+}
+
+// ResolveAppURL returns the public origin Nimbus should use when telling
+// external services (Google's OAuth in particular) where to send the user
+// back. Resolution order:
+//
+//  1. db.GopherSettings.CloudTunnelURL — populated by the Gopher self-bootstrap
+//     once cloud.<domain> is live; preferred because it survives operator
+//     IP changes and is what a public browser will hit.
+//  2. cfg.AppURL — env-configured override; ignored when it's the bare default
+//     localhost:5173 or any loopback address (those won't roundtrip through
+//     a remote OAuth provider).
+//  3. The inbound request's scheme + host — last resort that at least matches
+//     the URL the admin's browser is currently on.
+//
+// Always returned without a trailing slash so callers can append paths
+// directly.
+func (a *Auth) ResolveAppURL(r *http.Request) string {
+	if settings, err := a.auth.GetGopherSettings(); err == nil {
+		if u := strings.TrimRight(strings.TrimSpace(settings.CloudTunnelURL), "/"); u != "" {
+			return u
+		}
+	}
+	if u := strings.TrimRight(strings.TrimSpace(a.appURL), "/"); u != "" && !looksLikeLocalhostURL(u) {
+		return u
+	}
+	if r != nil && r.Host != "" {
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		return scheme + "://" + r.Host
+	}
+	return strings.TrimRight(a.appURL, "/")
+}
+
+// looksLikeLocalhostURL reports whether the URL points at a loopback host.
+// Mirrors the helper in provision/gpu_bootstrap.go but lives here so the
+// auth handler doesn't take a provision dependency.
+func looksLikeLocalhostURL(u string) bool {
+	if u == "" {
+		return true
+	}
+	s := strings.ToLower(u)
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "https://"), "http://")
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 && !strings.Contains(s[:i], ":") {
+		s = s[:i]
+	}
+	return s == "localhost" ||
+		strings.HasPrefix(s, "127.") ||
+		s == "0.0.0.0" ||
+		s == "::1" ||
+		s == "[::1]"
 }
 
 // Providers handles GET /api/auth/providers — public endpoint that tells the
@@ -612,7 +670,7 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 // --- Google OAuth -----------------------------------------------------------
 
 func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
-	a.oauthStart(a.googleProvider())(w, r)
+	a.oauthStart(a.googleProvider(r))(w, r)
 }
 
 // GoogleCallback wraps the shared OAuth callback flow with the
@@ -621,7 +679,7 @@ func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
 // returning users whose domain IS authorized are auto-verified against the
 // current access code version so they bypass the /verify form.
 func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	provider := a.googleProvider()
+	provider := a.googleProvider(r)
 	if provider == nil {
 		http.Redirect(w, r, "/auth/callback?error=exchange_failed&provider=google", http.StatusTemporaryRedirect)
 		return

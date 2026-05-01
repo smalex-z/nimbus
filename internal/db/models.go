@@ -71,6 +71,15 @@ type GopherSettings struct {
 	APIURL string `gorm:"default:''"`
 	APIKey string `gorm:"default:''"`
 
+	// CloudSubdomain is the leftmost label of the public hostname Nimbus's
+	// self-tunnel exposes the dashboard at — e.g. "cloud" yields
+	// cloud.<gopher-domain>. Empty is treated as the default "cloud" by
+	// readers (selftunnel.EffectiveCloudSubdomain) so existing deployments
+	// keep their current URL after the AutoMigrate adds this column.
+	// Configurable so two Nimbus instances pointed at the same Gopher (e.g.
+	// dev + prod) can each claim a distinct subdomain.
+	CloudSubdomain string `gorm:"default:''"`
+
 	// CloudMachineID is the Gopher ExternalMachine.ID for the Nimbus host
 	// itself. Set as soon as POST /api/v1/machines returns; cleared on
 	// teardown. Used for cleanup (DELETE /machines/:id) and for resuming
