@@ -15,6 +15,7 @@ import {
   saveAuthorizedGoogleDomains,
   saveOAuthSettings,
   setPasswordlessAuth,
+  emailUnlinkedUsers,
   setUserSuspended,
   suspendUnlinkedUsers,
 } from '@/api/client'
@@ -1738,6 +1739,27 @@ function ProvidersSummary({
     }
   }
 
+  const emailUnlinked = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      const r = await emailUnlinkedUsers()
+      // Surface the result in the panel's existing status slot — the
+      // bulk-action button reuses the suspend-result text style so we
+      // don't introduce a third success/failure UI per panel.
+      const failuresSummary =
+        r.failed > 0 && r.failures && r.failures.length > 0
+          ? ` Failures: ${r.failures.slice(0, 3).join('; ')}${r.failures.length > 3 ? `; +${r.failures.length - 3} more` : ''}`
+          : ''
+      setError(`Sent ${r.sent}${r.failed > 0 ? `, failed ${r.failed}.${failuresSummary}` : '.'}`)
+      onMutated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
       <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
@@ -1823,25 +1845,25 @@ function ProvidersSummary({
           >
             {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
           </button>
-          {/* Email-stragglers button. Always disabled today — the send
-              pipeline ships in a follow-up release. Tooltip routes the
-              admin to /email so they can configure SMTP in the meantime;
-              once SMTP is configured + enabled the button stays disabled
-              but shows "Email coming soon" instead of the configure
-              prompt. The first version of the click action will mint
-              magic-link tokens and send recovery emails. */}
+          {/* Email-stragglers button. Enabled once SMTP is configured
+              + enabled on /email; click mints magic-link tokens and
+              sends each unlinked user a recovery email. Synchronous —
+              the request waits on N SMTP roundtrips, but client and
+              server both run with a generous timeout so a small batch
+              completes in a single shot. */}
           <button
             type="button"
             className="n-btn"
-            disabled
-            style={{ fontSize: 12, padding: '6px 12px', height: 32, cursor: 'not-allowed' }}
+            disabled={busy || !status.smtp_ready}
+            onClick={emailUnlinked}
+            style={{ fontSize: 12, padding: '6px 12px', height: 32, cursor: status.smtp_ready ? 'pointer' : 'not-allowed' }}
             title={
               status.smtp_ready
-                ? 'Email recovery is in preview — magic-link send lands in a follow-up release.'
+                ? `Sends a magic-link recovery email to each unlinked user. Each link expires in 24h.`
                 : 'SMTP not configured — set up Email in the Control Panel to enable.'
             }
           >
-            Email {status.stragglers} unlinked user{status.stragglers === 1 ? '' : 's'}
+            {busy ? 'Sending…' : `Email ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
           </button>
         </div>
       )}

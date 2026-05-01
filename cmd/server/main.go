@@ -115,7 +115,8 @@ func main() {
 	}
 
 	database, err := db.New(cfg.DBPath,
-		&db.User{}, &db.Session{}, &db.OAuthSettings{}, &db.SMTPSettings{},
+		&db.User{}, &db.Session{}, &db.LoginToken{},
+		&db.OAuthSettings{}, &db.SMTPSettings{},
 		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
@@ -151,6 +152,17 @@ func main() {
 		log.Printf("warning: admin backfill check failed: %v", err)
 	} else if promoted {
 		log.Printf("backfill: promoted oldest user to admin (no admin existed)")
+	}
+
+	// Sweep expired magic-link / recovery tokens on every boot. Cheap
+	// (one DELETE WHERE expires_at < now) and keeps the table from
+	// growing unbounded between server restarts. Failures are
+	// non-fatal — the consumer also rejects expired rows at redeem
+	// time, so the table just stays a bit dirtier.
+	if removed, err := authSvc.PurgeExpiredLoginTokens(); err != nil {
+		log.Printf("warning: purge expired login tokens: %v", err)
+	} else if removed > 0 {
+		log.Printf("startup: purged %d expired login tokens", removed)
 	}
 
 	// Network settings: env vars seed the DB row on first boot; after that the

@@ -91,6 +91,31 @@ type OAuthSettings struct {
 	RequirePasswordlessAuth bool `gorm:"default:false"`
 }
 
+// LoginToken is a single-use, short-lived token that signs a user in
+// when redeemed. Currently minted by the magic-link recovery flow
+// that emails password-only users (so they can come connect
+// Google/GitHub on their /account page) and consumed by
+// /api/auth/magic/{token}.
+//
+// Token is the opaque random-hex string and the primary key. Purpose
+// tags what flow minted it so the consumer can refuse cross-purpose
+// tokens — today only "magic_link" exists, but the column is here so
+// future single-use tokens (password reset, invite) don't need
+// another schema bump.
+//
+// Single-use is enforced by an UPDATE ... SET used_at = ? WHERE
+// token = ? AND used_at IS NULL inside ConsumeLoginToken: the row
+// can only flip from unused to used once, and a concurrent second
+// redeem hits zero rows affected.
+type LoginToken struct {
+	Token     string     `gorm:"primaryKey"`
+	UserID    uint       `gorm:"not null;index"`
+	Purpose   string     `gorm:"not null;default:''"`
+	ExpiresAt time.Time  `gorm:"not null;index"`
+	UsedAt    *time.Time `gorm:"index"`
+	CreatedAt time.Time
+}
+
 // SMTPSettings holds outbound-mail configuration. Singleton (ID=1).
 // Used by the planned magic-link recovery flow that emails password-only
 // users when an admin moves the workspace to OAuth-only sign-in. The

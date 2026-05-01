@@ -1,13 +1,8 @@
 import { useEffect, useState } from 'react'
-import { getSMTPSettings, saveSMTPSettings } from '@/api/client'
+import { getSMTPSettings, saveSMTPSettings, sendTestEmail } from '@/api/client'
 import type { SMTPSettingsView, SaveSMTPRequest } from '@/api/client'
 
-// Email — admin-only SMTP configuration. Today the saved config is
-// dormant: nothing reads it for sending yet. The /users page's
-// "Email N unlinked users" button gates on this card's Configured +
-// Enabled state, but the actual recovery-email send pipeline lands in
-// a follow-up release. Storing now (vs. later) means the schema and
-// form scaffolding are ready when send wires up.
+// Email — admin-only SMTP configuration + test-send affordance.
 //
 // Password handling follows the standard "edit secrets" pattern:
 // leave the field blank to keep the existing stored value (the
@@ -15,6 +10,12 @@ import type { SMTPSettingsView, SaveSMTPRequest } from '@/api/client'
 // request omits `password` when blank, sends the new value otherwise.
 // Backend encrypts at rest with the same secrets.Cipher used for the
 // SSH key vault.
+//
+// "Send test email" delivers a short message to the calling admin's
+// own address — useful for verifying the saved credentials before
+// triggering the bulk recovery send from /users. The button is the
+// only way to learn whether host/auth/TLS actually work end to end;
+// the form save just persists the values.
 export default function Email() {
   const [view, setView] = useState<SMTPSettingsView | null>(null)
   const [host, setHost] = useState('')
@@ -27,6 +28,8 @@ export default function Email() {
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [testBusy, setTestBusy] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
 
   useEffect(() => {
     getSMTPSettings()
@@ -245,7 +248,7 @@ export default function Email() {
                 </span>
               </label>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
                 <button
                   type="submit"
                   className="n-btn n-btn-primary"
@@ -254,7 +257,36 @@ export default function Email() {
                 >
                   {busy ? 'Saving…' : 'Save'}
                 </button>
+                <button
+                  type="button"
+                  className="n-btn"
+                  disabled={testBusy || !view?.configured}
+                  title={
+                    view?.configured
+                      ? 'Sends a short test message to your own email address using the saved settings.'
+                      : 'Save host + from-address first.'
+                  }
+                  onClick={async () => {
+                    setTestResult(null)
+                    setTestBusy(true)
+                    try {
+                      const r = await sendTestEmail()
+                      setTestResult({ ok: true, msg: `Test email sent to ${r.to}.` })
+                    } catch (err) {
+                      setTestResult({ ok: false, msg: err instanceof Error ? err.message : 'failed' })
+                    } finally {
+                      setTestBusy(false)
+                    }
+                  }}
+                >
+                  {testBusy ? 'Sending…' : 'Send test email'}
+                </button>
                 {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
+                {testResult && (
+                  <span style={{ fontSize: 13, color: testResult.ok ? 'var(--ok)' : 'var(--err)' }}>
+                    {testResult.msg}
+                  </span>
+                )}
               </div>
             </form>
           </div>
