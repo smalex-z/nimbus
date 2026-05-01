@@ -978,77 +978,61 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
       </div>
 
       {rows !== null && rows.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {/* Filter row: four small dropdowns. Each "Any …" option is
-              the disable-this-axis sentinel; combinations AND together. */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-            <FilterSelect
-              ariaLabel="Role"
-              value={filters.role}
-              onChange={(v) => setFilters((f) => ({ ...f, role: v as RoleFilter }))}
-              options={[
-                { value: 'any', label: 'Any role' },
-                { value: 'admin', label: 'Admins' },
-                { value: 'member', label: 'Members' },
-              ]}
-            />
-            <FilterSelect
-              ariaLabel="Status"
-              value={filters.status}
-              onChange={(v) => setFilters((f) => ({ ...f, status: v as StatusFilter }))}
-              options={[
-                { value: 'any', label: 'Any status' },
-                { value: 'active', label: 'Active' },
-                { value: 'suspended', label: 'Suspended' },
-              ]}
-            />
-            <FilterSelect
-              ariaLabel="Verification"
-              value={filters.verified}
-              onChange={(v) => setFilters((f) => ({ ...f, verified: v as VerifiedFilter }))}
-              options={[
-                { value: 'any', label: 'Any verification' },
-                { value: 'verified', label: 'Verified' },
-                { value: 'unverified', label: 'Unverified' },
-              ]}
-            />
-            <FilterSelect
-              ariaLabel="Sign-in"
-              value={filters.provider}
-              onChange={(v) => setFilters((f) => ({ ...f, provider: v as ProviderFilter }))}
-              options={[
-                { value: 'any', label: 'Any sign-in' },
-                { value: 'has-oauth', label: 'OAuth-linked' },
-                { value: 'password-only', label: 'Password-only' },
-              ]}
-            />
-            {filtersActive && (
-              <button
-                type="button"
-                onClick={() => setFilters(DEFAULT_FILTERS)}
-                className="n-btn-ghost"
-                style={{
-                  fontSize: 11,
-                  fontFamily: 'Geist Mono, monospace',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.06em',
-                  padding: '4px 8px',
-                  height: 28,
-                  cursor: 'pointer',
-                  color: 'var(--ink-mute)',
-                }}
-              >
-                Clear
-              </button>
-            )}
-          </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          {/* Filter row: four compact dropdowns then a flex-growing
+              search input as the last column. flex-wrap lets the search
+              drop to its own line on narrow viewports rather than
+              squeezing everything. Combinations AND across axes; "Any …"
+              disables that axis. */}
+          <FilterSelect
+            ariaLabel="Role"
+            value={filters.role}
+            onChange={(v) => setFilters((f) => ({ ...f, role: v as RoleFilter }))}
+            options={[
+              { value: 'any', label: 'Any role' },
+              { value: 'admin', label: 'Admins' },
+              { value: 'member', label: 'Members' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Status"
+            value={filters.status}
+            onChange={(v) => setFilters((f) => ({ ...f, status: v as StatusFilter }))}
+            options={[
+              { value: 'any', label: 'Any status' },
+              { value: 'active', label: 'Active' },
+              { value: 'suspended', label: 'Suspended' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Verification"
+            value={filters.verified}
+            onChange={(v) => setFilters((f) => ({ ...f, verified: v as VerifiedFilter }))}
+            options={[
+              { value: 'any', label: 'Any verification' },
+              { value: 'verified', label: 'Verified' },
+              { value: 'unverified', label: 'Unverified' },
+            ]}
+          />
+          <FilterSelect
+            ariaLabel="Sign-in"
+            value={filters.provider}
+            onChange={(v) => setFilters((f) => ({ ...f, provider: v as ProviderFilter }))}
+            options={[
+              { value: 'any', label: 'Any sign-in' },
+              { value: 'has-oauth', label: 'OAuth-linked' },
+              { value: 'password-only', label: 'Password-only' },
+            ]}
+          />
           <input
             type="search"
             placeholder="Search by name or email…"
             value={filters.search}
             onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
             style={{
-              height: 30,
+              flex: 1,
+              minWidth: 160,
+              height: 28,
               fontSize: 12,
               padding: '0 10px',
               borderRadius: 6,
@@ -1058,6 +1042,25 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
               outline: 'none',
             }}
           />
+          {filtersActive && (
+            <button
+              type="button"
+              onClick={() => setFilters(DEFAULT_FILTERS)}
+              className="n-btn-ghost"
+              style={{
+                fontSize: 11,
+                fontFamily: 'Geist Mono, monospace',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                padding: '4px 8px',
+                height: 28,
+                cursor: 'pointer',
+                color: 'var(--ink-mute)',
+              }}
+            >
+              Clear
+            </button>
+          )}
         </div>
       )}
 
@@ -1809,9 +1812,17 @@ function PencilIcon() {
 
 // FilterSelect is a small, dense dropdown for the row of axis filters
 // above the user table. Native <select> for accessibility (keyboard
-// open, screen-reader announce) styled inline so it lines up with
-// the table's compact aesthetic. The "Any …" option always sits at
-// the top of every list — picking it disables that axis.
+// open, screen-reader announce) styled inline. The "Any …" option
+// always sits at the top of every list — picking it disables that
+// axis.
+//
+// Active state is signalled by a stronger border and a faint tint,
+// not by flipping the whole control to a dark fill. The dark-fill
+// approach broke on browsers that don't fully honour `appearance:
+// none` for selects (Firefox/Win, some Chromium configs render the
+// OS-native "filled select" chrome — a striped/zigzag pattern —
+// over our background, looking horrific). Keeping the surface white
+// dodges the issue entirely.
 function FilterSelect({
   ariaLabel,
   value,
@@ -1834,16 +1845,17 @@ function FilterSelect({
         fontSize: 12,
         padding: '0 24px 0 10px',
         borderRadius: 6,
-        border: '1px solid var(--line-strong)',
-        background: isDefault ? 'transparent' : 'var(--ink)',
-        color: isDefault ? 'var(--ink-body)' : '#FCFBFA',
+        border: `1px solid ${isDefault ? 'var(--line-strong)' : 'var(--ink)'}`,
+        backgroundColor: isDefault ? 'var(--surface)' : 'rgba(20, 18, 28, 0.05)',
+        color: 'var(--ink)',
+        fontWeight: isDefault ? 400 : 500,
         cursor: 'pointer',
         appearance: 'none',
         WebkitAppearance: 'none',
         MozAppearance: 'none',
-        // Inline caret so the select reads as a dropdown without
-        // pulling in the OS-native chrome.
-        backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='none' stroke='${isDefault ? '%2363606E' : '%23FCFBFA'}' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1l4 4 4-4'/></svg>")`,
+        // Inline caret so the dropdown reads as a select without the
+        // OS-native chrome. Always dark — we never invert.
+        backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='none' stroke='%2363606E' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1l4 4 4-4'/></svg>")`,
         backgroundRepeat: 'no-repeat',
         backgroundPosition: 'right 8px center',
       }}
