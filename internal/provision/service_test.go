@@ -176,6 +176,13 @@ func happyFakePVE(t *testing.T) *fakePVE {
 }
 
 func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool, *db.DB) {
+	return newTestServiceOpts(t, fake, nil)
+}
+
+// newTestServiceOpts is the configurable variant of newTestService — it lets
+// a single test override Config fields (e.g. NetworkOpPerVMTimeout) before
+// provision.New applies its defaults.
+func newTestServiceOpts(t *testing.T, fake *fakePVE, mutate func(*provision.Config)) (*provision.Service, *ippool.Pool, *db.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
@@ -206,7 +213,7 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 	}
 	keysSvc := sshkeys.New(database.DB, cipher)
 
-	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, provision.Config{
+	cfg := provision.Config{
 		TemplateBaseVMID: 9000,
 		GatewayIP:        "10.0.0.1",
 		Nameserver:       "1.1.1.1",
@@ -214,7 +221,11 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		IPReadyTimeout:   1 * time.Second,
 		PollInterval:     5 * time.Millisecond,
 		CPUType:          "x86-64-v3",
-	})
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, cfg)
 	return svc, pool, database
 }
 
