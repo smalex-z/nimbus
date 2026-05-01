@@ -604,6 +604,39 @@ func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
 	}
 }
 
+// PublicTunnel with a pubkey-only key must be rejected upfront — without
+// the private half Nimbus can't SSH into the VM to run the Gopher bootstrap
+// script, and registering the machine anyway leaves it stranded in
+// `pending` with no UI path to finish it. Validated only when tunnels
+// integration is wired (see TestProvision_TunnelDisabled_IgnoresFlag for
+// the no-Gopher case).
+func TestProvision_PublicTunnel_RequiresPrivateKey(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+	// Only a tunnels client makes the gate fire; without one the field is a
+	// silent no-op.
+	tc, _ := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("Gopher should not have been called when validation rejects")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	svc.SetTunnelClient(tc)
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "no-priv",
+		Tier:         "small",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+		PublicTunnel: true,
+	}, nil)
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+	if ve.Field != "ssh" {
+		t.Errorf("ValidationError.Field = %q, want ssh", ve.Field)
+	}
+}
+
 func TestProvision_BYO_MismatchedKeypair_Rejected(t *testing.T) {
 	t.Parallel()
 	svc, _, _ := newTestService(t, happyFakePVE(t))
@@ -1160,11 +1193,16 @@ func TestProvision_TunnelInfraError_VMStillSucceeds(t *testing.T) {
 	})
 	svc.SetTunnelClient(tc)
 
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:     "infra-fail",
 		Tier:         "small",
 		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
+		SSHPubKey:    pub,
+		SSHPrivKey:   priv,
 		PublicTunnel: true,
 	}, nil)
 	if err != nil {
@@ -1216,11 +1254,16 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 	})
 	svc.SetTunnelClient(tc)
 
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:     "soft",
 		Tier:         "small",
 		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
+		SSHPubKey:    pub,
+		SSHPrivKey:   priv,
 		PublicTunnel: true,
 	}, nil)
 	if err != nil {
