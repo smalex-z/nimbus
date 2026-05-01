@@ -110,6 +110,11 @@ type Config struct {
 	// PollInterval controls how often we poll the agent. 0 means use 3s.
 	PollInterval time.Duration
 
+	// NetworkOpPerVMTimeout caps each per-VM iteration in ForceGatewayUpdate /
+	// RenumberAllVMs so a single hung Proxmox reboot task can't wedge the
+	// whole batch behind one VM. 0 means use the default (3 min).
+	NetworkOpPerVMTimeout time.Duration
+
 	// SourceNode is the node Proxmox queries for "clone source". Templates
 	// are typically replicated to every node, but the clone API still wants
 	// a source-node URL — by convention, we use the same target node. If
@@ -182,6 +187,9 @@ func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
+	}
+	if cfg.NetworkOpPerVMTimeout == 0 {
+		cfg.NetworkOpPerVMTimeout = 3 * time.Minute
 	}
 	prefix := cfg.PrefixLen
 	if prefix < 1 || prefix > 32 {
@@ -342,6 +350,24 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	keyID := sshKey.ID
 	keyName := sshKey.Name
 	sshPubKey := sshKey.PublicKey
+
+	// Public-SSH gate: the Gopher bootstrap step needs a private half to SSH
+	// into the VM after first boot, so reject the request now rather than
+	// register a Gopher machine and leave it stranded in `pending` with no
+	// way for the user to finish it. sshPrivateKey is non-empty when
+	// resolveSSHKey just generated the keypair (always succeeds); otherwise
+	// the vault row must carry a private half.
+	//
+	// Skipped when tunnels integration is disabled cluster-wide (s.tunnels
+	// == nil) — in that mode req.PublicTunnel is already a silent no-op
+	// (machine is never registered), so there's nothing to strand and no
+	// reason to reject an otherwise-valid request.
+	if req.PublicTunnel && s.tunnels != nil && sshPrivateKey == "" && !sshKey.HasPrivateKey() {
+		return nil, &internalerrors.ValidationError{
+			Field:   "ssh",
+			Message: "public SSH requires the private half of the SSH key — pick a key that has it vaulted, generate a new one, or paste a private key.",
+		}
+	}
 
 	// Step 1: reserve IP. defer release on any later failure.
 	ip, err := s.pool.Reserve(ctx, req.Hostname)

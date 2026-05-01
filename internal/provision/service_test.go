@@ -176,6 +176,13 @@ func happyFakePVE(t *testing.T) *fakePVE {
 }
 
 func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Pool, *db.DB) {
+	return newTestServiceOpts(t, fake, nil)
+}
+
+// newTestServiceOpts is the configurable variant of newTestService — it lets
+// a single test override Config fields (e.g. NetworkOpPerVMTimeout) before
+// provision.New applies its defaults.
+func newTestServiceOpts(t *testing.T, fake *fakePVE, mutate func(*provision.Config)) (*provision.Service, *ippool.Pool, *db.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
@@ -206,7 +213,7 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 	}
 	keysSvc := sshkeys.New(database.DB, cipher)
 
-	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, provision.Config{
+	cfg := provision.Config{
 		TemplateBaseVMID: 9000,
 		GatewayIP:        "10.0.0.1",
 		Nameserver:       "1.1.1.1",
@@ -214,7 +221,11 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 		IPReadyTimeout:   1 * time.Second,
 		PollInterval:     5 * time.Millisecond,
 		CPUType:          "x86-64-v3",
-	})
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, cfg)
 	return svc, pool, database
 }
 
@@ -590,6 +601,39 @@ func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("expected NotFound from GetPrivateKey, got %v", err)
+	}
+}
+
+// PublicTunnel with a pubkey-only key must be rejected upfront — without
+// the private half Nimbus can't SSH into the VM to run the Gopher bootstrap
+// script, and registering the machine anyway leaves it stranded in
+// `pending` with no UI path to finish it. Validated only when tunnels
+// integration is wired (see TestProvision_TunnelDisabled_IgnoresFlag for
+// the no-Gopher case).
+func TestProvision_PublicTunnel_RequiresPrivateKey(t *testing.T) {
+	t.Parallel()
+	svc, _, _ := newTestService(t, happyFakePVE(t))
+	// Only a tunnels client makes the gate fire; without one the field is a
+	// silent no-op.
+	tc, _ := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("Gopher should not have been called when validation rejects")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	svc.SetTunnelClient(tc)
+
+	_, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "no-priv",
+		Tier:         "small",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+		PublicTunnel: true,
+	}, nil)
+	var ve *internalerrors.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected ValidationError, got %v", err)
+	}
+	if ve.Field != "ssh" {
+		t.Errorf("ValidationError.Field = %q, want ssh", ve.Field)
 	}
 }
 
@@ -1149,11 +1193,16 @@ func TestProvision_TunnelInfraError_VMStillSucceeds(t *testing.T) {
 	})
 	svc.SetTunnelClient(tc)
 
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:     "infra-fail",
 		Tier:         "small",
 		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
+		SSHPubKey:    pub,
+		SSHPrivKey:   priv,
 		PublicTunnel: true,
 	}, nil)
 	if err != nil {
@@ -1205,11 +1254,16 @@ func TestProvision_TunnelSoftSuccess_BootstrapSkipped(t *testing.T) {
 	})
 	svc.SetTunnelClient(tc)
 
+	pub, priv, err := provision.GenerateEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := svc.Provision(context.Background(), provision.Request{
 		Hostname:     "soft",
 		Tier:         "small",
 		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
+		SSHPubKey:    pub,
+		SSHPrivKey:   priv,
 		PublicTunnel: true,
 	}, nil)
 	if err != nil {

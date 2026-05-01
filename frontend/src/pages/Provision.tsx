@@ -153,6 +153,35 @@ export default function Provision() {
 
   const selectedTier = TIERS[form.tier]
 
+  // selectedKeyHasPrivate gates the "Expose SSH publicly" checkbox: Nimbus
+  // can't bootstrap the Gopher tunnel into the VM without SSHing in, which
+  // needs the private half. Backend enforces the same rule with a
+  // ValidationError; this computes the same answer client-side so the
+  // checkbox disables before submit.
+  const selectedKeyHasPrivate = useMemo(() => {
+    switch (form.keyMode) {
+      case 'gen':
+        return true // Nimbus generates the keypair → private half always present.
+      case 'byo':
+        return form.privKey.trim().length > 0
+      case 'saved':
+        if (form.savedKeyId === null) return false
+        return savedKeys.find((k) => k.id === form.savedKeyId)?.has_private_key ?? false
+      default:
+        return false
+    }
+  }, [form.keyMode, form.privKey, form.savedKeyId, savedKeys])
+
+  // Auto-clear the public-tunnel checkbox when the underlying key loses its
+  // private half (e.g. user switched from "generate" to a saved pubkey-only
+  // key). Without this the checkbox stays visually checked but disabled,
+  // and the user can't tell the request would be rejected.
+  useEffect(() => {
+    if (!selectedKeyHasPrivate && form.publicTunnel) {
+      setForm((prev) => ({ ...prev, publicTunnel: false }))
+    }
+  }, [selectedKeyHasPrivate, form.publicTunnel])
+
   const canSubmit = useMemo(() => {
     if (!form.hostname || form.hostname.length === 0) return false
     if (form.tier === 'xl') return false
@@ -270,6 +299,7 @@ export default function Provision() {
               savedKeys={savedKeys}
               tunnelInfo={tunnelInfo}
               gpuInfo={gpuInfo}
+              selectedKeyHasPrivate={selectedKeyHasPrivate}
             />
           </Card>
 
@@ -432,9 +462,13 @@ interface FormBodyProps {
   savedKeys: SSHKey[]
   tunnelInfo: TunnelInfo | null
   gpuInfo: GPUInferenceStatus | null
+  // Mirrors the backend rule that public SSH needs a private half — the
+  // parent computes it once and passes it down so this component doesn't
+  // duplicate the keyMode → has_private_key logic.
+  selectedKeyHasPrivate: boolean
 }
 
-function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -594,7 +628,7 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo }: FormBody
         <label className="text-[13px] font-medium text-ink">Public access</label>
         <label
           className={`flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
-            tunnelInfo?.enabled
+            tunnelInfo?.enabled && selectedKeyHasPrivate
               ? 'cursor-pointer hover:border-ink/40'
               : 'cursor-not-allowed opacity-60'
           }`}
@@ -603,7 +637,7 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo }: FormBody
             type="checkbox"
             checked={form.publicTunnel}
             onChange={(e) => updateForm('publicTunnel', e.target.checked)}
-            disabled={!tunnelInfo?.enabled}
+            disabled={!tunnelInfo?.enabled || !selectedKeyHasPrivate}
             className="mt-0.5 w-4 h-4 accent-ink disabled:cursor-not-allowed"
           />
           <div className="flex-1">
@@ -620,6 +654,15 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo }: FormBody
                 Tunnel integration not configured. An admin can wire it up
                 from{' '}
                 <Link to="/settings" className="underline">Settings → Gopher tunnels</Link>.
+              </div>
+            )}
+            {tunnelInfo?.enabled && !selectedKeyHasPrivate && (
+              <div className="text-xs text-warn mt-1.5">
+                {form.keyMode === 'byo'
+                  ? 'Paste the private half above — Nimbus needs it to SSH into the VM and run the Gopher bootstrap.'
+                  : form.keyMode === 'saved'
+                    ? <>This saved key has no private half on file. Pick another key or upload its private key from{' '}<Link to="/keys" className="underline">SSH keys</Link>.</>
+                    : 'Pick a key with a private half or generate a new one — the Gopher bootstrap needs to SSH into the VM.'}
               </div>
             )}
           </div>

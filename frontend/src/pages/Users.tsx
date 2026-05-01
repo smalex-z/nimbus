@@ -35,6 +35,16 @@ interface ProviderPanelProps {
   instructionsUrl: string
   instructionsLabel: string
   onSave: (clientId: string, clientSecret: string) => Promise<unknown>
+  // Redirect URI Nimbus will send to this IdP. Empty when the backend
+  // resolver isn't wired (older builds) — the panel just hides the hint.
+  redirectURI?: string
+  // What the IdP's console calls this field, so the hint copy matches.
+  redirectURILabel?: string
+  // 'cloud_tunnel' | 'app_url' | 'request_host' | '' — chooses which
+  // sub-line ("from Gopher self-tunnel" / "from APP_URL" / etc.) to show.
+  redirectURISource?: OAuthSettingsView['redirect_uri_source']
+  // Warning text when the resolved host is unusable (loopback / raw IP).
+  redirectURIWarning?: string
   children?: React.ReactNode
 }
 
@@ -46,6 +56,10 @@ function ProviderPanel({
   instructionsUrl,
   instructionsLabel,
   onSave,
+  redirectURI,
+  redirectURILabel,
+  redirectURISource,
+  redirectURIWarning,
   children,
 }: ProviderPanelProps) {
   const [clientId, setClientId] = useState(initialClientId)
@@ -110,6 +124,15 @@ function ProviderPanel({
         and enter the credentials below. Users will be able to sign in with {name} once configured.
       </p>
 
+      {redirectURI && (
+        <RedirectURIHint
+          uri={redirectURI}
+          fieldLabel={redirectURILabel ?? 'Redirect URI'}
+          source={redirectURISource}
+          warning={redirectURIWarning}
+        />
+      )}
+
       <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div className="n-field">
           <label className="n-label" htmlFor={`${name}-client-id`}>
@@ -167,6 +190,73 @@ function ProviderPanel({
         <div style={{ paddingTop: 18, borderTop: '1px solid var(--line)' }}>
           {children}
         </div>
+      )}
+    </div>
+  )
+}
+
+// RedirectURIHint renders a read-only "paste this into the IdP console"
+// field with a copy button + a one-line provenance hint and an optional
+// warning when the resolved host is something Google would reject.
+function RedirectURIHint({
+  uri,
+  fieldLabel,
+  source,
+  warning,
+}: {
+  uri: string
+  fieldLabel: string
+  source: OAuthSettingsView['redirect_uri_source']
+  warning?: string
+}) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(uri)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard can fail in non-HTTPS / iframe contexts — silently swallow;
+      // user can still triple-click + Cmd/Ctrl-C the visible value.
+    }
+  }
+  return (
+    <div className="n-field" style={{ gap: 6 }}>
+      <label className="n-label">{fieldLabel}</label>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          className="n-input"
+          type="text"
+          readOnly
+          value={uri}
+          onFocus={(e) => e.currentTarget.select()}
+          style={{ flex: 1, fontFamily: 'Geist Mono, monospace', fontSize: 12 }}
+        />
+        <button
+          type="button"
+          className="n-btn"
+          onClick={handleCopy}
+          style={{ padding: '0 12px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          aria-label={`Copy ${fieldLabel}`}
+        >
+          <CopyIcon />
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+        Register this exact value as the {fieldLabel.toLowerCase()} on your OAuth app.{' '}
+        {source === 'cloud_tunnel'
+          ? 'Resolved from the Gopher self-tunnel.'
+          : source === 'app_url'
+            ? 'Resolved from APP_URL.'
+            : source === 'request_host'
+              ? 'Inferred from this browser session — set APP_URL or finish the Gopher self-bootstrap to make it stable.'
+              : ''}
+      </p>
+      {warning && (
+        <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--err)', lineHeight: 1.5 }}>
+          {warning}
+        </p>
       )}
     </div>
   )
@@ -1979,6 +2069,10 @@ function OAuthProviderModal({
             instructionsUrl="https://console.cloud.google.com/apis/credentials"
             instructionsLabel="Google Cloud Console"
             onSave={onSaveGoogle}
+            redirectURI={settings.google_redirect_uri}
+            redirectURILabel="Authorized redirect URI"
+            redirectURISource={settings.redirect_uri_source}
+            redirectURIWarning={settings.redirect_uri_warning}
           >
             <GoogleDomainsSection />
           </ProviderPanel>
@@ -1991,6 +2085,10 @@ function OAuthProviderModal({
             instructionsUrl="https://github.com/settings/applications/new"
             instructionsLabel="github.com/settings/applications/new"
             onSave={onSaveGitHub}
+            redirectURI={settings.github_callback_url}
+            redirectURILabel="Authorization callback URL"
+            redirectURISource={settings.redirect_uri_source}
+            redirectURIWarning={settings.redirect_uri_warning}
           >
             <GitHubOrgsSection />
           </ProviderPanel>

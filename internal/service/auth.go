@@ -18,15 +18,15 @@ import (
 )
 
 var (
-	ErrEmailTaken           = errors.New("email already registered")
-	ErrInvalidCredentials   = errors.New("invalid credentials")
-	ErrSessionNotFound      = errors.New("session not found or expired")
-	ErrAdminAlreadyClaimed  = errors.New("admin already claimed")
-	ErrUsersExist           = errors.New("users already exist")
-	ErrInvalidAccessCode    = errors.New("invalid access code")
-	ErrAccessCodeNotPresent = errors.New("access code not configured")
-	ErrDomainNotAuthorized  = errors.New("email domain not authorized")
-	ErrOrgNotAuthorized     = errors.New("github org not authorized")
+	ErrEmailTaken             = errors.New("email already registered")
+	ErrInvalidCredentials     = errors.New("invalid credentials")
+	ErrSessionNotFound        = errors.New("session not found or expired")
+	ErrAdminAlreadyClaimed    = errors.New("admin already claimed")
+	ErrUsersExist             = errors.New("users already exist")
+	ErrInvalidAccessCode      = errors.New("invalid access code")
+	ErrAccessCodeNotPresent   = errors.New("access code not configured")
+	ErrDomainNotAuthorized    = errors.New("email domain not authorized")
+	ErrOrgNotAuthorized       = errors.New("github org not authorized")
 	ErrUserNotFound           = errors.New("user not found")
 	ErrRequesterNotLinked     = errors.New("link an OAuth provider on your own account before requiring passwordless sign-in")
 	ErrUserSuspended          = errors.New("account suspended")
@@ -943,14 +943,14 @@ func subtleConstantTimeEq(a, b string) bool {
 // The encrypted password ciphertext stays inside the service; the UI
 // only sees whether a password is set, not the value.
 type SMTPSettingsView struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	Username     string `json:"username"`
-	HasPassword  bool   `json:"has_password"`
-	FromAddress  string `json:"from_address"`
-	Encryption   string `json:"encryption"`
-	Enabled      bool   `json:"enabled"`
-	Configured   bool   `json:"configured"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	HasPassword bool   `json:"has_password"`
+	FromAddress string `json:"from_address"`
+	Encryption  string `json:"encryption"`
+	Enabled     bool   `json:"enabled"`
+	Configured  bool   `json:"configured"`
 }
 
 // SaveSMTPRequest mirrors the form on /email. An empty password leaves
@@ -1044,9 +1044,10 @@ func (s *AuthService) GetGopherSettings() (*db.GopherSettings, error) {
 
 // SaveGopherSettings persists Gopher credentials. Empty fields are treated as
 // "preserve existing" so the UI can rotate just the API key without
-// re-entering the URL (and vice versa). Only the URL/key columns are
-// touched; CloudTunnel* fields are owned by selftunnel.Service and managed
-// separately via SaveCloudTunnelState.
+// re-entering the URL (and vice versa). The same rule applies to
+// CloudSubdomain — empty means keep what's stored. Only the credential +
+// subdomain columns are touched; CloudTunnel* fields are owned by
+// selftunnel.Service and managed separately via SaveCloudTunnelState.
 func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	existing, err := s.GetGopherSettings()
 	if err != nil {
@@ -1058,9 +1059,13 @@ func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	if next.APIKey == "" {
 		next.APIKey = existing.APIKey
 	}
+	if next.CloudSubdomain == "" {
+		next.CloudSubdomain = existing.CloudSubdomain
+	}
 	return s.db.Model(&db.GopherSettings{}).Where("id = ?", 1).Updates(map[string]any{
-		"api_url": next.APIURL,
-		"api_key": next.APIKey,
+		"api_url":         next.APIURL,
+		"api_key":         next.APIKey,
+		"cloud_subdomain": next.CloudSubdomain,
 	}).Error
 }
 

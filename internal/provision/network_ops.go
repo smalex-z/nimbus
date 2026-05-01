@@ -61,39 +61,50 @@ func (s *Service) ForceGatewayUpdate(ctx context.Context, gateway string) (Netwo
 	}
 	rep := NetworkOpReport{}
 	for _, vm := range vms {
-		if vm.IP == "" {
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "vm has no recorded IP",
-			})
-			continue
-		}
-		ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", vm.IP, s.PrefixLen(), gateway)
-		if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
-			IPConfig0: ipconfig,
-		}); err != nil {
-			msg := "set cloud-init: " + err.Error()
-			if isVMConfigMissing(err) {
-				msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
-			}
-			log.Printf("force-gateway: set cloud-init vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: msg,
-			})
-			continue
-		}
-		if err := s.rebootForNetworkChange(ctx, vm); err != nil {
-			log.Printf("force-gateway: reboot vmid=%d on %s: %v (config saved, will apply on next boot)", vm.VMID, vm.Node, err)
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "config saved but reboot failed: " + err.Error(),
-			})
+		if failure := s.processForceGatewayVM(ctx, vm, gateway); failure != nil {
+			rep.Failures = append(rep.Failures, *failure)
 			continue
 		}
 		rep.Updated++
 	}
 	return rep, nil
+}
+
+// processForceGatewayVM applies the force-gateway update to a single VM under
+// a per-VM deadline. Returns nil on success, or a populated *NetworkOpFailure
+// describing why this VM was skipped.
+func (s *Service) processForceGatewayVM(parentCtx context.Context, vm db.VM, gateway string) *NetworkOpFailure {
+	ctx, cancel := context.WithTimeout(parentCtx, s.cfg.NetworkOpPerVMTimeout)
+	defer cancel()
+
+	if vm.IP == "" {
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "vm has no recorded IP",
+		}
+	}
+	ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", vm.IP, s.PrefixLen(), gateway)
+	if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
+		IPConfig0: ipconfig,
+	}); err != nil {
+		msg := "set cloud-init: " + err.Error()
+		if isVMConfigMissing(err) {
+			msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
+		}
+		log.Printf("force-gateway: set cloud-init vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: msg,
+		}
+	}
+	if err := s.rebootForNetworkChange(ctx, vm); err != nil {
+		log.Printf("force-gateway: reboot vmid=%d on %s: %v (config saved, will apply on next boot)", vm.VMID, vm.Node, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "config saved but reboot failed: " + err.Error(),
+		}
+	}
+	return nil
 }
 
 // RenumberAllVMs reassigns every managed VM to a fresh IP from the current
@@ -129,75 +140,99 @@ func (s *Service) RenumberAllVMs(ctx context.Context, gateway, poolStart, poolEn
 
 	rep := NetworkOpReport{}
 	for _, vm := range vms {
-		newIP, err := s.pool.Reserve(ctx, vm.Hostname)
-		if err != nil {
-			if errors.Is(err, ippool.ErrPoolExhausted) {
-				rep.Failures = append(rep.Failures, NetworkOpFailure{
-					VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-					Err: "pool exhausted mid-renumber",
-				})
+		failure, fatal := s.processRenumberVM(ctx, vm, gateway, poolStart, poolEnd)
+		if failure != nil {
+			rep.Failures = append(rep.Failures, *failure)
+		} else {
+			rep.Updated++
+		}
+		if fatal != nil {
+			if errors.Is(fatal, ippool.ErrPoolExhausted) {
 				return rep, fmt.Errorf("pool exhausted after renumbering %d/%d", rep.Updated, len(vms))
 			}
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "reserve new ip: " + err.Error(),
-			})
-			continue
+			return rep, fatal
 		}
-
-		ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", newIP, s.PrefixLen(), gateway)
-		if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
-			IPConfig0: ipconfig,
-		}); err != nil {
-			_ = s.pool.Release(ctx, newIP)
-			msg := "set cloud-init: " + err.Error()
-			if isVMConfigMissing(err) {
-				msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
-			}
-			log.Printf("renumber: set cloud-init vmid=%d on %s: %v (rolled back reservation)", vm.VMID, vm.Node, err)
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: msg,
-			})
-			continue
-		}
-
-		if err := s.rebootForNetworkChange(ctx, vm); err != nil {
-			log.Printf("renumber: reboot vmid=%d on %s: %v (config saved, IP not yet active)", vm.VMID, vm.Node, err)
-			// Don't roll back — the cloud-init drive is already updated.
-			// Mark the new IP allocated and update DB so the operator's
-			// view is consistent; the VM picks up the new IP on next boot.
-		}
-
-		if err := s.pool.MarkAllocated(ctx, newIP, vm.VMID); err != nil {
-			log.Printf("renumber: mark allocated %s vmid=%d: %v", newIP, vm.VMID, err)
-		}
-		oldIP := vm.IP
-		if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("id = ?", vm.ID).Update("ip", newIP).Error; err != nil {
-			log.Printf("renumber: update vms.ip row=%d new=%s: %v", vm.ID, newIP, err)
-			rep.Failures = append(rep.Failures, NetworkOpFailure{
-				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
-				Err: "update vm record: " + err.Error(),
-			})
-			continue
-		}
-		if oldIP != "" {
-			// In-range old IPs return to the free pool (can be reused by a
-			// later iteration). Out-of-range old IPs would re-pollute
-			// Reserve's lex-lowest pick if marked free, so drop them outright.
-			if ippool.InRange(oldIP, poolStart, poolEnd) {
-				if err := s.pool.Release(ctx, oldIP); err != nil {
-					log.Printf("renumber: release old ip %s vmid=%d: %v", oldIP, vm.VMID, err)
-				}
-			} else {
-				if err := s.pool.Drop(ctx, oldIP); err != nil {
-					log.Printf("renumber: drop stranded ip %s vmid=%d: %v", oldIP, vm.VMID, err)
-				}
-			}
-		}
-		rep.Updated++
 	}
 	return rep, nil
+}
+
+// processRenumberVM renumbers a single VM under a per-VM deadline. Returns
+// (nil, nil) on success. A non-nil first return records the per-VM failure;
+// a non-nil second return is fatal to the whole batch (currently only pool
+// exhaustion, where the failure is also recorded for the offending VM).
+func (s *Service) processRenumberVM(parentCtx context.Context, vm db.VM, gateway, poolStart, poolEnd string) (*NetworkOpFailure, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, s.cfg.NetworkOpPerVMTimeout)
+	defer cancel()
+
+	newIP, err := s.pool.Reserve(ctx, vm.Hostname)
+	if err != nil {
+		if errors.Is(err, ippool.ErrPoolExhausted) {
+			return &NetworkOpFailure{
+				VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+				Err: "pool exhausted mid-renumber",
+			}, ippool.ErrPoolExhausted
+		}
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "reserve new ip: " + err.Error(),
+		}, nil
+	}
+
+	ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", newIP, s.PrefixLen(), gateway)
+	if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
+		IPConfig0: ipconfig,
+	}); err != nil {
+		// Roll back under the parent ctx — vmCtx may already be expired,
+		// and we still want the reservation released so the IP isn't
+		// stranded for RESERVATION_TTL_SECONDS.
+		_ = s.pool.Release(parentCtx, newIP)
+		msg := "set cloud-init: " + err.Error()
+		if isVMConfigMissing(err) {
+			msg = fmt.Sprintf("vm not present on node %s — local DB is out of sync (try a reconcile)", vm.Node)
+		}
+		log.Printf("renumber: set cloud-init vmid=%d on %s: %v (rolled back reservation)", vm.VMID, vm.Node, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: msg,
+		}, nil
+	}
+
+	if err := s.rebootForNetworkChange(ctx, vm); err != nil {
+		log.Printf("renumber: reboot vmid=%d on %s: %v (config saved, IP not yet active)", vm.VMID, vm.Node, err)
+		// Don't roll back — the cloud-init drive is already updated.
+		// Mark the new IP allocated and update DB so the operator's
+		// view is consistent; the VM picks up the new IP on next boot.
+	}
+
+	// Bookkeeping below may have to outlive an expired vmCtx (the reboot
+	// poll above can burn the whole budget). Use parentCtx so the pool +
+	// DB stay consistent even when this VM's slot timed out.
+	if err := s.pool.MarkAllocated(parentCtx, newIP, vm.VMID); err != nil {
+		log.Printf("renumber: mark allocated %s vmid=%d: %v", newIP, vm.VMID, err)
+	}
+	oldIP := vm.IP
+	if err := s.db.WithContext(parentCtx).Model(&db.VM{}).Where("id = ?", vm.ID).Update("ip", newIP).Error; err != nil {
+		log.Printf("renumber: update vms.ip row=%d new=%s: %v", vm.ID, newIP, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "update vm record: " + err.Error(),
+		}, nil
+	}
+	if oldIP != "" {
+		// In-range old IPs return to the free pool (can be reused by a
+		// later iteration). Out-of-range old IPs would re-pollute
+		// Reserve's lex-lowest pick if marked free, so drop them outright.
+		if ippool.InRange(oldIP, poolStart, poolEnd) {
+			if err := s.pool.Release(parentCtx, oldIP); err != nil {
+				log.Printf("renumber: release old ip %s vmid=%d: %v", oldIP, vm.VMID, err)
+			}
+		} else {
+			if err := s.pool.Drop(parentCtx, oldIP); err != nil {
+				log.Printf("renumber: drop stranded ip %s vmid=%d: %v", oldIP, vm.VMID, err)
+			}
+		}
+	}
+	return nil, nil
 }
 
 // rebootForNetworkChange issues a Proxmox reboot so the new cloud-init

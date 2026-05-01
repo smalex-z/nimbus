@@ -3,9 +3,12 @@ package provision_test
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nimbus/internal/db"
+	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 )
 
@@ -261,5 +264,152 @@ func TestForceGatewayUpdate_VMNotPresentOnNodeSurfacesCleanMessage(t *testing.T)
 	got := rep.Failures[0].Err
 	if !strings.Contains(got, "vm not present on node") || !strings.Contains(got, "out of sync") {
 		t.Errorf("failure message = %q, want clean drift message", got)
+	}
+}
+
+// TestForceGatewayUpdate_HungVMTimesOutAndBatchContinues guards the bug that
+// motivated NetworkOpPerVMTimeout: a single VM whose Proxmox reboot task hangs
+// indefinitely must not wedge the entire batch. The first VM's WaitForTask
+// blocks on the per-VM ctx; once the deadline fires, the loop records a
+// failure and proceeds to the second VM.
+func TestForceGatewayUpdate_HungVMTimesOutAndBatchContinues(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	var calls atomic.Int32
+	fake.waitForTask = func(ctx context.Context, _, _ string, _ time.Duration) error {
+		// First VM: simulate a Proxmox task stuck in "running" forever — block
+		// until the per-VM ctx expires. Second VM: return immediately.
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	svc, _, database := newTestServiceOpts(t, fake, func(c *provision.Config) {
+		c.NetworkOpPerVMTimeout = 50 * time.Millisecond
+	})
+	seedManagedVM(t, database, "vm-stuck", 200, "10.0.0.2")
+	seedManagedVM(t, database, "vm-ok", 201, "10.0.0.3")
+
+	done := make(chan struct{})
+	var rep provision.NetworkOpReport
+	var opErr error
+	go func() {
+		rep, opErr = svc.ForceGatewayUpdate(context.Background(), "10.0.0.99")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForceGatewayUpdate hung — per-VM timeout did not unwedge the batch")
+	}
+	if opErr != nil {
+		t.Fatalf("ForceGatewayUpdate: %v", opErr)
+	}
+	if rep.Updated != 1 || len(rep.Failures) != 1 {
+		t.Fatalf("rep = %+v; want Updated=1 Failures=1 (vm-stuck times out, vm-ok succeeds)", rep)
+	}
+	if rep.Failures[0].VMID != 200 {
+		t.Errorf("failure vmid = %d, want 200 (vm-stuck)", rep.Failures[0].VMID)
+	}
+	if !strings.Contains(rep.Failures[0].Err, "reboot") {
+		t.Errorf("failure msg = %q, want reboot-related", rep.Failures[0].Err)
+	}
+}
+
+// TestRenumberAllVMs_HungVMTimesOutAndBatchContinues is the renumber-side
+// analogue: a stuck reboot on VM 1 must not stop the renumber for VM 2.
+// Cloud-init was already written for VM 1, so the renumber accepts it as
+// "config saved, IP not yet active" and still increments Updated.
+func TestRenumberAllVMs_HungVMTimesOutAndBatchContinues(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	var calls atomic.Int32
+	fake.waitForTask = func(ctx context.Context, _, _ string, _ time.Duration) error {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	svc, _, database := newTestServiceOpts(t, fake, func(c *provision.Config) {
+		c.NetworkOpPerVMTimeout = 50 * time.Millisecond
+	})
+	seedManagedVM(t, database, "vm-stuck", 200, "10.0.0.2")
+	seedManagedVM(t, database, "vm-ok", 201, "10.0.0.3")
+
+	done := make(chan struct{})
+	var rep provision.NetworkOpReport
+	var opErr error
+	go func() {
+		rep, opErr = svc.RenumberAllVMs(context.Background(), "10.0.0.1", "10.0.0.1", "10.0.0.5")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RenumberAllVMs hung — per-VM timeout did not unwedge the batch")
+	}
+	if opErr != nil {
+		t.Fatalf("RenumberAllVMs: %v", opErr)
+	}
+	// Both VMs get their cloud-init drive rewritten — vm-stuck's reboot poll
+	// times out (logged, not a failure), vm-ok's reboot returns cleanly.
+	if rep.Updated != 2 || len(rep.Failures) != 0 {
+		t.Fatalf("rep = %+v; want Updated=2 Failures=0 (reboot timeout is non-fatal once cloud-init landed)", rep)
+	}
+	// Both VM rows must show fresh IPs.
+	var got []db.VM
+	if err := database.WithContext(context.Background()).Order("id ASC").Find(&got).Error; err != nil {
+		t.Fatalf("list vms: %v", err)
+	}
+	if got[0].IP == "10.0.0.2" || got[1].IP == "10.0.0.3" {
+		t.Errorf("vm IPs still original: %s, %s — renumber did not write back", got[0].IP, got[1].IP)
+	}
+}
+
+// TestRenumberAllVMs_HungSetCloudInitTimesOutAsFailure covers the case where
+// the per-VM deadline fires while SetCloudInit itself is still blocking — the
+// cloud-init drive was *not* written, so the iteration is a clean failure
+// (reservation rolled back) and the next VM still runs.
+func TestRenumberAllVMs_HungSetCloudInitTimesOutAsFailure(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	var calls atomic.Int32
+	fake.setCloudInit = func(ctx context.Context, _ string, _ int, _ proxmox.CloudInitConfig) error {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	svc, pool, database := newTestServiceOpts(t, fake, func(c *provision.Config) {
+		c.NetworkOpPerVMTimeout = 50 * time.Millisecond
+	})
+	seedManagedVM(t, database, "vm-stuck", 200, "10.0.0.2")
+	seedManagedVM(t, database, "vm-ok", 201, "10.0.0.3")
+
+	rep, err := svc.RenumberAllVMs(context.Background(), "10.0.0.1", "10.0.0.1", "10.0.0.5")
+	if err != nil {
+		t.Fatalf("RenumberAllVMs: %v", err)
+	}
+	if rep.Updated != 1 || len(rep.Failures) != 1 {
+		t.Fatalf("rep = %+v; want Updated=1 Failures=1", rep)
+	}
+	if rep.Failures[0].VMID != 200 || !strings.Contains(rep.Failures[0].Err, "set cloud-init") {
+		t.Errorf("failure = %+v; want vmid=200 with set cloud-init message", rep.Failures[0])
+	}
+	// The new IP reserved for vm-stuck must have been rolled back so it's
+	// available for the next reserve / not stranded as 'reserved' for the
+	// reservation TTL.
+	free, err := pool.CountFree(context.Background())
+	if err != nil {
+		t.Fatalf("CountFree: %v", err)
+	}
+	// Pool 10.0.0.1..5 = 5 addrs, .1 = gateway (allocated by Seed? no — Seed
+	// just stocks the range). After renumber: vm-ok holds one, vm-stuck has
+	// none. The reservation for the failed VM must have been released.
+	if free < 3 {
+		t.Errorf("free count = %d after rollback, expected ≥3 (failed reservation should have been released)", free)
 	}
 }
