@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -515,12 +516,58 @@ func (c *Client) SetClusterTagStyle(ctx context.Context, tagStyle string) error 
 // time because it doesn't bake in an assumption about the cloud image's
 // base size. Shrinking is rejected by Proxmox — passing a value smaller
 // than the current size returns an error.
+//
+// Retries on transient pvedaemon worker-spawn failures (HTTP 500 with
+// "got no worker upid - start worker failed" in the body) up to twice,
+// with 1s and 3s backoff. That class of failure means Proxmox couldn't
+// fork the task-runner — no work happened, so a retry can't double-
+// resize. Other 4xx/5xx still fail fast; we only retry the exact
+// signature we've seen clear up on its own.
 func (c *Client) ResizeDisk(ctx context.Context, node string, vmid int, disk, size string) error {
 	params := url.Values{}
 	params.Set("disk", disk)
 	params.Set("size", size)
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/resize", url.PathEscape(node), vmid)
-	return c.do(ctx, http.MethodPut, path, params, nil)
+
+	backoffs := []time.Duration{0, time.Second, 3 * time.Second}
+	var lastErr error
+	for attempt, wait := range backoffs {
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+		err := c.do(ctx, http.MethodPut, path, params, nil)
+		if err == nil {
+			if attempt > 0 {
+				log.Printf("proxmox resize: vmid=%d succeeded on attempt %d after transient worker-spawn failure", vmid, attempt+1)
+			}
+			return nil
+		}
+		if !isTransientWorkerSpawnFailure(err) {
+			return err
+		}
+		log.Printf("proxmox resize: vmid=%d attempt %d hit transient worker-spawn failure, retrying", vmid, attempt+1)
+		lastErr = err
+	}
+	return fmt.Errorf("resize disk after %d retries: %w", len(backoffs)-1, lastErr)
+}
+
+// isTransientWorkerSpawnFailure matches the specific "got no worker upid -
+// start worker failed" error pvedaemon returns when it can't fork a
+// task-runner process. The condition is brief (usually clears in
+// seconds) and means the worker never started — so any side effects we
+// might be worried about retrying around can't have happened. Other
+// 500s (e.g. "no need to extend disk") fall through unwrapped.
+func isTransientWorkerSpawnFailure(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.Status == http.StatusInternalServerError &&
+		strings.Contains(httpErr.Body, "got no worker upid")
 }
 
 // StartVM powers on a VM. Returns the task UPID for the start task.

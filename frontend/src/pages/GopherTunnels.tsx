@@ -3,10 +3,16 @@ import { getGopherSettings, saveGopherSettings } from '@/api/client'
 import type { GopherSettingsView } from '@/api/client'
 import SelfBootstrapModal from '@/components/ui/SelfBootstrapModal'
 
+// DNS-label rule the backend enforces — surfaced client-side so the user
+// sees the error before the round-trip. 1-63 chars, a-z/0-9/hyphen, no
+// leading or trailing hyphen.
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+
 function GopherPanel() {
   const [settings, setSettings] = useState<GopherSettingsView | null>(null)
   const [apiURL, setAPIURL] = useState('')
   const [apiKey, setAPIKey] = useState('')
+  const [subdomain, setSubdomain] = useState('')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -19,19 +25,50 @@ function GopherPanel() {
       .then((s) => {
         setSettings(s)
         setAPIURL(s.api_url)
+        setSubdomain(s.cloud_subdomain)
       })
       .catch(() => setError('Failed to load Gopher settings'))
   }, [])
+
+  const trimmedSubdomain = subdomain.trim().toLowerCase()
+  const subdomainChanged =
+    settings != null && trimmedSubdomain !== '' && trimmedSubdomain !== settings.cloud_subdomain
+  const subdomainInvalid = trimmedSubdomain !== '' && !DNS_LABEL.test(trimmedSubdomain)
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
     setSaved(false)
+
+    if (subdomainInvalid) {
+      setError('Cloud subdomain must be a DNS label: a-z, 0-9, or hyphen (no leading/trailing hyphen).')
+      return
+    }
+
+    // Confirm subdomain changes — the public hostname is moving and any
+    // OAuth provider with the old redirect URI registered will break until
+    // the admin updates it on the IdP side.
+    if (subdomainChanged && settings) {
+      const ok = window.confirm(
+        `Change cloud subdomain from "${settings.cloud_subdomain}" to "${trimmedSubdomain}"?\n\n` +
+          `Nimbus will tear down the existing tunnel and rebuild it under the new hostname. ` +
+          `Any OAuth provider that has the old redirect URI registered (Google Cloud Console, ` +
+          `GitHub OAuth app) will stop accepting sign-ins until you update the redirect URI to ` +
+          `point at the new hostname.`,
+      )
+      if (!ok) return
+    }
+
     try {
       setSaving(true)
-      const next = await saveGopherSettings({ api_url: apiURL, api_key: apiKey })
+      const next = await saveGopherSettings({
+        api_url: apiURL,
+        api_key: apiKey,
+        cloud_subdomain: trimmedSubdomain,
+      })
       setSettings(next)
       setAPIURL(next.api_url)
+      setSubdomain(next.cloud_subdomain)
       setAPIKey('')
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
@@ -111,6 +148,39 @@ function GopherPanel() {
             value={apiKey}
             onChange={(e) => setAPIKey(e.target.value)}
           />
+        </div>
+        <div className="n-field">
+          <label className="n-label" htmlFor="gopher-cloud-subdomain">
+            Cloud subdomain
+          </label>
+          <input
+            id="gopher-cloud-subdomain"
+            className="n-input"
+            type="text"
+            placeholder="cloud"
+            value={subdomain}
+            onChange={(e) => setSubdomain(e.target.value)}
+            style={{ fontFamily: 'Geist Mono, monospace' }}
+          />
+          <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            Leftmost label of the public hostname Nimbus is exposed at — defaults to{' '}
+            <code style={{ fontFamily: 'Geist Mono, monospace' }}>cloud</code>. Override when two
+            Nimbus instances share one Gopher domain (e.g.{' '}
+            <code style={{ fontFamily: 'Geist Mono, monospace' }}>cloud-dev</code> for the dev
+            instance).
+          </p>
+          {subdomainInvalid && (
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--err)', lineHeight: 1.5 }}>
+              DNS label only: a-z, 0-9, or hyphen (no leading/trailing hyphen, max 63 chars).
+            </p>
+          )}
+          {subdomainChanged && !subdomainInvalid && (
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: '#9a5c2e', lineHeight: 1.5 }}>
+              Changing the subdomain rebuilds the public tunnel. OAuth providers that have the old
+              redirect URI registered will stop accepting sign-ins until you update them on the IdP
+              side.
+            </p>
+          )}
         </div>
 
         {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}

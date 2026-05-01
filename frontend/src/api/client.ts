@@ -363,12 +363,18 @@ export async function getTunnelInfo(): Promise<TunnelInfo> {
 
 export interface GopherSettingsView {
   api_url: string
+  // Effective subdomain — the backend collapses an empty stored value to
+  // the default ("cloud") here so the UI never has to know the fallback.
+  cloud_subdomain: string
   configured: boolean
 }
 
 export interface SaveGopherSettingsRequest {
   api_url?: string
   api_key?: string
+  // Empty preserves the existing stored value (same merge-on-empty rule
+  // as api_url / api_key). To change, send a DNS label (a-z/0-9/hyphen).
+  cloud_subdomain?: string
 }
 
 export async function getGopherSettings(): Promise<GopherSettingsView> {
@@ -510,6 +516,14 @@ export interface OAuthSettingsView {
   google_client_id: string
   github_configured: boolean
   google_configured: boolean
+  // Redirect URIs Nimbus will send to the IdP — paste-into-console hints.
+  // Empty when the backend resolver isn't wired (older builds).
+  google_redirect_uri?: string
+  github_callback_url?: string
+  // Where the host portion came from: 'cloud_tunnel' | 'app_url' | 'request_host'.
+  redirect_uri_source?: 'cloud_tunnel' | 'app_url' | 'request_host' | ''
+  // Set when the resolved host is something Google would reject.
+  redirect_uri_warning?: string
 }
 
 export interface SaveOAuthSettingsRequest {

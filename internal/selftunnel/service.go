@@ -31,11 +31,41 @@ import (
 	"nimbus/internal/tunnel"
 )
 
-// CloudSubdomain is the subdomain Nimbus's self-tunnel is exposed at.
-// e.g. with Gopher domain altsuite.co the dashboard ends up at
-// https://cloud.altsuite.co. Hardcoded — there's no reason to make this
-// configurable per deployment.
-const CloudSubdomain = "cloud"
+// DefaultCloudSubdomain is the leftmost label the self-tunnel falls back to
+// when db.GopherSettings.CloudSubdomain is empty. Two Nimbus instances
+// pointed at the same Gopher (e.g. dev + prod) can override this via the
+// Settings → Gopher panel so each claims a unique public hostname.
+const DefaultCloudSubdomain = "cloud"
+
+// EffectiveCloudSubdomain returns the configured subdomain, or
+// DefaultCloudSubdomain when the configured value is empty. Centralised so
+// every reader (selftunnel runBootstrap, the SaveGopher tear-down branch,
+// the API view) collapses empty-vs-default the same way.
+func EffectiveCloudSubdomain(configured string) string {
+	if s := strings.TrimSpace(configured); s != "" {
+		return s
+	}
+	return DefaultCloudSubdomain
+}
+
+// IsValidCloudSubdomain reports whether s is a single DNS label suitable for
+// the leftmost component of a hostname. Lowercased a-z + digits + hyphens,
+// 1-63 chars, no leading/trailing hyphen. Mirrors RFC 1035 §2.3.1.
+func IsValidCloudSubdomain(s string) bool {
+	if len(s) < 1 || len(s) > 63 {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
 
 const (
 	StateIdle           = ""
@@ -180,6 +210,14 @@ func (s *Service) clearInflight() {
 // runBootstrap is the actual state machine. Each step writes its phase
 // to the DB so the Settings modal sees progress.
 func (s *Service) runBootstrap(ctx context.Context) error {
+	// Read the configured cloud subdomain up front so the whole bootstrap
+	// uses one consistent value. Empty falls back to DefaultCloudSubdomain.
+	current, err := s.store.GetGopherSettings()
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	subdomain := EffectiveCloudSubdomain(current.CloudSubdomain)
+
 	// Step 1 — register the Nimbus host as a Gopher machine.
 	if err := s.persist(db.GopherSettings{CloudBootstrapState: StateRegistering}); err != nil {
 		return fmt.Errorf("persist state: %w", err)
@@ -228,7 +266,7 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 	t, err := s.gopher.CreateTunnel(ctx, tunnel.CreateTunnelRequest{
 		MachineID:  machine.ID,
 		TargetPort: s.nimbusPort,
-		Subdomain:  CloudSubdomain,
+		Subdomain:  subdomain,
 	})
 	if err != nil {
 		return fmt.Errorf("create tunnel: %w", err)

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
 	"nimbus/internal/provision"
+	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/tunnel"
 )
@@ -70,6 +72,13 @@ type SelfBootstrap interface {
 	SetGopherClient(c *tunnel.Client)
 }
 
+// AppURLResolver resolves the public origin Nimbus is reachable at, taking
+// the live Gopher self-tunnel and inbound request into account. *Auth
+// satisfies it via ResolveAppURL.
+type AppURLResolver interface {
+	ResolveAppURL(r *http.Request) string
+}
+
 // Settings handles admin-only configuration endpoints.
 type Settings struct {
 	auth            *service.AuthService
@@ -77,6 +86,7 @@ type Settings struct {
 	tunnels         TunnelInfoSetter
 	gpuAppliers     []GPUConfigApplier
 	nimbusAppURL    string // captured at construction so SaveGPU can build NimbusGPUAPI URL
+	appURLResolver  AppURLResolver
 	selfBootstrap   SelfBootstrap
 	networkAppliers []NetworkApplier
 	networkOps      NetworkOps
@@ -116,6 +126,14 @@ func (s *Settings) WithNimbusAppURL(u string) *Settings {
 	return s
 }
 
+// WithAppURLResolver wires the live redirect-URI resolver so GetOAuth can
+// surface what Nimbus is actually going to send to Google. *Auth satisfies
+// this via ResolveAppURL.
+func (s *Settings) WithAppURLResolver(r AppURLResolver) *Settings {
+	s.appURLResolver = r
+	return s
+}
+
 // WithSelfBootstrap wires the selftunnel.Service so SaveGopher can kick
 // off the self-bootstrap automatically + the modal endpoints have
 // something to talk to.
@@ -150,6 +168,24 @@ type oauthSettingsView struct {
 	GoogleClientID   string `json:"google_client_id"`
 	GitHubConfigured bool   `json:"github_configured"`
 	GoogleConfigured bool   `json:"google_configured"`
+
+	// GoogleRedirectURI is the exact URI Nimbus will send to Google on the
+	// next OAuth start — must be registered byte-for-byte in Google Cloud
+	// Console. Empty if the resolver isn't wired (older callers).
+	GoogleRedirectURI string `json:"google_redirect_uri"`
+	// GitHubCallbackURL is the matching value for GitHub's "Authorization
+	// callback URL" field. GitHub doesn't accept a redirect_uri query param
+	// the way Google does — it uses whatever is registered on the OAuth app
+	// — so this is purely informational for the admin.
+	GitHubCallbackURL string `json:"github_callback_url"`
+	// RedirectURISource explains where the host portion came from so the UI
+	// can show the right hint. One of: "cloud_tunnel" | "app_url" |
+	// "request_host" | "" (resolver missing).
+	RedirectURISource string `json:"redirect_uri_source"`
+	// RedirectURIWarning is set when the resolved host is something Google
+	// will reject (raw IP other than 127.0.0.1, loopback). Empty when the
+	// host looks acceptable.
+	RedirectURIWarning string `json:"redirect_uri_warning,omitempty"`
 }
 
 // GetOAuth handles GET /api/settings/oauth. Secrets are never returned.
@@ -159,12 +195,76 @@ func (s *Settings) GetOAuth(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to load OAuth settings")
 		return
 	}
-	response.Success(w, oauthSettingsView{
+	view := oauthSettingsView{
 		GitHubClientID:   settings.GitHubClientID,
 		GoogleClientID:   settings.GoogleClientID,
 		GitHubConfigured: settings.GitHubClientID != "" && settings.GitHubClientSecret != "",
 		GoogleConfigured: settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
-	})
+	}
+	if s.appURLResolver != nil {
+		base := s.appURLResolver.ResolveAppURL(r)
+		view.GoogleRedirectURI = base + "/api/auth/google/callback"
+		view.GitHubCallbackURL = base + "/api/auth/github/callback"
+		view.RedirectURISource = redirectURISource(base, s.auth, s.nimbusAppURL)
+		view.RedirectURIWarning = redirectURIWarning(base)
+	}
+	response.Success(w, view)
+}
+
+// redirectURISource categorises which input the resolver picked, mirroring
+// the precedence in Auth.ResolveAppURL. The settings handler uses this to
+// drive a one-line UI hint ("registered Cloud Tunnel" / "from APP_URL" /
+// "guessed from this browser session").
+func redirectURISource(base string, auth *service.AuthService, envAppURL string) string {
+	trim := func(s string) string { return strings.TrimRight(strings.TrimSpace(s), "/") }
+	if gopher, err := auth.GetGopherSettings(); err == nil {
+		if u := trim(gopher.CloudTunnelURL); u != "" && u == base {
+			return "cloud_tunnel"
+		}
+	}
+	if u := trim(envAppURL); u != "" && !looksLikeLocalhost(stripScheme(u)) && u == base {
+		return "app_url"
+	}
+	return "request_host"
+}
+
+// redirectURIWarning returns operator-readable copy when the resolved host
+// is something Google will refuse on a Web App credential type. Returns
+// empty string when the host looks acceptable.
+func redirectURIWarning(base string) string {
+	host := stripScheme(base)
+	if host == "" || looksLikeLocalhost(host) {
+		return "Resolved host is a loopback address. Google won't accept it as a redirect URI; either set APP_URL or finish the Gopher self-bootstrap so cloud.<domain> is live."
+	}
+	if isRawIPHost(host) {
+		return "Resolved host is a raw IP address. Google rejects raw IPs for redirect URIs (other than 127.0.0.1) — register a hostname (a custom domain or the Gopher cloud.<domain>) before saving credentials."
+	}
+	return ""
+}
+
+// stripScheme drops the leading scheme + path from a URL string, leaving
+// only host[:port]. Empty input yields empty output.
+func stripScheme(u string) string {
+	s := strings.TrimSpace(u)
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "https://"), "http://")
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// isRawIPHost reports whether host (no scheme, may include :port) is a
+// dotted-decimal IPv4 address. Used to flag the "Google rejects raw IPs"
+// case without firing on hostnames that just happen to start with digits.
+func isRawIPHost(host string) bool {
+	h := host
+	if i := strings.LastIndex(h, ":"); i >= 0 && !strings.Contains(h[:i], ":") {
+		h = h[:i]
+	}
+	if h == "" {
+		return false
+	}
+	return net.ParseIP(h) != nil && net.ParseIP(h).To4() != nil
 }
 
 type saveOAuthRequest struct {
@@ -291,8 +391,12 @@ func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Reque
 }
 
 type gopherSettingsView struct {
-	APIURL     string `json:"api_url"`
-	Configured bool   `json:"configured"`
+	APIURL string `json:"api_url"`
+	// CloudSubdomain is the *effective* leftmost label of the public URL —
+	// empty in the DB collapses to selftunnel.DefaultCloudSubdomain ("cloud")
+	// here so the UI never has to guess the fallback.
+	CloudSubdomain string `json:"cloud_subdomain"`
+	Configured     bool   `json:"configured"`
 }
 
 // GetGopher handles GET /api/settings/gopher (admin only). The API key is
@@ -304,14 +408,20 @@ func (s *Settings) GetGopher(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	response.Success(w, gopherSettingsView{
-		APIURL:     settings.APIURL,
-		Configured: settings.APIURL != "" && settings.APIKey != "",
+		APIURL:         settings.APIURL,
+		CloudSubdomain: selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
+		Configured:     settings.APIURL != "" && settings.APIKey != "",
 	})
 }
 
 type saveGopherRequest struct {
 	APIURL string `json:"api_url"`
 	APIKey string `json:"api_key"`
+	// CloudSubdomain is the leftmost label of the public hostname Nimbus's
+	// self-tunnel exposes the dashboard at. Empty preserves the existing
+	// stored value (same rule as APIURL/APIKey). Validated as a DNS label
+	// before persisting so a typo never reaches Gopher.
+	CloudSubdomain string `json:"cloud_subdomain"`
 }
 
 // SaveGopher handles PUT /api/settings/gopher (admin only). Persists the
@@ -319,6 +429,13 @@ type saveGopherRequest struct {
 // registered applier (so provision flow + admin /tunnels endpoint pick up
 // the new credentials with no restart). On clear (both fields blank),
 // passes nil to disable.
+//
+// When cloud_subdomain changes from the previously-active value, the existing
+// cloud tunnel is deleted on Gopher and the saved CloudTunnelID/URL are
+// cleared so the next self-bootstrap recreates the tunnel under the new
+// subdomain. The admin still has to re-register the OAuth redirect URI on
+// any IdP that pinned the old hostname — the UI surfaces a confirm dialog
+// before this fires.
 func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	var req saveGopherRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -327,8 +444,34 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	}
 	url := strings.TrimSpace(req.APIURL)
 	key := strings.TrimSpace(req.APIKey)
+	subdomain := strings.ToLower(strings.TrimSpace(req.CloudSubdomain))
 
-	if err := s.auth.SaveGopherSettings(db.GopherSettings{APIURL: url, APIKey: key}); err != nil {
+	// Validate subdomain only when the caller supplied a non-empty value;
+	// empty means "preserve existing" per the SaveGopherSettings contract.
+	if subdomain != "" && !selftunnel.IsValidCloudSubdomain(subdomain) {
+		response.BadRequest(w, "cloud_subdomain must be a DNS label: 1-63 chars, a-z/0-9/hyphen, no leading or trailing hyphen")
+		return
+	}
+
+	// Snapshot the *effective* subdomain BEFORE the save so we can detect a
+	// change and tear down the obsolete tunnel.
+	prev, err := s.auth.GetGopherSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load existing Gopher settings")
+		return
+	}
+	prevEffective := selftunnel.EffectiveCloudSubdomain(prev.CloudSubdomain)
+	nextEffective := prevEffective
+	if subdomain != "" {
+		nextEffective = subdomain
+	}
+	subdomainChanged := nextEffective != prevEffective
+
+	if err := s.auth.SaveGopherSettings(db.GopherSettings{
+		APIURL:         url,
+		APIKey:         key,
+		CloudSubdomain: subdomain,
+	}); err != nil {
 		response.InternalError(w, "failed to save Gopher settings")
 		return
 	}
@@ -359,6 +502,28 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 		s.selfBootstrap.SetGopherClient(client)
 	}
 
+	// Subdomain changed AND we still have a Gopher client: delete the old
+	// tunnel + clear the saved tunnel state so the next bootstrap creates a
+	// fresh one under the new hostname. Non-fatal — if Gopher rejects the
+	// DELETE, the operator can clean it up manually; we still want the new
+	// subdomain saved locally.
+	if subdomainChanged && client != nil && prev.CloudTunnelID != "" {
+		if err := client.DeleteTunnel(r.Context(), prev.CloudTunnelID); err != nil {
+			log.Printf("save-gopher: failed to delete obsolete tunnel %s: %v", prev.CloudTunnelID, err)
+		}
+		// Clear the local pointer regardless — the old tunnel is no longer
+		// the source of truth, even if Gopher still has the row.
+		if err := s.auth.SaveCloudTunnelState(db.GopherSettings{
+			CloudMachineID:      prev.CloudMachineID, // keep the machine; we just rebuild the tunnel
+			CloudTunnelID:       "",
+			CloudTunnelURL:      "",
+			CloudBootstrapState: "",
+			CloudBootstrapError: "",
+		}); err != nil {
+			log.Printf("save-gopher: failed to clear cloud tunnel state: %v", err)
+		}
+	}
+
 	// Kick off the self-bootstrap when we now have a usable Gopher client.
 	// Errors here are non-fatal for the save itself — the modal will poll
 	// /self-bootstrap and surface whatever happens.
@@ -371,8 +536,9 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.Success(w, gopherSettingsView{
-		APIURL:     settings.APIURL,
-		Configured: client != nil,
+		APIURL:         settings.APIURL,
+		CloudSubdomain: selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
+		Configured:     client != nil,
 	})
 }
 
