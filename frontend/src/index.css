@@ -128,6 +128,14 @@
 }
 
 /* ── Buttons ────────────────────────────────────────────── */
+/* `.n-btn` alone now renders as a visible secondary button — white
+   surface, 22%-opacity border (--line-strong). The earlier default
+   was `border: 1px solid transparent` with no background, so any
+   call site that forgot a variant suffix rendered as plain text
+   indistinguishable from the surrounding copy. The `n-btn-secondary`
+   class becomes redundant (kept as an alias for explicit intent in
+   call sites), and `n-btn-ghost` explicitly drops the chrome back
+   to transparent for the rare actually-textual button. */
 .n-btn {
   display: inline-flex;
   align-items: center;
@@ -141,10 +149,17 @@
   font-weight: 500;
   letter-spacing: -0.005em;
   cursor: pointer;
-  border: 1px solid transparent;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
   transition: all 0.15s ease;
   text-decoration: none;
   white-space: nowrap;
+}
+
+.n-btn:hover {
+  border-color: rgba(20, 18, 28, 0.32);
+  background: rgba(20, 18, 28, 0.03);
 }
 
 .n-btn-primary {
@@ -155,6 +170,7 @@
 
 .n-btn-primary:hover {
   background: #000;
+  border-color: #000;
   transform: translateY(-1px);
   box-shadow: 0 6px 20px -8px rgba(20, 18, 28, 0.5);
 }
@@ -163,24 +179,33 @@
   transform: translateY(0);
 }
 
+/* Idempotent — same as base .n-btn now. Kept so existing call sites
+   that explicitly request the secondary look still compile and so
+   future code that wants to be loud about intent can. */
 .n-btn-secondary {
   background: var(--surface);
   color: var(--ink);
-  border-color: var(--line);
+  border-color: var(--line-strong);
 }
 
 .n-btn-secondary:hover {
-  border-color: var(--line-strong);
-  background: #ffffff;
+  border-color: rgba(20, 18, 28, 0.32);
+  background: rgba(20, 18, 28, 0.03);
 }
 
+/* Genuinely chromeless — for buttons that should read as inline text
+   actions, like a "Cancel" embedded next to copy. Strips the visible
+   defaults `.n-btn` now provides. */
 .n-btn-ghost {
   background: transparent;
   color: var(--ink-body);
+  border-color: transparent;
 }
 
 .n-btn-ghost:hover {
   color: var(--ink);
+  background: transparent;
+  border-color: transparent;
 }
 
 .n-btn-block {
