@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 import {
@@ -789,6 +789,13 @@ export default function Users() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editingProvider, setEditingProvider] = useState<EditingProvider>(null)
+  // refreshTick is the parent-owned signal that mutations from one
+  // panel (e.g. the user-row "Suspend" action) need to invalidate the
+  // other (the PasswordlessPanel's straggler count). Both children
+  // re-fetch when this ticks. Using a counter rather than a callback
+  // bus keeps each panel's own load logic local.
+  const [refreshTick, setRefreshTick] = useState(0)
+  const refreshAll = useCallback(() => setRefreshTick((t) => t + 1), [])
 
   useEffect(() => {
     getOAuthSettings()
@@ -834,7 +841,7 @@ export default function Users() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         <div className="lg:col-span-2 flex flex-col gap-6">
-          <UsersTable />
+          <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
         </div>
         <div className="lg:col-span-1 flex flex-col gap-6">
           <AccessCodePanel />
@@ -842,7 +849,7 @@ export default function Users() {
             settings={settings}
             onEdit={(p) => setEditingProvider(p)}
           />
-          <PasswordlessPanel />
+          <PasswordlessPanel refreshTick={refreshTick} onMutated={refreshAll} />
         </div>
       </div>
 
@@ -871,21 +878,23 @@ type PendingAction =
   | { kind: 'delete'; user: UserManagementView }
   | null
 
-function UsersTable() {
+// onMutated bubbles every successful row-action up to the parent so the
+// PasswordlessPanel's straggler count stays in sync — suspending a row
+// here changes whether the OAuth-only toggle is reachable, and we don't
+// want the user to have to refresh to see that. refreshTick is the
+// inbound counterpart: when another panel mutates, the parent bumps
+// the tick and we re-fetch.
+function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
   const { user: me } = useAuth()
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction>(null)
 
-  const reload = () => {
+  useEffect(() => {
     listUsers()
       .then(setRows)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
-  }
-
-  useEffect(() => {
-    reload()
-  }, [])
+  }, [refreshTick])
 
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -954,7 +963,7 @@ function UsersTable() {
                       onSuspend={async () => {
                         try {
                           await setUserSuspended(u.id, !u.suspended)
-                          reload()
+                          onMutated()
                         } catch (err) {
                           setError(err instanceof Error ? err.message : 'failed')
                         }
@@ -974,7 +983,7 @@ function UsersTable() {
           onClose={() => setPending(null)}
           onPromoted={() => {
             setPending(null)
-            reload()
+            onMutated()
           }}
         />
       )}
@@ -984,7 +993,7 @@ function UsersTable() {
           onClose={() => setPending(null)}
           onDeleted={() => {
             setPending(null)
-            reload()
+            onMutated()
           }}
         />
       )}
@@ -1535,18 +1544,19 @@ function PencilIcon() {
 // blocking the toggle, and we offer a one-click "Suspend stragglers"
 // affordance so they can clear the gate without manually walking
 // every row in the table.
-function PasswordlessPanel() {
+function PasswordlessPanel({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
   const [status, setStatus] = useState<PasswordlessStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const reload = () => {
+  // Re-fetch on parent tick so suspending or unsuspending a user from
+  // the table immediately moves the straggler count + bulk-suspend
+  // button on this panel without a page refresh.
+  useEffect(() => {
     getPasswordlessStatus()
       .then(setStatus)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
-  }
-
-  useEffect(reload, [])
+  }, [refreshTick])
 
   const toggle = async () => {
     if (!status) return
@@ -1555,6 +1565,9 @@ function PasswordlessPanel() {
     try {
       const next = await setPasswordlessAuth(!status.passwordless_goal)
       setStatus(next)
+      // Notify parent so the table picks up any side effects (none
+      // today, but cheap insurance against future toggle behaviour).
+      onMutated()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed')
     } finally {
@@ -1567,10 +1580,10 @@ function PasswordlessPanel() {
     setBusy(true)
     try {
       const { suspended } = await suspendUnlinkedUsers()
-      reload()
-      // Best-effort UX: surface the count so the admin knows the
-      // bulk action ran. We use the error slot rendered in green-ish
-      // tone — but realistically use a transient inline message.
+      // Suspending stragglers updates every dependent count — kick
+      // the parent so the user table re-renders with the suspended
+      // pills and dimmed rows alongside our straggler-count drop.
+      onMutated()
       if (suspended === 0) {
         setError('No users needed suspending.')
       }
