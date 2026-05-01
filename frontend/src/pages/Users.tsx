@@ -848,8 +848,9 @@ export default function Users() {
           <ProvidersSummary
             settings={settings}
             onEdit={(p) => setEditingProvider(p)}
+            refreshTick={refreshTick}
+            onMutated={refreshAll}
           />
-          <PasswordlessPanel refreshTick={refreshTick} onMutated={refreshAll} />
         </div>
       </div>
 
@@ -884,33 +885,61 @@ type PendingAction =
 // want the user to have to refresh to see that. refreshTick is the
 // inbound counterpart: when another panel mutates, the parent bumps
 // the tick and we re-fetch.
-// Each chip narrows the visible set; chips combine with AND (so e.g.
-// Admins + Unverified shows admins who haven't completed access-code
-// verification). A user is "password-only" when their providers slice
-// is exactly ["password"] — having Google or GitHub also linked moves
-// them out of straggler territory.
-type ChipFilter = 'admins' | 'suspended' | 'unverified' | 'passwordOnly'
+// Filter dimensions — each is a dropdown with an "any" sentinel that
+// disables filtering on that axis. Combinations AND together: pick
+// "Members" + "Unverified" + "Password-only" to find members who
+// haven't verified and have no OAuth, the typical straggler set.
+type RoleFilter = 'any' | 'admin' | 'member'
+type StatusFilter = 'any' | 'active' | 'suspended'
+type VerifiedFilter = 'any' | 'verified' | 'unverified'
+type ProviderFilter = 'any' | 'password-only' | 'has-oauth'
 
-const CHIPS: { id: ChipFilter; label: string }[] = [
-  { id: 'admins', label: 'Admins' },
-  { id: 'suspended', label: 'Suspended' },
-  { id: 'unverified', label: 'Unverified' },
-  { id: 'passwordOnly', label: 'Password-only' },
-]
+interface UserFilters {
+  role: RoleFilter
+  status: StatusFilter
+  verified: VerifiedFilter
+  provider: ProviderFilter
+  search: string
+}
 
-function rowMatchesFilters(u: UserManagementView, search: string, active: Set<ChipFilter>): boolean {
-  if (active.has('admins') && !u.is_admin) return false
-  if (active.has('suspended') && !u.suspended) return false
-  if (active.has('unverified') && u.verified) return false
-  if (active.has('passwordOnly')) {
+const DEFAULT_FILTERS: UserFilters = {
+  role: 'any',
+  status: 'any',
+  verified: 'any',
+  provider: 'any',
+  search: '',
+}
+
+function rowMatchesFilters(u: UserManagementView, f: UserFilters): boolean {
+  if (f.role === 'admin' && !u.is_admin) return false
+  if (f.role === 'member' && u.is_admin) return false
+  if (f.status === 'active' && u.suspended) return false
+  if (f.status === 'suspended' && !u.suspended) return false
+  if (f.verified === 'verified' && !u.verified) return false
+  if (f.verified === 'unverified' && u.verified) return false
+  if (f.provider === 'password-only') {
     const onlyPassword = u.providers.length === 1 && u.providers[0] === 'password'
     if (!onlyPassword) return false
   }
-  if (search) {
-    const q = search.toLowerCase()
+  if (f.provider === 'has-oauth') {
+    const hasOAuth = u.providers.includes('google') || u.providers.includes('github')
+    if (!hasOAuth) return false
+  }
+  if (f.search) {
+    const q = f.search.toLowerCase()
     if (!u.name.toLowerCase().includes(q) && !u.email.toLowerCase().includes(q)) return false
   }
   return true
+}
+
+function filtersAreActive(f: UserFilters): boolean {
+  return (
+    f.role !== 'any' ||
+    f.status !== 'any' ||
+    f.verified !== 'any' ||
+    f.provider !== 'any' ||
+    f.search.trim() !== ''
+  )
 }
 
 function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
@@ -918,8 +947,7 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction>(null)
-  const [search, setSearch] = useState('')
-  const [activeChips, setActiveChips] = useState<Set<ChipFilter>>(new Set())
+  const [filters, setFilters] = useState<UserFilters>(DEFAULT_FILTERS)
 
   useEffect(() => {
     listUsers()
@@ -929,21 +957,12 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
 
   const filteredRows = useMemo(() => {
     if (!rows) return null
-    return rows.filter((u) => rowMatchesFilters(u, search.trim(), activeChips))
-  }, [rows, search, activeChips])
-
-  const toggleChip = (id: ChipFilter) => {
-    setActiveChips((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+    return rows.filter((u) => rowMatchesFilters(u, filters))
+  }, [rows, filters])
 
   const filteredCount = filteredRows?.length ?? 0
   const totalCount = rows?.length ?? 0
-  const filtersActive = search.trim() !== '' || activeChips.size > 0
+  const filtersActive = filtersAreActive(filters)
 
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -959,69 +978,86 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
       </div>
 
       {rows !== null && rows.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <input
-            type="search"
-            className="n-input"
-            placeholder="Search by name or email…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ height: 36, fontSize: 13 }}
-          />
-          <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 6 }}>
-            {CHIPS.map((c) => {
-              const active = activeChips.has(c.id)
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => toggleChip(c.id)}
-                  className="n-btn-ghost"
-                  style={{
-                    fontSize: 11,
-                    fontFamily: 'Geist Mono, monospace',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.06em',
-                    padding: '4px 10px',
-                    height: 26,
-                    borderRadius: 999,
-                    border: '1px solid',
-                    borderColor: active ? 'var(--ink)' : 'var(--line-strong)',
-                    background: active ? 'var(--ink)' : 'transparent',
-                    color: active ? '#FCFBFA' : 'var(--ink-body)',
-                    cursor: 'pointer',
-                    transition: 'all 0.12s ease',
-                  }}
-                >
-                  {c.label}
-                </button>
-              )
-            })}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Filter row: four small dropdowns. Each "Any …" option is
+              the disable-this-axis sentinel; combinations AND together. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <FilterSelect
+              ariaLabel="Role"
+              value={filters.role}
+              onChange={(v) => setFilters((f) => ({ ...f, role: v as RoleFilter }))}
+              options={[
+                { value: 'any', label: 'Any role' },
+                { value: 'admin', label: 'Admins' },
+                { value: 'member', label: 'Members' },
+              ]}
+            />
+            <FilterSelect
+              ariaLabel="Status"
+              value={filters.status}
+              onChange={(v) => setFilters((f) => ({ ...f, status: v as StatusFilter }))}
+              options={[
+                { value: 'any', label: 'Any status' },
+                { value: 'active', label: 'Active' },
+                { value: 'suspended', label: 'Suspended' },
+              ]}
+            />
+            <FilterSelect
+              ariaLabel="Verification"
+              value={filters.verified}
+              onChange={(v) => setFilters((f) => ({ ...f, verified: v as VerifiedFilter }))}
+              options={[
+                { value: 'any', label: 'Any verification' },
+                { value: 'verified', label: 'Verified' },
+                { value: 'unverified', label: 'Unverified' },
+              ]}
+            />
+            <FilterSelect
+              ariaLabel="Sign-in"
+              value={filters.provider}
+              onChange={(v) => setFilters((f) => ({ ...f, provider: v as ProviderFilter }))}
+              options={[
+                { value: 'any', label: 'Any sign-in' },
+                { value: 'has-oauth', label: 'OAuth-linked' },
+                { value: 'password-only', label: 'Password-only' },
+              ]}
+            />
             {filtersActive && (
               <button
                 type="button"
-                onClick={() => {
-                  setSearch('')
-                  setActiveChips(new Set())
-                }}
+                onClick={() => setFilters(DEFAULT_FILTERS)}
                 className="n-btn-ghost"
                 style={{
                   fontSize: 11,
                   fontFamily: 'Geist Mono, monospace',
                   textTransform: 'uppercase',
                   letterSpacing: '0.06em',
-                  padding: '4px 10px',
-                  height: 26,
+                  padding: '4px 8px',
+                  height: 28,
                   cursor: 'pointer',
                   color: 'var(--ink-mute)',
-                  background: 'transparent',
-                  border: 'none',
                 }}
               >
                 Clear
               </button>
             )}
           </div>
+          <input
+            type="search"
+            placeholder="Search by name or email…"
+            value={filters.search}
+            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+            style={{
+              height: 30,
+              fontSize: 12,
+              padding: '0 10px',
+              borderRadius: 6,
+              border: '1px solid var(--line-strong)',
+              background: 'var(--surface)',
+              color: 'var(--ink)',
+              outline: 'none',
+            }}
+          />
         </div>
       )}
 
@@ -1552,13 +1588,63 @@ function formatJoined(iso: string): string {
 // button per row. Pressing a pencil opens a modal scoped to *that*
 // provider — no shared "Configure" surface, since most operators only
 // touch one provider per visit.
+// ProvidersSummary now also hosts the passwordless-sign-in toggle —
+// it's the same conceptual scope (sign-in providers + which sign-in
+// surfaces are exposed on the login page), so giving it its own card
+// was overkill. The toggle and bulk-suspend live in a divided second
+// section so the OAuth client config stays the visual anchor.
 function ProvidersSummary({
   settings,
   onEdit,
+  refreshTick,
+  onMutated,
 }: {
   settings: OAuthSettingsView | null
   onEdit: (provider: 'google' | 'github') => void
+  refreshTick: number
+  onMutated: () => void
 }) {
+  const [status, setStatus] = useState<PasswordlessStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    getPasswordlessStatus()
+      .then(setStatus)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }, [refreshTick])
+
+  const toggle = async () => {
+    if (!status) return
+    setError(null)
+    setBusy(true)
+    try {
+      const next = await setPasswordlessAuth(!status.passwordless_goal)
+      setStatus(next)
+      onMutated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const bulkSuspend = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      const { suspended } = await suspendUnlinkedUsers()
+      onMutated()
+      if (suspended === 0) {
+        setError('No users needed suspending.')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
       <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
@@ -1582,6 +1668,70 @@ function ProvidersSummary({
           onEdit={() => onEdit('github')}
         />
       </div>
+
+      <div style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+          Passwordless sign-in
+        </span>
+        {status?.passwordless_goal && (
+          <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
+            <span className="n-pill-dot" />
+            active
+          </span>
+        )}
+      </div>
+
+      {status && (
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 10,
+            padding: '10px 12px',
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            cursor: busy ? 'wait' : 'pointer',
+            background: status.passwordless_goal ? 'rgba(20,18,28,0.05)' : 'rgba(20,18,28,0.02)',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={status.passwordless_goal}
+            disabled={busy}
+            onChange={toggle}
+            style={{ marginTop: 3 }}
+          />
+          <span>
+            <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+              Require OAuth sign-in
+            </span>
+            <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
+              {status.passwordless_goal
+                ? 'Password form is hidden on the sign-in page.'
+                : status.stragglers === 0
+                  ? 'Every active user has OAuth linked. Toggle on to hide the password form.'
+                  : `${status.stragglers} active user${status.stragglers === 1 ? '' : 's'} still depend${status.stragglers === 1 ? 's' : ''} on password sign-in. Suspend or delete them before enabling.`}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {status && !status.passwordless_goal && status.stragglers > 0 && (
+        <button
+          type="button"
+          className="n-btn"
+          onClick={bulkSuspend}
+          disabled={busy}
+          style={{ alignSelf: 'flex-start', fontSize: 12, padding: '6px 12px', height: 32 }}
+          title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
+        >
+          {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
+        </button>
+      )}
+
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
     </div>
   )
 }
@@ -1657,135 +1807,53 @@ function PencilIcon() {
   )
 }
 
-// PasswordlessPanel surfaces the OAuth-only-sign-in toggle. The
-// backend hard-gates enabling: the requesting admin must have OAuth
-// linked themselves AND zero active password-only users can remain.
-// We surface the rejection messages verbatim from the server (409
-// with the service error string) so the admin sees exactly what's
-// blocking the toggle, and we offer a one-click "Suspend stragglers"
-// affordance so they can clear the gate without manually walking
-// every row in the table.
-function PasswordlessPanel({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
-  const [status, setStatus] = useState<PasswordlessStatus | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  // Re-fetch on parent tick so suspending or unsuspending a user from
-  // the table immediately moves the straggler count + bulk-suspend
-  // button on this panel without a page refresh.
-  useEffect(() => {
-    getPasswordlessStatus()
-      .then(setStatus)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
-  }, [refreshTick])
-
-  const toggle = async () => {
-    if (!status) return
-    setError(null)
-    setBusy(true)
-    try {
-      const next = await setPasswordlessAuth(!status.passwordless_goal)
-      setStatus(next)
-      // Notify parent so the table picks up any side effects (none
-      // today, but cheap insurance against future toggle behaviour).
-      onMutated()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const bulkSuspend = async () => {
-    setError(null)
-    setBusy(true)
-    try {
-      const { suspended } = await suspendUnlinkedUsers()
-      // Suspending stragglers updates every dependent count — kick
-      // the parent so the user table re-renders with the suspended
-      // pills and dimmed rows alongside our straggler-count drop.
-      onMutated()
-      if (suspended === 0) {
-        setError('No users needed suspending.')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
+// FilterSelect is a small, dense dropdown for the row of axis filters
+// above the user table. Native <select> for accessibility (keyboard
+// open, screen-reader announce) styled inline so it lines up with
+// the table's compact aesthetic. The "Any …" option always sits at
+// the top of every list — picking it disables that axis.
+function FilterSelect({
+  ariaLabel,
+  value,
+  onChange,
+  options,
+}: {
+  ariaLabel: string
+  value: string
+  onChange: (next: string) => void
+  options: { value: string; label: string }[]
+}) {
+  const isDefault = options[0]?.value === value
   return (
-    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-          Passwordless sign-in
-        </span>
-        {status?.passwordless_goal && (
-          <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
-            <span className="n-pill-dot" />
-            active
-          </span>
-        )}
-      </div>
-      <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
-        Hides the password form on the sign-in page so only Google /
-        GitHub buttons remain. Can only be enabled once every active
-        user has linked an OAuth provider — link your own account from
-        the Account page first, then suspend or delete the stragglers
-        below.
-      </p>
-
-      {status && (
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 10,
-            padding: '10px 12px',
-            border: '1px solid var(--line)',
-            borderRadius: 10,
-            cursor: busy ? 'wait' : 'pointer',
-            background: status.passwordless_goal ? 'rgba(20,18,28,0.05)' : 'rgba(20,18,28,0.02)',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={status.passwordless_goal}
-            disabled={busy}
-            onChange={toggle}
-            style={{ marginTop: 3 }}
-          />
-          <span>
-            <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-              Require OAuth sign-in
-            </span>
-            <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5, marginTop: 2 }}>
-              {status.passwordless_goal
-                ? 'Password form is hidden on the sign-in page.'
-                : status.stragglers === 0
-                  ? 'Every active user has OAuth linked. Toggle on to hide the password form.'
-                  : `${status.stragglers} active user${status.stragglers === 1 ? '' : 's'} still depend${status.stragglers === 1 ? 's' : ''} on password sign-in. Suspend or delete them before enabling.`}
-            </span>
-          </span>
-        </label>
-      )}
-
-      {status && !status.passwordless_goal && status.stragglers > 0 && (
-        <button
-          type="button"
-          className="n-btn"
-          onClick={bulkSuspend}
-          disabled={busy}
-          style={{ alignSelf: 'flex-start', fontSize: 12, padding: '6px 12px' }}
-          title="Suspends every active password-only user so you can flip the toggle. They keep their data and can be unsuspended later."
-        >
-          {busy ? 'Working…' : `Suspend ${status.stragglers} unlinked user${status.stragglers === 1 ? '' : 's'}`}
-        </button>
-      )}
-
-      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
-    </div>
+    <select
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        height: 28,
+        fontSize: 12,
+        padding: '0 24px 0 10px',
+        borderRadius: 6,
+        border: '1px solid var(--line-strong)',
+        background: isDefault ? 'transparent' : 'var(--ink)',
+        color: isDefault ? 'var(--ink-body)' : '#FCFBFA',
+        cursor: 'pointer',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+        MozAppearance: 'none',
+        // Inline caret so the select reads as a dropdown without
+        // pulling in the OS-native chrome.
+        backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='none' stroke='${isDefault ? '%2363606E' : '%23FCFBFA'}' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1l4 4 4-4'/></svg>")`,
+        backgroundRepeat: 'no-repeat',
+        backgroundPosition: 'right 8px center',
+      }}
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   )
 }
 
