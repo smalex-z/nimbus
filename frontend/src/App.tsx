@@ -9,6 +9,8 @@ import RequireVerified from '@/components/RequireVerified'
 import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
 import Email from '@/pages/Email'
+import SettingsLayout from '@/components/SettingsLayout'
+import SettingsSignIn from '@/pages/settings/SignIn'
 import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
 import GPUHost from '@/pages/GPUHost'
@@ -91,17 +93,27 @@ export default function App() {
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/gpu" element={<GPU />} />
                       <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
-                      <Route path="/email" element={<RequireAdmin><Email /></RequireAdmin>} />
                       <Route path="/quotas" element={<RequireAdmin><Quotas /></RequireAdmin>} />
                       <Route path="/account" element={<Account />} />
-                      {/* Old /settings URL kept around so any existing
-                          bookmarks / pasted links still resolve to the
-                          rebranded user management page. */}
-                      <Route path="/settings" element={<Navigate to="/users" replace />} />
-                      <Route path="/gophers" element={<RequireAdmin><GopherTunnels /></RequireAdmin>} />
-                      <Route path="/network" element={<RequireAdmin><Network /></RequireAdmin>} />
-                      <Route path="/s3" element={<RequireAdmin><S3 /></RequireAdmin>} />
-                      <Route path="/gpu-host" element={<RequireAdmin><GPUHost /></RequireAdmin>} />
+                      {/* /settings hosts the consolidated config sidebar
+                          (Sign-in, Email, Gopher Tunnels, Network, S3,
+                          GPU hosts). The old standalone routes — /email,
+                          /gophers, /network, /s3, /gpu-host — redirect
+                          to their /settings/* counterparts so existing
+                          bookmarks still resolve. */}
+                      <Route path="/settings" element={<Navigate to="/settings/sign-in" replace />} />
+                      <Route path="/settings/sign-in" element={<RequireAdmin><SettingsLayout><SettingsSignIn /></SettingsLayout></RequireAdmin>} />
+                      <Route path="/settings/email" element={<RequireAdmin><SettingsLayout><Email /></SettingsLayout></RequireAdmin>} />
+                      <Route path="/settings/gopher" element={<RequireAdmin><SettingsLayout><GopherTunnels /></SettingsLayout></RequireAdmin>} />
+                      <Route path="/settings/network" element={<RequireAdmin><SettingsLayout><Network /></SettingsLayout></RequireAdmin>} />
+                      <Route path="/settings/s3" element={<RequireAdmin><SettingsLayout><S3 /></SettingsLayout></RequireAdmin>} />
+                      <Route path="/settings/gpu-hosts" element={<RequireAdmin><SettingsLayout><GPUHost /></SettingsLayout></RequireAdmin>} />
+                      {/* Bookmark redirects from the old standalone admin pages. */}
+                      <Route path="/email" element={<Navigate to="/settings/email" replace />} />
+                      <Route path="/gophers" element={<Navigate to="/settings/gopher" replace />} />
+                      <Route path="/network" element={<Navigate to="/settings/network" replace />} />
+                      <Route path="/s3" element={<Navigate to="/settings/s3" replace />} />
+                      <Route path="/gpu-host" element={<Navigate to="/settings/gpu-hosts" replace />} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>

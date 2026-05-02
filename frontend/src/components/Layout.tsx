@@ -108,6 +108,19 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
+              {/* Users + Quotas are admin's high-frequency surfaces —
+                  promoted out of the old Control Panel dropdown so a
+                  sysadmin can hit them in one click. */}
+              {user?.is_admin && (
+                <NavLink to="/users" className={navLinkClass}>
+                  Users
+                </NavLink>
+              )}
+              {user?.is_admin && (
+                <NavLink to="/quotas" className={navLinkClass}>
+                  Quotas
+                </NavLink>
+              )}
               {user?.is_admin && s3Deployed && (
                 <NavLink to="/s3" className={navLinkClass}>
                   <span className="inline-flex items-center gap-1.5">
@@ -146,47 +159,13 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
-                  <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-ink-3 font-semibold">
-                    Control Panel
-                  </div>
-                  <NavLink to="/users" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Users
-                  </NavLink>
-                  <NavLink to="/quotas" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Quotas
-                  </NavLink>
-                  <NavLink to="/email" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    <span className="inline-flex items-center gap-1.5">
-                      Email
-                      <span
-                        className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded"
-                        title="Preview — config saves but the send pipeline ships in a follow-up release"
-                      >
-                        Preview
-                      </span>
-                    </span>
-                  </NavLink>
-                  <NavLink to="/gophers" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Gopher Tunnels
-                  </NavLink>
-                  <NavLink to="/network" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Network
-                  </NavLink>
-                  {/* When S3 is deployed the link is promoted to a top-level
-                      navbar item; hiding the dropdown entry avoids duplication. */}
-                  {!s3Deployed && (
-                    <NavLink to="/s3" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                      <span className="inline-flex items-center gap-1.5">
-                        S3 Storage
-                        <AlphaPill />
-                      </span>
-                    </NavLink>
-                  )}
-                  <NavLink to="/gpu-host" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    <span className="inline-flex items-center gap-1.5">
-                      GPU hosts
-                      <AlphaPill />
-                    </span>
+                  {/* Workspace configuration (Sign-in, Email, Gopher,
+                      Network, S3, GPU hosts) lives behind /settings,
+                      which renders a sidebar of categories. Keys is
+                      still a personal action so it gets its own entry
+                      next to Account. */}
+                  <NavLink to="/settings" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Settings
                   </NavLink>
                   <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Keys
