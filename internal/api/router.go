@@ -198,6 +198,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/settings/smtp", auth.SaveSMTP)
 				r.Post("/settings/smtp/test", auth.SendTestEmail)
 				r.Post("/users/email-unlinked", auth.EmailUnlinked)
+				r.Get("/settings/quotas", auth.GetQuotas)
+				r.Put("/settings/quotas", auth.SaveQuotas)
+				r.Put("/users/{id}/quota", auth.SetUserQuota)
 
 				r.Get("/nodes", nodes.List)
 				r.Get("/ips", ips.List)

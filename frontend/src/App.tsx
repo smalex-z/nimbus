@@ -16,6 +16,7 @@ import Keys from '@/pages/Keys'
 import Network from '@/pages/Network'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
+import Quotas from '@/pages/Quotas'
 import S3 from '@/pages/S3'
 import Users from '@/pages/Users'
 import SignIn from '@/pages/auth/SignIn'
@@ -91,6 +92,7 @@ export default function App() {
                       <Route path="/gpu" element={<GPU />} />
                       <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
                       <Route path="/email" element={<RequireAdmin><Email /></RequireAdmin>} />
+                      <Route path="/quotas" element={<RequireAdmin><Quotas /></RequireAdmin>} />
                       <Route path="/account" element={<Account />} />
                       {/* Old /settings URL kept around so any existing
                           bookmarks / pasted links still resolve to the

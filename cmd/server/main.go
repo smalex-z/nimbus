@@ -116,7 +116,7 @@ func main() {
 
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.LoginToken{},
-		&db.OAuthSettings{}, &db.SMTPSettings{},
+		&db.OAuthSettings{}, &db.SMTPSettings{}, &db.QuotaSettings{},
 		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
@@ -351,6 +351,11 @@ func main() {
 	// the candidate IP and verifyAndRetryReserve leapfrogs to the next free
 	// address.
 	provSvc.SetIPVerifier(chainVerifier{reconciler, netscan.NewVerifier(netscan.New(netscanCfg))})
+	// Wire the quota resolver so the member gate consults per-user
+	// overrides + workspace default. Without this the gate falls back
+	// to the legacy provision.MemberMaxVMs constant — fine for tests,
+	// not what we want in production.
+	provSvc.SetQuotaResolver(authSvc)
 
 	// Resolve Gopher settings. The DB row is the source of truth (admin can
 	// edit it live from the Settings page); env vars are a one-shot seed for
@@ -500,7 +505,7 @@ func main() {
 		// need root to write under /var/lib.
 		gpuLogDir = "./gpu-jobs"
 	}
-	gpuSvc, err := gpu.New(database.DB, gpuLogDir)
+	gpuSvc, err := gpu.New(database.DB, gpuLogDir, gpu.WithQuotaResolver(authSvc))
 	if err != nil {
 		log.Fatalf("failed to init gpu service: %v", err)
 	}

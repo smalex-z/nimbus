@@ -50,6 +50,17 @@ type User struct {
 	// email-based flow). Suspended users' sessions are revoked at
 	// suspend time.
 	Suspended bool `gorm:"default:false;index" json:"-"`
+	// VMQuotaOverride and GPUJobQuotaOverride let an admin grant a
+	// specific user a quota above (or below) the workspace default
+	// stored on QuotaSettings. Both are nullable pointers: nil means
+	// "use the workspace default," a value means "use this number"
+	// (zero is allowed and means "this user can't provision/submit").
+	// Pointers rather than int with a sentinel because GORM's
+	// AutoMigrate fills new columns on existing rows with the zero
+	// value, and we'd then have no way to distinguish "no override"
+	// from "explicit zero override."
+	VMQuotaOverride     *int `gorm:"column:vm_quota_override" json:"-"`
+	GPUJobQuotaOverride *int `gorm:"column:gpu_job_quota_override" json:"-"`
 }
 
 // Session ties a browser cookie to a user for a limited duration.
@@ -147,6 +158,23 @@ type SMTPSettings struct {
 	// using them. Useful for temporary outages or migrations without
 	// wiping the form.
 	Enabled bool `gorm:"default:false"`
+}
+
+// QuotaSettings stores workspace-wide quota defaults. Singleton (ID=1).
+// Members hit these caps; admins bypass via Request.RequesterIsAdmin.
+// Per-user overrides on db.User.VMQuotaOverride /
+// db.User.GPUJobQuotaOverride layer on top — the effective cap is the
+// override when present, else the value here.
+//
+// Seeded on first boot from the legacy hardcoded constants
+// (provision.MemberMaxVMs, gpu.MemberMaxActiveJobs) so an upgrade
+// doesn't change observed behaviour. Future schema bumps that add new
+// quota dimensions (CPU cores, RAM, etc.) extend this row rather than
+// introducing parallel tables.
+type QuotaSettings struct {
+	ID                  uint `gorm:"primaryKey"`
+	MemberMaxVMs        int  `gorm:"default:5"`
+	MemberMaxActiveJobs int  `gorm:"default:5"`
 }
 
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single

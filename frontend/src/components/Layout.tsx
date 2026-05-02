@@ -152,6 +152,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/users" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Users
                   </NavLink>
+                  <NavLink to="/quotas" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Quotas
+                  </NavLink>
                   <NavLink to="/email" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     <span className="inline-flex items-center gap-1.5">
                       Email
