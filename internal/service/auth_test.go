@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -104,6 +105,85 @@ func TestPromoteFirstUserIfNoAdmin_MultiUser_OldestOnly(t *testing.T) {
 		if u.IsAdmin {
 			t.Errorf("user %s should not be admin", u.Email)
 		}
+	}
+}
+
+// SetPassword on an OAuth-only account (no PasswordHash) accepts any
+// oldPassword (including empty) and sets a fresh hash. After setting, the
+// new password verifies and the user can sign in via Login.
+func TestSetPassword_SetOnOAuthOnlyAccount(t *testing.T) {
+	t.Parallel()
+	svc, database := newAuthService(t)
+
+	if err := database.Create(&db.User{
+		Name: "oauth-only", Email: "oa@x", PasswordHash: "",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var user db.User
+	if err := database.First(&user, "email = ?", "oa@x").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// oldPassword should be ignored when there's no current password —
+	// pass a junk value and confirm SetPassword still succeeds.
+	if err := svc.SetPassword(user.ID, "ignored", "newpassword12"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	if err := svc.VerifyPassword(user.ID, "newpassword12"); err != nil {
+		t.Errorf("expected new password to verify, got %v", err)
+	}
+
+	// Login flow works end-to-end with the freshly set password.
+	if _, _, err := svc.Login("oa@x", "newpassword12"); err != nil {
+		t.Errorf("Login with fresh password failed: %v", err)
+	}
+}
+
+// SetPassword on an account that already has one requires the old to match.
+// Wrong-old returns ErrInvalidCredentials and leaves the stored hash alone.
+func TestSetPassword_ChangeRequiresOldPassword(t *testing.T) {
+	t.Parallel()
+	svc, _ := newAuthService(t)
+
+	view, err := svc.Register(service.RegisterParams{
+		Name: "alice", Email: "a@x", Password: "originalpw1",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Wrong old — rejected, original password still works.
+	err = svc.SetPassword(view.ID, "wrong-old", "newpassword12")
+	if !errors.Is(err, service.ErrInvalidCredentials) {
+		t.Fatalf("wrong old should return ErrInvalidCredentials, got %v", err)
+	}
+	if err := svc.VerifyPassword(view.ID, "originalpw1"); err != nil {
+		t.Errorf("original password should still work after rejected change, got %v", err)
+	}
+
+	// Correct old — accepted, new password takes effect, old no longer works.
+	if err := svc.SetPassword(view.ID, "originalpw1", "newpassword12"); err != nil {
+		t.Fatalf("SetPassword with correct old: %v", err)
+	}
+	if err := svc.VerifyPassword(view.ID, "newpassword12"); err != nil {
+		t.Errorf("new password should verify, got %v", err)
+	}
+	if err := svc.VerifyPassword(view.ID, "originalpw1"); !errors.Is(err, service.ErrInvalidCredentials) {
+		t.Errorf("old password should no longer work, got %v", err)
+	}
+}
+
+// SetPassword on a missing user returns ErrUserNotFound — the handler
+// surfaces this as 404 so a deleted-then-resurrected session can't quietly
+// land on a stranger's row.
+func TestSetPassword_UnknownUser(t *testing.T) {
+	t.Parallel()
+	svc, _ := newAuthService(t)
+
+	err := svc.SetPassword(999, "", "newpassword12")
+	if !errors.Is(err, service.ErrUserNotFound) {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 }
 

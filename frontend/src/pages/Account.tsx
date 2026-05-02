@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
-import { getAccount, getProviders } from '@/api/client'
+import { changePassword, getAccount, getProviders } from '@/api/client'
 import type { AccountView, OAuthProviders } from '@/api/client'
 
 // Account — a personal page reachable from the user dropdown by every
@@ -87,6 +87,7 @@ export default function Account() {
           <div className="lg:col-span-2 flex flex-col gap-6">
             <ProfileCard account={account} />
             <LinkedProvidersCard account={account} providers={providers} />
+            <PasswordCard hasPassword={account.has_password} onUpdated={reload} />
           </div>
         </div>
       )}
@@ -234,6 +235,136 @@ function ProviderLinkRow({
           provider not configured
         </span>
       )}
+    </div>
+  )
+}
+
+// PasswordCard renders the self-service set-or-change-password form. Two
+// variants driven by hasPassword:
+//   - true:  current + new + confirm fields. Server requires old to match.
+//   - false: new + confirm only. OAuth-only accounts adding a password.
+//
+// On success we call onUpdated() so the parent reloads the AccountView and
+// the card re-renders with the "true" variant — useful so a first-time
+// setter sees the "current password" field appear without a manual refresh.
+function PasswordCard({ hasPassword, onUpdated }: { hasPassword: boolean; onUpdated: () => void }) {
+  const [oldPassword, setOldPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const newTooShort = newPassword.length > 0 && newPassword.length < 8
+  const mismatch = confirm.length > 0 && confirm !== newPassword
+  const canSubmit =
+    newPassword.length >= 8 &&
+    confirm === newPassword &&
+    (!hasPassword || oldPassword.length > 0) &&
+    !saving
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSaved(false)
+    if (!canSubmit) return
+    try {
+      setSaving(true)
+      await changePassword({
+        old_password: hasPassword ? oldPassword : undefined,
+        new_password: newPassword,
+      })
+      setOldPassword('')
+      setNewPassword('')
+      setConfirm('')
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+      onUpdated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update password')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+        {hasPassword ? 'Change password' : 'Set a password'}
+      </span>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+        {hasPassword
+          ? 'Update the password on your account. You stay signed in on this device — only the stored credential changes.'
+          : 'Add a password so you can sign in without an OAuth provider. Useful as a fallback when your provider is unreachable or your admin moves the workspace off OAuth-only sign-in.'}
+      </p>
+
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {hasPassword && (
+          <div className="n-field">
+            <label className="n-label" htmlFor="account-old-password">Current password</label>
+            <input
+              id="account-old-password"
+              className="n-input"
+              type="password"
+              autoComplete="current-password"
+              value={oldPassword}
+              onChange={(e) => setOldPassword(e.target.value)}
+            />
+          </div>
+        )}
+        <div className="n-field">
+          <label className="n-label" htmlFor="account-new-password">New password</label>
+          <input
+            id="account-new-password"
+            className="n-input"
+            type="password"
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          {newTooShort && (
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--err)' }}>
+              At least 8 characters.
+            </p>
+          )}
+        </div>
+        <div className="n-field">
+          <label className="n-label" htmlFor="account-confirm-password">Confirm new password</label>
+          <input
+            id="account-confirm-password"
+            className="n-input"
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+          {mismatch && (
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--err)' }}>
+              Doesn't match the new password.
+            </p>
+          )}
+        </div>
+
+        {error && (
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            type="submit"
+            className="n-btn n-btn-primary"
+            disabled={!canSubmit}
+            style={{ minWidth: 100 }}
+          >
+            {saving ? 'Saving…' : hasPassword ? 'Update password' : 'Set password'}
+          </button>
+          {saved && (
+            <span style={{ fontSize: 13, color: 'var(--ok)' }}>
+              {hasPassword ? 'Password updated.' : 'Password set.'}
+            </span>
+          )}
+        </div>
+      </form>
     </div>
   )
 }

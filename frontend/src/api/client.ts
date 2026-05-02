@@ -535,6 +535,17 @@ export async function getAccount(): Promise<AccountView> {
   return data
 }
 
+export interface ChangePasswordRequest {
+  // old_password is only required when the account already has one;
+  // when has_password is false (OAuth-only) the server ignores it.
+  old_password?: string
+  new_password: string
+}
+
+export async function changePassword(req: ChangePasswordRequest): Promise<void> {
+  await api.post('/account/password', req)
+}
+
 export interface PasswordlessStatus {
   passwordless_goal: boolean
   stragglers: number

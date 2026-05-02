@@ -528,6 +528,50 @@ type accountView struct {
 	GithubConnected bool   `json:"github_connected"`
 }
 
+// changePasswordRequest is the body shape for POST /api/account/password.
+// OldPassword is optional — required only when the caller already has a
+// password on file (otherwise we're setting one for the first time, e.g. an
+// OAuth-only user adding password sign-in).
+type changePasswordRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+// ChangePassword handles POST /api/account/password — self-service set or
+// change. Validates the new password length here (matches Register's
+// >= 8 char rule); the service decides whether to require old_password
+// based on the row's current state.
+func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "Invalid request body")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		response.BadRequest(w, "New password must be at least 8 characters")
+		return
+	}
+	err := a.auth.SetPassword(user.ID, req.OldPassword, req.NewPassword)
+	if errors.Is(err, service.ErrInvalidCredentials) {
+		response.Error(w, http.StatusUnauthorized, "Current password is incorrect")
+		return
+	}
+	if errors.Is(err, service.ErrUserNotFound) {
+		response.Error(w, http.StatusNotFound, "Account not found")
+		return
+	}
+	if err != nil {
+		response.InternalError(w, "Failed to update password")
+		return
+	}
+	response.NoContent(w)
+}
+
 // Account handles GET /api/account — current user's profile + the
 // linked-providers state so the /account page can decide which
 // Connect buttons to render.

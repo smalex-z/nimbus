@@ -233,6 +233,40 @@ func (s *AuthService) Login(email, password string) (string, *UserView, error) {
 	return sessionID, userToView(&user), nil
 }
 
+// SetPassword sets or replaces the caller's password.
+//
+//   - If the user already has a password, oldPassword must match — wrong
+//     value returns ErrInvalidCredentials.
+//   - If the user has no password (OAuth-only account), oldPassword is
+//     ignored and a fresh one is set.
+//
+// Caller is responsible for length / complexity validation (handler layer
+// matches Register's >= 8 char rule).
+//
+// Existing sessions are NOT invalidated — a self-service password change
+// shouldn't log the user out of every device. If we ever add "change
+// password reason: I think someone else has my password" that path
+// should clear other sessions; today's flow is convenience-only.
+func (s *AuthService) SetPassword(userID uint, oldPassword, newPassword string) error {
+	var user db.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrUserNotFound
+		}
+		return err
+	}
+	if user.PasswordHash != "" {
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
+			return ErrInvalidCredentials
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	return s.db.Model(&db.User{}).Where("id = ?", userID).Update("password_hash", string(hash)).Error
+}
+
 // VerifyPassword confirms the supplied password matches the user's hash.
 // Returns ErrInvalidCredentials when wrong, or when the user has no
 // password set (OAuth-only accounts can't be used for password gating).
