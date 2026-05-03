@@ -535,6 +535,17 @@ export async function getAccount(): Promise<AccountView> {
   return data
 }
 
+// changePassword rotates the caller's password. Requires the current
+// password — even with a valid session, an attacker who's stolen a
+// cookie shouldn't be able to lock the real owner out. The server
+// returns 401 on wrong-current and 400 on too-short / unchanged.
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await api.put('/account/password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+}
+
 export interface PasswordlessStatus {
   passwordless_goal: boolean
   stragglers: number

@@ -13,9 +13,9 @@ import type { SMTPSettingsView, SaveSMTPRequest } from '@/api/client'
 //
 // "Send test email" delivers a short message to the calling admin's
 // own address — useful for verifying the saved credentials before
-// triggering the bulk recovery send from /users. The button is the
-// only way to learn whether host/auth/TLS actually work end to end;
-// the form save just persists the values.
+// triggering the bulk recovery send from /authentication. The button
+// is the only way to learn whether host/auth/TLS actually work end to
+// end; the form save just persists the values.
 export default function Email() {
   const [view, setView] = useState<SMTPSettingsView | null>(null)
   const [host, setHost] = useState('')
@@ -78,7 +78,7 @@ export default function Email() {
         <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px', display: 'inline-flex', alignItems: 'center', gap: 10 }}>
           Email
           <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-0.5 rounded">
-            Preview
+            Alpha
           </span>
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
@@ -298,7 +298,7 @@ export default function Email() {
               </span>
               <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
                 Once SMTP is enabled and the send pipeline ships, admins on
-                /users can email password-only accounts a magic-link
+                /authentication can email password-only accounts a magic-link
                 recovery URL. Clicking the link signs the user in (and
                 unsuspends them if needed) and drops them on /account so
                 they can connect Google or GitHub.

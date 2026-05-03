@@ -495,7 +495,7 @@ export default function Network() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
         <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
-          Network
+          VM network
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
           The IP pool nimbus draws from when provisioning, and the gateway
