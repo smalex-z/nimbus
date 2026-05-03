@@ -1,12 +1,10 @@
 import { ReactNode } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
-import { useEffect, useState } from 'react'
-import { getGPUInference, getS3Storage } from '@/api/client'
+import { NavLink } from 'react-router-dom'
 
 // InfrastructureLayout wraps every /infrastructure/* subroute with a
 // left sidebar of category links. The sidebar is the page; the right
 // column slots in the matching subpage's content (Email, Gopher Tunnels,
-// VM network, S3 Storage, GPU hosts).
+// VM network).
 //
 // Each entry routes to its own URL (e.g. /infrastructure/email) so the
 // browser back button + bookmarks work the way an admin expects.
@@ -14,10 +12,10 @@ import { getGPUInference, getS3Storage } from '@/api/client'
 // NavLink's isActive is exact by default; we use end={false} so the
 // match also catches the index path.
 //
-// The sidebar entries for S3 and GPU hosts only render once those
-// surfaces are activated for the workspace (S3 deployed, GPU paired).
-// Same gate the top-level navbar uses, polled the same way, so the
-// sidebar mirrors what's actually configurable today.
+// S3 and GPU used to live here too, but they're full operational
+// surfaces (not config) — they were promoted to top-level routes (/s3,
+// /gpu) reachable from the user dropdown so they don't share the
+// sidebar's narrow content column.
 
 interface InfrastructureLayoutProps {
   children: ReactNode
@@ -27,34 +25,13 @@ interface NavItem {
   label: string
   to: string
   badge?: 'preview' | 'alpha'
-  visible: boolean
 }
 
 export default function InfrastructureLayout({ children }: InfrastructureLayoutProps) {
-  const location = useLocation()
-  // S3 is configurable from /infrastructure/s3 once the storage VM is
-  // deployed, but pre-deploy the link would lead to a half-empty
-  // page. Same gate the top navbar uses.
-  const [s3Deployed, setS3Deployed] = useState(false)
-  const [gpuPlaneEnabled, setGpuPlaneEnabled] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    getS3Storage()
-      .then((row) => { if (!cancelled) setS3Deployed(row !== null) })
-      .catch(() => undefined)
-    getGPUInference()
-      .then((s) => { if (!cancelled) setGpuPlaneEnabled(s.enabled) })
-      .catch(() => undefined)
-    return () => { cancelled = true }
-  }, [location.pathname])
-
   const items: NavItem[] = [
-    { label: 'Email', to: '/infrastructure/email', badge: 'preview', visible: true },
-    { label: 'Gopher Tunnels', to: '/infrastructure/gopher', visible: true },
-    { label: 'VM network', to: '/infrastructure/network', visible: true },
-    { label: 'S3 Storage', to: '/infrastructure/s3', visible: !s3Deployed, badge: 'alpha' },
-    { label: 'GPU hosts', to: '/infrastructure/gpu-hosts', badge: 'alpha', visible: gpuPlaneEnabled || !gpuPlaneEnabled }, // always visible — pairing also lives here
+    { label: 'Email', to: '/infrastructure/email', badge: 'preview' },
+    { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
+    { label: 'VM network', to: '/infrastructure/network' },
   ]
 
   return (
@@ -82,7 +59,7 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
             alignSelf: 'start',
           }}
         >
-          {items.filter((i) => i.visible).map((item) => (
+          {items.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

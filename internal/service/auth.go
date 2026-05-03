@@ -255,6 +255,22 @@ func (s *AuthService) VerifyPassword(userID uint, password string) error {
 	return nil
 }
 
+// ChangePassword rotates a user's password hash. The current password is
+// verified first as a session-binding step — even if the caller's session
+// cookie is valid, they can't rotate the password without proving they
+// know the old one. ErrInvalidCredentials surfaces back to the handler
+// for both wrong-password and OAuth-only-account cases.
+func (s *AuthService) ChangePassword(userID uint, currentPassword, newPassword string) error {
+	if err := s.VerifyPassword(userID, currentPassword); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	return s.db.Model(&db.User{}).Where("id = ?", userID).Update("password_hash", string(hash)).Error
+}
+
 // PromoteToAdmin flips a member account to admin. Idempotent — promoting
 // an already-admin returns no error. Caller is responsible for any
 // authorization gate (password re-auth, requester is admin, etc.) since

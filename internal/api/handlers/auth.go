@@ -553,6 +553,48 @@ func (a *Auth) Account(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ChangePassword handles PUT /api/account/password. The caller must
+// supply their current password — the session cookie alone isn't enough
+// to rotate, since a stolen cookie shouldn't let an attacker lock the
+// real owner out. OAuth-only accounts (no password set) get the same
+// "current password is incorrect" 401 the wrong-password path does;
+// the UI gates the section on /account.has_password so they shouldn't
+// reach this handler in normal flows.
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "Invalid request body")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		response.BadRequest(w, "Password must be at least 8 characters")
+		return
+	}
+	if req.CurrentPassword == req.NewPassword {
+		response.BadRequest(w, "New password must differ from current")
+		return
+	}
+	if err := a.auth.ChangePassword(user.ID, req.CurrentPassword, req.NewPassword); err != nil {
+		if errors.Is(err, service.ErrInvalidCredentials) {
+			response.Error(w, http.StatusUnauthorized, "Current password is incorrect")
+			return
+		}
+		response.InternalError(w, "Failed to change password")
+		return
+	}
+	response.Success(w, map[string]bool{"ok": true})
+}
+
 // SetPasswordlessAuth handles PUT /api/settings/oauth/passwordless —
 // admin-only toggle for the OAuth-only-sign-in setting. Hard gate:
 // the service rejects with ErrRequesterNotLinked when the admin

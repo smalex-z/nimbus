@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
-import { getAccount, getProviders } from '@/api/client'
+import { changePassword, getAccount, getProviders } from '@/api/client'
 import type { AccountView, OAuthProviders } from '@/api/client'
 
 // Account — a personal page reachable from the user dropdown by every
@@ -87,9 +87,122 @@ export default function Account() {
           <div className="lg:col-span-2 flex flex-col gap-6">
             <ProfileCard account={account} />
             <LinkedProvidersCard account={account} providers={providers} />
+            {account.has_password && <ChangePasswordCard />}
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ChangePasswordCard rotates the current user's password. Always
+// requires the current password — defends against a stolen cookie
+// being used to lock the real owner out. Only renders when the user
+// has a password set; OAuth-only accounts have nothing to change.
+function ChangePasswordCard() {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSaved(false)
+    if (next.length < 8) {
+      setError('New password must be at least 8 characters')
+      return
+    }
+    if (next !== confirm) {
+      setError('New password and confirmation do not match')
+      return
+    }
+    if (current === next) {
+      setError('New password must differ from current')
+      return
+    }
+    setBusy(true)
+    try {
+      await changePassword(current, next)
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to change password')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+        Change password
+      </span>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+        Confirm with your current password. The server signs you out of
+        nothing — your other sessions stay open until they naturally expire.
+      </p>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="n-field">
+          <label className="n-label" htmlFor="current-password">Current password</label>
+          <input
+            id="current-password"
+            className="n-input"
+            type="password"
+            autoComplete="current-password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            required
+          />
+        </div>
+        <div className="n-field">
+          <label className="n-label" htmlFor="new-password">New password</label>
+          <input
+            id="new-password"
+            className="n-input"
+            type="password"
+            autoComplete="new-password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            required
+            minLength={8}
+          />
+        </div>
+        <div className="n-field">
+          <label className="n-label" htmlFor="confirm-password">Confirm new password</label>
+          <input
+            id="confirm-password"
+            className="n-input"
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            required
+            minLength={8}
+          />
+        </div>
+        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+        {saved && (
+          <span className="n-pill n-pill-ok" style={{ alignSelf: 'flex-start', fontSize: 11 }}>
+            <span className="n-pill-dot" />
+            password updated
+          </span>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="submit"
+            className="n-btn n-btn-primary"
+            disabled={busy || !current || !next || !confirm}
+          >
+            {busy ? 'Saving…' : 'Update password'}
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -163,12 +276,6 @@ function LinkedProvidersCard({
         configured={Boolean(providers?.github)}
         href="/api/auth/github/link"
       />
-
-      {account.has_password && (
-        <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--ink-mute)' }}>
-          You also have a password set on this account.
-        </p>
-      )}
     </div>
   )
 }

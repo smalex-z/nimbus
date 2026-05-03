@@ -1,7 +1,7 @@
-import { ReactNode, useEffect, useState } from 'react'
+import { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import nimbusLogo from '@/assets/Nimbus_Logo.png'
-import api, { getGPUInference, getS3Storage } from '@/api/client'
+import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
 
@@ -17,9 +17,10 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
       : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
   }`
 
-// Smaller, indented items shown under the Control Panel section header.
-const controlPanelItemClass = ({ isActive }: { isActive: boolean }) =>
-  `block w-full pl-5 pr-3 py-1 text-xs no-underline transition-colors text-left cursor-pointer ${
+// Dropdown items: 13px, icon on the left, full row tappable. Active
+// state mirrors the top-level nav so the user sees where they are.
+const dropdownItemClass = ({ isActive }: { isActive: boolean }) =>
+  `flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-[13px] no-underline transition-colors text-left cursor-pointer ${
     isActive
       ? 'bg-[rgba(27,23,38,0.08)] text-ink'
       : 'text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink'
@@ -28,49 +29,6 @@ const controlPanelItemClass = ({ isActive }: { isActive: boolean }) =>
 export default function Layout({ children, showNav = true }: LayoutProps) {
   const { user } = useAuth()
   const location = useLocation()
-  // Whether an S3 storage row exists (any status). Promotes the S3 link
-  // from the Control Panel dropdown to a top-level navbar item — the
-  // page is only useful day-to-day after the storage VM is deployed.
-  // Refetched on route change so the navbar updates as soon as the user
-  // navigates away from /s3 post-deploy or post-delete.
-  const [s3Deployed, setS3Deployed] = useState(false)
-
-  useEffect(() => {
-    if (!user?.is_admin) {
-      setS3Deployed(false)
-      return
-    }
-    let cancelled = false
-    getS3Storage()
-      .then((row) => {
-        if (!cancelled) setS3Deployed(row !== null)
-      })
-      .catch(() => {
-        // Network blip or transient 500 — leave the navbar where it
-        // was. Errors are not user-actionable from the navbar.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [user?.is_admin, location.pathname])
-
-  // gpuPlaneEnabled gates the top-level "GPU" tab. We only render it once
-  // an admin has paired a GX10 — pre-pairing the tab would lead users to a
-  // page that has nothing to show. Polled lazily so a fresh pairing is
-  // reflected in the nav within a minute without a page refresh.
-  const [gpuPlaneEnabled, setGpuPlaneEnabled] = useState(false)
-  useEffect(() => {
-    if (!user) return
-    let cancelled = false
-    const tick = () => {
-      getGPUInference()
-        .then((s) => { if (!cancelled) setGpuPlaneEnabled(s.enabled) })
-        .catch(() => { /* keep last known state on error */ })
-    }
-    tick()
-    const id = setInterval(tick, 60_000)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [user])
 
   const handleSignOut = async () => {
     try {
@@ -97,6 +55,12 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
             </Link>
 
             <div className="flex gap-1 items-center">
+              {/* Top-level nav stays minimal: high-frequency operational
+                  surfaces only. Everything else (Authentication,
+                  Infrastructure, S3, GPU, Keys, Account) lives in the
+                  dropdown so the bar doesn't sprawl as more capabilities
+                  land. Dashboard + Quotas are admin-only; Provision +
+                  My machines are universal. */}
               {user?.is_admin && (
                 <NavLink to="/admin" className={navLinkClass}>
                   Dashboard
@@ -108,37 +72,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
-              {/* Quotas is admin's high-frequency surface — promoted out
-                  of the old Control Panel dropdown so a sysadmin can hit
-                  it in one click. Authentication is also admin policy
-                  but lives in the dropdown alongside Infrastructure to
-                  keep the top bar from sprawling. */}
               {user?.is_admin && (
                 <NavLink to="/quotas" className={navLinkClass}>
                   Quotas
                 </NavLink>
               )}
-              {user?.is_admin && s3Deployed && (
-                <NavLink to="/s3" className={navLinkClass}>
-                  <span className="inline-flex items-center gap-1.5">
-                    S3
-                    <AlphaPill />
-                  </span>
-                </NavLink>
-              )}
-              {gpuPlaneEnabled && (
-                <NavLink to="/gpu" className={navLinkClass}>
-                  <span className="inline-flex items-center gap-1.5">
-                    GPU
-                    <AlphaPill />
-                  </span>
-                </NavLink>
-              )}
-              {/* Keys lived as a top-level nav link for members. The
-                  picker on /provision and the manage-keys link inside
-                  it are the high-frequency entry points; the dedicated
-                  page is a lookup surface, so it now lives in the user
-                  dropdown next to Account (matching the admin layout). */}
 
               {user && <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />}
 
@@ -156,34 +94,36 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
-                  {/* Authentication (users + sign-in policy) and
-                      Infrastructure (Email, Gopher, VM network, S3, GPU
-                      hosts) are admin policy surfaces grouped here so
-                      the top bar doesn't sprawl. Keys is a personal
-                      action so it gets its own entry next to Account. */}
-                  <NavLink to="/authentication" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Authentication
+                  {/* Two-section dropdown: Workspace (admin policy +
+                      cluster surfaces) and Account (personal). Section
+                      labels make the grouping explicit at a glance. */}
+                  <SectionLabel>Workspace</SectionLabel>
+                  <NavLink to="/authentication" className={dropdownItemClass}>
+                    <ShieldIcon /><span>Authentication</span>
                   </NavLink>
-                  <NavLink to="/infrastructure" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Infrastructure
+                  <NavLink to="/infrastructure" className={dropdownItemClass}>
+                    <ServerIcon /><span>Infrastructure</span>
                   </NavLink>
-                  <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Keys
+                  <NavLink to="/s3" className={dropdownItemClass}>
+                    <DatabaseIcon /><span>S3</span><AlphaPill />
+                  </NavLink>
+                  <NavLink to="/gpu" className={dropdownItemClass}>
+                    <CpuIcon /><span>GPU</span><AlphaPill />
                   </NavLink>
 
                   <div className="my-1 border-t border-line" />
 
-                  <NavLink to="/account" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Account
+                  <SectionLabel>Account</SectionLabel>
+                  <NavLink to="/keys" className={dropdownItemClass}>
+                    <KeyIcon /><span>Keys</span>
                   </NavLink>
-                  <button
-                    type="button"
-                    onClick={handleSignOut}
-                    style={{ cursor: 'pointer' }}
-                    className="block w-full px-3 py-1.5 text-sm text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors text-left cursor-pointer"
-                  >
-                    Sign out
-                  </button>
+                  <NavLink to="/account" className={dropdownItemClass}>
+                    <UserIcon /><span>Account</span>
+                  </NavLink>
+
+                  <div className="my-1 border-t border-line" />
+
+                  <SignOutButton onClick={handleSignOut} />
                 </NavDropdown>
               ) : user ? (
                 <NavDropdown
@@ -196,21 +136,15 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
-                  <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Keys
+                  <SectionLabel>Account</SectionLabel>
+                  <NavLink to="/keys" className={dropdownItemClass}>
+                    <KeyIcon /><span>Keys</span>
                   </NavLink>
-                  <NavLink to="/account" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Account
+                  <NavLink to="/account" className={dropdownItemClass}>
+                    <UserIcon /><span>Account</span>
                   </NavLink>
                   <div className="my-1 border-t border-line" />
-                  <button
-                    type="button"
-                    onClick={handleSignOut}
-                    style={{ cursor: 'pointer' }}
-                    className="block w-full px-3 py-1.5 text-sm text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors text-left cursor-pointer"
-                  >
-                    Sign out
-                  </button>
+                  <SignOutButton onClick={handleSignOut} />
                 </NavDropdown>
               ) : null}
             </div>
@@ -237,13 +171,134 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
   )
 }
 
+// SectionLabel — small uppercase header inside the dropdown. Groups
+// items into "Workspace" (admin) and "Account" (personal) so the
+// visual structure mirrors the conceptual one.
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="px-3 pt-2 pb-1 text-[10px] font-mono uppercase tracking-widest"
+      style={{ color: 'var(--ink-mute)' }}
+    >
+      {children}
+    </div>
+  )
+}
+
+// SignOutButton — destructive variant of a dropdown item. Uses the
+// error colour family so it visually separates from the navigation
+// items above it.
+function SignOutButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-[13px] text-left cursor-pointer transition-colors hover:bg-[rgba(184,55,55,0.08)]"
+      style={{ color: 'var(--err)' }}
+    >
+      <SignOutIcon /><span>Sign out</span>
+    </button>
+  )
+}
+
 // AlphaPill — small uppercase chip for surfaces that aren't yet stable.
-// Same colour family the in-modal "Alpha" badge already uses (warn/orange),
-// kept here so the navbar and dropdown stay consistent without a CSS round-trip.
 function AlphaPill() {
   return (
-    <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded">
+    <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded ml-auto">
       Alpha
     </span>
+  )
+}
+
+// --- icons -------------------------------------------------------
+// 16px, 1.6px stroke, currentColor. Single source so the dropdown's
+// visual rhythm stays consistent without pulling in a UI library.
+
+const iconProps = {
+  width: 16,
+  height: 16,
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.6,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+  'aria-hidden': true,
+}
+
+function ShieldIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  )
+}
+
+function ServerIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="3" y="4" width="18" height="7" rx="1.5" />
+      <rect x="3" y="13" width="18" height="7" rx="1.5" />
+      <line x1="7" y1="7.5" x2="7.01" y2="7.5" />
+      <line x1="7" y1="16.5" x2="7.01" y2="16.5" />
+    </svg>
+  )
+}
+
+function DatabaseIcon() {
+  return (
+    <svg {...iconProps}>
+      <ellipse cx="12" cy="5" rx="8" ry="2.5" />
+      <path d="M4 5v6c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5V5" />
+      <path d="M4 11v6c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-6" />
+    </svg>
+  )
+}
+
+function CpuIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="5" y="5" width="14" height="14" rx="1.5" />
+      <rect x="9" y="9" width="6" height="6" />
+      <line x1="9" y1="2" x2="9" y2="5" />
+      <line x1="15" y1="2" x2="15" y2="5" />
+      <line x1="9" y1="19" x2="9" y2="22" />
+      <line x1="15" y1="19" x2="15" y2="22" />
+      <line x1="2" y1="9" x2="5" y2="9" />
+      <line x1="2" y1="15" x2="5" y2="15" />
+      <line x1="19" y1="9" x2="22" y2="9" />
+      <line x1="19" y1="15" x2="22" y2="15" />
+    </svg>
+  )
+}
+
+function KeyIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="8" cy="15" r="3.5" />
+      <path d="M10.5 12.5L20 3" />
+      <path d="M16 7l3 3" />
+      <path d="M18 5l2 2" />
+    </svg>
+  )
+}
+
+function UserIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6" />
+    </svg>
+  )
+}
+
+function SignOutIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" />
+      <path d="M16 17l5-5-5-5" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
   )
 }

@@ -165,6 +165,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", auth.Me)
 			r.Get("/users", auth.ListUsers)
 			r.Get("/account", auth.Account)
+			r.Put("/account/password", auth.ChangePassword)
 
 			// Access-code endpoints — must be reachable WITHOUT being verified,
 			// so the unverified user can submit their code from the Verify page.
