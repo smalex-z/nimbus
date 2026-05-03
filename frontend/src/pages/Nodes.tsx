@@ -1,39 +1,51 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { listNodes } from '@/api/client'
+import { useCallback, useEffect, useState } from 'react'
+import { getProxmoxBinding, listNodes } from '@/api/client'
+import type { ProxmoxBinding } from '@/api/client'
 import type { NodeView } from '@/types'
 import { CordonModal, DrainPlanModal, RemoveNodeModal, TagsModal } from '@/components/NodeActionModals'
+import ProxmoxBindingModal from '@/components/ProxmoxBindingModal'
+import Card from '@/components/ui/Card'
+import StatusBadge from '@/components/ui/StatusBadge'
+import UsageBar from '@/components/ui/UsageBar'
 import NavDropdown from '@/components/ui/NavDropdown'
+import { formatBytes } from '@/lib/format'
 
-// Nodes — admin-only page listing every Proxmox node Nimbus knows about,
-// with per-row actions for cordon / drain / uncordon / tag / remove.
+// Nodes — admin-only page for cluster lifecycle. Three sections stacked:
 //
-// Lock state semantics (mirrors Kubernetes vocabulary by design — most
-// operators recognize cordon/drain from kubectl):
-//   none      — normal: scheduler can land VMs here
-//   cordoned  — soft lock: scheduler skips, existing VMs untouched
-//   draining  — hard lock: scheduler skips + a drain operation is in flight
-//   drained   — terminal: zero managed VMs left, ready to remove from cluster
+//   1. Connected-Proxmox row — surfaces "you are talking to <node> in
+//      <cluster>" so the operator never wonders which cluster they're
+//      looking at. Click → opens ProxmoxBindingModal with the full
+//      detail (version, node count, last contact, reachability).
+//   2. Per-node card grid — same visual language as the Admin dashboard
+//      (UsageBars for CPU / mem-in-use / mem-allocated / swap). Adds
+//      lock-state badge + actions menu (cordon / drain / tags / remove).
+//   3. Modals (cordon / drain plan / tags / remove) — mounted at the
+//      page level so card-level actions can dispatch into them.
 //
-// The drain action opens a modal showing the migration plan — operator
-// reviews + (optionally) overrides per-VM destinations before confirming.
-// Uses NDJSON streaming progress for the actual execution. See
-// DrainPlanModal in components/NodeActionModals.tsx.
+// Lock state vocabulary follows kubectl (cordon / drain) — the row
+// dropdown carries tooltips so an operator who's never used kubectl
+// still knows what each verb does without leaving the page.
 export default function Nodes() {
   const [rows, setRows] = useState<NodeView[] | null>(null)
+  const [binding, setBinding] = useState<ProxmoxBinding | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction>(null)
+  const [bindingOpen, setBindingOpen] = useState(false)
 
   const reload = useCallback(() => {
     listNodes()
       .then(setRows)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+    getProxmoxBinding()
+      .then(setBinding)
+      .catch(() => { /* keep last binding on transient error */ })
   }, [])
 
   useEffect(() => { reload() }, [reload])
 
-  // Re-fetch on a slow loop so cordon/drain state changes from another
-  // operator's session show up here without a page reload. Cheap (one
-  // /api/nodes round trip; Proxmox calls are already cached server-side).
+  // Slow refresh so cordon/drain state changes from another operator's
+  // session show up here without a full page reload. Cheap (one
+  // /api/nodes round trip + one /api/proxmox/binding).
   useEffect(() => {
     const id = setInterval(reload, 15_000)
     return () => clearInterval(id)
@@ -52,6 +64,8 @@ export default function Nodes() {
         </p>
       </div>
 
+      {binding && <BindingRow binding={binding} onClick={() => setBindingOpen(true)} />}
+
       {error && (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>
       )}
@@ -67,7 +81,11 @@ export default function Nodes() {
       )}
 
       {rows !== null && rows.length > 0 && (
-        <NodesTable rows={rows} onAction={setPending} />
+        <NodeCardGrid rows={rows} onAction={setPending} />
+      )}
+
+      {bindingOpen && binding && (
+        <ProxmoxBindingModal binding={binding} onClose={() => setBindingOpen(false)} />
       )}
 
       {pending?.kind === 'cordon' && (
@@ -106,133 +124,217 @@ type PendingAction =
   | { kind: 'cordon' | 'drain' | 'remove' | 'tags'; node: NodeView }
   | null
 
-function NodesTable({ rows, onAction }: { rows: NodeView[]; onAction: (a: PendingAction) => void }) {
-  const sorted = useMemo(() => {
-    // Online nodes first, then alphabetical. Self-host stays where it
-    // sorts naturally — operators want to see it in the same place
-    // regardless of whether it's selected.
-    return [...rows].sort((a, b) => {
-      if (a.status !== b.status) {
-        if (a.status === 'online') return -1
-        if (b.status === 'online') return 1
-      }
-      return a.name.localeCompare(b.name)
-    })
-  }, [rows])
-
+// BindingRow shows the "connected to <node>" indicator. Compact (one
+// row of glass) so it doesn't compete with the node grid for attention,
+// but always visible — the operator never has to wonder which cluster
+// they're configuring.
+function BindingRow({
+  binding,
+  onClick,
+}: {
+  binding: ProxmoxBinding
+  onClick: () => void
+}) {
+  const reachable = binding.reachable !== false
+  const primary = binding.connected_node || binding.cluster_name || hostFromURL(binding.host) || 'Proxmox'
   return (
-    <div className="glass" style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-          Cluster nodes
-        </span>
-        <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-          {rows.length} {rows.length === 1 ? 'node' : 'nodes'}
+    <button
+      type="button"
+      onClick={onClick}
+      className="glass"
+      style={{
+        padding: '14px 18px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 16,
+        cursor: 'pointer',
+        textAlign: 'left',
+        background: 'rgba(255,255,255,0.6)',
+      }}
+      title="Click for cluster details"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span
+          aria-hidden="true"
+          style={{
+            width: 8, height: 8, borderRadius: 4,
+            background: reachable ? 'var(--ok)' : 'var(--err)',
+          }}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          <span style={{ fontSize: 11, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Connected to
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)', marginTop: 2 }}>
+            {primary}
+            {binding.cluster_name && binding.connected_node !== binding.cluster_name && (
+              <span style={{ color: 'var(--ink-mute)', fontWeight: 400, marginLeft: 8 }}>
+                · cluster {binding.cluster_name}
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 18, fontSize: 12, color: 'var(--ink-body)' }}>
+        <span style={{ fontFamily: 'Geist Mono, monospace' }}>{binding.host}</span>
+        {binding.version && (
+          <span style={{ fontFamily: 'Geist Mono, monospace', color: 'var(--ink-mute)' }}>
+            pve {binding.version}
+          </span>
+        )}
+        <span style={{ color: 'var(--ink-mute)' }}>
+          {binding.node_count} {binding.node_count === 1 ? 'node' : 'nodes'} →
         </span>
       </div>
-      <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
-        <table className="w-full text-left" style={{ fontSize: 13, borderCollapse: 'collapse' }}>
-          <thead>
-            <tr style={{ color: 'var(--ink-mute)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>Node</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>Lock</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>CPU</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>RAM</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>VMs</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500 }}>Tags</th>
-              <th style={{ padding: '8px 8px', fontWeight: 500, width: 1 }} aria-label="Actions" />
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((n) => (
-              <tr key={n.name} style={{ borderTop: '1px solid var(--line)' }}>
-                <td style={{ padding: '10px 8px' }}>
-                  <div style={{ color: 'var(--ink)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {n.name}
-                    {n.is_self_host && (
-                      <span
-                        className="font-mono"
-                        title="The node Nimbus itself runs on — Remove is disabled"
-                        style={{
-                          fontSize: 9, padding: '1px 5px', borderRadius: 3,
-                          color: 'var(--ink-mute)', background: 'rgba(20,18,28,0.05)',
-                          border: '1px solid var(--line)', textTransform: 'uppercase',
-                          letterSpacing: '0.06em',
-                        }}
-                      >self</span>
-                    )}
-                  </div>
-                  {n.ip && (
-                    <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2 }}>
-                      {n.ip}
-                    </div>
-                  )}
-                </td>
-                <td style={{ padding: '10px 8px' }}><StatusPill status={n.status} /></td>
-                <td style={{ padding: '10px 8px' }}>
-                  <LockPill state={n.lock_state} reason={n.lock_reason} />
-                </td>
-                <td style={{ padding: '10px 8px', color: 'var(--ink-body)', whiteSpace: 'nowrap' }}>
-                  {(n.cpu * 100).toFixed(0)}% / {n.max_cpu}c
-                </td>
-                <td style={{ padding: '10px 8px', color: 'var(--ink-body)', whiteSpace: 'nowrap' }}>
-                  {n.mem_total > 0 ? `${((n.mem_used / n.mem_total) * 100).toFixed(0)}%` : '—'}
-                </td>
-                <td style={{ padding: '10px 8px', color: 'var(--ink-body)', whiteSpace: 'nowrap' }}>
-                  {n.vm_count} / {n.vm_count_total}
-                </td>
-                <td style={{ padding: '10px 8px' }}><TagChips tags={n.tags} /></td>
-                <td style={{ padding: '10px 8px', textAlign: 'right' }}>
-                  <RowActions node={n} onAction={onAction} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    </button>
+  )
+}
+
+function hostFromURL(raw: string): string {
+  try {
+    const u = new URL(raw)
+    return u.hostname
+  } catch {
+    return raw
+  }
+}
+
+// NodeCardGrid arranges per-node cards in a responsive grid — same
+// breakpoints the Admin dashboard uses so the two surfaces feel
+// consistent.
+function NodeCardGrid({ rows, onAction }: { rows: NodeView[]; onAction: (a: PendingAction) => void }) {
+  // Online first, then alpha. Self-host stays where it sorts naturally.
+  const sorted = [...rows].sort((a, b) => {
+    if (a.status !== b.status) {
+      if (a.status === 'online') return -1
+      if (b.status === 'online') return 1
+    }
+    return a.name.localeCompare(b.name)
+  })
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      {sorted.map((n) => (
+        <NodeCard key={n.name} node={n} onAction={onAction} />
+      ))}
     </div>
   )
 }
 
-function StatusPill({ status }: { status: NodeView['status'] }) {
-  if (status === 'online') {
-    return (
-      <span className="n-pill n-pill-ok" style={{ fontSize: 10 }}>
-        <span className="n-pill-dot" />
-        online
-      </span>
-    )
-  }
+// NodeCard mirrors the Admin dashboard's node card layout (CPU / mem
+// in use / mem allocated / swap usage bars) and adds the lock-state
+// badge + an action menu in the corner. Reusing the visual language
+// keeps the operator's mental model consistent across the two surfaces.
+function NodeCard({ node: n, onAction }: { node: NodeView; onAction: (a: PendingAction) => void }) {
+  const memUsedPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
+  const memAllocPct = n.mem_total > 0 ? (n.mem_allocated / n.mem_total) * 100 : 0
+  const swapPct = n.swap_total > 0 ? (n.swap_used / n.swap_total) * 100 : 0
+  const cpuPct = n.cpu * 100
+  const swapping = n.swap_used > 10 * 1024 * 1024
+  const hasSwap = n.swap_total > 0
+
   return (
-    <span
-      className="n-pill"
-      style={{
-        fontSize: 10,
-        color: 'var(--err)',
-        background: 'rgba(184,55,55,0.08)',
-        border: '1px solid rgba(184,55,55,0.25)',
-      }}
-    >
-      {status}
-    </span>
+    <Card className="p-6">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <div className="font-display text-lg font-medium flex items-center gap-2">
+            {n.name}
+            {n.is_self_host && (
+              <span
+                className="font-mono"
+                title="Nimbus runs on this node — Remove is disabled to prevent locking yourself out"
+                style={{
+                  fontSize: 9, padding: '1px 5px', borderRadius: 3,
+                  color: 'var(--ink-mute)', background: 'rgba(20,18,28,0.05)',
+                  border: '1px solid var(--line)', textTransform: 'uppercase',
+                  letterSpacing: '0.06em',
+                }}
+              >self</span>
+            )}
+          </div>
+          <div className="font-mono text-[11px] text-ink-3 mt-1">
+            {n.max_cpu} cores · {formatBytes(n.mem_total)} RAM
+            {n.ip && <> · {n.ip}</>}
+          </div>
+          <div className="font-mono text-[11px] text-ink-3 mt-0.5">
+            <span title={`${n.vm_count} running of ${n.vm_count_total} total`}>
+              {n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+            </span>
+            {n.tags.length > 0 && (
+              <span> · {n.tags.join(', ')}</span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col items-end gap-1.5">
+          <div className="flex items-center gap-2">
+            <LockBadge state={n.lock_state} reason={n.lock_reason} />
+            <StatusBadge status={n.status} />
+            <RowActions node={n} onAction={onAction} />
+          </div>
+          {swapping && (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)]"
+              title="Allocated memory exceeded physical RAM — host is paging to swap."
+            >
+              swap{' '}
+              <span className="normal-case tracking-normal">
+                +{formatBytes(n.swap_used)}
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="mt-5 flex flex-col gap-3">
+        <UsageBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(1)}%`} />
+        <UsageBar
+          label="Memory in use"
+          pct={memUsedPct}
+          hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
+        />
+        <UsageBar
+          label="Memory allocated"
+          pct={memAllocPct}
+          hint={`${formatBytes(n.mem_allocated)} / ${formatBytes(n.mem_total)}`}
+        />
+        {hasSwap && (
+          <UsageBar
+            label="Swap usage"
+            pct={swapPct}
+            hint={`${formatBytes(n.swap_used)} / ${formatBytes(n.swap_total)}`}
+          />
+        )}
+      </div>
+    </Card>
   )
 }
 
-function LockPill({ state, reason }: { state: NodeView['lock_state']; reason?: string }) {
-  if (state === 'none') {
-    return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
-  }
-  const palette: Record<string, { color: string; bg: string; border: string }> = {
-    cordoned: { color: '#9a5c2e', bg: 'rgba(248,175,130,0.15)', border: 'rgba(248,175,130,0.4)' },
-    draining: { color: '#9a5c2e', bg: 'rgba(248,175,130,0.15)', border: 'rgba(248,175,130,0.4)' },
-    drained:  { color: 'var(--ink-mute)', bg: 'rgba(20,18,28,0.05)', border: 'var(--line)' },
+function LockBadge({ state, reason }: { state: NodeView['lock_state']; reason?: string }) {
+  if (state === 'none') return null
+  const palette: Record<string, { color: string; bg: string; border: string; tip: string }> = {
+    cordoned: {
+      color: '#9a5c2e',
+      bg: 'rgba(248,175,130,0.15)',
+      border: 'rgba(248,175,130,0.4)',
+      tip: 'Cordoned — scheduler skips this node, existing VMs keep running',
+    },
+    draining: {
+      color: '#9a5c2e',
+      bg: 'rgba(248,175,130,0.15)',
+      border: 'rgba(248,175,130,0.4)',
+      tip: 'Draining — migration in flight; do not touch',
+    },
+    drained: {
+      color: 'var(--ink-mute)',
+      bg: 'rgba(20,18,28,0.05)',
+      border: 'var(--line)',
+      tip: 'Drained — no managed VMs left, ready to remove from cluster',
+    },
   }
   const p = palette[state]
   return (
     <span
       className="font-mono"
-      title={reason || ''}
+      title={reason ? `${p.tip}\n\nReason: ${reason}` : p.tip}
       style={{
         fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
         textTransform: 'uppercase', letterSpacing: '0.06em',
@@ -244,33 +346,11 @@ function LockPill({ state, reason }: { state: NodeView['lock_state']; reason?: s
   )
 }
 
-function TagChips({ tags }: { tags: string[] }) {
-  if (!tags || tags.length === 0) {
-    return <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>—</span>
-  }
-  return (
-    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
-      {tags.map((t) => (
-        <span
-          key={t}
-          style={{
-            fontSize: 10, fontFamily: 'Geist Mono, monospace',
-            padding: '2px 6px', borderRadius: 4,
-            background: 'rgba(20,18,28,0.05)', border: '1px solid var(--line)',
-            color: 'var(--ink-body)',
-          }}
-        >
-          {t}
-        </span>
-      ))}
-    </span>
-  )
-}
-
+// RowActions is the per-card "..." menu. Each item carries a `title` so
+// hovering reveals what the verb actually does — important for cordon
+// and drain since most operators outside the kubectl world won't recognize
+// the verbs at a glance.
 function RowActions({ node, onAction }: { node: NodeView; onAction: (a: PendingAction) => void }) {
-  // Mirror the dismiss-then-do pattern UsersTable uses so the dropdown
-  // closes cleanly before the modal mounts (otherwise the floating
-  // panel sits over the modal backdrop).
   const dismissAndDo = (fn: () => void) => () => {
     document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     fn()
@@ -280,60 +360,80 @@ function RowActions({ node, onAction }: { node: NodeView; onAction: (a: PendingA
       placement="bottom-end"
       triggerOn="click"
       triggerClassName="inline-flex items-center justify-center w-7 h-7 rounded-md border border-line-2 bg-white/85 text-ink-2 hover:border-ink hover:text-ink transition-colors"
-      panelClassName="rounded-lg border border-line bg-white py-1 min-w-[200px] shadow-lg"
+      panelClassName="rounded-lg border border-line bg-white py-1 min-w-[240px] shadow-lg"
       trigger={<MoreIcon />}
     >
       {node.lock_state === 'none' && (
-        <button
-          type="button"
+        <ActionItem
+          label="Cordon…"
+          tip="Stop the scheduler from placing new VMs here. Existing VMs keep running. Reversible — Uncordon brings the node back."
           onClick={dismissAndDo(() => onAction({ kind: 'cordon', node }))}
-          className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
-        >
-          Cordon…
-        </button>
+        />
       )}
       {(node.lock_state === 'cordoned' || node.lock_state === 'drained') && (
-        <button
-          type="button"
+        <ActionItem
+          label="Uncordon"
+          tip="Allow the scheduler to place new VMs here again."
           onClick={dismissAndDo(() => onAction({ kind: 'cordon', node }))}
-          className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
-        >
-          Uncordon
-        </button>
+        />
       )}
       {(node.lock_state === 'none' || node.lock_state === 'cordoned') && (
-        <button
-          type="button"
+        <ActionItem
+          label="Drain…"
+          tip="Migrate every managed VM off this node, then mark it drained. Opens a plan modal — you review and (optionally) override per-VM destinations before confirming. Used when you're physically reclaiming the host."
           onClick={dismissAndDo(() => onAction({ kind: 'drain', node }))}
-          className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
-        >
-          Drain…
-        </button>
+        />
       )}
-      <button
-        type="button"
+      <ActionItem
+        label="Tags…"
+        tip="Free-text labels (e.g. gpu, nvme-fast). Stored for the future workload-aware scheduler; doesn't affect placement yet."
         onClick={dismissAndDo(() => onAction({ kind: 'tags', node }))}
-        className="block w-full text-left px-3 py-1.5 text-[13px] text-ink hover:bg-[rgba(27,23,38,0.05)] cursor-pointer"
-      >
-        Tags…
-      </button>
+      />
       <div className="my-1 border-t border-line" />
-      <button
-        type="button"
+      <ActionItem
+        label="Remove from cluster…"
+        destructive
         disabled={node.is_self_host || node.lock_state !== 'drained'}
-        onClick={dismissAndDo(() => onAction({ kind: 'remove', node }))}
-        title={
+        tip={
           node.is_self_host
-            ? 'Cannot remove the node Nimbus runs on'
+            ? 'Cannot remove the node Nimbus runs on.'
             : node.lock_state !== 'drained'
-              ? 'Drain the node first'
-              : ''
+              ? 'Drain the node first — this calls pvecm delnode, which Proxmox refuses while VMs are still on it.'
+              : 'Removes this node from the Proxmox cluster (pvecm delnode). The host itself is unaffected.'
         }
-        className="block w-full text-left px-3 py-1.5 text-[13px] text-bad hover:bg-[rgba(184,55,55,0.06)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-      >
-        Remove from cluster…
-      </button>
+        onClick={dismissAndDo(() => onAction({ kind: 'remove', node }))}
+      />
     </NavDropdown>
+  )
+}
+
+function ActionItem({
+  label,
+  tip,
+  onClick,
+  destructive = false,
+  disabled = false,
+}: {
+  label: string
+  tip: string
+  onClick: () => void
+  destructive?: boolean
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      title={tip}
+      disabled={disabled}
+      onClick={onClick}
+      className={`block w-full text-left px-3 py-1.5 text-[13px] cursor-pointer ${
+        destructive
+          ? 'text-bad hover:bg-[rgba(184,55,55,0.06)]'
+          : 'text-ink hover:bg-[rgba(27,23,38,0.05)]'
+      } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent`}
+    >
+      {label}
+    </button>
   )
 }
 

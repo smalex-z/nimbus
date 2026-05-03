@@ -1125,6 +1125,10 @@ export async function reconcileVMs(): Promise<VMReconcileReport> {
 
 export interface ProxmoxBinding {
   host: string
+  // The node Nimbus is talking to via the API. Distinct from
+  // cluster_name (the corosync cluster identifier) — operators care
+  // about the entry-point node, not just "which cluster."
+  connected_node: string
   cluster_name: string
   version: string
   node_count: number

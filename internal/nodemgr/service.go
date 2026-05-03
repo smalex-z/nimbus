@@ -42,6 +42,7 @@ type ProxmoxClient interface {
 	GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error)
 	GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error)
 	GetNodeStatus(ctx context.Context, node string) (*proxmox.NodeStatus, error)
+	GetClusterStatus(ctx context.Context) ([]proxmox.ClusterStatusEntry, error)
 	NodeAddresses(ctx context.Context) (map[string]string, error)
 	ClusterName(ctx context.Context) (string, error)
 	Version(ctx context.Context) (string, error)
@@ -320,25 +321,35 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 	return len(nodes), pruned, nil
 }
 
-// Binding is what GET /api/proxmox/binding returns — the chip in the SPA
-// header consumes it. Kept lean (one Proxmox round trip + two cluster-
-// scoped calls) so the chip can poll without straining the API.
+// Binding is what GET /api/proxmox/binding returns — the Nodes page
+// consumes it as the "what cluster are we talking to" indicator.
 type Binding struct {
-	Host        string    `json:"host"`         // configured Proxmox base URL
-	ClusterName string    `json:"cluster_name"` // empty for single-node deployments
-	Version     string    `json:"version"`      // e.g. "8.2.7"
-	NodeCount   int       `json:"node_count"`
-	LastSeen    time.Time `json:"last_seen"` // wall time of the last successful call
-	Reachable   bool      `json:"reachable"` // false when ALL the calls failed
+	Host string `json:"host"` // configured Proxmox base URL
+	// ConnectedNode is the cluster member whose Proxmox API actually
+	// served this request (the node where corosync `Local=1`). For
+	// single-host deployments it equals the only node; for multi-node
+	// clusters it's the entry-point node — telling the operator "you
+	// reach the cluster *through* this host." Distinct from
+	// ClusterName, which is the corosync-wide identifier.
+	ConnectedNode string    `json:"connected_node"`
+	ClusterName   string    `json:"cluster_name"` // empty for single-node deployments
+	Version       string    `json:"version"`      // e.g. "8.2.7"
+	NodeCount     int       `json:"node_count"`
+	LastSeen      time.Time `json:"last_seen"` // wall time of the last successful call
+	Reachable     bool      `json:"reachable"` // false when ALL the calls failed
 }
 
-// GetBinding returns the cluster-binding chip payload. Failures are not
+// GetBinding returns the cluster-binding payload. Failures are not
 // fatal — partial responses (e.g. version OK, cluster name failed) are
 // served with the missing fields blank.
 //
 // The host is provided by the caller (config) since the proxmox client
 // doesn't expose its base URL; passing it through Service avoids leaking
 // the config dependency to every consumer.
+//
+// ConnectedNode comes from /cluster/status — Proxmox marks the
+// API-receiving node with Local=1 so we can name the entry point
+// rather than just the cluster.
 func (s *Service) GetBinding(ctx context.Context, host string) (*Binding, error) {
 	out := &Binding{Host: host}
 
@@ -347,14 +358,27 @@ func (s *Service) GetBinding(ctx context.Context, host string) (*Binding, error)
 		out.Reachable = true
 		out.LastSeen = time.Now().UTC()
 	}
-	if name, err := s.px.ClusterName(ctx); err == nil {
-		out.ClusterName = name
+	if entries, err := s.px.GetClusterStatus(ctx); err == nil {
+		for _, e := range entries {
+			if e.Type == "cluster" && out.ClusterName == "" {
+				out.ClusterName = e.Name
+			}
+			if e.Type == "node" && e.Local == 1 {
+				out.ConnectedNode = e.Name
+			}
+		}
 	}
 	if nodes, err := s.px.GetNodes(ctx); err == nil {
 		out.NodeCount = len(nodes)
 		out.Reachable = true
 		if out.LastSeen.IsZero() {
 			out.LastSeen = time.Now().UTC()
+		}
+		// /cluster/status omits the cluster row on single-node
+		// deployments — fall back to the lone node's name so the chip
+		// has *something* concrete to display rather than "—".
+		if out.ConnectedNode == "" && len(nodes) == 1 {
+			out.ConnectedNode = nodes[0].Name
 		}
 	}
 	return out, nil

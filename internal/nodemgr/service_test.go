@@ -86,6 +86,12 @@ func (f *fakePVE) NodeAddresses(_ context.Context) (map[string]string, error) {
 func (f *fakePVE) ClusterName(_ context.Context) (string, error) { return f.clusterName, nil }
 func (f *fakePVE) Version(_ context.Context) (string, error)     { return f.version, nil }
 
+func (f *fakePVE) GetClusterStatus(_ context.Context) ([]proxmox.ClusterStatusEntry, error) {
+	// Fakes don't drive Binding tests; empty slice is enough to satisfy
+	// the interface so List/ComputePlan/Execute paths compile.
+	return nil, nil
+}
+
 func (f *fakePVE) MigrateVM(_ context.Context, source string, vmid int, target string, online bool) (string, error) {
 	f.mu.Lock()
 	call := migrateCall{Source: source, VMID: vmid, Target: target, Online: online}
