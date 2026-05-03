@@ -853,19 +853,20 @@ function GitHubOrgsSection() {
 }
 
 
-// SettingsSignIn — /settings/sign-in subpage. The single home for
-// "who can sign in to this workspace": OAuth provider config, the
-// access-code regenerate widget, the passwordless-sign-in toggle (with
-// bulk-suspend / email-stragglers affordances), and the full account
-// table. All four govern sign-in policy + membership, so they share a
-// page rather than splitting across /users and /settings/sign-in like
-// the previous iteration did.
+// Authentication — top-level admin page consolidating "who can sign in
+// to this workspace" and "who has signed up". OAuth provider config,
+// access-code regenerate widget, passwordless-sign-in toggle (with
+// bulk-suspend / email-stragglers affordances) sit on the right; the
+// full accounts table sits on the left. Single page since all four
+// surfaces govern the same domain — an admin reviewing a flagged
+// account often wants to flip the passwordless toggle in the same
+// session, and routing them through /settings made that two clicks
+// instead of one.
 //
-// The page stacks: providers + passwordless summary, access code panel,
-// then the accounts table. Every helper for the OAuth + access-code
-// surfaces lives in this file; the accounts table lives in
-// components/UsersTable.tsx since it's the one piece a future page
-// (e.g. an audit-log surface) might want to reuse.
+// Every helper for the OAuth + access-code surfaces lives in this file;
+// the accounts table lives in components/UsersTable.tsx since it's the
+// one piece a future page (e.g. an audit-log surface) might want to
+// reuse.
 //
 // editingProvider tracks which (if any) per-provider modal is open.
 // Using a discrete identifier rather than a boolean lets the modal
@@ -873,7 +874,7 @@ function GitHubOrgsSection() {
 // flags.
 type EditingProvider = 'google' | 'github' | null
 
-export default function SettingsSignIn() {
+export default function Authentication() {
   const [settings, setSettings] = useState<OAuthSettingsView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editingProvider, setEditingProvider] = useState<EditingProvider>(null)
@@ -910,14 +911,14 @@ export default function SettingsSignIn() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
-        <h2 style={{ fontSize: 22, margin: '0 0 4px', fontWeight: 500 }}>
-          Sign-in & access
-        </h2>
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)' }}>
-          OAuth providers, access code, the passwordless-sign-in toggle, and the
-          full account list.
+        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
+          Authentication
+        </h1>
+        <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
+          Sign-in providers, access code, the passwordless toggle, and the
+          full account list — all in one place.
         </p>
       </div>
 
@@ -925,14 +926,22 @@ export default function SettingsSignIn() {
         <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{loadError}</p>
       )}
 
-      <ProvidersSummary
-        settings={settings}
-        onEdit={(p) => setEditingProvider(p)}
-        refreshTick={refreshTick}
-        onMutated={refreshAll}
-      />
-      <AccessCodePanel />
-      <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
+      {/* Two-column on lg+: accounts on the left (the wide data
+          surface), sign-in policy stack on the right (config, lower
+          frequency). Falls back to a single column on narrow viewports
+          where stacking reads better than a 280px right rail. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6 items-start">
+        <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <ProvidersSummary
+            settings={settings}
+            onEdit={(p) => setEditingProvider(p)}
+            refreshTick={refreshTick}
+            onMutated={refreshAll}
+          />
+          <AccessCodePanel />
+        </div>
+      </div>
 
       {editingProvider && settings && (
         <OAuthProviderModal

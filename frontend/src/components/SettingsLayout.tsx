@@ -50,7 +50,6 @@ export default function SettingsLayout({ children }: SettingsLayoutProps) {
   }, [location.pathname])
 
   const items: NavItem[] = [
-    { label: 'Sign-in & access', to: '/settings/sign-in', visible: true },
     { label: 'Email', to: '/settings/email', badge: 'preview', visible: true },
     { label: 'Gopher Tunnels', to: '/settings/gopher', visible: true },
     { label: 'Network', to: '/settings/network', visible: true },
@@ -75,7 +74,11 @@ export default function SettingsLayout({ children }: SettingsLayoutProps) {
             flexDirection: 'column',
             gap: 2,
             position: 'sticky',
-            top: 80,
+            // The sticky navbar measures ~73px (py-5 padding + h-8 logo +
+            // 1px border). 100 leaves a clean ~27px gap so the sidebar
+            // doesn't appear glued to the bottom of the navbar after the
+            // page scrolls into the sticky range.
+            top: 100,
             alignSelf: 'start',
           }}
         >

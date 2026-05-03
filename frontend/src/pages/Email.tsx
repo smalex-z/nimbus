@@ -13,7 +13,7 @@ import type { SMTPSettingsView, SaveSMTPRequest } from '@/api/client'
 //
 // "Send test email" delivers a short message to the calling admin's
 // own address — useful for verifying the saved credentials before
-// triggering the bulk recovery send from /settings/sign-in. The button
+// triggering the bulk recovery send from /authentication. The button
 // is the only way to learn whether host/auth/TLS actually work end to
 // end; the form save just persists the values.
 export default function Email() {
@@ -298,7 +298,7 @@ export default function Email() {
               </span>
               <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
                 Once SMTP is enabled and the send pipeline ships, admins on
-                /settings/sign-in can email password-only accounts a magic-link
+                /authentication can email password-only accounts a magic-link
                 recovery URL. Clicking the link signs the user in (and
                 unsuspends them if needed) and drops them on /account so
                 they can connect Google or GitHub.

@@ -8,9 +8,9 @@ import RequireAuth from '@/components/RequireAuth'
 import RequireVerified from '@/components/RequireVerified'
 import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
+import Authentication from '@/pages/Authentication'
 import Email from '@/pages/Email'
 import SettingsLayout from '@/components/SettingsLayout'
-import SettingsSignIn from '@/pages/settings/SignIn'
 import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
 import GPUHost from '@/pages/GPUHost'
@@ -93,29 +93,33 @@ export default function App() {
                       <Route path="/gpu" element={<GPU />} />
                       <Route path="/quotas" element={<RequireAdmin><Quotas /></RequireAdmin>} />
                       <Route path="/account" element={<Account />} />
-                      {/* /settings hosts the consolidated config sidebar
-                          (Sign-in, Email, Gopher Tunnels, Network, S3,
-                          GPU hosts). The old standalone routes — /email,
-                          /gophers, /network, /s3, /gpu-host — redirect
-                          to their /settings/* counterparts so existing
-                          bookmarks still resolve. */}
-                      <Route path="/settings" element={<Navigate to="/settings/sign-in" replace />} />
-                      <Route path="/settings/sign-in" element={<RequireAdmin><SettingsLayout><SettingsSignIn /></SettingsLayout></RequireAdmin>} />
+                      {/* /authentication is the top-level admin page that
+                          owns the user table + sign-in providers + access
+                          code + passwordless toggle. Lived briefly under
+                          /settings/sign-in but the data surface is wide
+                          enough to deserve its own tab. */}
+                      <Route path="/authentication" element={<RequireAdmin><Authentication /></RequireAdmin>} />
+                      {/* /settings hosts the workspace-config sidebar
+                          (Email, Gopher Tunnels, Network, S3, GPU hosts).
+                          Old standalone routes — /email, /gophers, /network,
+                          /s3, /gpu-host — redirect to their /settings/*
+                          counterparts so existing bookmarks still resolve. */}
+                      <Route path="/settings" element={<Navigate to="/settings/email" replace />} />
                       <Route path="/settings/email" element={<RequireAdmin><SettingsLayout><Email /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/gopher" element={<RequireAdmin><SettingsLayout><GopherTunnels /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/network" element={<RequireAdmin><SettingsLayout><Network /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/s3" element={<RequireAdmin><SettingsLayout><S3 /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/gpu-hosts" element={<RequireAdmin><SettingsLayout><GPUHost /></SettingsLayout></RequireAdmin>} />
-                      {/* Bookmark redirects from the old standalone admin pages.
-                          /users used to be its own surface; the user table now
-                          lives inside /settings/sign-in alongside the OAuth
-                          providers + access code + passwordless toggle. */}
+                      {/* Bookmark redirects. /users + /settings/sign-in
+                          both used to host the user table; both now land
+                          on /authentication. */}
                       <Route path="/email" element={<Navigate to="/settings/email" replace />} />
                       <Route path="/gophers" element={<Navigate to="/settings/gopher" replace />} />
                       <Route path="/network" element={<Navigate to="/settings/network" replace />} />
                       <Route path="/s3" element={<Navigate to="/settings/s3" replace />} />
                       <Route path="/gpu-host" element={<Navigate to="/settings/gpu-hosts" replace />} />
-                      <Route path="/users" element={<Navigate to="/settings/sign-in" replace />} />
+                      <Route path="/users" element={<Navigate to="/authentication" replace />} />
+                      <Route path="/settings/sign-in" element={<Navigate to="/authentication" replace />} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>

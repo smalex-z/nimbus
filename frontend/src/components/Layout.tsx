@@ -108,10 +108,14 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
-              {/* Quotas is admin's high-frequency surface — promoted out
-                  of the old Control Panel dropdown so a sysadmin can hit
-                  it in one click. The user table moved back under
-                  /settings/sign-in (see Settings → Sign-in & access). */}
+              {/* Authentication + Quotas are admin's high-frequency
+                  policy surfaces — promoted out of the old Control Panel
+                  dropdown so a sysadmin can hit them in one click. */}
+              {user?.is_admin && (
+                <NavLink to="/authentication" className={navLinkClass}>
+                  Authentication
+                </NavLink>
+              )}
               {user?.is_admin && (
                 <NavLink to="/quotas" className={navLinkClass}>
                   Quotas
@@ -214,14 +218,17 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
         </nav>
       )}
 
-      {/* /settings/* is a wide page: the consolidated sidebar (220px) plus
-          a content column with tables, filter rows, and OAuth panels needs
-          more horizontal room than the 1200px the rest of the app uses.
-          Bumping just the main width — not the navbar — keeps the top bar
-          centred and aligned with everywhere else. */}
+      {/* /settings/* and /authentication are wide pages: settings has a
+          220px sidebar next to its content, and /authentication runs a
+          users table next to a 360px policy rail. Both need more
+          horizontal room than the 1200px the rest of the app uses.
+          Bumping just the main width — not the navbar — keeps the top
+          bar centred and aligned with everywhere else. */}
       <main
         className={`flex-1 mx-auto w-full px-8 py-12 pb-20 animate-fadeIn ${
-          location.pathname.startsWith('/settings') ? 'max-w-[1440px]' : 'max-w-[1200px]'
+          location.pathname.startsWith('/settings') || location.pathname.startsWith('/authentication')
+            ? 'max-w-[1440px]'
+            : 'max-w-[1200px]'
         }`}
       >
         {children}

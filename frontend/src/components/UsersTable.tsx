@@ -16,7 +16,7 @@ import { useAuth } from '@/hooks/useAuth'
 // match) so the column reflects what would happen on the user's next
 // request, not a snapshot at sign-up.
 //
-// Lives in /settings/sign-in alongside the OAuth providers + access code
+// Lives in /authentication alongside the OAuth providers + access code
 // + passwordless toggle — the four surfaces all govern who can sign in,
 // so they share a page.
 
