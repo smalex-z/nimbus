@@ -78,7 +78,7 @@ export default function Email() {
         <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px', display: 'inline-flex', alignItems: 'center', gap: 10 }}>
           Email
           <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-0.5 rounded">
-            Preview
+            Alpha
           </span>
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>

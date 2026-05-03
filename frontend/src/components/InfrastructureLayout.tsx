@@ -24,12 +24,12 @@ interface InfrastructureLayoutProps {
 interface NavItem {
   label: string
   to: string
-  badge?: 'preview' | 'alpha'
+  badge?: 'alpha'
 }
 
 export default function InfrastructureLayout({ children }: InfrastructureLayoutProps) {
   const items: NavItem[] = [
-    { label: 'Email', to: '/infrastructure/email', badge: 'preview' },
+    { label: 'Email', to: '/infrastructure/email', badge: 'alpha' },
     { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
     { label: 'VM network', to: '/infrastructure/network' },
   ]
@@ -73,7 +73,6 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
             >
               <span className="inline-flex items-center gap-1.5">
                 {item.label}
-                {item.badge === 'preview' && <PreviewPill />}
                 {item.badge === 'alpha' && <AlphaPill />}
               </span>
             </NavLink>
@@ -82,17 +81,6 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
         <div>{children}</div>
       </div>
     </div>
-  )
-}
-
-function PreviewPill() {
-  return (
-    <span
-      className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded"
-      title="Preview — config saves but the send pipeline ships in a follow-up release"
-    >
-      Preview
-    </span>
   )
 }
 
