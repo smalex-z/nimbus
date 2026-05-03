@@ -1121,4 +1121,175 @@ export async function reconcileVMs(): Promise<VMReconcileReport> {
   return data
 }
 
+// --- /api/proxmox/binding ----------------------------------------------------
+
+export interface ProxmoxBinding {
+  host: string
+  cluster_name: string
+  version: string
+  node_count: number
+  last_seen: string
+  reachable: boolean
+}
+
+export async function getProxmoxBinding(): Promise<ProxmoxBinding> {
+  const { data } = await api.get<ProxmoxBinding>('/proxmox/binding')
+  return data
+}
+
+// --- /api/nodes admin actions ------------------------------------------------
+
+export async function cordonNode(name: string, reason: string): Promise<void> {
+  await api.post(`/nodes/${encodeURIComponent(name)}/cordon`, { reason })
+}
+
+export async function uncordonNode(name: string): Promise<void> {
+  await api.post(`/nodes/${encodeURIComponent(name)}/uncordon`)
+}
+
+export async function setNodeTags(name: string, tags: string[]): Promise<void> {
+  await api.put(`/nodes/${encodeURIComponent(name)}/tags`, { tags })
+}
+
+export async function removeNode(name: string): Promise<void> {
+  await api.delete(`/nodes/${encodeURIComponent(name)}`)
+}
+
+// --- drain plan + executor ---------------------------------------------------
+
+export interface DrainEligibleTarget {
+  node: string
+  score: number
+  projected_ram_pct: number
+  disabled: boolean
+  disabled_reason?: string
+}
+
+export interface DrainWarning {
+  severity: 'soft' | 'caution' | 'high' | 'blocked'
+  message: string
+}
+
+export interface PlannedMigration {
+  vm_id: number
+  vm_row_id: number
+  hostname: string
+  tier: string
+  auto_pick: string
+  override?: string
+  eligible: DrainEligibleTarget[]
+  warnings?: DrainWarning[]
+}
+
+export interface NodeProjection {
+  node: string
+  current_vm_count: number
+  planned_vm_count: number
+  current_ram_pct: number
+  planned_ram_pct: number
+  severity: 'ok' | 'caution' | 'high'
+}
+
+export interface DrainPlan {
+  source_node: string
+  migrations: PlannedMigration[]
+  aggregate: NodeProjection[]
+  has_blocked: boolean
+}
+
+export async function getDrainPlan(name: string): Promise<DrainPlan> {
+  const { data } = await api.get<DrainPlan>(`/nodes/${encodeURIComponent(name)}/drain-plan`)
+  return data
+}
+
+// DrainEvent mirrors nodemgr.DrainEvent — one streamed update per NDJSON
+// line. Type tells the SPA how to render: per-VM start/done/error events
+// drive the in-modal checklist; the terminal complete event closes out.
+export interface DrainEvent {
+  type: 'plan_locked' | 'vm_start' | 'vm_done' | 'vm_error' | 'complete' | 'error'
+  vm_id?: number
+  hostname?: string
+  target?: string
+  step?: string
+  error?: string
+  succeeded?: number
+  failed?: number
+  drained?: boolean
+}
+
+export interface DrainExecuteRequest {
+  // Choices is a list (matching the wire format) — vm_id keys would force
+  // string coercion in JSON. The order doesn't affect execution; the
+  // server iterates the source node's managed VMs in vmid order regardless.
+  choices: Array<{ vm_id: number; target: string }>
+  confirm_phrase: string
+}
+
+// executeDrain streams the per-VM progress as NDJSON. onEvent is called
+// for every parsed line. Resolves when the stream closes; rejects on
+// pre-stream errors (auth, validation, etc.) or network failures mid-
+// stream. Mirrors provisionVMStreaming's shape so the SPA handles both
+// the same way.
+export async function executeDrain(
+  name: string,
+  req: DrainExecuteRequest,
+  onEvent: (evt: DrainEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`/api/nodes/${encodeURIComponent(name)}/drain`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify(req),
+    signal,
+  })
+
+  if (!resp.ok) {
+    let message = `request failed (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (body?.error) message = body.error
+    } catch {
+      // body wasn't JSON — fall through
+    }
+    throw new Error(message)
+  }
+  if (!resp.body) {
+    throw new Error('server returned no body')
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let done = false
+  while (!done) {
+    const chunk = await reader.read()
+    done = chunk.done
+    if (chunk.value) buffer += decoder.decode(chunk.value, { stream: true })
+    let nl = buffer.indexOf('\n')
+    while (nl !== -1) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        try {
+          onEvent(JSON.parse(line) as DrainEvent)
+        } catch {
+          // Skip malformed lines — keeps the stream resilient to a
+          // single bad event while still surfacing the rest.
+        }
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
+  // Flush the trailing buffer (server may not send a final newline).
+  const tail = buffer.trim()
+  if (tail) {
+    try {
+      onEvent(JSON.parse(tail) as DrainEvent)
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export default api

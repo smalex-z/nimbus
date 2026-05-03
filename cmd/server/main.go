@@ -24,6 +24,7 @@ import (
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
 	"nimbus/internal/netscan"
+	"nimbus/internal/nodemgr"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -120,6 +121,7 @@ func main() {
 		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
+		&db.Node{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -527,6 +529,24 @@ func main() {
 		log.Printf("pruned %d gpu job log file(s), freed %d bytes", n, freed)
 	}
 
+	// Node-management service: owns lock state (cordon/drain/drained),
+	// tag editing, drain orchestration, remove-from-cluster. Telemetry
+	// stays read-through to Proxmox; only operator-set state lives in
+	// db.Node. Self-host name (resolved via os.Hostname) is the safety
+	// gate that refuses to delete the node Nimbus itself runs on.
+	selfHost, _ := os.Hostname()
+	nodeMgrSvc := nodemgr.New(database.DB, pveClient, nodemgr.Config{
+		PerVMMigrateTimeout: 30 * time.Minute,
+		TaskPollInterval:    2 * time.Second,
+		VacateMissThreshold: cfg.VacateMissThreshold,
+		SelfHostName:        selfHost,
+	})
+	// Background reconcile: same cadence as the IP pool's. Observed
+	// nodes upsert + LastSeenAt bump; unobserved nodes prune after the
+	// miss threshold, mirroring the ippool pattern. Failures are logged
+	// and the next cycle retries.
+	go runNodeReconcileLoop(bgCtx, nodeMgrSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
 	router := api.NewRouter(api.Deps{
 		Auth:          authSvc,
 		Provision:     provSvc,
@@ -541,6 +561,7 @@ func main() {
 		S3:            s3Svc,
 		GPU:           gpuSvc,
 		GX10Assets:    gx10AssetsFS,
+		NodeMgr:       nodeMgrSvc,
 		Config:        cfg,
 		Restart:       restartSelf,
 	})
@@ -788,6 +809,36 @@ func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interv
 			if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
 				log.Printf("background reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
 					len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+			}
+		}
+	}
+}
+
+// runNodeReconcileLoop periodically refreshes db.Node rows against Proxmox
+// — observed nodes get LastSeenAt bumped (so they're never pruned), missing
+// nodes get pruned after VacateMissThreshold cycles. Mirrors the cadence
+// + on-failure-log shape of runReconcileLoop.
+func runNodeReconcileLoop(ctx context.Context, svc *nodemgr.Service, interval time.Duration) {
+	if interval <= 0 {
+		log.Printf("node reconcile loop disabled (interval=%v)", interval)
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, interval)
+			observed, pruned, err := svc.Reconcile(runCtx, interval)
+			cancel()
+			if err != nil {
+				log.Printf("node reconcile error: %v", err)
+				continue
+			}
+			if pruned > 0 {
+				log.Printf("node reconcile: observed=%d pruned=%d", observed, pruned)
 			}
 		}
 	}

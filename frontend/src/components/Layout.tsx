@@ -4,6 +4,7 @@ import nimbusLogo from '@/assets/Nimbus_Logo.png'
 import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
+import ProxmoxBindingChip from '@/components/ProxmoxBindingChip'
 
 interface LayoutProps {
   children: ReactNode
@@ -78,6 +79,12 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                 </NavLink>
               )}
 
+              {/* Cluster-binding chip — admin-only since member dropdowns
+                  don't show node management surfaces. Lives between the
+                  top-level nav and the user dropdown so it's the last
+                  thing before the per-user controls. */}
+              {user?.is_admin && <ProxmoxBindingChip />}
+
               {user && <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />}
 
               {user?.is_admin ? (
@@ -100,6 +107,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <SectionLabel>Workspace</SectionLabel>
                   <NavLink to="/authentication" className={dropdownItemClass}>
                     <ShieldIcon /><span>Authentication</span>
+                  </NavLink>
+                  <NavLink to="/nodes" className={dropdownItemClass}>
+                    <NodesIcon /><span>Nodes</span>
                   </NavLink>
                   <NavLink to="/infrastructure" className={dropdownItemClass}>
                     <ServerIcon /><span>Infrastructure</span>
@@ -242,6 +252,22 @@ function ServerIcon() {
       <rect x="3" y="13" width="18" height="7" rx="1.5" />
       <line x1="7" y1="7.5" x2="7.01" y2="7.5" />
       <line x1="7" y1="16.5" x2="7.01" y2="16.5" />
+    </svg>
+  )
+}
+
+function NodesIcon() {
+  // Three stacked rectangles — physical-host metaphor without
+  // duplicating the Server (single-stack) icon. Reads as "cluster
+  // nodes" at a glance.
+  return (
+    <svg {...iconProps}>
+      <rect x="3" y="3" width="18" height="4" rx="1" />
+      <rect x="3" y="10" width="18" height="4" rx="1" />
+      <rect x="3" y="17" width="18" height="4" rx="1" />
+      <line x1="6.5" y1="5" x2="6.51" y2="5" />
+      <line x1="6.5" y1="12" x2="6.51" y2="12" />
+      <line x1="6.5" y1="19" x2="6.51" y2="19" />
     </svg>
   )
 }

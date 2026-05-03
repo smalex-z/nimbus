@@ -15,6 +15,7 @@ import (
 	"nimbus/internal/config"
 	"nimbus/internal/gpu"
 	"nimbus/internal/ippool"
+	"nimbus/internal/nodemgr"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -39,6 +40,7 @@ type Deps struct {
 	S3            *s3storage.Service
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
+	NodeMgr       *nodemgr.Service
 	Config        *config.Config
 	Restart       func()
 }
@@ -56,7 +58,7 @@ func NewRouter(d Deps) http.Handler {
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
 	keys := handlers.NewKeys(d.Keys)
-	nodes := handlers.NewNodes(d.Proxmox)
+	nodes := handlers.NewNodes(d.NodeMgr, d.Config.ProxmoxHost)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
@@ -204,6 +206,20 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/users/{id}/quota", auth.SetUserQuota)
 
 				r.Get("/nodes", nodes.List)
+				// Admin-facing node lifecycle. Drain streams NDJSON and
+				// can run for tens of minutes per VM on cold migrations
+				// — give it a generous timeout. The other actions are
+				// fast DB writes (cordon/uncordon/tags/delete).
+				r.Post("/nodes/{name}/cordon", nodes.Cordon)
+				r.Post("/nodes/{name}/uncordon", nodes.Uncordon)
+				r.Put("/nodes/{name}/tags", nodes.SetTags)
+				r.Get("/nodes/{name}/drain-plan", nodes.DrainPlan)
+				r.With(middleware.Timeout(60*time.Minute)).
+					Post("/nodes/{name}/drain", nodes.Drain)
+				r.Delete("/nodes/{name}", nodes.Remove)
+				// Cluster-binding chip in the SPA header — read-only,
+				// thin payload, polls every ~30s.
+				r.Get("/proxmox/binding", nodes.Binding)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)

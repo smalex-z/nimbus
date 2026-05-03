@@ -641,6 +641,67 @@ func (c *Client) DestroyVM(ctx context.Context, node string, vmid int) (string, 
 	return taskID, nil
 }
 
+// MigrateVM relocates a VM from one node to another via the Proxmox migration
+// API. Returns the task UPID for caller-side polling via WaitForTask.
+//
+// online=true requests a live migration (memory copy + cutover, VM keeps
+// running). Proxmox falls back to an offline migration automatically when the
+// VM is stopped, so callers can pass online=true unconditionally and let the
+// hypervisor decide. with_local_disks=1 is set so VMs whose disks live on
+// node-local storage (the common case for Nimbus deployments) are eligible —
+// without it Proxmox refuses unless storage is shared.
+//
+// The Proxmox endpoint is POST /nodes/{source}/qemu/{vmid}/migrate; the
+// response is a task UPID that runs on the SOURCE node — that's where to
+// poll status.
+func (c *Client) MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error) {
+	params := url.Values{}
+	params.Set("target", targetNode)
+	if online {
+		params.Set("online", "1")
+	}
+	// with_local_disks lets Proxmox copy disks that aren't on shared storage.
+	// No-op when the storage IS shared, so safe to set unconditionally.
+	params.Set("with-local-disks", "1")
+
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/migrate", url.PathEscape(sourceNode), vmid)
+	if err := c.do(ctx, http.MethodPost, path, params, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// DeleteNode removes a node from the Proxmox cluster (pvecm delnode equivalent).
+// Wrapper for DELETE /cluster/config/nodes/{node}. Returns nil on success;
+// Proxmox refuses if the node still hosts VMs/storage that hasn't been moved
+// off, surfacing as an HTTP 500 with a descriptive body.
+//
+// Operators should call this only on a node whose lock state is "drained" —
+// Nimbus's nodemgr enforces that gate before invoking.
+func (c *Client) DeleteNode(ctx context.Context, node string) error {
+	path := fmt.Sprintf("/cluster/config/nodes/%s", url.PathEscape(node))
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// ClusterName extracts the cluster's display name from /cluster/status. The
+// "cluster" row in that payload carries the Name field; per-node rows leave
+// it set to the node hostname. Returns "" (no error) when the deployment is
+// a single-node "cluster of one" (Proxmox doesn't emit a cluster row in that
+// case).
+func (c *Client) ClusterName(ctx context.Context) (string, error) {
+	entries, err := c.GetClusterStatus(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.Type == "cluster" {
+			return e.Name, nil
+		}
+	}
+	return "", nil
+}
+
 // agentResult is what the guest-agent endpoint actually returns: a wrapper
 // around an array of NetworkInterface records.
 type agentResult struct {
