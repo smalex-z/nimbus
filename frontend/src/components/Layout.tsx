@@ -108,14 +108,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
-              {/* Authentication + Quotas are admin's high-frequency
-                  policy surfaces — promoted out of the old Control Panel
-                  dropdown so a sysadmin can hit them in one click. */}
-              {user?.is_admin && (
-                <NavLink to="/authentication" className={navLinkClass}>
-                  Authentication
-                </NavLink>
-              )}
+              {/* Quotas is admin's high-frequency surface — promoted out
+                  of the old Control Panel dropdown so a sysadmin can hit
+                  it in one click. Authentication is also admin policy
+                  but lives in the dropdown alongside Infrastructure to
+                  keep the top bar from sprawling. */}
               {user?.is_admin && (
                 <NavLink to="/quotas" className={navLinkClass}>
                   Quotas
@@ -159,11 +156,14 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
-                  {/* Cluster + backend-services config (Email, Gopher,
-                      VM network, S3, GPU hosts) lives behind
-                      /infrastructure, which renders a sidebar of
-                      categories. Keys is still a personal action so it
-                      gets its own entry next to Account. */}
+                  {/* Authentication (users + sign-in policy) and
+                      Infrastructure (Email, Gopher, VM network, S3, GPU
+                      hosts) are admin policy surfaces grouped here so
+                      the top bar doesn't sprawl. Keys is a personal
+                      action so it gets its own entry next to Account. */}
+                  <NavLink to="/authentication" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Authentication
+                  </NavLink>
                   <NavLink to="/infrastructure" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Infrastructure
                   </NavLink>
