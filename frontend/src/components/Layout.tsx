@@ -108,14 +108,10 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
-              {/* Users + Quotas are admin's high-frequency surfaces —
-                  promoted out of the old Control Panel dropdown so a
-                  sysadmin can hit them in one click. */}
-              {user?.is_admin && (
-                <NavLink to="/users" className={navLinkClass}>
-                  Users
-                </NavLink>
-              )}
+              {/* Quotas is admin's high-frequency surface — promoted out
+                  of the old Control Panel dropdown so a sysadmin can hit
+                  it in one click. The user table moved back under
+                  /settings/sign-in (see Settings → Sign-in & access). */}
               {user?.is_admin && (
                 <NavLink to="/quotas" className={navLinkClass}>
                   Quotas
@@ -137,11 +133,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   </span>
                 </NavLink>
               )}
-              {!user?.is_admin && (
-                <NavLink to="/keys" className={navLinkClass}>
-                  Keys
-                </NavLink>
-              )}
+              {/* Keys lived as a top-level nav link for members. The
+                  picker on /provision and the manage-keys link inside
+                  it are the high-frequency entry points; the dedicated
+                  page is a lookup surface, so it now lives in the user
+                  dropdown next to Account (matching the admin layout). */}
 
               {user && <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />}
 
@@ -196,6 +192,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
+                  <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Keys
+                  </NavLink>
                   <NavLink to="/account" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Account
                   </NavLink>
@@ -215,7 +214,16 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
         </nav>
       )}
 
-      <main className="flex-1 max-w-[1200px] mx-auto w-full px-8 py-12 pb-20 animate-fadeIn">
+      {/* /settings/* is a wide page: the consolidated sidebar (220px) plus
+          a content column with tables, filter rows, and OAuth panels needs
+          more horizontal room than the 1200px the rest of the app uses.
+          Bumping just the main width — not the navbar — keeps the top bar
+          centred and aligned with everywhere else. */}
+      <main
+        className={`flex-1 mx-auto w-full px-8 py-12 pb-20 animate-fadeIn ${
+          location.pathname.startsWith('/settings') ? 'max-w-[1440px]' : 'max-w-[1200px]'
+        }`}
+      >
         {children}
       </main>
     </div>

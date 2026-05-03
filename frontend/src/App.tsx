@@ -20,7 +20,6 @@ import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Quotas from '@/pages/Quotas'
 import S3 from '@/pages/S3'
-import Users from '@/pages/Users'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
@@ -92,7 +91,6 @@ export default function App() {
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
                       <Route path="/gpu" element={<GPU />} />
-                      <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
                       <Route path="/quotas" element={<RequireAdmin><Quotas /></RequireAdmin>} />
                       <Route path="/account" element={<Account />} />
                       {/* /settings hosts the consolidated config sidebar
@@ -108,12 +106,16 @@ export default function App() {
                       <Route path="/settings/network" element={<RequireAdmin><SettingsLayout><Network /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/s3" element={<RequireAdmin><SettingsLayout><S3 /></SettingsLayout></RequireAdmin>} />
                       <Route path="/settings/gpu-hosts" element={<RequireAdmin><SettingsLayout><GPUHost /></SettingsLayout></RequireAdmin>} />
-                      {/* Bookmark redirects from the old standalone admin pages. */}
+                      {/* Bookmark redirects from the old standalone admin pages.
+                          /users used to be its own surface; the user table now
+                          lives inside /settings/sign-in alongside the OAuth
+                          providers + access code + passwordless toggle. */}
                       <Route path="/email" element={<Navigate to="/settings/email" replace />} />
                       <Route path="/gophers" element={<Navigate to="/settings/gopher" replace />} />
                       <Route path="/network" element={<Navigate to="/settings/network" replace />} />
                       <Route path="/s3" element={<Navigate to="/settings/s3" replace />} />
                       <Route path="/gpu-host" element={<Navigate to="/settings/gpu-hosts" replace />} />
+                      <Route path="/users" element={<Navigate to="/settings/sign-in" replace />} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>

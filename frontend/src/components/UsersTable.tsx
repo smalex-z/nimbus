@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   deleteUser,
@@ -10,57 +10,21 @@ import type { UserManagementView } from '@/api/client'
 import NavDropdown from '@/components/ui/NavDropdown'
 import { useAuth } from '@/hooks/useAuth'
 
-
-
-// Users — admin-facing list of every account that has signed up,
-// with the per-row actions menu (promote / suspend / delete / set
-// quota override) and the search + filter dropdowns above it. The
-// access-code, OAuth providers, and passwordless toggle that used
-// to live in this page's right rail moved to /settings/sign-in
-// when Users + Quotas got promoted to top-level admin tabs.
-export default function Users() {
-  // refreshTick is the parent-owned signal that any in-row mutation
-  // (suspend / promote / delete) needs to bump so the table re-fetches.
-  // Used to also wire to the providers panel, but those moved.
-  const [refreshTick, setRefreshTick] = useState(0)
-  const refreshAll = useCallback(() => setRefreshTick((t) => t + 1), [])
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
-      <div>
-        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
-          Users
-        </h1>
-        <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
-          Every account that has signed up. Sign-in providers and the access
-          code now live under{' '}
-          <a href="/settings/sign-in" className="n-link">Settings → Sign-in &amp; access</a>.
-        </p>
-      </div>
-
-      <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
-    </div>
-  )
-}
-
 // UsersTable renders every account the admin can see. Sorted server-side
 // by created_at desc, so the most recent sign-up shows first. Verified
 // status follows the live policy (admin / authorized domain / org / code
 // match) so the column reflects what would happen on the user's next
 // request, not a snapshot at sign-up.
-// pendingAction tracks which row + modal are currently open. Single
-// state object so we can't accidentally show both modals at once.
+//
+// Lives in /settings/sign-in alongside the OAuth providers + access code
+// + passwordless toggle — the four surfaces all govern who can sign in,
+// so they share a page.
+
 type PendingAction =
   | { kind: 'promote'; user: UserManagementView }
   | { kind: 'delete'; user: UserManagementView }
   | null
 
-// onMutated bubbles every successful row-action up to the parent so the
-// PasswordlessPanel's straggler count stays in sync — suspending a row
-// here changes whether the OAuth-only toggle is reachable, and we don't
-// want the user to have to refresh to see that. refreshTick is the
-// inbound counterpart: when another panel mutates, the parent bumps
-// the tick and we re-fetch.
 // Filter dimensions — each is a dropdown with an "any" sentinel that
 // disables filtering on that axis. Combinations AND together: pick
 // "Members" + "Unverified" + "Password-only" to find members who
@@ -118,7 +82,19 @@ function filtersAreActive(f: UserFilters): boolean {
   )
 }
 
-function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated: () => void }) {
+// onMutated bubbles every successful row-action up to the parent so the
+// PasswordlessPanel's straggler count stays in sync — suspending a row
+// here changes whether the OAuth-only toggle is reachable, and we don't
+// want the user to have to refresh to see that. refreshTick is the
+// inbound counterpart: when another panel mutates, the parent bumps
+// the tick and we re-fetch.
+export default function UsersTable({
+  refreshTick,
+  onMutated,
+}: {
+  refreshTick: number
+  onMutated: () => void
+}) {
   const { user: me } = useAuth()
   const [rows, setRows] = useState<UserManagementView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -261,8 +237,11 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
           <table className="w-full text-left" style={{ fontSize: 13, borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ color: 'var(--ink-mute)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Name</th>
-                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Email</th>
+                {/* Name + email share one column — the email reads as a
+                    sub-line under the name. Saves a table column on a
+                    page that already has filters + status pills + a
+                    Sign-in chip group competing for width. */}
+                <th style={{ padding: '8px 8px', fontWeight: 500 }}>Name / Email</th>
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Joined</th>
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Sign-in</th>
                 <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
@@ -275,11 +254,20 @@ function UsersTable({ refreshTick, onMutated }: { refreshTick: number; onMutated
                   key={u.id}
                   style={{ borderTop: '1px solid var(--line)', opacity: u.suspended ? 0.55 : 1 }}
                 >
-                  <td style={{ padding: '10px 8px', color: 'var(--ink)', fontWeight: 500 }}>
-                    {u.name || <span style={{ color: 'var(--ink-mute)' }}>—</span>}
-                  </td>
-                  <td style={{ padding: '10px 8px', color: 'var(--ink-body)', fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
-                    {u.email}
+                  <td style={{ padding: '10px 8px' }}>
+                    <div style={{ color: 'var(--ink)', fontWeight: 500 }}>
+                      {u.name || <span style={{ color: 'var(--ink-mute)' }}>—</span>}
+                    </div>
+                    <div
+                      style={{
+                        color: 'var(--ink-body)',
+                        fontFamily: 'Geist Mono, monospace',
+                        fontSize: 11,
+                        marginTop: 2,
+                      }}
+                    >
+                      {u.email}
+                    </div>
                   </td>
                   <td style={{ padding: '10px 8px', color: 'var(--ink-body)', whiteSpace: 'nowrap' }}>
                     {formatJoined(u.created_at)}
@@ -834,4 +822,3 @@ function MoreIcon() {
     </svg>
   )
 }
-

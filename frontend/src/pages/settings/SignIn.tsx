@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { GithubIcon, GoogleIcon } from '@/components/nimbus'
+import UsersTable from '@/components/UsersTable'
 import {
   emailUnlinkedUsers,
   getAccessCode,
@@ -852,20 +853,19 @@ function GitHubOrgsSection() {
 }
 
 
-// SettingsSignIn — /settings/sign-in subpage. Owns the OAuth provider
-// configuration, the access-code regenerate widget, and the
-// passwordless-sign-in toggle (plus its bulk-suspend / email-stragglers
-// affordances). The /users page used to host all this on the right
-// rail; promoting Users + Quotas to top-level admin tabs left no
-// natural home for workspace-wide sign-in policy, so it lives here
-// behind the new /settings sidebar.
+// SettingsSignIn — /settings/sign-in subpage. The single home for
+// "who can sign in to this workspace": OAuth provider config, the
+// access-code regenerate widget, the passwordless-sign-in toggle (with
+// bulk-suspend / email-stragglers affordances), and the full account
+// table. All four govern sign-in policy + membership, so they share a
+// page rather than splitting across /users and /settings/sign-in like
+// the previous iteration did.
 //
-// The page is two stacked cards: the providers + passwordless summary
-// (which itself opens a per-provider modal for the full client-id /
-// secret / domain-or-org-list editor) and the access code panel.
-// Every existing helper component lives in this same file because
-// nothing outside SettingsSignIn renders any of them today; if a
-// second page ever needs them, lift to a shared module then.
+// The page stacks: providers + passwordless summary, access code panel,
+// then the accounts table. Every helper for the OAuth + access-code
+// surfaces lives in this file; the accounts table lives in
+// components/UsersTable.tsx since it's the one piece a future page
+// (e.g. an audit-log surface) might want to reuse.
 //
 // editingProvider tracks which (if any) per-provider modal is open.
 // Using a discrete identifier rather than a boolean lets the modal
@@ -878,9 +878,9 @@ export default function SettingsSignIn() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editingProvider, setEditingProvider] = useState<EditingProvider>(null)
   // refreshTick lets ProvidersSummary's bulk-suspend / email-stragglers
-  // actions tell the (live) sibling cards to re-fetch — same pattern
-  // /users uses with its UsersTable + ProvidersSummary pair.
-  const [, setRefreshTick] = useState(0)
+  // actions tell the live UsersTable to re-fetch (and vice-versa: a
+  // suspend/promote/delete from the table updates the straggler counts).
+  const [refreshTick, setRefreshTick] = useState(0)
   const refreshAll = useCallback(() => setRefreshTick((t) => t + 1), [])
 
   useEffect(() => {
@@ -916,7 +916,8 @@ export default function SettingsSignIn() {
           Sign-in & access
         </h2>
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)' }}>
-          OAuth providers, access code, and the passwordless-sign-in toggle.
+          OAuth providers, access code, the passwordless-sign-in toggle, and the
+          full account list.
         </p>
       </div>
 
@@ -927,10 +928,11 @@ export default function SettingsSignIn() {
       <ProvidersSummary
         settings={settings}
         onEdit={(p) => setEditingProvider(p)}
-        refreshTick={0}
+        refreshTick={refreshTick}
         onMutated={refreshAll}
       />
       <AccessCodePanel />
+      <UsersTable refreshTick={refreshTick} onMutated={refreshAll} />
 
       {editingProvider && settings && (
         <OAuthProviderModal
