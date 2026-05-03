@@ -653,7 +653,7 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
               <div className="text-xs text-warn mt-1.5">
                 Tunnel integration not configured. An admin can wire it up
                 from{' '}
-                <Link to="/settings" className="underline">Settings → Gopher tunnels</Link>.
+                <Link to="/infrastructure/gopher" className="underline">Infrastructure → Gopher tunnels</Link>.
               </div>
             )}
             {tunnelInfo?.enabled && !selectedKeyHasPrivate && (

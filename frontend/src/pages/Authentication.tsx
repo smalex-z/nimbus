@@ -860,8 +860,8 @@ function GitHubOrgsSection() {
 // full accounts table sits on the left. Single page since all four
 // surfaces govern the same domain — an admin reviewing a flagged
 // account often wants to flip the passwordless toggle in the same
-// session, and routing them through /settings made that two clicks
-// instead of one.
+// session, and routing them through the infrastructure sidebar made
+// that two clicks instead of one.
 //
 // Every helper for the OAuth + access-code surfaces lives in this file;
 // the accounts table lives in components/UsersTable.tsx since it's the

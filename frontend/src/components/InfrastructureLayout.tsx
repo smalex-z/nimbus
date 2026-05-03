@@ -3,12 +3,12 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { getGPUInference, getS3Storage } from '@/api/client'
 
-// SettingsLayout wraps every /settings/* subroute with a left sidebar
-// of category links. The sidebar is the page; the right column slots
-// in the matching subpage's content (Sign-in, Email, Gopher Tunnels,
-// Network, S3 Storage, GPU hosts).
+// InfrastructureLayout wraps every /infrastructure/* subroute with a
+// left sidebar of category links. The sidebar is the page; the right
+// column slots in the matching subpage's content (Email, Gopher Tunnels,
+// VM network, S3 Storage, GPU hosts).
 //
-// Each entry routes to its own URL (e.g. /settings/email) so the
+// Each entry routes to its own URL (e.g. /infrastructure/email) so the
 // browser back button + bookmarks work the way an admin expects.
 // The sidebar item highlights when its URL prefix matches —
 // NavLink's isActive is exact by default; we use end={false} so the
@@ -19,7 +19,7 @@ import { getGPUInference, getS3Storage } from '@/api/client'
 // Same gate the top-level navbar uses, polled the same way, so the
 // sidebar mirrors what's actually configurable today.
 
-interface SettingsLayoutProps {
+interface InfrastructureLayoutProps {
   children: ReactNode
 }
 
@@ -30,9 +30,9 @@ interface NavItem {
   visible: boolean
 }
 
-export default function SettingsLayout({ children }: SettingsLayoutProps) {
+export default function InfrastructureLayout({ children }: InfrastructureLayoutProps) {
   const location = useLocation()
-  // S3 is configurable from /settings/s3 once the storage VM is
+  // S3 is configurable from /infrastructure/s3 once the storage VM is
   // deployed, but pre-deploy the link would lead to a half-empty
   // page. Same gate the top navbar uses.
   const [s3Deployed, setS3Deployed] = useState(false)
@@ -50,19 +50,19 @@ export default function SettingsLayout({ children }: SettingsLayoutProps) {
   }, [location.pathname])
 
   const items: NavItem[] = [
-    { label: 'Email', to: '/settings/email', badge: 'preview', visible: true },
-    { label: 'Gopher Tunnels', to: '/settings/gopher', visible: true },
-    { label: 'Network', to: '/settings/network', visible: true },
-    { label: 'S3 Storage', to: '/settings/s3', visible: !s3Deployed, badge: 'alpha' },
-    { label: 'GPU hosts', to: '/settings/gpu-hosts', badge: 'alpha', visible: gpuPlaneEnabled || !gpuPlaneEnabled }, // always visible — pairing also lives here
+    { label: 'Email', to: '/infrastructure/email', badge: 'preview', visible: true },
+    { label: 'Gopher Tunnels', to: '/infrastructure/gopher', visible: true },
+    { label: 'VM network', to: '/infrastructure/network', visible: true },
+    { label: 'S3 Storage', to: '/infrastructure/s3', visible: !s3Deployed, badge: 'alpha' },
+    { label: 'GPU hosts', to: '/infrastructure/gpu-hosts', badge: 'alpha', visible: gpuPlaneEnabled || !gpuPlaneEnabled }, // always visible — pairing also lives here
   ]
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
-        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>Settings</h1>
+        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>Infrastructure</h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
-          Workspace-wide configuration. Pick a category on the left.
+          Backend services and cluster configuration. Pick a category on the left.
         </p>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-6 items-start">

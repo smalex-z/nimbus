@@ -159,13 +159,13 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     </>
                   }
                 >
-                  {/* Workspace configuration (Sign-in, Email, Gopher,
-                      Network, S3, GPU hosts) lives behind /settings,
-                      which renders a sidebar of categories. Keys is
-                      still a personal action so it gets its own entry
-                      next to Account. */}
-                  <NavLink to="/settings" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
-                    Settings
+                  {/* Cluster + backend-services config (Email, Gopher,
+                      VM network, S3, GPU hosts) lives behind
+                      /infrastructure, which renders a sidebar of
+                      categories. Keys is still a personal action so it
+                      gets its own entry next to Account. */}
+                  <NavLink to="/infrastructure" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
+                    Infrastructure
                   </NavLink>
                   <NavLink to="/keys" className={controlPanelItemClass} style={{ cursor: 'pointer' }}>
                     Keys
@@ -218,15 +218,15 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
         </nav>
       )}
 
-      {/* /settings/* and /authentication are wide pages: settings has a
-          220px sidebar next to its content, and /authentication runs a
+      {/* /infrastructure/* and /authentication are wide pages: the former
+          has a 220px sidebar next to its content, and the latter runs a
           users table next to a 360px policy rail. Both need more
           horizontal room than the 1200px the rest of the app uses.
           Bumping just the main width — not the navbar — keeps the top
           bar centred and aligned with everywhere else. */}
       <main
         className={`flex-1 mx-auto w-full px-8 py-12 pb-20 animate-fadeIn ${
-          location.pathname.startsWith('/settings') || location.pathname.startsWith('/authentication')
+          location.pathname.startsWith('/infrastructure') || location.pathname.startsWith('/authentication')
             ? 'max-w-[1440px]'
             : 'max-w-[1200px]'
         }`}

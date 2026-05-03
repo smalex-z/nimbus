@@ -10,7 +10,7 @@ import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
 import Authentication from '@/pages/Authentication'
 import Email from '@/pages/Email'
-import SettingsLayout from '@/components/SettingsLayout'
+import InfrastructureLayout from '@/components/InfrastructureLayout'
 import GopherTunnels from '@/pages/GopherTunnels'
 import GPU from '@/pages/GPU'
 import GPUHost from '@/pages/GPUHost'
@@ -95,31 +95,37 @@ export default function App() {
                       <Route path="/account" element={<Account />} />
                       {/* /authentication is the top-level admin page that
                           owns the user table + sign-in providers + access
-                          code + passwordless toggle. Lived briefly under
-                          /settings/sign-in but the data surface is wide
-                          enough to deserve its own tab. */}
+                          code + passwordless toggle. */}
                       <Route path="/authentication" element={<RequireAdmin><Authentication /></RequireAdmin>} />
-                      {/* /settings hosts the workspace-config sidebar
-                          (Email, Gopher Tunnels, Network, S3, GPU hosts).
-                          Old standalone routes — /email, /gophers, /network,
-                          /s3, /gpu-host — redirect to their /settings/*
-                          counterparts so existing bookmarks still resolve. */}
-                      <Route path="/settings" element={<Navigate to="/settings/email" replace />} />
-                      <Route path="/settings/email" element={<RequireAdmin><SettingsLayout><Email /></SettingsLayout></RequireAdmin>} />
-                      <Route path="/settings/gopher" element={<RequireAdmin><SettingsLayout><GopherTunnels /></SettingsLayout></RequireAdmin>} />
-                      <Route path="/settings/network" element={<RequireAdmin><SettingsLayout><Network /></SettingsLayout></RequireAdmin>} />
-                      <Route path="/settings/s3" element={<RequireAdmin><SettingsLayout><S3 /></SettingsLayout></RequireAdmin>} />
-                      <Route path="/settings/gpu-hosts" element={<RequireAdmin><SettingsLayout><GPUHost /></SettingsLayout></RequireAdmin>} />
+                      {/* /infrastructure hosts the cluster + backend-services
+                          sidebar (Email, Gopher Tunnels, VM network, S3,
+                          GPU hosts). Old standalone routes — /email,
+                          /gophers, /network, /s3, /gpu-host — redirect to
+                          their /infrastructure/* counterparts so existing
+                          bookmarks still resolve. */}
+                      <Route path="/infrastructure" element={<Navigate to="/infrastructure/email" replace />} />
+                      <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/gopher" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/network" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/s3" element={<RequireAdmin><InfrastructureLayout><S3 /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/gpu-hosts" element={<RequireAdmin><InfrastructureLayout><GPUHost /></InfrastructureLayout></RequireAdmin>} />
                       {/* Bookmark redirects. /users + /settings/sign-in
                           both used to host the user table; both now land
-                          on /authentication. */}
-                      <Route path="/email" element={<Navigate to="/settings/email" replace />} />
-                      <Route path="/gophers" element={<Navigate to="/settings/gopher" replace />} />
-                      <Route path="/network" element={<Navigate to="/settings/network" replace />} />
-                      <Route path="/s3" element={<Navigate to="/settings/s3" replace />} />
-                      <Route path="/gpu-host" element={<Navigate to="/settings/gpu-hosts" replace />} />
+                          on /authentication. /settings/* was the prior
+                          name of /infrastructure/*. */}
+                      <Route path="/email" element={<Navigate to="/infrastructure/email" replace />} />
+                      <Route path="/gophers" element={<Navigate to="/infrastructure/gopher" replace />} />
+                      <Route path="/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/s3" element={<Navigate to="/infrastructure/s3" replace />} />
+                      <Route path="/gpu-host" element={<Navigate to="/infrastructure/gpu-hosts" replace />} />
                       <Route path="/users" element={<Navigate to="/authentication" replace />} />
+                      <Route path="/settings" element={<Navigate to="/infrastructure" replace />} />
                       <Route path="/settings/sign-in" element={<Navigate to="/authentication" replace />} />
+                      <Route path="/settings/email" element={<Navigate to="/infrastructure/email" replace />} />
+                      <Route path="/settings/gopher" element={<Navigate to="/infrastructure/gopher" replace />} />
+                      <Route path="/settings/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/settings/s3" element={<Navigate to="/infrastructure/s3" replace />} />
+                      <Route path="/settings/gpu-hosts" element={<Navigate to="/infrastructure/gpu-hosts" replace />} />
                       <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                     </Routes>
                   </Layout>
