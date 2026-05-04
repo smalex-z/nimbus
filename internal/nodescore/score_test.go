@@ -351,28 +351,17 @@ func TestDetectSpecialization(t *testing.T) {
 	}
 }
 
-// TestDefaultWorkloadForTier mirrors the GitHub-issue-defined mapping.
-// The provision API uses this to pick a default when the operator doesn't
-// explicitly specify, and the dashboard uses it to flag the "auto-recommended"
-// option.
+// TestDefaultWorkloadForTier — every tier resolves to balanced. The
+// helper is kept tier-aware in signature for forward-compat with
+// operator-tunable defaults; current behaviour is the conservative
+// "don't bias placement" answer.
 func TestDefaultWorkloadForTier(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		tier string
-		want nodescore.WorkloadType
-	}{
-		{"small", nodescore.WorkloadWeb},
-		{"medium", nodescore.WorkloadWeb},
-		{"large", nodescore.WorkloadBalanced},
-		{"xl", nodescore.WorkloadCompute},
-		{"unknown", nodescore.WorkloadBalanced}, // safe default
-		{"", nodescore.WorkloadBalanced},
-	}
-	for _, c := range cases {
-		t.Run(c.tier, func(t *testing.T) {
+	for _, tier := range []string{"small", "medium", "large", "xl", "unknown", ""} {
+		t.Run(tier, func(t *testing.T) {
 			t.Parallel()
-			if got := nodescore.DefaultWorkloadForTier(c.tier); got != c.want {
-				t.Errorf("got %q, want %q", got, c.want)
+			if got := nodescore.DefaultWorkloadForTier(tier); got != nodescore.WorkloadBalanced {
+				t.Errorf("DefaultWorkloadForTier(%q) = %q, want balanced", tier, got)
 			}
 		})
 	}

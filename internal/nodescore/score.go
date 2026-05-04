@@ -182,23 +182,18 @@ func DetectSpecialization(n Node) Specialization {
 	}
 }
 
-// DefaultWorkloadForTier maps tier name → recommended default workload.
-// Used at provision time when the operator doesn't explicitly pick a
-// workload, and as the read-time fallback for db.VM rows that predate
-// the workload_type column.
+// DefaultWorkloadForTier returns the workload to use when the operator
+// hasn't picked one explicitly. Always WorkloadBalanced regardless of
+// tier — the conservative default that doesn't bias placement toward
+// any specialization.
 //
-//	small, medium → web      (most common deployments — web services)
-//	large         → balanced (mixed workloads at the larger sizes)
-//	xl            → compute  (the size people pick for ML/training)
+// The tierName argument is preserved for forward-compat: future
+// operator-tunable defaults (e.g. cluster-wide "small VMs are usually
+// web servers, default to web") would change this body without
+// requiring a signature change everywhere.
 func DefaultWorkloadForTier(tierName string) WorkloadType {
-	switch tierName {
-	case "small", "medium":
-		return WorkloadWeb
-	case "xl":
-		return WorkloadCompute
-	default:
-		return WorkloadBalanced
-	}
+	_ = tierName
+	return WorkloadBalanced
 }
 
 // Env carries cluster-wide knobs and the per-node lookups the caller has

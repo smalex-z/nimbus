@@ -18,7 +18,6 @@ import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Textarea from '@/components/ui/Textarea'
 import TierCard from '@/components/ui/TierCard'
-import RadioCard from '@/components/ui/RadioCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
@@ -57,11 +56,11 @@ interface FormState {
 }
 
 // defaultWorkloadForTier mirrors nodescore.DefaultWorkloadForTier on
-// the backend. Kept inline rather than fetched so the form can drive
-// the "auto-recommended" highlight without a round trip.
-function defaultWorkloadForTier(tier: TierName): WorkloadType {
-  if (tier === 'small' || tier === 'medium') return 'web'
-  if (tier === 'xl') return 'compute'
+// the backend. Always 'balanced' regardless of tier — the conservative
+// default that doesn't bias placement toward a specialization. The
+// helper takes a tier so the signature is stable if we ever add
+// per-tier defaults via operator config.
+function defaultWorkloadForTier(_tier: TierName): WorkloadType {
   return 'balanced'
 }
 
@@ -539,40 +538,14 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
         </p>
       </div>
 
-      <WorkloadPicker
-        tier={form.tier}
-        workload={form.workload}
-        onChange={(w) => updateForm('workload', w)}
-      />
-
       <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">SSH key</label>
-        <div className="grid gap-2">
-          {savedKeys.length > 0 && (
-            <RadioCard
-              title="Use a saved key"
-              description={
-                savedKeys.find((k) => k.is_default)
-                  ? "Your default key is selected. You can pick a different one."
-                  : "Pick from the keys you've already added."
-              }
-              selected={form.keyMode === 'saved'}
-              onClick={() => updateForm('keyMode', 'saved')}
-            />
-          )}
-          <RadioCard
-            title="Generate one for me"
-            description="We'll mint an Ed25519 keypair, vault it, and show the private key once."
-            selected={form.keyMode === 'gen'}
-            onClick={() => updateForm('keyMode', 'gen')}
-          />
-          <RadioCard
-            title="Bring your own key"
-            description="Paste or upload a public key. Optionally store the private half so you can download it later."
-            selected={form.keyMode === 'byo'}
-            onClick={() => updateForm('keyMode', 'byo')}
-          />
-        </div>
+        <KeyModeButtons
+          mode={form.keyMode}
+          onChange={(m) => updateForm('keyMode', m)}
+          hasSavedKeys={savedKeys.length > 0}
+        />
+        <p className="text-[11px] text-ink-3 leading-relaxed mt-1">{keyModeBlurb(form.keyMode, savedKeys)}</p>
         {form.keyMode === 'saved' && savedKeys.length > 0 && (
           <div className="mt-3 flex flex-col gap-2">
             <select
@@ -702,28 +675,35 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
         )}
       </div>
 
-      {gpuInfo?.enabled && (
-        <div className="flex flex-col gap-2">
-          <label className="text-[13px] font-medium text-ink">GPU access</label>
-          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
-            <input
-              type="checkbox"
-              checked={form.enableGPU}
-              onChange={(e) => updateForm('enableGPU', e.target.checked)}
-              className="mt-0.5 w-4 h-4 accent-ink"
-            />
-            <div className="flex-1">
-              <div className="text-sm font-medium">Include GX10 access</div>
-              <div className="text-xs text-ink-3 mt-0.5">
-                Injects <span className="font-mono">OPENAI_BASE_URL</span> and a{' '}
-                <span className="font-mono">gx10</span> CLI helper so this VM can
-                hit the inference server and submit GPU jobs. Off by default —
-                only enable for VMs that actually need it.
+      <AdvancedSection>
+        <WorkloadPicker
+          tier={form.tier}
+          workload={form.workload}
+          onChange={(w) => updateForm('workload', w)}
+        />
+        {gpuInfo?.enabled && (
+          <div className="flex flex-col gap-2">
+            <label className="text-[13px] font-medium text-ink">GPU access</label>
+            <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+              <input
+                type="checkbox"
+                checked={form.enableGPU}
+                onChange={(e) => updateForm('enableGPU', e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-ink"
+              />
+              <div className="flex-1">
+                <div className="text-sm font-medium">Include GX10 access</div>
+                <div className="text-xs text-ink-3 mt-0.5">
+                  Injects <span className="font-mono">OPENAI_BASE_URL</span> and a{' '}
+                  <span className="font-mono">gx10</span> CLI helper so this VM can
+                  hit the inference server and submit GPU jobs. Off by default —
+                  only enable for VMs that actually need it.
+                </div>
               </div>
-            </div>
-          </label>
-        </div>
-      )}
+            </label>
+          </div>
+        )}
+      </AdvancedSection>
     </div>
   )
 }
@@ -1266,6 +1246,100 @@ function WorkloadPicker({
         <code className="text-ink-2">{recommended}</code> — override if your VM doesn't fit
         that profile.
       </p>
+    </div>
+  )
+}
+
+// KeyModeButtons — horizontal segmented control replacing the previous
+// stack of three RadioCards. Two buttons when there are no saved keys
+// (Generate / Bring your own); three when at least one saved key
+// exists (Saved / Generate / BYO).
+//
+// Each button is equal-width via flex-1; the selected one inverts to
+// dark fill, matching the tier-pill convention elsewhere in the app.
+// The longer description that used to live on each card moves to a
+// single-line caption underneath the row that updates per selection
+// (see keyModeBlurb).
+function KeyModeButtons({
+  mode,
+  onChange,
+  hasSavedKeys,
+}: {
+  mode: KeyMode
+  onChange: (m: KeyMode) => void
+  hasSavedKeys: boolean
+}) {
+  const opts: { id: KeyMode; label: string }[] = []
+  if (hasSavedKeys) opts.push({ id: 'saved', label: 'Use a saved key' })
+  opts.push({ id: 'gen', label: 'Generate one for me' })
+  opts.push({ id: 'byo', label: 'Bring your own' })
+  return (
+    <div className="flex gap-1.5">
+      {opts.map((opt) => {
+        const selected = mode === opt.id
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onChange(opt.id)}
+            className={`flex-1 px-3 py-2.5 rounded-[8px] text-[13px] font-medium border transition-colors cursor-pointer ${
+              selected
+                ? 'bg-ink text-white border-ink'
+                : 'bg-white/85 text-ink border-line-2 hover:border-ink-3'
+            }`}
+          >
+            {opt.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// keyModeBlurb — one-line caption beneath the segmented control. The
+// longer descriptions that used to live on each RadioCard surface here
+// based on the current selection. Kept short so the form stays dense.
+function keyModeBlurb(mode: KeyMode, savedKeys: SSHKey[]): string {
+  switch (mode) {
+    case 'saved':
+      return savedKeys.find((k) => k.is_default)
+        ? 'Your default key is selected — pick a different one if needed.'
+        : "Pick from the keys you've already added."
+    case 'gen':
+      return "We'll mint an Ed25519 keypair, vault it, and show the private key once."
+    case 'byo':
+      return 'Paste or upload a public key. Optionally store the private half so you can download it later.'
+  }
+}
+
+// AdvancedSection — collapsible disclosure for less-frequently-touched
+// settings. Used to wrap workload type + GPU access at the bottom of
+// the form so the default view stays focused on the core identity
+// (hostname / OS / tier / SSH / public access). Collapsed by default;
+// chevron rotates on open.
+function AdvancedSection({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex flex-col gap-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 text-[13px] font-medium text-ink-2 hover:text-ink transition-colors cursor-pointer self-start"
+        aria-expanded={open}
+      >
+        <span
+          aria-hidden="true"
+          className="text-ink-3 transition-transform"
+          style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        >▶</span>
+        Advanced
+        <span className="text-[11px] text-ink-3 font-normal">workload type, GPU access</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-5 pl-1">
+          {children}
+        </div>
+      )}
     </div>
   )
 }
