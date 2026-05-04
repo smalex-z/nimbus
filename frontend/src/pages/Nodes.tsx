@@ -313,14 +313,25 @@ function NodeCard({ node: n }: { node: NodeView }) {
         </div>
       </div>
 
-      {/* Compact bar stack — four metrics, no labels in front of bars
-          (the hint right-aligned next to the percent does the work). */}
+      {/* Compact bar stack. Both used + allocated for RAM and disk —
+          they answer different questions (used = live pressure right
+          now, allocated = "if every VM filled its declared size, what
+          then"). The scheduler gates on allocated, so surfacing it
+          alongside used makes placement reasoning visible. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <MiniBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(0)}%`} />
         <MiniBar label="RAM" pct={memPct} hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`} />
         <MiniBar label="RAM alloc" pct={memAllocPct} hint={`${memAllocPct.toFixed(0)}%`} accent />
         {n.disk_total > 0 && (
-          <MiniBar label="Disk" pct={diskPct} hint={`${formatBytes(n.disk_used)} / ${formatBytes(n.disk_total)}`} />
+          <>
+            <MiniBar label="Disk" pct={diskPct} hint={`${formatBytes(n.disk_used)} / ${formatBytes(n.disk_total)}`} />
+            <MiniBar
+              label="Disk alloc"
+              pct={n.disk_total > 0 ? (n.disk_allocated / n.disk_total) * 100 : 0}
+              hint={`${formatBytes(n.disk_allocated)} / ${formatBytes(n.disk_total)}`}
+              accent
+            />
+          </>
         )}
       </div>
 
@@ -375,6 +386,15 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
       </div>
     </div>
   )
+}
+
+// pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
+// "allocated" cells where high values flag overcommit risk and the
+// operator's eye should snap to them.
+function pctColor(pct: number): string {
+  if (pct > 85) return 'var(--err)'
+  if (pct > 60) return '#9a5c2e'
+  return 'var(--ink-body)'
 }
 
 function StatusDot({ status }: { status: NodeView['status'] }) {
@@ -458,9 +478,10 @@ function ManageTable({ rows, onAction }: { rows: NodeView[]; onAction: (a: Pendi
               <th style={{ padding: '6px 8px', fontWeight: 500 }}>Node</th>
               <th style={{ padding: '6px 8px', fontWeight: 500 }}>Lock</th>
               <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>CPU</th>
-              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>RAM</th>
-              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Alloc</th>
-              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Disk</th>
+              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }} title="RAM in use right now">RAM</th>
+              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }} title="RAM allocated (sum of every VM's configured maxmem)">RAM alloc</th>
+              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }} title="Disk in use right now (thin-provisioned written bytes)">Disk</th>
+              <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }} title="Disk allocated (sum of every VM's configured maxdisk)">Disk alloc</th>
               <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>VMs</th>
               <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tags</th>
               <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Actions</th>
@@ -480,8 +501,9 @@ function ManageTable({ rows, onAction }: { rows: NodeView[]; onAction: (a: Pendi
 function ManageRow({ node: n, onAction }: { node: NodeView; onAction: (a: PendingAction) => void }) {
   const cpuPct = n.cpu * 100
   const memPct = n.mem_total > 0 ? (n.mem_used / n.mem_total) * 100 : 0
-  const allocPct = n.mem_total > 0 ? (n.mem_allocated / n.mem_total) * 100 : 0
+  const memAllocPct = n.mem_total > 0 ? (n.mem_allocated / n.mem_total) * 100 : 0
   const diskPct = n.disk_total > 0 ? (n.disk_used / n.disk_total) * 100 : 0
+  const diskAllocPct = n.disk_total > 0 ? (n.disk_allocated / n.disk_total) * 100 : 0
   return (
     <tr style={{ borderTop: '1px solid var(--line)', opacity: n.status === 'online' ? 1 : 0.55 }}>
       <td style={{ padding: '8px 8px' }}>
@@ -500,16 +522,22 @@ function ManageRow({ node: n, onAction }: { node: NodeView; onAction: (a: Pendin
       <td style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: 'var(--ink-body)' }}>{cpuPct.toFixed(0)}%</td>
       <td style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: 'var(--ink-body)' }}>{memPct.toFixed(0)}%</td>
       <td
-        style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: allocPct > 85 ? 'var(--err)' : allocPct > 60 ? '#9a5c2e' : 'var(--ink-body)' }}
+        style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: pctColor(memAllocPct) }}
         title="RAM allocated to non-template VMs (sum of maxmem)"
       >
-        {allocPct.toFixed(0)}%
+        {memAllocPct.toFixed(0)}%
       </td>
       <td
         style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: 'var(--ink-body)' }}
-        title={n.disk_pool_name ? `${n.disk_pool_name} pool` : 'no disk telemetry'}
+        title={n.disk_pool_name ? `${n.disk_pool_name} pool — bytes written` : 'no disk telemetry'}
       >
         {n.disk_total > 0 ? `${diskPct.toFixed(0)}%` : '—'}
+      </td>
+      <td
+        style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: pctColor(diskAllocPct) }}
+        title={n.disk_pool_name ? `${n.disk_pool_name} pool — sum of every VM's configured maxdisk (thin-provisioned commitment)` : 'no disk telemetry'}
+      >
+        {n.disk_total > 0 ? `${diskAllocPct.toFixed(0)}%` : '—'}
       </td>
       <td style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: 'var(--ink-body)' }}>
         {n.vm_count}/{n.vm_count_total}
