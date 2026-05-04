@@ -295,15 +295,21 @@ func (GPUJob) TableName() string { return "gpu_jobs" }
 // VM is the canonical record for a provisioned virtual machine.
 type VM struct {
 	gorm.Model
-	VMID       int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
-	Hostname   string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
-	IP         string `gorm:"column:ip;index;not null"                json:"ip"`
-	Node       string `gorm:"column:node;not null"                    json:"node"`
-	Tier       string `gorm:"column:tier;not null"                    json:"tier"`
-	OSTemplate string `gorm:"column:os_template;not null"             json:"os_template"`
-	Username   string `gorm:"column:username"                         json:"username"`
-	Status     string `gorm:"column:status;index;not null"            json:"status"`
-	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
+	VMID     int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
+	Hostname string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
+	IP       string `gorm:"column:ip;index;not null"                json:"ip"`
+	Node     string `gorm:"column:node;not null"                    json:"node"`
+	Tier     string `gorm:"column:tier;not null"                    json:"tier"`
+	// WorkloadType is the operator-supplied (or tier-defaulted) hint
+	// driving workload-aware scoring. One of "web", "database",
+	// "compute", "balanced". Empty for legacy rows; readers fall back
+	// to nodescore.DefaultWorkloadForTier(tier) so behavior stays
+	// sensible without a destructive backfill.
+	WorkloadType string `gorm:"column:workload_type;default:''"        json:"workload_type"`
+	OSTemplate   string `gorm:"column:os_template;not null"            json:"os_template"`
+	Username     string `gorm:"column:username"                         json:"username"`
+	Status       string `gorm:"column:status;index;not null"            json:"status"`
+	OwnerID      *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
 	// SSHKeyID points to the row in the ssh_keys table that owns the SSH
 	// material for this VM. nullable: set NULL when the key is deleted, so the
 	// VM record outlives its key. Replaces the legacy per-VM KeyName/CT/Nonce

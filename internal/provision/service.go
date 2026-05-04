@@ -454,7 +454,15 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// have a template for the requested OS. The per-node templateVMID lookup
 	// uses the node_templates table (filled in by bootstrap) so we don't have
 	// to fan out a TemplateExists call per node.
-	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate)
+	//
+	// WorkloadType drives the nodescore Profile (web/database/compute/
+	// balanced). Empty in the request falls back to a tier-based default so
+	// callers that don't pass workload still get reasonable placement.
+	workload := nodescore.WorkloadType(req.WorkloadType)
+	if workload == "" {
+		workload = nodescore.DefaultWorkloadForTier(req.Tier)
+	}
+	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate, workload)
 	if err != nil {
 		return nil, err
 	}
@@ -625,19 +633,20 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
 	vm := &db.VM{
-		VMID:       newVMID,
-		Hostname:   req.Hostname,
-		IP:         ip,
-		Node:       target,
-		Tier:       req.Tier,
-		OSTemplate: req.OSTemplate,
-		Username:   username,
-		Status:     "running",
-		OwnerID:    req.OwnerID,
-		SSHKeyID:   &keyID,
-		KeyName:    keyName,
-		SSHPubKey:  sshPubKey,
-		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
+		VMID:         newVMID,
+		Hostname:     req.Hostname,
+		IP:           ip,
+		Node:         target,
+		Tier:         req.Tier,
+		WorkloadType: string(workload),
+		OSTemplate:   req.OSTemplate,
+		Username:     username,
+		Status:       "running",
+		OwnerID:      req.OwnerID,
+		SSHKeyID:     &keyID,
+		KeyName:      keyName,
+		SSHPubKey:    sshPubKey,
+		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -1302,6 +1311,7 @@ func (s *Service) pickNode(
 	ctx context.Context,
 	tier nodescore.Tier,
 	osKey string,
+	workload nodescore.WorkloadType,
 ) (target string, templateVMID int, err error) {
 	// Fetch all node_templates rows for this OS in one query. Returned
 	// (node, vmid) pairs are exactly the nodes eligible to host this OS.
@@ -1411,19 +1421,20 @@ func (s *Service) pickNode(
 		StorageByNode:    storageByNode,
 		MemBufferMiB:     s.cfg.MemBufferMiB,
 		CPULoadFactor:    s.cfg.CPULoadFactor,
+		Workload:         workload,
 	}
 	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
 	winner, all := nodescore.Pick(decisions)
 	if winner == nil {
-		log.Printf("pickNode: tier=%s os=%s no_winner decisions: %s",
-			tier.Name, osKey, formatDecisions(all))
+		log.Printf("pickNode: tier=%s os=%s workload=%s no_winner decisions: %s",
+			tier.Name, osKey, workload, formatDecisions(all))
 		return "", 0, &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s: %s",
-				tier.Name, osKey, formatRejections(all)),
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s workload=%s: %s",
+				tier.Name, osKey, workload, formatRejections(all)),
 		}
 	}
-	log.Printf("pickNode: tier=%s os=%s winner=%s decisions: %s",
-		tier.Name, osKey, winner.Node.Name, formatDecisions(all))
+	log.Printf("pickNode: tier=%s os=%s workload=%s winner=%s spec=%s decisions: %s",
+		tier.Name, osKey, workload, winner.Node.Name, winner.Result.Spec, formatDecisions(all))
 	return winner.Node.Name, templateVMIDByNode[winner.Node.Name], nil
 }
 

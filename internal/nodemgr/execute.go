@@ -214,7 +214,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		return fmt.Errorf("unknown tier %q", vm.Tier)
 	}
 
-	nodes, vms, _, err := s.clusterSnapshot(ctx)
+	nodes, vms, storeRows, err := s.clusterSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
@@ -249,8 +249,40 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		rt.CommittedMemBytes += v.MaxMem
 	}
 
+	// Storage telemetry for the disk gate — same shape ComputePlan
+	// builds. Without this the executor would silently skip disk
+	// re-validation at the very moment Proxmox would reject the
+	// migrate, leaving the per-VM error message vague ("no space")
+	// rather than nodescore's structured ReasonInsufficientDisk.
+	var storageByNode map[string]nodescore.StorageInfo
+	if s.cfg.VMDiskStorage != "" {
+		storageByNode = make(map[string]nodescore.StorageInfo, 1)
+		for _, st := range storeRows {
+			if st.Storage != s.cfg.VMDiskStorage {
+				continue
+			}
+			if st.Shared == 1 || st.Node == target {
+				storageByNode[target] = nodescore.StorageInfo{TotalBytes: st.Total, UsedBytes: st.Used}
+				if st.Shared == 1 {
+					break
+				}
+			}
+		}
+	}
+
+	// VM workload drives the Profile, same way ComputePlan does. The
+	// re-validation pass only checks gates (specifically capacity),
+	// but threading workload keeps the soft-score path consistent if
+	// future logic gates on the resolved score too.
+	workload := nodescore.WorkloadType(vm.WorkloadType)
+	if workload == "" {
+		workload = nodescore.DefaultWorkloadForTier(vm.Tier)
+	}
+
 	env := nodescore.Env{
 		TemplatesPresent: map[string]bool{target: true}, // migration doesn't need templates
+		StorageByNode:    storageByNode,
+		Workload:         workload,
 	}
 	got := nodescore.Score(*targetNode, tier, env, rt)
 	if got.Score == 0 {

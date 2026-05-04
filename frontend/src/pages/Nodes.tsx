@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getProxmoxBinding, listNodes } from '@/api/client'
+import { getProxmoxBinding, getScoringProfiles, listNodes, listNodesWithScores } from '@/api/client'
 import type { ProxmoxBinding } from '@/api/client'
-import type { NodeView } from '@/types'
+import type { NodeView, NodeViewWithScores, ScoringProfile, Specialization, TierName, WorkloadType } from '@/types'
 import { CordonModal, DrainPlanModal, RemoveNodeModal, TagsModal } from '@/components/NodeActionModals'
 import ProxmoxBindingModal, { ChangeBindingModal } from '@/components/ProxmoxBindingModal'
 import { formatBytes } from '@/lib/format'
+
+const WORKLOAD_ORDER: WorkloadType[] = ['web', 'database', 'compute', 'balanced']
+const TIER_PREVIEW_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 // Nodes — admin-only cluster lifecycle page. Three stacked sections:
 //
@@ -79,6 +82,7 @@ export default function Nodes() {
         <>
           <CardGrid rows={rows} />
           <ManageTable rows={rows} onAction={setPending} />
+          <ScoringMatrix />
         </>
       )}
 
@@ -654,4 +658,198 @@ function ActionBtn({
       {label}
     </button>
   )
+}
+
+// ScoringMatrix renders the per-node × per-workload score grid. Shown
+// below the management table so the page reads as: glance (cards) →
+// dispatch (table) → scheduler diagnostics (matrix).
+//
+// The tier picker at the top drives the preview — operators ask "if
+// I provisioned a medium VM, where would it land?" and the matrix
+// answers across all four workload types simultaneously. Cells show
+// the score as a percent, ramped green/amber/red, with a hover
+// tooltip rendering the components map breakdown.
+//
+// Cheap to compute: one cluster snapshot reused across all
+// (node, workload) combinations server-side.
+function ScoringMatrix() {
+  const [tier, setTier] = useState<TierName>('medium')
+  const [data, setData] = useState<NodeViewWithScores[] | null>(null)
+  const [profiles, setProfiles] = useState<Record<WorkloadType, ScoringProfile> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  // Profiles are static — fetch once for the whole page lifetime.
+  useEffect(() => {
+    getScoringProfiles()
+      .then(setProfiles)
+      .catch(() => { /* tooltips degrade to plain numbers */ })
+  }, [])
+
+  // Refetch scores when tier preview changes.
+  useEffect(() => {
+    setLoading(true)
+    listNodesWithScores(tier)
+      .then((rows) => { setData(rows); setError(null) })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+      .finally(() => setLoading(false))
+  }, [tier])
+
+  const sorted = useMemo(() => {
+    if (!data) return []
+    return [...data].sort((a, b) => a.name.localeCompare(b.name))
+  }, [data])
+
+  return (
+    <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Scoring matrix</span>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            How would each node score for each workload at the preview tier? Hover a cell for the components breakdown.
+          </p>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(20,18,28,0.03)' }}>
+          {TIER_PREVIEW_ORDER.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTier(t)}
+              style={{
+                fontSize: 11, padding: '4px 10px', borderRadius: 5,
+                border: 'none', cursor: 'pointer',
+                background: tier === t ? 'var(--ink)' : 'transparent',
+                color: tier === t ? 'white' : 'var(--ink-2)',
+                fontFamily: 'Geist Mono, monospace',
+                textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500,
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
+      {loading && !data && (
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)' }}>Computing scores…</p>
+      )}
+      {sorted.length > 0 && (
+        <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
+          <table className="w-full text-left" style={{ fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: 'var(--ink-mute)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Node</th>
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Spec</th>
+                {WORKLOAD_ORDER.map((w) => (
+                  <th
+                    key={w}
+                    style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}
+                    title={profiles ? formulaText(w, profiles[w]) : undefined}
+                  >
+                    {w}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((n) => (
+                <tr key={n.name} style={{ borderTop: '1px solid var(--line)', opacity: n.status === 'online' ? 1 : 0.55 }}>
+                  <td style={{ padding: '8px 8px', fontWeight: 500, color: 'var(--ink)' }}>{n.name}</td>
+                  <td style={{ padding: '8px 8px' }}>
+                    <SpecChip spec={inferSpec(n)} />
+                  </td>
+                  {WORKLOAD_ORDER.map((w) => {
+                    const cell = n.scores?.[w]
+                    return (
+                      <td
+                        key={w}
+                        style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace' }}
+                        title={cellTooltip(w, tier, cell, profiles?.[w])}
+                      >
+                        <ScoreCell breakdown={cell} />
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// inferSpec falls back to deriving the specialization from the node's
+// resource shape when the backend payload didn't include it (e.g. older
+// API responses). Mirrors nodescore.DetectSpecialization's thresholds.
+function inferSpec(n: NodeViewWithScores): Specialization {
+  const anyCell = n.scores?.web ?? n.scores?.database ?? n.scores?.compute ?? n.scores?.balanced
+  if (anyCell?.spec) return anyCell.spec
+  if (n.max_cpu <= 0 || n.mem_total === 0) return 'balanced'
+  const gibPerCore = n.mem_total / (1 << 30) / n.max_cpu
+  if (gibPerCore < 4) return 'cpu'
+  if (gibPerCore > 8) return 'memory'
+  return 'balanced'
+}
+
+function SpecChip({ spec }: { spec: Specialization }) {
+  const palette: Record<Specialization, { color: string; bg: string; border: string; label: string }> = {
+    cpu:      { color: '#9a5c2e', bg: 'rgba(248,175,130,0.15)', border: 'rgba(248,175,130,0.4)', label: 'cpu-opt' },
+    memory:   { color: '#3b6e9c', bg: 'rgba(130,175,248,0.15)', border: 'rgba(130,175,248,0.4)', label: 'mem-opt' },
+    balanced: { color: 'var(--ink-mute)', bg: 'rgba(20,18,28,0.05)', border: 'var(--line)', label: 'balanced' },
+  }
+  const p = palette[spec]
+  return (
+    <span
+      className="font-mono"
+      style={{
+        fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 3,
+        textTransform: 'uppercase', letterSpacing: '0.06em',
+        color: p.color, background: p.bg, border: `1px solid ${p.border}`,
+      }}
+    >{p.label}</span>
+  )
+}
+
+function ScoreCell({ breakdown }: { breakdown?: import('@/types').ScoreBreakdown }) {
+  if (!breakdown) return <span style={{ color: 'var(--ink-mute)' }}>—</span>
+  if (breakdown.score === 0) {
+    return (
+      <span style={{ color: 'var(--err)' }} title={breakdown.reasons?.join(', ')}>
+        rejected
+      </span>
+    )
+  }
+  const pct = breakdown.score * 100
+  const color = pct > 70 ? 'var(--ok)' : pct > 40 ? '#9a5c2e' : 'var(--err)'
+  return (
+    <span style={{ color }}>
+      {pct.toFixed(0)}%
+      {breakdown.spec_match && <span style={{ marginLeft: 4, color: 'var(--ink-mute)' }} title="specialization-bonus active">★</span>}
+    </span>
+  )
+}
+
+function formulaText(w: WorkloadType, p?: ScoringProfile): string | undefined {
+  if (!p) return undefined
+  return `${w}: ${p.mem_weight.toFixed(2)}·mem + ${p.cpu_weight.toFixed(2)}·cpu + ${p.disk_weight.toFixed(2)}·disk + ${p.spec_bonus.toFixed(2)} bonus on ${p.spec_preference}-opt nodes`
+}
+
+function cellTooltip(w: WorkloadType, tier: TierName, b?: import('@/types').ScoreBreakdown, p?: ScoringProfile): string | undefined {
+  if (!b) return undefined
+  if (b.score === 0) {
+    return `${w} (${tier}): rejected — ${b.reasons?.join(', ') || 'no eligible reasons reported'}`
+  }
+  if (!b.components) return `${w} (${tier}): score ${(b.score * 100).toFixed(0)}%`
+  const c = b.components
+  const fmt = (k: string, label: string) => {
+    const headK = `${k}_headroom`
+    const wK = `${k}_weighted`
+    if (c[wK] === undefined) return ''
+    return `${(p ? p[`${k}_weight` as keyof ScoringProfile] as number : 0).toFixed(2)}·${label}(${(c[headK] ?? 0).toFixed(2)})=${(c[wK] ?? 0).toFixed(3)}`
+  }
+  const parts = [fmt('mem', 'mem'), fmt('cpu', 'cpu'), fmt('disk', 'disk')].filter(Boolean)
+  if ((c.spec_bonus ?? 0) > 0) parts.push(`bonus=${c.spec_bonus.toFixed(3)}`)
+  return `${w} (${tier}): ${parts.join(' + ')} = ${(c.total ?? b.score).toFixed(3)}`
 }

@@ -17,6 +17,10 @@ import type {
   ProvisionStep,
   SSHKey,
   VM,
+  WorkloadType,
+  NodeViewWithScores,
+  ScoreBreakdown,
+  ScoringProfile,
 } from '@/types'
 
 // Default-timeout client used for fast endpoints.
@@ -93,6 +97,36 @@ export async function getHealth(): Promise<HealthResponse> {
 
 export async function listNodes(): Promise<NodeView[]> {
   const { data } = await api.get<NodeView[]>('/nodes')
+  return data
+}
+
+// listNodesWithScores requests the scoring-decorated payload — each row
+// carries a `scores` map across the four workload types under a preview
+// tier. Used by the Nodes page's scoring matrix; cheap (one cluster
+// snapshot reused across all combinations).
+export async function listNodesWithScores(previewTier?: string): Promise<NodeViewWithScores[]> {
+  const params: Record<string, string> = { include_scores: 'true' }
+  if (previewTier) params.preview_tier = previewTier
+  const { data } = await api.get<NodeViewWithScores[]>('/nodes', { params })
+  return data
+}
+
+// getNodeScore drills into one (node, tier, workload) cell for the
+// matrix tooltip. Returns the full breakdown including rejection
+// reasons when the node is ineligible at this tier+workload.
+export async function getNodeScore(name: string, workload: WorkloadType, tier: string): Promise<ScoreBreakdown> {
+  const { data } = await api.get<ScoreBreakdown>(`/nodes/${encodeURIComponent(name)}/score`, {
+    params: { workload, tier },
+  })
+  return data
+}
+
+// getScoringProfiles returns the workload→Profile map. Static data
+// (matches the nodescore.Profiles constant); the dashboard caches it
+// for the lifetime of the page so formula tooltips render without
+// hard-coding weights client-side.
+export async function getScoringProfiles(): Promise<Record<WorkloadType, ScoringProfile>> {
+  const { data } = await api.get<Record<WorkloadType, ScoringProfile>>('/scoring/profiles')
   return data
 }
 

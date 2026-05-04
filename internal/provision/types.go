@@ -12,14 +12,20 @@ package provision
 // The service is the place this gets resolved (the handler validates only
 // shape, not key-store state).
 type Request struct {
-	Hostname    string
-	Tier        string
-	OSTemplate  string
-	SSHKeyID    *uint  // optional: use an existing vault entry
-	SSHPubKey   string // BYO
-	SSHPrivKey  string // optional: BYO callers may stash the private half in Nimbus's vault
-	GenerateKey bool
-	OwnerID     *uint // nil in Phase 1 (no auth)
+	Hostname   string
+	Tier       string
+	OSTemplate string
+	// WorkloadType selects the nodescore Profile the scheduler uses
+	// (web/database/compute/balanced). Empty falls back to
+	// nodescore.DefaultWorkloadForTier(Tier), so callers that don't yet
+	// plumb workload still get sensible scoring matched to the tier
+	// they picked. Persisted on db.VM.WorkloadType.
+	WorkloadType string
+	SSHKeyID     *uint  // optional: use an existing vault entry
+	SSHPubKey    string // BYO
+	SSHPrivKey   string // optional: BYO callers may stash the private half in Nimbus's vault
+	GenerateKey  bool
+	OwnerID      *uint // nil in Phase 1 (no auth)
 
 	// RequesterIsAdmin bypasses member quotas (MemberMaxVMs) and the tier
 	// allowlist (MemberAllowedTiers). Default false — the safe answer when

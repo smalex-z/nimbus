@@ -131,13 +131,40 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		maxMemByNode[n.Name] = n.MaxMem
 	}
 
-	// Optional disk telemetry — same shape as provision.pickNode. nil
-	// disables the disk gate. We don't know the operator's VMDiskStorage
-	// at this layer; leave it nil so the disk gate is permissive (the
-	// executor's actual migrate call will fail if the destination's
-	// storage backend can't host the VM, surfacing as a per-VM error).
-	_ = storeRows
+	// Disk telemetry: build the same StorageByNode map provision.pickNode
+	// uses so the drain plan's disk gate fires up front, surfacing
+	// no-room errors in the modal instead of letting the migrate call
+	// fail mid-batch. Disabled when the operator hasn't configured a
+	// VM-disk pool (cfg.VMDiskStorage empty).
 	var storageByNodeOpt map[string]nodescore.StorageInfo
+	if s.cfg.VMDiskStorage != "" {
+		storageByNodeOpt = make(map[string]nodescore.StorageInfo, len(nodes))
+		// Shared pools repeat per node with identical capacity; the
+		// first row wins, then stamp the same StorageInfo onto every
+		// node so the disk gate sees the same pool everywhere.
+		var sharedInfo *nodescore.StorageInfo
+		for _, st := range storeRows {
+			if st.Storage != s.cfg.VMDiskStorage {
+				continue
+			}
+			info := nodescore.StorageInfo{TotalBytes: st.Total, UsedBytes: st.Used}
+			if st.Shared == 1 {
+				if sharedInfo == nil {
+					sharedInfo = &info
+				}
+				continue
+			}
+			storageByNodeOpt[st.Node] = info
+		}
+		if sharedInfo != nil {
+			for _, n := range nodes {
+				storageByNodeOpt[n.Name] = *sharedInfo
+			}
+		}
+	}
+	// Track planned disk additions per target so each subsequent VM in
+	// the loop sees the running total (mirrors plannedAdd for memory).
+	plannedDiskAdd := make(map[string]uint64)
 
 	plan := &DrainPlan{SourceNode: sourceNode, Migrations: make([]PlannedMigration, 0, len(managed))}
 	plannedAdd := make(map[string]uint64) // additional committed mem to add per dest
@@ -168,9 +195,30 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			}
 		}
 
+		// Build a per-VM view of disk pools that already counts what
+		// earlier-planned migrations promised — otherwise two large VMs
+		// could both be planned to land on a node that only fits one.
+		var perVMStorage map[string]nodescore.StorageInfo
+		if storageByNodeOpt != nil {
+			perVMStorage = make(map[string]nodescore.StorageInfo, len(storageByNodeOpt))
+			for name, si := range storageByNodeOpt {
+				si.UsedBytes += plannedDiskAdd[name]
+				perVMStorage[name] = si
+			}
+		}
+
+		// VM workload drives the Profile selection so a migrated DB VM
+		// still prefers a memory-optimized destination. Empty (legacy
+		// row) → tier-default.
+		workload := nodescore.WorkloadType(vm.WorkloadType)
+		if workload == "" {
+			workload = nodescore.DefaultWorkloadForTier(vm.Tier)
+		}
+
 		env := nodescore.Env{
 			TemplatesPresent: templatesPresent,
-			StorageByNode:    storageByNodeOpt,
+			StorageByNode:    perVMStorage,
+			Workload:         workload,
 		}
 		decisions := nodescore.Evaluate(candidates, runtime, tier, env)
 		winner, _ := nodescore.Pick(decisions)
@@ -192,10 +240,11 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		// only seed the initial view.
 		row.Warnings = warningsForTarget(row.AutoPick, row.Eligible)
 
-		// Apply this VM's planned mem to the destination's running tally
-		// so the next VM's runtime sees it.
+		// Apply this VM's planned mem AND disk to the destination's
+		// running tally so the next VM's runtime + storage view see them.
 		if winner != nil {
 			plannedAdd[winner.Node.Name] += uint64(tier.MemMB) * (1 << 20)
+			plannedDiskAdd[winner.Node.Name] += uint64(tier.DiskGB) * (1 << 30)
 		}
 
 		plan.Migrations = append(plan.Migrations, row)

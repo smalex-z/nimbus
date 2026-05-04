@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
 )
 
@@ -42,13 +43,65 @@ func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
 // List handles GET /api/nodes. Returns one row per Proxmox node with live
 // telemetry merged with persistent fields (lock state, tags, lock context).
 // Both the Admin dashboard and the new /nodes page consume this.
+//
+// When ?include_scores=true is passed, each row is decorated with a
+// `scores` map containing the four workload scores under a preview tier
+// (default `medium`; override with ?preview_tier=large). The Nodes
+// page's scoring matrix uses this; consumers that don't ask get the
+// plain payload they always got.
 func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 	view, err := h.mgr.List(r.Context())
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
-	response.Success(w, view.Nodes)
+
+	if r.URL.Query().Get("include_scores") != "true" {
+		response.Success(w, view.Nodes)
+		return
+	}
+	previewTier := r.URL.Query().Get("preview_tier")
+	scoresByNode, resolvedTier, err := h.mgr.ScoreAllWorkloads(r.Context(), previewTier)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	out := make([]nodemgr.NodeWithScores, 0, len(view.Nodes))
+	for _, n := range view.Nodes {
+		out = append(out, nodemgr.NodeWithScores{
+			View:        n,
+			Scores:      scoresByNode[n.Name],
+			PreviewTier: resolvedTier,
+		})
+	}
+	response.Success(w, out)
+}
+
+// Score handles GET /api/nodes/{name}/score?workload=&tier=. Single-cell
+// drill-down for the matrix tooltip. Returns the full breakdown
+// (including rejection reasons when the node is ineligible) under one
+// (workload, tier) pair.
+func (h *Nodes) Score(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	tierName := r.URL.Query().Get("tier")
+	if tierName == "" {
+		tierName = "medium"
+	}
+	workload := nodescore.WorkloadType(r.URL.Query().Get("workload"))
+	out, err := h.mgr.ScoreOne(r.Context(), name, tierName, workload)
+	if err != nil {
+		writeNodeMutationError(w, err)
+		return
+	}
+	response.Success(w, out)
+}
+
+// Profiles handles GET /api/scoring/profiles. Static data — the
+// workload → weight-vector map. Lets the SPA render formula tooltips
+// without hard-coding weights client-side; future weight tuning is a
+// backend-only change.
+func (h *Nodes) Profiles(w http.ResponseWriter, _ *http.Request) {
+	response.Success(w, nodemgr.AllProfiles())
 }
 
 // Cordon handles POST /api/nodes/{name}/cordon. Body: {"reason": "..."}

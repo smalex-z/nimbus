@@ -29,8 +29,12 @@ type VMs struct {
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
 
 type createVMRequest struct {
-	Hostname     string `json:"hostname"`
-	Tier         string `json:"tier"`
+	Hostname string `json:"hostname"`
+	Tier     string `json:"tier"`
+	// WorkloadType selects the nodescore Profile (web/database/compute/
+	// balanced). Empty falls back to the tier-based default in the
+	// service layer; non-empty values are validated against the enum.
+	WorkloadType string `json:"workload_type,omitempty"`
 	OSTemplate   string `json:"os_template"`
 	SSHKeyID     *uint  `json:"ssh_key_id,omitempty"`
 	SSHPubKey    string `json:"ssh_pubkey,omitempty"`
@@ -111,6 +115,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	res, err := h.svc.Provision(r.Context(), provision.Request{
 		Hostname:         req.Hostname,
 		Tier:             req.Tier,
+		WorkloadType:     req.WorkloadType,
 		OSTemplate:       req.OSTemplate,
 		SSHKeyID:         req.SSHKeyID,
 		SSHPubKey:        req.SSHPubKey,
@@ -391,6 +396,18 @@ func validateCreate(req createVMRequest) error {
 	}
 	if _, ok := nodescore.Tiers[req.Tier]; !ok {
 		return &internalerrors.ValidationError{Field: "tier", Message: "must be one of small, medium, large"}
+	}
+	// Workload type is optional (empty → tier-default in the service);
+	// when provided it must match one of the known profiles. Reject
+	// typos at the handler so the operator gets a clear error rather
+	// than silent fallback to balanced.
+	if req.WorkloadType != "" {
+		if _, ok := nodescore.Profiles[nodescore.WorkloadType(req.WorkloadType)]; !ok {
+			return &internalerrors.ValidationError{
+				Field:   "workload_type",
+				Message: "must be one of web, database, compute, balanced",
+			}
+		}
 	}
 	// Per-tier authorization (member allowlist vs admin-bypass) is enforced
 	// in provision.Service.Provision so the rule lives next to the quota

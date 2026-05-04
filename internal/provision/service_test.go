@@ -1087,6 +1087,63 @@ func TestPickNode_CordonedNodeSkipped(t *testing.T) {
 	}
 }
 
+// TestPickNode_WorkloadMatchesSpecialization is the headline test for
+// workload-aware scoring: a database VM should land on the memory-
+// optimized node, not the CPU-optimized one — even when both have
+// plenty of capacity. Without the workload Profile + spec-bonus, the
+// scorer would treat them as roughly equal and pick by tie-break VM
+// count (also equal), so the request would land non-deterministically.
+func TestPickNode_WorkloadMatchesSpecialization(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// alpha: 16c/32G = 2 GiB/c → CPU-optimized
+	// bravo: 8c/128G = 16 GiB/c → memory-optimized
+	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", MaxCPU: 16, MaxMem: 32 << 30, Mem: 1 << 30, CPU: 0.1},
+			{Name: "bravo", Status: "online", MaxCPU: 8, MaxMem: 128 << 30, Mem: 1 << 30, CPU: 0.1},
+		}, nil
+	}
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "local-lvm", Node: "alpha", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+			{Storage: "local-lvm", Node: "bravo", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+		}, nil
+	}
+	captured := atomic.Pointer[string]{}
+	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
+		t := target
+		captured.Store(&t)
+		return "UPID", nil
+	}
+
+	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "local-lvm",
+	})
+
+	// Provision a database workload — should pick bravo (memory-opt).
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "db-test-vm",
+		Tier:         "medium",
+		WorkloadType: "database",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+	}, nil); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got := captured.Load()
+	if got == nil || *got != "bravo" {
+		t.Errorf("CloneVM target = %v, want bravo (db workload prefers mem-opt)", got)
+	}
+}
+
 func TestPickNode_SharedStorageDedupes(t *testing.T) {
 	t.Parallel()
 	fake := pickNodeFakePVE(t)
