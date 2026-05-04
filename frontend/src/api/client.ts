@@ -417,14 +417,12 @@ export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }
 
-export interface DiscoverResult {
-  is_hypervisor: boolean
-  endpoints: string[]
-  suggested_gateway?: string
-}
-
-export async function discoverProxmox(): Promise<DiscoverResult> {
-  const { data } = await api.get<DiscoverResult>('/setup/discover')
+// discoverProxmoxSetup hits /api/setup/discover (unauth, only available
+// during install-mode boot). Used by the setup wizard. The admin-side
+// equivalent — discoverProxmoxAdmin below — hits /api/proxmox/discover
+// once the wizard is past and the admin is authenticated.
+export async function discoverProxmoxSetup(): Promise<ProxmoxDiscovery> {
+  const { data } = await api.get<ProxmoxDiscovery>('/setup/discover', { timeout: 30_000 })
   return data
 }
 
@@ -1125,6 +1123,9 @@ export async function reconcileVMs(): Promise<VMReconcileReport> {
 
 export interface ProxmoxBinding {
   host: string
+  // token_id is the user@realm!tokenname half (the secret stays
+  // write-only). Surfaced so the change-binding modal can pre-fill.
+  token_id?: string
   // The node Nimbus is talking to via the API. Distinct from
   // cluster_name (the corosync cluster identifier) — operators care
   // about the entry-point node, not just "which cluster."
@@ -1134,6 +1135,31 @@ export interface ProxmoxBinding {
   node_count: number
   last_seen: string
   reachable: boolean
+}
+
+// DiscoveredEndpoint is one Proxmox endpoint surfaced by /api/setup/discover
+// (used by the install wizard) and /api/proxmox/discover (used by the admin
+// change-binding modal). node_name is populated from corosync.conf when
+// available and from the TLS cert CN otherwise; falls back to ip.
+export interface DiscoveredEndpoint {
+  url: string
+  ip: string
+  node_name?: string
+  source: 'localhost' | 'corosync' | 'scan'
+}
+
+export interface ProxmoxDiscovery {
+  is_hypervisor: boolean
+  endpoints: DiscoveredEndpoint[]
+  suggested_gateway?: string
+}
+
+// discoverProxmoxAdmin hits /api/proxmox/discover (admin-gated). Same
+// payload + handler as the setup-mode discover; admin gets it via this
+// route since /setup/* is only mounted in install mode.
+export async function discoverProxmoxAdmin(): Promise<ProxmoxDiscovery> {
+  const { data } = await api.get<ProxmoxDiscovery>('/proxmox/discover', { timeout: 30_000 })
+  return data
 }
 
 export async function getProxmoxBinding(): Promise<ProxmoxBinding> {

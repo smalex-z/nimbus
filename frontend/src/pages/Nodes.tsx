@@ -125,11 +125,13 @@ type PendingAction =
   | { kind: 'cordon' | 'drain' | 'remove' | 'tags'; node: NodeView }
   | null
 
-// ConnectionBar — single horizontal row showing the active Proxmox
-// binding. Two affordances: click the body for cluster details (read-
-// only modal); click the explicit "Change…" button for the reconfigure
-// flow. Splitting the click targets keeps the most common path (read)
-// from accidentally triggering the rare path (write).
+// ConnectionBar — two-line indicator for the active Proxmox binding.
+// Top line is the primary identity (status dot + connected node name);
+// secondary line carries the operational details (cluster, host URL,
+// version, node count). Edit icon on the right opens the reconfigure
+// modal; clicking the body opens the read-only detail modal. Splitting
+// the click targets keeps the common path (read) from triggering the
+// rare path (write).
 function ConnectionBar({
   binding,
   onDetail,
@@ -145,10 +147,10 @@ function ConnectionBar({
     <div
       className="glass"
       style={{
-        padding: '12px 16px',
+        padding: '14px 18px',
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
+        gap: 12,
         background: 'rgba(255,255,255,0.65)',
       }}
     >
@@ -156,48 +158,76 @@ function ConnectionBar({
         type="button"
         onClick={onDetail}
         title="Click for cluster details"
-        className="flex items-center gap-3 text-left cursor-pointer"
-        style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', padding: 0 }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: 'transparent',
+          border: 'none',
+          padding: 0,
+          textAlign: 'left',
+          cursor: 'pointer',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+        }}
       >
-        <span
-          aria-hidden="true"
-          style={{
-            width: 8, height: 8, borderRadius: 4, flexShrink: 0,
-            background: reachable ? 'var(--ok)' : 'var(--err)',
-          }}
-        />
-        <span style={{ fontSize: 11, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Connected to
-        </span>
-        <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>
-          {primary}
-        </span>
-        {binding.cluster_name && binding.connected_node && binding.cluster_name !== binding.connected_node && (
-          <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-            cluster <span style={{ fontFamily: 'Geist Mono, monospace' }}>{binding.cluster_name}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span
+            aria-hidden="true"
+            style={{
+              width: 8, height: 8, borderRadius: 4, flexShrink: 0,
+              background: reachable ? 'var(--ok)' : 'var(--err)',
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Connected to
           </span>
-        )}
-        <span style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 15, fontWeight: 500, color: 'var(--ink)' }}>
+            {primary}
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', paddingLeft: 18, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {binding.cluster_name && <>cluster {binding.cluster_name} · </>}
           {binding.host}
-        </span>
-        {binding.version && (
-          <span style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace' }}>
-            pve {binding.version}
-          </span>
-        )}
-        <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
-          {binding.node_count} {binding.node_count === 1 ? 'node' : 'nodes'}
-        </span>
+          {binding.version && <> · pve {binding.version}</>}
+          {' · '}{binding.node_count} {binding.node_count === 1 ? 'node' : 'nodes'}
+        </div>
       </button>
       <button
         type="button"
         onClick={onChange}
-        className="n-btn"
-        style={{ fontSize: 12, padding: '6px 12px' }}
+        title="Change Proxmox connection"
+        aria-label="Change Proxmox connection"
+        style={{
+          width: 32, height: 32, borderRadius: 6,
+          border: '1px solid var(--line)',
+          background: 'transparent',
+          color: 'var(--ink-2)',
+          cursor: 'pointer',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'background 100ms, color 100ms',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = 'rgba(20,18,28,0.05)'
+          e.currentTarget.style.color = 'var(--ink)'
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = 'transparent'
+          e.currentTarget.style.color = 'var(--ink-2)'
+        }}
       >
-        Change…
+        <EditIcon />
       </button>
     </div>
+  )
+}
+
+function EditIcon() {
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 113 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
   )
 }
 

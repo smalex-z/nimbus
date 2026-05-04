@@ -387,6 +387,12 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 // consumes it as the "what cluster are we talking to" indicator.
 type Binding struct {
 	Host string `json:"host"` // configured Proxmox base URL
+	// TokenID is the user@realm!tokenname half of the Proxmox token
+	// (the secret stays write-only). Returned so the change-binding
+	// modal can pre-fill rather than asking the operator to retype it.
+	// Not actually a secret — anyone with read access to the env file
+	// can read it; surfacing here just saves a copy-paste step.
+	TokenID string `json:"token_id,omitempty"`
 	// ConnectedNode is the cluster member whose Proxmox API actually
 	// served this request (the node where corosync `Local=1`). For
 	// single-host deployments it equals the only node; for multi-node
@@ -405,15 +411,15 @@ type Binding struct {
 // fatal — partial responses (e.g. version OK, cluster name failed) are
 // served with the missing fields blank.
 //
-// The host is provided by the caller (config) since the proxmox client
-// doesn't expose its base URL; passing it through Service avoids leaking
-// the config dependency to every consumer.
+// host + tokenID are provided by the caller (config) since the proxmox
+// client doesn't expose either; passing them through Service avoids
+// leaking the config dependency to every consumer.
 //
 // ConnectedNode comes from /cluster/status — Proxmox marks the
 // API-receiving node with Local=1 so we can name the entry point
 // rather than just the cluster.
-func (s *Service) GetBinding(ctx context.Context, host string) (*Binding, error) {
-	out := &Binding{Host: host}
+func (s *Service) GetBinding(ctx context.Context, host, tokenID string) (*Binding, error) {
+	out := &Binding{Host: host, TokenID: tokenID}
 
 	if v, err := s.px.Version(ctx); err == nil {
 		out.Version = v

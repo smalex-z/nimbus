@@ -198,11 +198,12 @@ func (h *Nodes) Remove(w http.ResponseWriter, r *http.Request) {
 // Nodes page. Errors inside collapse into Reachable=false rather than
 // HTTP 500 so the page can render "offline" without spamming alerts.
 func (h *Nodes) Binding(w http.ResponseWriter, r *http.Request) {
-	host := ""
+	var host, tokenID string
 	if h.cfg != nil {
 		host = h.cfg.ProxmoxHost
+		tokenID = h.cfg.ProxmoxTokenID
 	}
-	out, err := h.mgr.GetBinding(r.Context(), host)
+	out, err := h.mgr.GetBinding(r.Context(), host, tokenID)
 	if err != nil {
 		response.FromError(w, err)
 		return

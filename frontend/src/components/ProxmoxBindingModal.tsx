@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { changeProxmoxBinding } from '@/api/client'
-import type { ProxmoxBinding } from '@/api/client'
+import { changeProxmoxBinding, discoverProxmoxAdmin } from '@/api/client'
+import type { DiscoveredEndpoint, ProxmoxBinding, ProxmoxDiscovery } from '@/api/client'
 
 // ProxmoxBindingModal renders the cluster-binding detail modal — version,
 // node count, last contact, reachability. Mounted by callers that already
@@ -135,14 +135,24 @@ export function ChangeBindingModal({
   onClose: () => void
 }) {
   const [host, setHost] = useState(current.host)
-  // Token id + secret never come back from the server (they're write-
-  // only fields on /etc/nimbus/nimbus.env). Operator must re-enter
-  // both — guards against accidental "test the token I forgot" rotates.
-  const [tokenID, setTokenID] = useState('')
+  // Token ID is pre-filled from current binding (it's the user@realm!
+  // tokenname half — not secret, just identifies which token slot we
+  // use). Default falls back to the wizard's `root@pam!nimbus` so a
+  // fresh install doesn't make the operator type it from scratch.
+  const [tokenID, setTokenID] = useState(current.token_id || 'root@pam!nimbus')
+  // Token secret is genuinely write-only — we never round-trip it from
+  // the server. Empty by default; operator re-enters every time.
   const [tokenSecret, setTokenSecret] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [restarting, setRestarting] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // Discovery state — populates the "detected" pill row beneath the URL
+  // field. Auto-fired on open; cheap (corosync read + LAN TLS scan,
+  // capped at 6 s).
+  const [discovery, setDiscovery] = useState<ProxmoxDiscovery | null>(null)
+  const [discovering, setDiscovering] = useState(true)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -154,6 +164,15 @@ export function ChangeBindingModal({
       document.body.style.overflow = prev
     }
   }, [onClose, busy])
+
+  useEffect(() => {
+    let cancelled = false
+    discoverProxmoxAdmin()
+      .then((d) => { if (!cancelled) setDiscovery(d) })
+      .catch(() => { /* silent — pills just don't show */ })
+      .finally(() => { if (!cancelled) setDiscovering(false) })
+    return () => { cancelled = true }
+  }, [])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -186,7 +205,7 @@ export function ChangeBindingModal({
     >
       <div
         className="glass"
-        style={{ width: '100%', maxWidth: 520, padding: '28px 32px' }}
+        style={{ width: '100%', maxWidth: 540, padding: '28px 32px' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="eyebrow">Change Proxmox connection</div>
@@ -195,7 +214,7 @@ export function ChangeBindingModal({
         </h3>
         <p style={{ margin: '0 0 18px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
           Nimbus will probe the new credentials, persist them to <code>/etc/nimbus/nimbus.env</code>,
-          and reload itself. The page will refresh automatically.
+          and reload itself. The page refreshes automatically.
         </p>
 
         {restarting ? (
@@ -225,33 +244,64 @@ export function ChangeBindingModal({
                 required
                 autoFocus
               />
-            </div>
-            <div className="n-field">
-              <label className="n-label" htmlFor="px-token-id">Token ID</label>
-              <input
-                id="px-token-id"
-                className="n-input"
-                type="text"
-                placeholder="root@pam!nimbus"
-                value={tokenID}
-                onChange={(e) => setTokenID(e.target.value)}
-                required
-                autoComplete="off"
+              <DiscoveryPills
+                discovering={discovering}
+                endpoints={discovery?.endpoints || []}
+                selectedURL={host}
+                onPick={setHost}
               />
             </div>
+
             <div className="n-field">
               <label className="n-label" htmlFor="px-token-secret">Token secret</label>
               <input
                 id="px-token-secret"
                 className="n-input"
                 type="password"
-                placeholder="(re-enter the secret)"
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                 value={tokenSecret}
                 onChange={(e) => setTokenSecret(e.target.value)}
                 required
                 autoComplete="off"
               />
+              <span style={{ fontSize: 11, color: 'var(--ink-mute)', marginTop: 4 }}>
+                The UUID Proxmox showed once when the token was created. Re-enter to confirm —
+                Nimbus never round-trips the secret back from the server.
+              </span>
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              style={{
+                fontSize: 11, fontFamily: 'Geist Mono, monospace',
+                color: 'var(--ink-mute)', textTransform: 'uppercase',
+                letterSpacing: '0.06em', alignSelf: 'flex-start',
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+              }}
+            >
+              {showAdvanced ? '▼ Hide' : '▶ Show'} advanced (token ID)
+            </button>
+            {showAdvanced && (
+              <div className="n-field">
+                <label className="n-label" htmlFor="px-token-id">Token ID</label>
+                <input
+                  id="px-token-id"
+                  className="n-input"
+                  type="text"
+                  placeholder="root@pam!nimbus"
+                  value={tokenID}
+                  onChange={(e) => setTokenID(e.target.value)}
+                  required
+                  autoComplete="off"
+                />
+                <span style={{ fontSize: 11, color: 'var(--ink-mute)', marginTop: 4 }}>
+                  Format: <code>user@realm!tokenname</code>. The default <code>root@pam!nimbus</code>
+                  is what the install wizard creates.
+                </span>
+              </div>
+            )}
+
             {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
               <button type="button" className="n-btn" onClick={onClose} disabled={busy}>Cancel</button>
@@ -268,5 +318,67 @@ export function ChangeBindingModal({
       </div>
     </div>,
     document.body,
+  )
+}
+
+// DiscoveryPills renders the row of "detected" Proxmox endpoints under
+// the URL field. Each pill shows the node name + IP when known (corosync
+// or TLS-cert CN), or just IP. Click selects that endpoint into the URL
+// field. Mirror of the install wizard's pill row so the two surfaces feel
+// consistent.
+function DiscoveryPills({
+  discovering,
+  endpoints,
+  selectedURL,
+  onPick,
+}: {
+  discovering: boolean
+  endpoints: DiscoveredEndpoint[]
+  selectedURL: string
+  onPick: (url: string) => void
+}) {
+  if (discovering) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 11, color: 'var(--ink-mute)' }}>
+        <span style={{ width: 4, height: 4, borderRadius: 2, background: 'var(--ink-mute)' }} className="animate-pulse" />
+        Scanning for PVE nodes…
+      </div>
+    )
+  }
+  if (endpoints.length === 0) return null
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, alignItems: 'center' }}>
+      <span style={{ fontSize: 11, fontFamily: 'Geist Mono, monospace', color: 'var(--ink-mute)' }}>detected:</span>
+      {endpoints.map((ep) => {
+        const selected = selectedURL === ep.url
+        const label = ep.node_name || ep.ip || ep.url
+        const sub = ep.node_name ? ep.ip : ''
+        return (
+          <button
+            type="button"
+            key={ep.url}
+            onClick={() => onPick(ep.url)}
+            title={`${ep.url}${ep.source === 'corosync' ? ' (from corosync.conf)' : ep.source === 'localhost' ? ' (this host)' : ' (LAN scan)'}`}
+            style={{
+              fontFamily: 'Geist Mono, monospace',
+              fontSize: 11,
+              padding: '2px 8px',
+              borderRadius: 4,
+              border: '1px solid',
+              borderColor: selected ? 'var(--ink)' : 'var(--line-strong)',
+              background: selected ? 'var(--ink)' : 'transparent',
+              color: selected ? 'white' : 'var(--ink-2)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span>{label}</span>
+            {sub && <span style={{ color: selected ? 'rgba(255,255,255,0.7)' : 'var(--ink-mute)' }}>{sub}</span>}
+          </button>
+        )
+      })}
+    </div>
   )
 }

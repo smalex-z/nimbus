@@ -3,6 +3,8 @@ package handlers
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,92 +250,196 @@ func (h *Setup) CreateAdmin(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, user)
 }
 
-type discoverResult struct {
-	IsHypervisor     bool     `json:"is_hypervisor"`
-	Endpoints        []string `json:"endpoints"`
-	SuggestedGateway string   `json:"suggested_gateway,omitempty"`
+// DiscoveredEndpoint pairs a Proxmox API URL with the node name it points at
+// (when known). The SPA uses NodeName as the primary label and falls back to
+// the IP/host portion of URL when name resolution failed.
+type DiscoveredEndpoint struct {
+	URL      string `json:"url"`
+	IP       string `json:"ip"`
+	NodeName string `json:"node_name,omitempty"`
+	// Source tells the SPA where this entry came from so it can group
+	// or label appropriately. "localhost" only appears on hypervisor
+	// installs; "corosync" comes from /etc/pve/corosync.conf;
+	// "scan" comes from the LAN TLS scan (CN extracted from the cert).
+	Source string `json:"source"`
 }
 
-// Discover handles GET /api/setup/discover.
-// It uses two complementary sources and merges the results:
-//   - corosync.conf (authoritative cluster membership, present on PVE nodes)
-//   - TCP port scan of all local subnets (works from any machine)
+type discoverResult struct {
+	IsHypervisor     bool                 `json:"is_hypervisor"`
+	Endpoints        []DiscoveredEndpoint `json:"endpoints"`
+	SuggestedGateway string               `json:"suggested_gateway,omitempty"`
+}
+
+// Discover handles GET /api/setup/discover (and the admin-side
+// /api/proxmox/discover). Two complementary sources merged:
+//   - corosync.conf (authoritative cluster membership; only readable on
+//     PVE nodes since /etc/pve requires www-data group membership)
+//   - TLS handshake on port 8006 across local subnets — works from any
+//     box, and the cert CN is the Proxmox node hostname so we get names
+//     for free without needing API credentials.
+//
+// SuggestedGateway is populated from /proc/net/route's default route on
+// every install (not just hypervisors) — the LAN VM running Nimbus
+// usually shares the gateway with the cluster's VMs.
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
-	result := discoverResult{Endpoints: []string{}}
+	result := discoverResult{Endpoints: []DiscoveredEndpoint{}}
+	result.SuggestedGateway = defaultGateway()
 
 	if _, err := os.Stat("/etc/pve"); err == nil {
 		result.IsHypervisor = true
-		result.SuggestedGateway = defaultGateway()
 	}
 
 	// Source 1: corosync cluster membership (instant, authoritative on PVE nodes).
-	// When on a hypervisor, lead with localhost (IP-independent, survives network changes),
-	// then list only remote cluster nodes (skip this machine's own IPs).
-	clusterIPs := corosyncNodeIPs()
-	if result.IsHypervisor {
-		// Always put localhost first on hypervisors
-		result.Endpoints = append(result.Endpoints, "https://localhost:8006")
+	// On hypervisor, lead with localhost (IP-independent, survives network
+	// changes); other cluster nodes follow.
+	corosync := corosyncNodes()
+	seenURL := map[string]bool{}
+	addEndpoint := func(ep DiscoveredEndpoint) {
+		if seenURL[ep.URL] {
+			return
+		}
+		seenURL[ep.URL] = true
+		result.Endpoints = append(result.Endpoints, ep)
+	}
 
-		// Add remote cluster nodes, skipping local IPs
-		if len(clusterIPs) > 0 {
-			localIPs := localIPv4s()
-			for _, ip := range clusterIPs {
-				if containsStr(localIPs, ip) {
-					continue // skip - localhost already covers this machine
-				}
-				url := "https://" + ip + ":8006"
-				if !containsStr(result.Endpoints, url) {
-					result.Endpoints = append(result.Endpoints, url)
-				}
+	if result.IsHypervisor {
+		// localhost gets the local node's name from corosync if we
+		// can identify which corosync entry is "us" by IP intersection.
+		localIPs := localIPv4s()
+		var localName string
+		for _, m := range corosync {
+			if containsStr(localIPs, m.IP) {
+				localName = m.Name
+				break
 			}
 		}
-	} else {
-		// On non-hypervisor, add cluster nodes as-is
-		for _, ip := range clusterIPs {
-			url := "https://" + ip + ":8006"
-			if !containsStr(result.Endpoints, url) {
-				result.Endpoints = append(result.Endpoints, url)
+		addEndpoint(DiscoveredEndpoint{
+			URL: "https://localhost:8006", IP: "127.0.0.1",
+			NodeName: localName, Source: "localhost",
+		})
+		for _, m := range corosync {
+			if containsStr(localIPs, m.IP) {
+				continue // already covered by localhost
 			}
+			addEndpoint(DiscoveredEndpoint{
+				URL: "https://" + m.IP + ":8006", IP: m.IP,
+				NodeName: m.Name, Source: "corosync",
+			})
+		}
+	} else {
+		for _, m := range corosync {
+			addEndpoint(DiscoveredEndpoint{
+				URL: "https://" + m.IP + ":8006", IP: m.IP,
+				NodeName: m.Name, Source: "corosync",
+			})
 		}
 	}
 
-	// Source 2: subnet scan — supplements corosync and works from any host.
+	// Source 2: subnet TLS scan — finds Proxmox nodes anywhere on the
+	// LAN. The cert CN is the node hostname; we extract it without
+	// needing API credentials. Skips IPs already covered by corosync
+	// (already-named) but still probes them when the corosync entry was
+	// IP-only so we backfill names.
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-
-	for _, ip := range scanPort8006(ctx) {
-		url := "https://" + ip + ":8006"
-		if !containsStr(result.Endpoints, url) {
-			result.Endpoints = append(result.Endpoints, url)
+	for _, hit := range scanPort8006(ctx) {
+		url := "https://" + hit.IP + ":8006"
+		if seenURL[url] {
+			// Backfill the name if the prior entry didn't have one.
+			if hit.NodeName != "" {
+				for i := range result.Endpoints {
+					if result.Endpoints[i].URL == url && result.Endpoints[i].NodeName == "" {
+						result.Endpoints[i].NodeName = hit.NodeName
+					}
+				}
+			}
+			continue
 		}
+		addEndpoint(DiscoveredEndpoint{
+			URL: url, IP: hit.IP, NodeName: hit.NodeName, Source: "scan",
+		})
 	}
 
 	response.Success(w, result)
 }
 
-// corosyncNodeIPs reads Proxmox cluster member IPs from /etc/pve/corosync.conf.
-func corosyncNodeIPs() []string {
+// corosyncMember pairs a node's logical name (from `name:` lines in
+// /etc/pve/corosync.conf) with its corosync ring address.
+type corosyncMember struct {
+	Name string
+	IP   string
+}
+
+// corosyncNodes parses both `name:` and `ring0_addr:` from
+// /etc/pve/corosync.conf. Each `node {}` block contains both — we
+// pair them by appearance order within the same block (parser is
+// brace-aware).
+func corosyncNodes() []corosyncMember {
 	data, err := os.ReadFile("/etc/pve/corosync.conf")
 	if err != nil {
 		return nil
 	}
-	var ips []string
+	var (
+		out          []corosyncMember
+		depth        int
+		inNodeBlock  bool
+		curName      string
+		curIP        string
+		nodeBraceLvl int
+	)
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "ring0_addr:") {
+		// Track brace depth to know when a node block opens/closes.
+		// `node {` opens; the matching `}` at the same depth closes.
+		if strings.HasPrefix(line, "node ") || line == "node {" {
+			inNodeBlock = true
+			nodeBraceLvl = depth
+			curName, curIP = "", ""
+		}
+		opens := strings.Count(line, "{")
+		closes := strings.Count(line, "}")
+		depth += opens - closes
+		if inNodeBlock && depth <= nodeBraceLvl {
+			// Block just closed — emit if we got both fields.
+			if curIP != "" {
+				out = append(out, corosyncMember{Name: curName, IP: curIP})
+			}
+			inNodeBlock = false
+			curName, curIP = "", ""
 			continue
 		}
-		addr := strings.TrimSpace(strings.TrimPrefix(line, "ring0_addr:"))
-		if net.ParseIP(addr) != nil {
-			ips = append(ips, addr)
+		if !inNodeBlock {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "name:"):
+			curName = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		case strings.HasPrefix(line, "ring0_addr:"):
+			addr := strings.TrimSpace(strings.TrimPrefix(line, "ring0_addr:"))
+			if net.ParseIP(addr) != nil {
+				curIP = addr
+			}
 		}
 	}
-	return ips
+	return out
 }
 
-// scanPort8006 returns the IPs across all local subnets that have TCP 8006 open.
-func scanPort8006(ctx context.Context) []string {
+// scanHit is one IP that responded on port 8006 with a TLS handshake.
+// NodeName is populated from the leaf cert's CN (Proxmox self-signed certs
+// use the node hostname as CN); empty when the cert can't be parsed or the
+// CN doesn't look like a hostname.
+type scanHit struct {
+	IP       string
+	NodeName string
+}
+
+// scanPort8006 returns the responding IPs across all local subnets. We do
+// a TLS handshake (rather than a raw TCP dial) so the cert CN gives us the
+// node hostname for free — no API credentials needed. InsecureSkipVerify
+// is set since Proxmox ships with a self-signed cert; we're only reading
+// the CN, not validating the chain.
+func scanPort8006(ctx context.Context) []scanHit {
 	seen := map[string]bool{}
 	var allHosts []string
 	for _, subnet := range localSubnets() {
@@ -354,12 +460,13 @@ func scanPort8006(ctx context.Context) []string {
 
 	var (
 		mu    sync.Mutex
-		found []string
+		found []scanHit
 		sem   = make(chan struct{}, 128)
 		wg    sync.WaitGroup
 	)
 
 	dialer := &net.Dialer{}
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 outer:
 	for _, ip := range allHosts {
 		ip := ip
@@ -372,19 +479,53 @@ outer:
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			dialCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+			dialCtx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
 			defer cancel()
-			conn, err := dialer.DialContext(dialCtx, "tcp", ip+":8006")
-			if err == nil {
-				_ = conn.Close()
-				mu.Lock()
-				found = append(found, ip)
-				mu.Unlock()
+			rawConn, err := dialer.DialContext(dialCtx, "tcp", ip+":8006")
+			if err != nil {
+				return
 			}
+			defer rawConn.Close() //nolint:errcheck
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+				// TCP responded but TLS failed — could still be Proxmox
+				// behind a proxy or a non-Proxmox service. Record the
+				// IP; the operator can name it by hand.
+				mu.Lock()
+				found = append(found, scanHit{IP: ip})
+				mu.Unlock()
+				return
+			}
+			defer tlsConn.Close() //nolint:errcheck
+			name := certNodeName(tlsConn.ConnectionState().PeerCertificates)
+			mu.Lock()
+			found = append(found, scanHit{IP: ip, NodeName: name})
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 	return found
+}
+
+// certNodeName extracts the leaf cert's CN, which Proxmox self-signed
+// certs set to the node hostname. Returns empty when the chain is empty
+// or the CN isn't a plausible hostname (no dot AND no letters — guards
+// against weird CN values from non-Proxmox servers like ".local" or "*").
+func certNodeName(chain []*x509.Certificate) string {
+	if len(chain) == 0 {
+		return ""
+	}
+	cn := strings.TrimSpace(chain[0].Subject.CommonName)
+	if cn == "" || strings.ContainsAny(cn, "*?") {
+		return ""
+	}
+	// Strip a trailing domain suffix Proxmox sometimes adds
+	// (e.g. "pve-1.local" → "pve-1"). The corosync `name:` field is
+	// always the bare hostname, so strip to align with that.
+	if dot := strings.Index(cn, "."); dot > 0 {
+		cn = cn[:dot]
+	}
+	return cn
 }
 
 // localIPv4s returns all non-loopback IPv4 addresses on this host.

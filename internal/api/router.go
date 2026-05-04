@@ -223,6 +223,11 @@ func NewRouter(d Deps) http.Handler {
 				// up. Same flow the install wizard uses.
 				r.Get("/proxmox/binding", nodes.Binding)
 				r.Put("/proxmox/binding", nodes.ChangeBinding)
+				// Discover Proxmox endpoints on this network — the
+				// admin reuses the install wizard's discovery handler
+				// from the change-binding modal, so the same scan +
+				// corosync logic runs in both contexts.
+				r.Get("/proxmox/discover", setup.Discover)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
