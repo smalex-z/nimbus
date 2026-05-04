@@ -1,5 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { changeProxmoxBinding } from '@/api/client'
 import type { ProxmoxBinding } from '@/api/client'
 
 // ProxmoxBindingModal renders the cluster-binding detail modal — version,
@@ -114,4 +115,158 @@ function formatRelative(iso: string): string {
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`
   return new Date(t).toLocaleString()
+}
+
+// ChangeBindingModal collects new Proxmox credentials, probes them
+// server-side (8 s timeout), persists to the env file, and triggers a
+// process restart. The page reloads after a short delay so the new
+// connection is in effect when the operator returns.
+//
+// Why restart instead of in-process swap: every consumer of the live
+// proxmox.Client (provision, ippool, nodemgr, …) holds the pointer at
+// construction time. Hot-swapping would require surgery in many places
+// and silent behaviour changes; the install wizard's same-shape flow
+// has been the convention since v1, so this matches.
+export function ChangeBindingModal({
+  current,
+  onClose,
+}: {
+  current: ProxmoxBinding
+  onClose: () => void
+}) {
+  const [host, setHost] = useState(current.host)
+  // Token id + secret never come back from the server (they're write-
+  // only fields on /etc/nimbus/nimbus.env). Operator must re-enter
+  // both — guards against accidental "test the token I forgot" rotates.
+  const [tokenID, setTokenID] = useState('')
+  const [tokenSecret, setTokenSecret] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [restarting, setRestarting] = useState(false)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose, busy])
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      await changeProxmoxBinding({
+        proxmox_host: host.trim(),
+        proxmox_token_id: tokenID.trim(),
+        proxmox_token_secret: tokenSecret.trim(),
+      })
+      // Server queues a 500 ms-delayed restart. Wait a beat longer
+      // before reloading so the fresh process is up to serve us.
+      setRestarting(true)
+      setTimeout(() => window.location.reload(), 3000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed')
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1010] grid place-items-center p-4"
+      style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Change Proxmox connection"
+      onClick={busy ? undefined : onClose}
+    >
+      <div
+        className="glass"
+        style={{ width: '100%', maxWidth: 520, padding: '28px 32px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="eyebrow">Change Proxmox connection</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>
+          {current.connected_node || current.cluster_name || 'Reconfigure'}
+        </h3>
+        <p style={{ margin: '0 0 18px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          Nimbus will probe the new credentials, persist them to <code>/etc/nimbus/nimbus.env</code>,
+          and reload itself. The page will refresh automatically.
+        </p>
+
+        {restarting ? (
+          <div
+            style={{
+              padding: '14px 16px',
+              background: 'rgba(20,18,28,0.04)',
+              border: '1px solid var(--line)',
+              borderRadius: 10,
+              fontSize: 13,
+              color: 'var(--ink-body)',
+            }}
+          >
+            Reloading Nimbus with the new connection… page will refresh in a moment.
+          </div>
+        ) : (
+          <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div className="n-field">
+              <label className="n-label" htmlFor="px-host">Proxmox API URL</label>
+              <input
+                id="px-host"
+                className="n-input"
+                type="url"
+                placeholder="https://pve.example.com:8006"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+            <div className="n-field">
+              <label className="n-label" htmlFor="px-token-id">Token ID</label>
+              <input
+                id="px-token-id"
+                className="n-input"
+                type="text"
+                placeholder="root@pam!nimbus"
+                value={tokenID}
+                onChange={(e) => setTokenID(e.target.value)}
+                required
+                autoComplete="off"
+              />
+            </div>
+            <div className="n-field">
+              <label className="n-label" htmlFor="px-token-secret">Token secret</label>
+              <input
+                id="px-token-secret"
+                className="n-input"
+                type="password"
+                placeholder="(re-enter the secret)"
+                value={tokenSecret}
+                onChange={(e) => setTokenSecret(e.target.value)}
+                required
+                autoComplete="off"
+              />
+            </div>
+            {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+              <button type="button" className="n-btn" onClick={onClose} disabled={busy}>Cancel</button>
+              <button
+                type="submit"
+                className="n-btn n-btn-primary"
+                disabled={busy || !host || !tokenID || !tokenSecret}
+              >
+                {busy ? 'Probing…' : 'Save & reload'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
 }

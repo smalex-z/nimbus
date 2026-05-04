@@ -1141,6 +1141,20 @@ export async function getProxmoxBinding(): Promise<ProxmoxBinding> {
   return data
 }
 
+// changeProxmoxBinding rewrites the Proxmox connection credentials and
+// triggers a server restart. The HTTP response returns BEFORE the
+// restart fires (server queues a 500 ms-delayed restart in a goroutine);
+// callers should reload the SPA after a couple seconds. The probe step
+// surfaces 502 on bad credentials so the operator can fix typos before
+// the restart commits.
+export async function changeProxmoxBinding(req: {
+  proxmox_host: string
+  proxmox_token_id: string
+  proxmox_token_secret: string
+}): Promise<void> {
+  await api.put('/proxmox/binding', req, { timeout: 15_000 })
+}
+
 // --- /api/nodes admin actions ------------------------------------------------
 
 export async function cordonNode(name: string, reason: string): Promise<void> {

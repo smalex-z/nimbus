@@ -1,17 +1,22 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/proxmox"
 )
 
 // Nodes wraps the nodemgr service for the cluster-status surface (used by
@@ -19,14 +24,19 @@ import (
 // tags, remove). Telemetry-only callers can read List; admin actions live
 // behind requireAdmin in the router.
 type Nodes struct {
-	mgr    *nodemgr.Service
-	pxHost string // surfaces in /api/proxmox/binding
+	mgr     *nodemgr.Service
+	cfg     *config.Config
+	restart func()
 }
 
 // NewNodes constructs a Nodes handler. mgr is the shared nodemgr.Service;
-// pxHost is the Proxmox base URL the binding endpoint reports back.
-func NewNodes(mgr *nodemgr.Service, pxHost string) *Nodes {
-	return &Nodes{mgr: mgr, pxHost: pxHost}
+// cfg is the live config (read for the binding endpoint and rewritten by
+// the change-binding flow); restart is the restartSelf hook that re-execs
+// the binary after credentials change so the new Proxmox client takes
+// effect. cfg or restart may be nil in tests; the change-binding endpoint
+// returns 503 in that case.
+func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
+	return &Nodes{mgr: mgr, cfg: cfg, restart: restart}
 }
 
 // List handles GET /api/nodes. Returns one row per Proxmox node with live
@@ -185,15 +195,105 @@ func (h *Nodes) Remove(w http.ResponseWriter, r *http.Request) {
 }
 
 // Binding handles GET /api/proxmox/binding. Tiny payload, polled by the
-// header chip. Errors inside collapse into Reachable=false rather than
-// HTTP 500 so the chip can render "offline" without spamming alerts.
+// Nodes page. Errors inside collapse into Reachable=false rather than
+// HTTP 500 so the page can render "offline" without spamming alerts.
 func (h *Nodes) Binding(w http.ResponseWriter, r *http.Request) {
-	out, err := h.mgr.GetBinding(r.Context(), h.pxHost)
+	host := ""
+	if h.cfg != nil {
+		host = h.cfg.ProxmoxHost
+	}
+	out, err := h.mgr.GetBinding(r.Context(), host)
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
 	response.Success(w, out)
+}
+
+// changeBindingRequest is the operator-confirmed reconfigure payload.
+// Mirrors the install wizard's testConnRequest — host + token-id +
+// token-secret. Other env values (IP pool, gateway, etc.) are preserved
+// from the current config and rewritten back unchanged.
+type changeBindingRequest struct {
+	ProxmoxHost        string `json:"proxmox_host"`
+	ProxmoxTokenID     string `json:"proxmox_token_id"`
+	ProxmoxTokenSecret string `json:"proxmox_token_secret"`
+}
+
+// ChangeBinding handles PUT /api/proxmox/binding. Probes the new
+// credentials with a one-shot Version call (8s timeout) — fail-fast so
+// a typo doesn't get persisted; success path writes the env file with
+// the existing IP-pool / gateway / etc. values intact, sets the process
+// env so syscall.Exec picks them up, then triggers restartSelf after a
+// short delay so the response can flush.
+//
+// Restart-after-write is the same flow the install wizard uses; the
+// alternative (in-process pveClient swap) would require surgery in
+// every consumer of *proxmox.Client and silent re-instantiation isn't
+// safer than a 1-2s reload.
+func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
+	if h.cfg == nil || h.restart == nil {
+		response.Error(w, http.StatusServiceUnavailable, "reconfigure not wired in this build")
+		return
+	}
+	var req changeBindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	req.ProxmoxHost = strings.TrimSpace(req.ProxmoxHost)
+	req.ProxmoxTokenID = strings.TrimSpace(req.ProxmoxTokenID)
+	req.ProxmoxTokenSecret = strings.TrimSpace(req.ProxmoxTokenSecret)
+	if req.ProxmoxHost == "" || req.ProxmoxTokenID == "" || req.ProxmoxTokenSecret == "" {
+		response.BadRequest(w, "proxmox_host, proxmox_token_id, and proxmox_token_secret are required")
+		return
+	}
+
+	// Probe before persisting — typos shouldn't strand the operator
+	// outside their own admin UI.
+	probe := proxmox.New(req.ProxmoxHost, req.ProxmoxTokenID, req.ProxmoxTokenSecret, 10*time.Second)
+	probeCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	if _, err := probe.Version(probeCtx); err != nil {
+		response.Error(w, http.StatusBadGateway, "cannot reach Proxmox with the new credentials: "+err.Error())
+		return
+	}
+
+	// Preserve every other env value — only the Proxmox triple changes.
+	envPath := config.EnvFilePath()
+	if err := config.WriteEnvFile(envPath, config.EnvValues{
+		ProxmoxHost:        req.ProxmoxHost,
+		ProxmoxTokenID:     req.ProxmoxTokenID,
+		ProxmoxTokenSecret: req.ProxmoxTokenSecret,
+		IPPoolStart:        h.cfg.IPPoolStart,
+		IPPoolEnd:          h.cfg.IPPoolEnd,
+		GatewayIP:          h.cfg.GatewayIP,
+		VMPrefixLen:        h.cfg.VMPrefixLen,
+		Nameserver:         h.cfg.Nameserver,
+		SearchDomain:       h.cfg.SearchDomain,
+		Port:               h.cfg.Port,
+		GopherAPIURL:       h.cfg.GopherAPIURL,
+		GopherAPIKey:       h.cfg.GopherAPIKey,
+	}); err != nil {
+		response.InternalError(w, "failed to persist env file: "+err.Error())
+		return
+	}
+
+	// syscall.Exec inherits the parent's env — set so the new image
+	// picks up the new credentials immediately.
+	_ = os.Setenv("PROXMOX_HOST", req.ProxmoxHost)
+	_ = os.Setenv("PROXMOX_TOKEN_ID", req.ProxmoxTokenID)
+	_ = os.Setenv("PROXMOX_TOKEN_SECRET", req.ProxmoxTokenSecret)
+
+	response.Success(w, map[string]string{
+		"message": "Proxmox connection updated. Reloading Nimbus…",
+	})
+
+	// Defer the restart so the HTTP response flushes first.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		h.restart()
+	}()
 }
 
 // writeNodeMutationError maps nodemgr's typed errors to HTTP statuses.

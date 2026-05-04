@@ -155,6 +155,17 @@ export interface NodeView {
   // dashboard renders them; the new /nodes admin page hides them.
   swap_used: number
   swap_total: number
+  // Per-node VM-disk pool metrics (the storage backend identified by
+  // cfg.VMDiskStorage, default local-lvm). disk_allocated is the sum
+  // of every non-template VM's configured maxdisk on this node — the
+  // pessimistic "fully grown" figure. All zero when no pool is
+  // configured or the node doesn't expose the pool.
+  disk_used: number
+  disk_total: number
+  disk_allocated: number
+  // Pool name actually queried; empty when disk telemetry is off.
+  // Surfaced so the SPA can label the bar (e.g. "local-lvm").
+  disk_pool_name?: string
   vm_count: number
   vm_count_total: number
   // Corosync ring address for this node, when available. The IP-pool table

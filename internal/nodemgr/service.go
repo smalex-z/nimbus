@@ -85,6 +85,11 @@ type Config struct {
 	// this node even when drained — pulling it would brick the API
 	// the operator is talking to.
 	SelfHostName string
+	// VMDiskStorage is the Proxmox storage pool name VMs land on
+	// (cfg.VMDiskStorage, e.g. "local-lvm"). When set, List populates
+	// per-node disk metrics filtered to this pool. Empty leaves disk
+	// fields zeroed.
+	VMDiskStorage string
 }
 
 // New constructs a Service. database is the shared *gorm.DB; px is the live
@@ -126,13 +131,24 @@ type View struct {
 	// SwapUsed/SwapTotal come from /nodes/{node}/status (fan-out per
 	// online node). Both 0 when the per-node call fails — single dead
 	// node never blanks the table.
-	SwapUsed     uint64    `json:"swap_used"`
-	SwapTotal    uint64    `json:"swap_total"`
-	VMCount      int       `json:"vm_count"`       // running, non-template
-	VMCountTotal int       `json:"vm_count_total"` // all non-template
-	IP           string    `json:"ip,omitempty"`
-	LastSeenAt   time.Time `json:"last_seen_at"`
-	IsSelfHost   bool      `json:"is_self_host"` // true for the node Nimbus runs on
+	SwapUsed  uint64 `json:"swap_used"`
+	SwapTotal uint64 `json:"swap_total"`
+	// DiskUsed/DiskTotal are the configured VM-disk pool's capacity
+	// on this node (from /cluster/resources?type=storage filtered by
+	// cfg.VMDiskStorage). DiskAllocated is the sum of every non-
+	// template VM's configured maxdisk on this node — the pessimistic
+	// "what would fill if every VM grew to its declared size" number.
+	// All three zero when no pool name is configured (cfg.VMDiskStorage
+	// empty) or when this node doesn't expose the pool.
+	DiskUsed      uint64    `json:"disk_used"`
+	DiskTotal     uint64    `json:"disk_total"`
+	DiskAllocated uint64    `json:"disk_allocated"`
+	DiskPoolName  string    `json:"disk_pool_name,omitempty"`
+	VMCount       int       `json:"vm_count"`       // running, non-template
+	VMCountTotal  int       `json:"vm_count_total"` // all non-template
+	IP            string    `json:"ip,omitempty"`
+	LastSeenAt    time.Time `json:"last_seen_at"`
+	IsSelfHost    bool      `json:"is_self_host"` // true for the node Nimbus runs on
 }
 
 // ListView is the cluster-wide view-model the SPA renders on /nodes. Lifts
@@ -156,11 +172,12 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 		return nil, fmt.Errorf("get cluster vms: %w", err)
 	}
 
-	// Aggregate per-node VM counts + committed mem.
+	// Aggregate per-node VM counts + committed mem + committed disk.
 	type agg struct {
-		running      int
-		total        int
-		memAllocated uint64
+		running       int
+		total         int
+		memAllocated  uint64
+		diskAllocated uint64
 	}
 	perNode := make(map[string]agg, len(nodes))
 	for _, vm := range clusterVMs {
@@ -170,11 +187,17 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 		a := perNode[vm.Node]
 		a.total++
 		a.memAllocated += vm.MaxMem
+		a.diskAllocated += vm.MaxDisk
 		if vm.Status == "running" {
 			a.running++
 		}
 		perNode[vm.Node] = a
 	}
+
+	// Per-node disk capacity for the configured VM pool. Best-effort:
+	// failure here just leaves disk fields zeroed; the rest of the
+	// table still renders.
+	diskByNode := s.fanoutDisk(ctx)
 
 	nodeIP, err := s.px.NodeAddresses(ctx)
 	if err != nil {
@@ -200,29 +223,68 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 		a := perNode[n.Name]
 		row := persistByName[n.Name]
 		swap := swapByNode[n.Name]
+		disk := diskByNode[n.Name]
 		out = append(out, View{
-			Name:         n.Name,
-			Status:       n.Status,
-			LockState:    lockOrNone(row.LockState),
-			LockedAt:     row.LockedAt,
-			LockedBy:     row.LockedBy,
-			LockReason:   row.LockReason,
-			Tags:         splitTags(row.Tags),
-			CPU:          n.CPU,
-			MaxCPU:       n.MaxCPU,
-			MemUsed:      n.Mem,
-			MemTotal:     n.MaxMem,
-			MemAllocated: a.memAllocated,
-			SwapUsed:     swap.Used,
-			SwapTotal:    swap.Total,
-			VMCount:      a.running,
-			VMCountTotal: a.total,
-			IP:           nodeIP[n.Name],
-			LastSeenAt:   row.LastSeenAt,
-			IsSelfHost:   s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
+			Name:          n.Name,
+			Status:        n.Status,
+			LockState:     lockOrNone(row.LockState),
+			LockedAt:      row.LockedAt,
+			LockedBy:      row.LockedBy,
+			LockReason:    row.LockReason,
+			Tags:          splitTags(row.Tags),
+			CPU:           n.CPU,
+			MaxCPU:        n.MaxCPU,
+			MemUsed:       n.Mem,
+			MemTotal:      n.MaxMem,
+			MemAllocated:  a.memAllocated,
+			SwapUsed:      swap.Used,
+			SwapTotal:     swap.Total,
+			DiskUsed:      disk.Used,
+			DiskTotal:     disk.Total,
+			DiskAllocated: a.diskAllocated,
+			DiskPoolName:  s.cfg.VMDiskStorage,
+			VMCount:       a.running,
+			VMCountTotal:  a.total,
+			IP:            nodeIP[n.Name],
+			LastSeenAt:    row.LastSeenAt,
+			IsSelfHost:    s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
 		})
 	}
 	return &ListView{Nodes: out}, nil
+}
+
+// diskCapacity is a stripped-down storage projection per node. Total +
+// Used in bytes for the configured VM-disk pool. Both zero when the
+// pool isn't visible on this node (different storage tier, mis-config).
+type diskCapacity struct {
+	Used  uint64
+	Total uint64
+}
+
+// fanoutDisk returns name → diskCapacity for the configured VMDiskStorage
+// pool. One cluster-wide call to /cluster/resources?type=storage; rows
+// are filtered by Storage name. Shared pools repeat per node with the
+// same numbers — fine, we just stamp the same value onto each node.
+//
+// Returns an empty map (no error) when no pool is configured or when
+// the cluster-storage call fails — disk fields then stay zeroed and
+// the SPA hides the disk bar.
+func (s *Service) fanoutDisk(ctx context.Context) map[string]diskCapacity {
+	out := make(map[string]diskCapacity)
+	if s.cfg.VMDiskStorage == "" {
+		return out
+	}
+	rows, err := s.px.GetClusterStorage(ctx)
+	if err != nil {
+		return out
+	}
+	for _, st := range rows {
+		if st.Storage != s.cfg.VMDiskStorage {
+			continue
+		}
+		out[st.Node] = diskCapacity{Used: st.Used, Total: st.Total}
+	}
+	return out
 }
 
 // fanoutSwap reads /nodes/{node}/status in parallel for each online node

@@ -540,6 +540,7 @@ func main() {
 		TaskPollInterval:    2 * time.Second,
 		VacateMissThreshold: cfg.VacateMissThreshold,
 		SelfHostName:        selfHost,
+		VMDiskStorage:       cfg.VMDiskStorage,
 	})
 	// Background reconcile: same cadence as the IP pool's. Observed
 	// nodes upsert + LastSeenAt bump; unobserved nodes prune after the

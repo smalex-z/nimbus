@@ -58,7 +58,7 @@ func NewRouter(d Deps) http.Handler {
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
 	keys := handlers.NewKeys(d.Keys)
-	nodes := handlers.NewNodes(d.NodeMgr, d.Config.ProxmoxHost)
+	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
@@ -217,9 +217,12 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(60*time.Minute)).
 					Post("/nodes/{name}/drain", nodes.Drain)
 				r.Delete("/nodes/{name}", nodes.Remove)
-				// Cluster-binding chip in the SPA header — read-only,
-				// thin payload, polls every ~30s.
+				// Proxmox binding — read-only chip + reconfigure.
+				// PUT writes the env file with the new triple, then
+				// triggers restartSelf so a fresh process picks them
+				// up. Same flow the install wizard uses.
 				r.Get("/proxmox/binding", nodes.Binding)
+				r.Put("/proxmox/binding", nodes.ChangeBinding)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)
