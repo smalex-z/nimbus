@@ -141,7 +141,10 @@ export function ChangeBindingModal({
   // fresh install doesn't make the operator type it from scratch.
   const [tokenID, setTokenID] = useState(current.token_id || 'root@pam!nimbus')
   // Token secret is genuinely write-only — we never round-trip it from
-  // the server. Empty by default; operator re-enters every time.
+  // the server. Empty submission means "keep the current secret" (the
+  // common case: switching entry nodes within the same cluster, since
+  // Proxmox tokens are cluster-wide). Operator only fills it in when
+  // actually rotating the token.
   const [tokenSecret, setTokenSecret] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -253,20 +256,22 @@ export function ChangeBindingModal({
             </div>
 
             <div className="n-field">
-              <label className="n-label" htmlFor="px-token-secret">Token secret</label>
+              <label className="n-label" htmlFor="px-token-secret">
+                Token secret <span style={{ fontWeight: 400, color: 'var(--ink-mute)' }}>(optional)</span>
+              </label>
               <input
                 id="px-token-secret"
                 className="n-input"
                 type="password"
-                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                placeholder="leave blank to keep the current secret"
                 value={tokenSecret}
                 onChange={(e) => setTokenSecret(e.target.value)}
-                required
                 autoComplete="off"
               />
               <span style={{ fontSize: 11, color: 'var(--ink-mute)', marginTop: 4 }}>
-                The UUID Proxmox showed once when the token was created. Re-enter to confirm —
-                Nimbus never round-trips the secret back from the server.
+                Proxmox tokens are cluster-wide, so switching to a different node usually
+                doesn't need a new secret. Only fill this in when you're actually rotating
+                the token — Nimbus keeps the current one when this field is blank.
               </span>
             </div>
 
@@ -308,7 +313,7 @@ export function ChangeBindingModal({
               <button
                 type="submit"
                 className="n-btn n-btn-primary"
-                disabled={busy || !host || !tokenID || !tokenSecret}
+                disabled={busy || !host || !tokenID}
               >
                 {busy ? 'Probing…' : 'Save & reload'}
               </button>

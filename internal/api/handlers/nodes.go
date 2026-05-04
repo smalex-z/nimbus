@@ -215,6 +215,11 @@ func (h *Nodes) Binding(w http.ResponseWriter, r *http.Request) {
 // Mirrors the install wizard's testConnRequest — host + token-id +
 // token-secret. Other env values (IP pool, gateway, etc.) are preserved
 // from the current config and rewritten back unchanged.
+//
+// ProxmoxTokenSecret is optional: empty means "keep the current secret"
+// — Proxmox API tokens are cluster-wide, so swapping the entry-point
+// node (the common case) doesn't need a new credential. The operator
+// only re-enters the secret when actually rotating it.
 type changeBindingRequest struct {
 	ProxmoxHost        string `json:"proxmox_host"`
 	ProxmoxTokenID     string `json:"proxmox_token_id"`
@@ -245,14 +250,26 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	req.ProxmoxHost = strings.TrimSpace(req.ProxmoxHost)
 	req.ProxmoxTokenID = strings.TrimSpace(req.ProxmoxTokenID)
 	req.ProxmoxTokenSecret = strings.TrimSpace(req.ProxmoxTokenSecret)
-	if req.ProxmoxHost == "" || req.ProxmoxTokenID == "" || req.ProxmoxTokenSecret == "" {
-		response.BadRequest(w, "proxmox_host, proxmox_token_id, and proxmox_token_secret are required")
+	if req.ProxmoxHost == "" || req.ProxmoxTokenID == "" {
+		response.BadRequest(w, "proxmox_host and proxmox_token_id are required")
+		return
+	}
+	// Empty secret = "keep the current one" (Proxmox tokens are
+	// cluster-wide, so switching entry nodes doesn't need new creds).
+	// Reject when there's no current secret to fall back on — should
+	// only happen on the wizard path, but defensive.
+	secret := req.ProxmoxTokenSecret
+	if secret == "" {
+		secret = h.cfg.ProxmoxTokenSecret
+	}
+	if secret == "" {
+		response.BadRequest(w, "proxmox_token_secret is required (no current secret to keep)")
 		return
 	}
 
 	// Probe before persisting — typos shouldn't strand the operator
 	// outside their own admin UI.
-	probe := proxmox.New(req.ProxmoxHost, req.ProxmoxTokenID, req.ProxmoxTokenSecret, 10*time.Second)
+	probe := proxmox.New(req.ProxmoxHost, req.ProxmoxTokenID, secret, 10*time.Second)
 	probeCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	if _, err := probe.Version(probeCtx); err != nil {
@@ -265,7 +282,7 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	if err := config.WriteEnvFile(envPath, config.EnvValues{
 		ProxmoxHost:        req.ProxmoxHost,
 		ProxmoxTokenID:     req.ProxmoxTokenID,
-		ProxmoxTokenSecret: req.ProxmoxTokenSecret,
+		ProxmoxTokenSecret: secret,
 		IPPoolStart:        h.cfg.IPPoolStart,
 		IPPoolEnd:          h.cfg.IPPoolEnd,
 		GatewayIP:          h.cfg.GatewayIP,
@@ -284,7 +301,7 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	// picks up the new credentials immediately.
 	_ = os.Setenv("PROXMOX_HOST", req.ProxmoxHost)
 	_ = os.Setenv("PROXMOX_TOKEN_ID", req.ProxmoxTokenID)
-	_ = os.Setenv("PROXMOX_TOKEN_SECRET", req.ProxmoxTokenSecret)
+	_ = os.Setenv("PROXMOX_TOKEN_SECRET", secret)
 
 	response.Success(w, map[string]string{
 		"message": "Proxmox connection updated. Reloading Nimbus…",
