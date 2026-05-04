@@ -1,3 +1,26 @@
+// Nimbus HTTP API.
+//
+// @title       Nimbus HTTP API
+// @version     1.0
+// @description Self-hosted VM provisioning portal for Proxmox VE. The API is
+// @description wrapped in a uniform `{success, data, error}` envelope on every
+// @description response — see EnvelopeOK / EnvelopeError schemas below.
+// @license.name MIT
+// @license.url  https://opensource.org/licenses/MIT
+//
+// @BasePath /api
+//
+// @securityDefinitions.apikey cookieAuth
+// @in          cookie
+// @name        nimbus_sid
+// @description Session cookie set by /api/auth/login. Required by all routes
+// @description outside the public auth + setup surface.
+//
+// @securityDefinitions.apikey workerAuth
+// @in          header
+// @name        Authorization
+// @description Bearer token used by the GX10 GPU worker daemon. Format:
+// @description `Bearer <hex>`. Mint via the Settings → GPU page.
 package main
 
 import (

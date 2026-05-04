@@ -9,8 +9,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	httpSwagger "github.com/swaggo/http-swagger"
 
 	"nimbus/internal/api/handlers"
+	_ "nimbus/internal/api/openapi" // registers the generated swagger spec
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/config"
 	"nimbus/internal/gpu"
@@ -106,6 +108,17 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	r.Route("/api", func(r chi.Router) {
+		// Public OpenAPI/SwaggerUI surface. The spec is bundled at build
+		// time via `make swagger` (swag init) and registered through the
+		// blank-imported `internal/api/openapi` package above. URL is
+		// hard-coded to /api/docs/doc.json so the SwaggerUI loads it
+		// regardless of how the server is deployed (http-swagger's default
+		// uses a relative path that breaks behind proxies).
+		r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/api/docs/", http.StatusMovedPermanently)
+		})
+		r.Get("/docs/*", httpSwagger.Handler(httpSwagger.URL("/api/docs/doc.json")))
+
 		r.Get("/health", health.Check)
 		r.Get("/setup/status", setup.Status)
 		r.Post("/setup/admin", setup.CreateAdmin)

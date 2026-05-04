@@ -1,0 +1,358 @@
+basePath: /api
+definitions:
+  handlers.EnvelopeError:
+    properties:
+      error:
+        example: invalid id
+        type: string
+      success:
+        example: false
+        type: boolean
+    type: object
+  handlers.EnvelopeOK:
+    properties:
+      data: {}
+      success:
+        example: true
+        type: boolean
+    type: object
+  handlers.attachPrivateKeyRequest:
+    properties:
+      private_key:
+        type: string
+    type: object
+  handlers.createKeyRequest:
+    properties:
+      generate:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      private_key:
+        type: string
+      public_key:
+        type: string
+      set_default:
+        type: boolean
+    type: object
+  handlers.createKeyResponse:
+    properties:
+      created_at:
+        type: string
+      fingerprint:
+        type: string
+      has_private_key:
+        type: boolean
+      id:
+        type: integer
+      is_default:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      owner_id:
+        type: integer
+      private_key:
+        type: string
+      public_key:
+        type: string
+      source:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handlers.keyView:
+    properties:
+      created_at:
+        type: string
+      fingerprint:
+        type: string
+      has_private_key:
+        type: boolean
+      id:
+        type: integer
+      is_default:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      owner_id:
+        type: integer
+      public_key:
+        type: string
+      source:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handlers.privateKeyResponse:
+    properties:
+      key_name:
+        type: string
+      private_key:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    Bearer token used by the GX10 GPU worker daemon. Format:
+    `Bearer <hex>`. Mint via the Settings → GPU page.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  title: Nimbus HTTP API
+  version: "1.0"
+paths:
+  /keys:
+    get:
+      description: |-
+        Returns the caller's stored SSH keys. Public-key + metadata only;
+        the encrypted private half is fetched via GET /keys/{id}/private-key.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.keyView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List SSH keys
+      tags:
+      - keys
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Either generates a new ed25519 keypair (`generate=true`) or stores
+        an imported public/private key. The freshly generated private half
+        is returned only on this response — re-download via /keys/{id}/private-key later.
+      parameters:
+      - description: Key creation request
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createKeyRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.createKeyResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create or import an SSH key
+      tags:
+      - keys
+  /keys/{id}:
+    delete:
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete an SSH key
+      tags:
+      - keys
+    get:
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.keyView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get a single SSH key
+      tags:
+      - keys
+  /keys/{id}/default:
+    post:
+      description: |-
+        Default keys are auto-attached at provision time when the request
+        body doesn't specify a key explicitly.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Mark this key as the caller's default
+      tags:
+      - keys
+  /keys/{id}/private-key:
+    get:
+      description: |-
+        Returns the decrypted private key. Available only to the key owner;
+        fails with 404 if no private half is stored.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.privateKeyResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Download the private half of an SSH key
+      tags:
+      - keys
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Vaults the private half of a key originally imported as a public
+        key only. After this call, has_private_key flips true.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Private key payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.attachPrivateKeyRequest'
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Attach a private key to a public-only key
+      tags:
+      - keys
+securityDefinitions:
+  cookieAuth:
+    in: cookie
+    name: nimbus_sid
+    type: apiKey
+  workerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
