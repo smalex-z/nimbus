@@ -255,7 +255,11 @@ function CardGrid({ rows }: { rows: NodeView[] }) {
     })
   }, [rows])
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+    // Density ramps with viewport: 1 col mobile, 2 col tablet, 3 col
+    // small desktop, 4 col xl. Cards have just enough fixed content
+    // (header + 5 thin bars) that 4-up at ~280-300px each stays
+    // legible — better at-a-glance density for clusters of 6+ nodes.
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
       {sorted.map((n) => <NodeCard key={n.name} node={n} />)}
     </div>
   )
