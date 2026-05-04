@@ -412,6 +412,41 @@ type S3Storage struct {
 // TableName pins the table name; without this GORM would pluralize to "s3_storages".
 func (S3Storage) TableName() string { return "s3_storage" }
 
+// Node is the local cache row for one Proxmox cluster node. Holds operator-
+// owned state (lock state, tags, lock-context metadata) that doesn't live in
+// Proxmox itself. Live telemetry (CPU/RAM/status) is read straight from
+// Proxmox at request time and not persisted here.
+//
+// LockState values:
+//   - "none"      — normal; new VMs may land here per scoring
+//   - "cordoned"  — scheduler skips this node; existing VMs untouched
+//   - "draining"  — scheduler skips + a drain operation is migrating VMs off
+//   - "drained"   — terminal; no managed VMs left, ready to remove from cluster
+//
+// Tags is a comma-separated string for forward-compat with workload-aware
+// scoring (gpu, nvme-fast, arm64, …); empty for a fresh node. Mirrors the
+// same CSV-in-a-string pattern NetworkSettings + GitHubOrgs use.
+//
+// Rows are populated lazily by nodemgr.Reconciler walking GetNodes — first
+// observation auto-creates with LockState="none". Removed nodes are pruned
+// when they go missing for VacateMissThreshold cycles, same logic the IP
+// reconciler applies to allocations.
+type Node struct {
+	Name       string     `gorm:"column:name;primaryKey"             json:"name"`
+	LockState  string     `gorm:"column:lock_state;default:'none'"   json:"lock_state"`
+	LockedAt   *time.Time `gorm:"column:locked_at"                   json:"locked_at,omitempty"`
+	LockedBy   *uint      `gorm:"column:locked_by"                   json:"locked_by,omitempty"`
+	LockReason string     `gorm:"column:lock_reason;default:''"      json:"lock_reason,omitempty"`
+	Tags       string     `gorm:"column:tags;default:''"             json:"-"`
+	LastSeenAt time.Time  `gorm:"column:last_seen_at"                json:"last_seen_at"`
+	CreatedAt  time.Time  `gorm:"column:created_at"                  json:"created_at"`
+	UpdatedAt  time.Time  `gorm:"column:updated_at"                  json:"updated_at"`
+}
+
+// TableName pins the GORM table name. Without it GORM picks "nodes" which is
+// fine — explicit just to match the rest of the file's pattern.
+func (Node) TableName() string { return "nodes" }
+
 // NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
 // single row (ID=1) is used. The columns mirror the env vars they replace
 // (IP_POOL_START / IP_POOL_END / GATEWAY_IP / VM_PREFIX_LEN) — env vars now

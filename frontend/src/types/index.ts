@@ -133,16 +133,39 @@ export interface ProvisionProgress {
   label: string
 }
 
+// LockState mirrors db.Node.LockState. "none" is the default; the others
+// are operator-set via the /nodes admin page. The provision scheduler
+// skips anything other than "none".
+export type NodeLockState = 'none' | 'cordoned' | 'draining' | 'drained'
+
 export interface NodeView {
   name: string
   status: 'online' | 'offline' | 'unknown'
+  lock_state: NodeLockState
+  locked_at?: string
+  locked_by?: number
+  lock_reason?: string
+  tags: string[]
   cpu: number
   max_cpu: number
   mem_used: number
   mem_total: number
   mem_allocated: number
+  // swap_used + swap_total come from /nodes/{node}/status — the Admin
+  // dashboard renders them; the new /nodes admin page hides them.
   swap_used: number
   swap_total: number
+  // Per-node VM-disk pool metrics (the storage backend identified by
+  // cfg.VMDiskStorage, default local-lvm). disk_allocated is the sum
+  // of every non-template VM's configured maxdisk on this node — the
+  // pessimistic "fully grown" figure. All zero when no pool is
+  // configured or the node doesn't expose the pool.
+  disk_used: number
+  disk_total: number
+  disk_allocated: number
+  // Pool name actually queried; empty when disk telemetry is off.
+  // Surfaced so the SPA can label the bar (e.g. "local-lvm").
+  disk_pool_name?: string
   vm_count: number
   vm_count_total: number
   // Corosync ring address for this node, when available. The IP-pool table
@@ -150,6 +173,13 @@ export interface NodeView {
   // instead of the generic EXTERNAL chip netscan would otherwise stamp on
   // them.
   ip?: string
+  // last_seen_at — wall time of the most recent reconcile observation.
+  // Purely informational; the SPA may render "seen N seconds ago".
+  last_seen_at: string
+  // is_self_host is true for the node Nimbus itself runs on. The /nodes
+  // page hides Cordon/Drain/Remove buttons on this row to prevent the
+  // operator from locking themselves out.
+  is_self_host: boolean
 }
 
 export interface ClusterStats {

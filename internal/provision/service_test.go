@@ -185,7 +185,7 @@ func newTestService(t *testing.T, fake *fakePVE) (*provision.Service, *ippool.Po
 func newTestServiceOpts(t *testing.T, fake *fakePVE, mutate func(*provision.Config)) (*provision.Service, *ippool.Pool, *db.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{})
+	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.Node{})
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
@@ -1024,6 +1024,66 @@ func TestPickNode_DiskGateRejectsFullPool(t *testing.T) {
 	got := captured.Load()
 	if got == nil || *got != "bravo" {
 		t.Errorf("CloneVM target = %v, want bravo (alpha's disk too full)", got)
+	}
+}
+
+// TestPickNode_CordonedNodeSkipped covers the spec acceptance criterion:
+// "Cordon flips state and the scheduler skips the node within one provision
+// attempt." Without the lockStatesByNode lookup in pickNode, this test would
+// fail — the cordoned alpha would still get scored normally and (being the
+// scoring tie-break winner) get picked.
+func TestPickNode_CordonedNodeSkipped(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "local-lvm", Node: "alpha", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+			{Storage: "local-lvm", Node: "bravo", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+		}, nil
+	}
+	captured := atomic.Pointer[string]{}
+	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
+		t := target
+		captured.Store(&t)
+		return "UPID", nil
+	}
+
+	svc, _, database := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "local-lvm",
+	})
+
+	// Seed both node rows; cordon alpha. The scheduler should pick bravo.
+	for _, name := range []string{"alpha", "bravo"} {
+		if err := database.WithContext(context.Background()).Create(&db.Node{
+			Name: name, LockState: "none", LastSeenAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed node %s: %v", name, err)
+		}
+	}
+	if err := database.WithContext(context.Background()).Model(&db.Node{}).
+		Where("name = ?", "alpha").
+		Update("lock_state", "cordoned").Error; err != nil {
+		t.Fatalf("cordon alpha: %v", err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "cordon-test-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+	}, nil); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got := captured.Load()
+	if got == nil || *got != "bravo" {
+		t.Errorf("CloneVM target = %v, want bravo (alpha cordoned)", got)
 	}
 }
 

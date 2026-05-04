@@ -15,6 +15,7 @@ import (
 	"nimbus/internal/config"
 	"nimbus/internal/gpu"
 	"nimbus/internal/ippool"
+	"nimbus/internal/nodemgr"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -39,6 +40,7 @@ type Deps struct {
 	S3            *s3storage.Service
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
+	NodeMgr       *nodemgr.Service
 	Config        *config.Config
 	Restart       func()
 }
@@ -56,7 +58,7 @@ func NewRouter(d Deps) http.Handler {
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision)
 	keys := handlers.NewKeys(d.Keys)
-	nodes := handlers.NewNodes(d.Proxmox)
+	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
 	bs := handlers.NewBootstrap(d.Bootstrap)
@@ -204,6 +206,28 @@ func NewRouter(d Deps) http.Handler {
 				r.Put("/users/{id}/quota", auth.SetUserQuota)
 
 				r.Get("/nodes", nodes.List)
+				// Admin-facing node lifecycle. Drain streams NDJSON and
+				// can run for tens of minutes per VM on cold migrations
+				// — give it a generous timeout. The other actions are
+				// fast DB writes (cordon/uncordon/tags/delete).
+				r.Post("/nodes/{name}/cordon", nodes.Cordon)
+				r.Post("/nodes/{name}/uncordon", nodes.Uncordon)
+				r.Put("/nodes/{name}/tags", nodes.SetTags)
+				r.Get("/nodes/{name}/drain-plan", nodes.DrainPlan)
+				r.With(middleware.Timeout(60*time.Minute)).
+					Post("/nodes/{name}/drain", nodes.Drain)
+				r.Delete("/nodes/{name}", nodes.Remove)
+				// Proxmox binding — read-only chip + reconfigure.
+				// PUT writes the env file with the new triple, then
+				// triggers restartSelf so a fresh process picks them
+				// up. Same flow the install wizard uses.
+				r.Get("/proxmox/binding", nodes.Binding)
+				r.Put("/proxmox/binding", nodes.ChangeBinding)
+				// Discover Proxmox endpoints on this network — the
+				// admin reuses the install wizard's discovery handler
+				// from the change-binding modal, so the same scan +
+				// corosync logic runs in both contexts.
+				r.Get("/proxmox/discover", setup.Discover)
 				r.Get("/ips", ips.List)
 				r.Get("/cluster/vms", cluster.ListVMs)
 				r.Delete("/cluster/vms/{id}", cluster.DeleteVM)

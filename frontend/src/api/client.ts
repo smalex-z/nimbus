@@ -417,14 +417,12 @@ export async function deleteKey(id: number): Promise<void> {
   await api.delete(`/keys/${id}`)
 }
 
-export interface DiscoverResult {
-  is_hypervisor: boolean
-  endpoints: string[]
-  suggested_gateway?: string
-}
-
-export async function discoverProxmox(): Promise<DiscoverResult> {
-  const { data } = await api.get<DiscoverResult>('/setup/discover')
+// discoverProxmoxSetup hits /api/setup/discover (unauth, only available
+// during install-mode boot). Used by the setup wizard. The admin-side
+// equivalent — discoverProxmoxAdmin below — hits /api/proxmox/discover
+// once the wizard is past and the admin is authenticated.
+export async function discoverProxmoxSetup(): Promise<ProxmoxDiscovery> {
+  const { data } = await api.get<ProxmoxDiscovery>('/setup/discover', { timeout: 30_000 })
   return data
 }
 
@@ -1119,6 +1117,223 @@ export interface VMReconcileReport {
 export async function reconcileVMs(): Promise<VMReconcileReport> {
   const { data } = await api.post<VMReconcileReport>('/vms/reconcile', {})
   return data
+}
+
+// --- /api/proxmox/binding ----------------------------------------------------
+
+export interface ProxmoxBinding {
+  host: string
+  // token_id is the user@realm!tokenname half (the secret stays
+  // write-only). Surfaced so the change-binding modal can pre-fill.
+  token_id?: string
+  // The node Nimbus is talking to via the API. Distinct from
+  // cluster_name (the corosync cluster identifier) — operators care
+  // about the entry-point node, not just "which cluster."
+  connected_node: string
+  cluster_name: string
+  version: string
+  node_count: number
+  last_seen: string
+  reachable: boolean
+}
+
+// DiscoveredEndpoint is one Proxmox endpoint surfaced by /api/setup/discover
+// (used by the install wizard) and /api/proxmox/discover (used by the admin
+// change-binding modal). node_name is populated from corosync.conf when
+// available and from the TLS cert CN otherwise; falls back to ip.
+export interface DiscoveredEndpoint {
+  url: string
+  ip: string
+  node_name?: string
+  source: 'localhost' | 'corosync' | 'scan'
+}
+
+export interface ProxmoxDiscovery {
+  is_hypervisor: boolean
+  endpoints: DiscoveredEndpoint[]
+  suggested_gateway?: string
+}
+
+// discoverProxmoxAdmin hits /api/proxmox/discover (admin-gated). Same
+// payload + handler as the setup-mode discover; admin gets it via this
+// route since /setup/* is only mounted in install mode.
+export async function discoverProxmoxAdmin(): Promise<ProxmoxDiscovery> {
+  const { data } = await api.get<ProxmoxDiscovery>('/proxmox/discover', { timeout: 30_000 })
+  return data
+}
+
+export async function getProxmoxBinding(): Promise<ProxmoxBinding> {
+  const { data } = await api.get<ProxmoxBinding>('/proxmox/binding')
+  return data
+}
+
+// changeProxmoxBinding rewrites the Proxmox connection credentials and
+// triggers a server restart. The HTTP response returns BEFORE the
+// restart fires (server queues a 500 ms-delayed restart in a goroutine);
+// callers should reload the SPA after a couple seconds. The probe step
+// surfaces 502 on bad credentials so the operator can fix typos before
+// the restart commits.
+export async function changeProxmoxBinding(req: {
+  proxmox_host: string
+  proxmox_token_id: string
+  proxmox_token_secret: string
+}): Promise<void> {
+  await api.put('/proxmox/binding', req, { timeout: 15_000 })
+}
+
+// --- /api/nodes admin actions ------------------------------------------------
+
+export async function cordonNode(name: string, reason: string): Promise<void> {
+  await api.post(`/nodes/${encodeURIComponent(name)}/cordon`, { reason })
+}
+
+export async function uncordonNode(name: string): Promise<void> {
+  await api.post(`/nodes/${encodeURIComponent(name)}/uncordon`)
+}
+
+export async function setNodeTags(name: string, tags: string[]): Promise<void> {
+  await api.put(`/nodes/${encodeURIComponent(name)}/tags`, { tags })
+}
+
+export async function removeNode(name: string): Promise<void> {
+  await api.delete(`/nodes/${encodeURIComponent(name)}`)
+}
+
+// --- drain plan + executor ---------------------------------------------------
+
+export interface DrainEligibleTarget {
+  node: string
+  score: number
+  projected_ram_pct: number
+  disabled: boolean
+  disabled_reason?: string
+}
+
+export interface DrainWarning {
+  severity: 'soft' | 'caution' | 'high' | 'blocked'
+  message: string
+}
+
+export interface PlannedMigration {
+  vm_id: number
+  vm_row_id: number
+  hostname: string
+  tier: string
+  auto_pick: string
+  override?: string
+  eligible: DrainEligibleTarget[]
+  warnings?: DrainWarning[]
+}
+
+export interface NodeProjection {
+  node: string
+  current_vm_count: number
+  planned_vm_count: number
+  current_ram_pct: number
+  planned_ram_pct: number
+  severity: 'ok' | 'caution' | 'high'
+}
+
+export interface DrainPlan {
+  source_node: string
+  migrations: PlannedMigration[]
+  aggregate: NodeProjection[]
+  has_blocked: boolean
+}
+
+export async function getDrainPlan(name: string): Promise<DrainPlan> {
+  const { data } = await api.get<DrainPlan>(`/nodes/${encodeURIComponent(name)}/drain-plan`)
+  return data
+}
+
+// DrainEvent mirrors nodemgr.DrainEvent — one streamed update per NDJSON
+// line. Type tells the SPA how to render: per-VM start/done/error events
+// drive the in-modal checklist; the terminal complete event closes out.
+export interface DrainEvent {
+  type: 'plan_locked' | 'vm_start' | 'vm_done' | 'vm_error' | 'complete' | 'error'
+  vm_id?: number
+  hostname?: string
+  target?: string
+  step?: string
+  error?: string
+  succeeded?: number
+  failed?: number
+  drained?: boolean
+}
+
+export interface DrainExecuteRequest {
+  // Choices is a list (matching the wire format) — vm_id keys would force
+  // string coercion in JSON. The order doesn't affect execution; the
+  // server iterates the source node's managed VMs in vmid order regardless.
+  choices: Array<{ vm_id: number; target: string }>
+  confirm_phrase: string
+}
+
+// executeDrain streams the per-VM progress as NDJSON. onEvent is called
+// for every parsed line. Resolves when the stream closes; rejects on
+// pre-stream errors (auth, validation, etc.) or network failures mid-
+// stream. Mirrors provisionVMStreaming's shape so the SPA handles both
+// the same way.
+export async function executeDrain(
+  name: string,
+  req: DrainExecuteRequest,
+  onEvent: (evt: DrainEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`/api/nodes/${encodeURIComponent(name)}/drain`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify(req),
+    signal,
+  })
+
+  if (!resp.ok) {
+    let message = `request failed (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (body?.error) message = body.error
+    } catch {
+      // body wasn't JSON — fall through
+    }
+    throw new Error(message)
+  }
+  if (!resp.body) {
+    throw new Error('server returned no body')
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let done = false
+  while (!done) {
+    const chunk = await reader.read()
+    done = chunk.done
+    if (chunk.value) buffer += decoder.decode(chunk.value, { stream: true })
+    let nl = buffer.indexOf('\n')
+    while (nl !== -1) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (line) {
+        try {
+          onEvent(JSON.parse(line) as DrainEvent)
+        } catch {
+          // Skip malformed lines — keeps the stream resilient to a
+          // single bad event while still surfacing the rest.
+        }
+      }
+      nl = buffer.indexOf('\n')
+    }
+  }
+  // Flush the trailing buffer (server may not send a final newline).
+  const tail = buffer.trim()
+  if (tail) {
+    try {
+      onEvent(JSON.parse(tail) as DrainEvent)
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export default api

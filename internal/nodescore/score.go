@@ -32,13 +32,19 @@ var Tiers = map[string]Tier{
 }
 
 // Node is the subset of Proxmox node telemetry the scorer needs.
+//
+// LockState is the operator-set lock from db.Node.LockState — "none" /
+// "cordoned" / "draining" / "drained". An empty value is treated as "none"
+// for forward compat with callers that haven't been wired to populate it.
+// The scorer rejects everything other than "none" before any capacity math.
 type Node struct {
-	Name   string
-	Status string  // "online" / "offline" / "unknown"
-	CPU    float64 // 0.0 = idle, 1.0 = saturated
-	MaxCPU int     // physical core count
-	Mem    uint64  // bytes used (live qemu + host overhead)
-	MaxMem uint64  // bytes total
+	Name      string
+	Status    string  // "online" / "offline" / "unknown"
+	CPU       float64 // 0.0 = idle, 1.0 = saturated
+	MaxCPU    int     // physical core count
+	Mem       uint64  // bytes used (live qemu + host overhead)
+	MaxMem    uint64  // bytes total
+	LockState string  // "" / "none" / "cordoned" / "draining" / "drained"
 }
 
 // StorageInfo describes the configured VM-disk pool's capacity on one node.
@@ -66,6 +72,9 @@ type Reason string
 const (
 	ReasonOffline           Reason = "offline"
 	ReasonExcluded          Reason = "excluded"
+	ReasonCordoned          Reason = "cordoned"
+	ReasonDraining          Reason = "draining"
+	ReasonDrained           Reason = "drained"
 	ReasonNoTemplate        Reason = "no_template"
 	ReasonNoCapacity        Reason = "no_capacity"
 	ReasonInsufficientCores Reason = "insufficient_cores"
@@ -144,6 +153,17 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 			reasons = append(reasons, ReasonExcluded)
 			break
 		}
+	}
+	// Operator-set lock states. Cordoned/draining/drained nodes never receive
+	// new VMs; the gate runs after offline/excluded so a single dead node
+	// reports both reasons (helps diagnostics) and before any capacity math.
+	switch n.LockState {
+	case "cordoned":
+		reasons = append(reasons, ReasonCordoned)
+	case "draining":
+		reasons = append(reasons, ReasonDraining)
+	case "drained":
+		reasons = append(reasons, ReasonDrained)
 	}
 	if !env.TemplatesPresent[n.Name] {
 		reasons = append(reasons, ReasonNoTemplate)

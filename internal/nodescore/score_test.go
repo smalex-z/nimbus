@@ -96,6 +96,42 @@ func TestScore_Gates(t *testing.T) {
 			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
 			wantReasons: nil,
 		},
+		{
+			name: "cordoned rejects",
+			node: nodescore.Node{
+				Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib,
+				LockState: "cordoned",
+			},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: []nodescore.Reason{nodescore.ReasonCordoned},
+		},
+		{
+			name: "draining rejects",
+			node: nodescore.Node{
+				Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib,
+				LockState: "draining",
+			},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: []nodescore.Reason{nodescore.ReasonDraining},
+		},
+		{
+			name: "drained rejects",
+			node: nodescore.Node{
+				Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib,
+				LockState: "drained",
+			},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: []nodescore.Reason{nodescore.ReasonDrained},
+		},
+		{
+			name: "empty lock state treated as none (accepts)",
+			node: nodescore.Node{
+				Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib,
+				LockState: "",
+			},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: nil,
+		},
 	}
 
 	for _, tt := range tests {

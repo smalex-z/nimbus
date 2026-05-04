@@ -1387,11 +1387,21 @@ func (s *Service) pickNode(
 		}
 	}
 
+	// Lock state lives on db.Node and is set by nodemgr (Cordon/Drain).
+	// Without this lookup the scheduler ignores cordoned/draining/drained
+	// nodes' lock state — defeating the whole point of cordoning. One
+	// SELECT per provision is fine; the row count is the cluster size.
+	lockByNode, err := s.lockStatesByNode(ctx)
+	if err != nil {
+		return "", 0, fmt.Errorf("load node lock states: %w", err)
+	}
+
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
 		scoringNodes = append(scoringNodes, nodescore.Node{
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
+			LockState: lockByNode[n.Name],
 		})
 	}
 
@@ -1415,6 +1425,23 @@ func (s *Service) pickNode(
 	log.Printf("pickNode: tier=%s os=%s winner=%s decisions: %s",
 		tier.Name, osKey, winner.Node.Name, formatDecisions(all))
 	return winner.Node.Name, templateVMIDByNode[winner.Node.Name], nil
+}
+
+// lockStatesByNode returns the operator-set lock state for every db.Node row.
+// Result is keyed by node name; missing entries default to "" (treated as
+// "none" by nodescore). Used by pickNode to filter cordoned/draining/drained
+// nodes — without this lookup nodescore's lock-state gate is dead code in
+// the provision path.
+func (s *Service) lockStatesByNode(ctx context.Context) (map[string]string, error) {
+	var rows []db.Node
+	if err := s.db.WithContext(ctx).Select("name", "lock_state").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.Name] = r.LockState
+	}
+	return out, nil
 }
 
 // formatRejections renders one "node=reason1,reason2" entry per rejected

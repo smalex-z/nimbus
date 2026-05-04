@@ -7,10 +7,10 @@ import {
   getSetupStatus,
   testProxmoxConnection,
   saveSetupConfig,
-  discoverProxmox,
+  discoverProxmoxSetup,
   createAdminAccount,
   type SaveConfigRequest,
-  type DiscoverResult,
+  type ProxmoxDiscovery,
 } from '@/api/client'
 
 type Step = 'proxmox' | 'network' | 'admin' | 'review' | 'restarting'
@@ -58,7 +58,7 @@ export default function Setup() {
     gopherApiKey: '',
   })
   const [admin, setAdmin] = useState<AdminFields>({ name: '', email: '', password: '' })
-  const [discovery, setDiscovery] = useState<DiscoverResult | null>(null)
+  const [discovery, setDiscovery] = useState<ProxmoxDiscovery | null>(null)
   const [discovering, setDiscovering] = useState(true)
   const [hostAutofilled, setHostAutofilled] = useState(false)
   const [gatewayAutofilled, setGatewayAutofilled] = useState(false)
@@ -69,14 +69,14 @@ export default function Setup() {
   const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
-    discoverProxmox()
+    discoverProxmoxSetup()
       .then((d) => {
         setDiscovery(d)
         if (d.is_hypervisor && d.endpoints.length > 0) {
           setProxmox((p) => {
             if (p.host) return p
             setHostAutofilled(true)
-            return { ...p, host: d.endpoints[0] }
+            return { ...p, host: d.endpoints[0].url }
           })
         }
         if (d.suggested_gateway) {
@@ -276,7 +276,7 @@ interface ProxmoxStepProps {
   testing: boolean
   testOk: string | null
   testError: string | null
-  discovery: DiscoverResult | null
+  discovery: ProxmoxDiscovery | null
   discovering: boolean
   hostAutofilled: boolean
   onDismissHostHint: () => void
@@ -320,19 +320,26 @@ function ProxmoxStep({ fields, onChange, onTest, testing, testOk, testError, dis
         ) : discovery && discovery.endpoints.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5 -mt-2">
             <span className="text-[11px] text-ink-3 font-mono">detected:</span>
-            {discovery.endpoints.map((ep) => (
-              <button
-                key={ep}
-                onClick={() => onChange('host', ep)}
-                className={`font-mono text-[11px] px-2 py-0.5 rounded-[5px] border transition-colors cursor-pointer ${
-                  fields.host === ep
-                    ? 'bg-ink text-white border-ink'
-                    : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
-                }`}
-              >
-                {ep}
-              </button>
-            ))}
+            {discovery.endpoints.map((ep) => {
+              const selected = fields.host === ep.url
+              const label = ep.node_name || ep.ip || ep.url
+              const sub = ep.node_name ? ep.ip : ''
+              return (
+                <button
+                  key={ep.url}
+                  onClick={() => onChange('host', ep.url)}
+                  title={`${ep.url}${ep.source === 'corosync' ? ' (from corosync.conf)' : ep.source === 'localhost' ? ' (this host)' : ' (LAN scan)'}`}
+                  className={`font-mono text-[11px] px-2 py-0.5 rounded-[5px] border transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                    selected
+                      ? 'bg-ink text-white border-ink'
+                      : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
+                  }`}
+                >
+                  <span>{label}</span>
+                  {sub && <span className={selected ? 'text-white/70' : 'text-ink-3'}>{sub}</span>}
+                </button>
+              )
+            })}
           </div>
         ) : null}
         <Input

@@ -15,6 +15,7 @@ import GopherTunnels from '@/pages/GopherTunnels'
 import GPUPlane from '@/pages/GPUPlane'
 import Keys from '@/pages/Keys'
 import Network from '@/pages/Network'
+import Nodes from '@/pages/Nodes'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Quotas from '@/pages/Quotas'
@@ -94,6 +95,11 @@ export default function App() {
                       {/* /authentication owns user table + sign-in providers
                           + access code + passwordless toggle. */}
                       <Route path="/authentication" element={<RequireAdmin><Authentication /></RequireAdmin>} />
+                      {/* /nodes is the cluster lifecycle surface — admin-
+                          only. Lock state (cordon/drain/drained), tag
+                          editing, drain orchestration, remove-from-cluster
+                          all live here. */}
+                      <Route path="/nodes" element={<RequireAdmin><Nodes /></RequireAdmin>} />
                       {/* /s3 and /gpu are full operational pages reached
                           from the dropdown — they used to live under
                           /infrastructure/* but the page bodies don't

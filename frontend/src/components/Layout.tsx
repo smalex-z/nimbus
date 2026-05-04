@@ -72,6 +72,16 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
               <NavLink to="/vms" className={navLinkClass}>
                 My machines
               </NavLink>
+              {/* Nodes is the cluster-lifecycle surface — promoted to
+                  the top bar (it's where the Proxmox-binding chip used
+                  to live; the chip itself moved into the Nodes page
+                  header where the rest of the cluster context already
+                  lives). */}
+              {user?.is_admin && (
+                <NavLink to="/nodes" className={navLinkClass}>
+                  Nodes
+                </NavLink>
+              )}
               {user?.is_admin && (
                 <NavLink to="/quotas" className={navLinkClass}>
                   Quotas
@@ -152,15 +162,16 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
         </nav>
       )}
 
-      {/* /infrastructure/* and /authentication are wide pages: the former
-          has a 220px sidebar next to its content, and the latter runs a
-          users table next to a 360px policy rail. Both need more
-          horizontal room than the 1200px the rest of the app uses.
-          Bumping just the main width — not the navbar — keeps the top
-          bar centred and aligned with everywhere else. */}
+      {/* Wide-page list. /infrastructure/* has a 220px sidebar next to
+          its content; /authentication runs a users table next to a
+          360px policy rail; /nodes packs a 4-up card grid + a dense
+          management table. All three benefit from the extra horizontal
+          breathing room over the 1200px default. */}
       <main
         className={`flex-1 mx-auto w-full px-8 py-12 pb-20 animate-fadeIn ${
-          location.pathname.startsWith('/infrastructure') || location.pathname.startsWith('/authentication')
+          location.pathname.startsWith('/infrastructure')
+            || location.pathname.startsWith('/authentication')
+            || location.pathname.startsWith('/nodes')
             ? 'max-w-[1440px]'
             : 'max-w-[1200px]'
         }`}
