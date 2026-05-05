@@ -47,6 +47,25 @@ func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
 // `score` breakdown for the preview tier (default `medium`; override
 // with ?preview_tier=large). The Nodes page's scoring matrix consumes
 // this; consumers that don't ask get the plain payload.
+//
+// @Summary     List cluster nodes with lock state + telemetry (admin)
+// @Description Joins Proxmox live telemetry (cpu/mem/storage) with the
+// @Description Nimbus-side lock state (none/cordoned/draining/drained) and
+// @Description operator-set tags. Powers both the Admin dashboard and the
+// @Description /nodes page. When `include_scores=true`, each row carries a
+// @Description `score` breakdown for the preview tier so the scoring matrix
+// @Description can render without a second round-trip.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Param       include_scores query    string false "set to `true` to decorate rows with score breakdowns"
+// @Param       preview_tier   query    string false "tier to score against (default `medium`); only used when include_scores=true" Enums(small, medium, large, xl)
+// @Success     200 {object} EnvelopeOK{data=[]nodemgr.View}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes [get]
 func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 	view, err := h.mgr.List(r.Context())
 	if err != nil {
@@ -79,6 +98,24 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 // drill-down — full breakdown including rejection reasons under the
 // given tier and host-aggregate constraint. `tags` is a comma-separated
 // list (empty = no constraint).
+//
+// @Summary     Score a single node at a tier + host-aggregate constraint (admin)
+// @Description Drill-down view used by the Nodes-page tooltip. Returns the
+// @Description full components map plus rejection reasons (when score=0)
+// @Description for the given (tier, required_tags) cell.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Param       name path     string true "Proxmox node name"
+// @Param       tier query    string false "tier the synthetic VM is sized at (default `medium`)" Enums(small, medium, large, xl)
+// @Param       tags query    string false "comma-separated host-aggregate tags the candidate must carry (empty = no constraint)"
+// @Success     200  {object} EnvelopeOK{data=nodemgr.ScoreBreakdown}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name}/score [get]
 func (h *Nodes) Score(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	tierName := r.URL.Query().Get("tier")
@@ -111,14 +148,34 @@ func parseTagsParam(raw string) []string {
 	return out
 }
 
+// cordonRequest is the body of POST /api/nodes/{name}/cordon. Reason is
+// optional — surfaces in the Nodes page as the lock-context label.
+type cordonRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 // Cordon handles POST /api/nodes/{name}/cordon. Body: {"reason": "..."}
 // (reason is optional). Refuses if a drain is already in flight or the
 // transition would skip a state (none → drained, etc.).
+//
+// @Summary     Cordon a node (admin)
+// @Description Marks the node as ineligible for new VM placement. Refused
+// @Description while a drain is in-flight on this node.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Param       name path     string        true  "Proxmox node name"
+// @Param       body body     cordonRequest false "Optional reason for the cordon"
+// @Success     200  {object} EnvelopeOK{data=db.Node}
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /nodes/{name}/cordon [post]
 func (h *Nodes) Cordon(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	var body struct {
-		Reason string `json:"reason"`
-	}
+	var body cordonRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
@@ -139,6 +196,20 @@ func (h *Nodes) Cordon(w http.ResponseWriter, r *http.Request) {
 
 // Uncordon handles POST /api/nodes/{name}/uncordon. No body. Refused while
 // a drain is in flight; refused for state="draining" (must complete first).
+//
+// @Summary     Lift the cordon on a node (admin)
+// @Description Refused while a drain is in-flight; the operator must let it
+// @Description complete first. Reverts cordoned/drained → none.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Param       name path     string true "Proxmox node name"
+// @Success     200  {object} EnvelopeOK{data=db.Node}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name}/uncordon [post]
 func (h *Nodes) Uncordon(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	row, err := h.mgr.Uncordon(r.Context(), name)
@@ -149,13 +220,33 @@ func (h *Nodes) Uncordon(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, row)
 }
 
+// setTagsRequest is the body of PUT /api/nodes/{name}/tags.
+type setTagsRequest struct {
+	Tags []string `json:"tags"`
+}
+
 // SetTags handles PUT /api/nodes/{name}/tags. Body: {"tags": [...]}.
 // Replaces the entire tag set; empty array clears.
+//
+// @Summary     Replace a node's tag set (admin)
+// @Description Replaces the entire set; pass an empty array to clear. Tags
+// @Description are operator-set labels surfaced in the Admin dashboard;
+// @Description Nimbus doesn't interpret them today.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Param       name path     string         true "Proxmox node name"
+// @Param       body body     setTagsRequest true "New tag set"
+// @Success     200  {object} EnvelopeOK{data=db.Node}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name}/tags [put]
 func (h *Nodes) SetTags(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	var body struct {
-		Tags []string `json:"tags"`
-	}
+	var body setTagsRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid JSON body")
 		return
@@ -171,6 +262,21 @@ func (h *Nodes) SetTags(w http.ResponseWriter, r *http.Request) {
 // DrainPlan handles GET /api/nodes/{name}/drain-plan. Returns the
 // per-VM recommendations + per-destination aggregate the SPA renders
 // in the modal.
+//
+// @Summary     Compute the drain plan for a node (admin)
+// @Description Per-VM recommendations + per-destination aggregate. Renders in
+// @Description the drain-confirm modal so the operator can override
+// @Description placement before executing.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Param       name path     string true "Proxmox node name"
+// @Success     200  {object} EnvelopeOK{data=nodemgr.DrainPlan}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name}/drain-plan [get]
 func (h *Nodes) DrainPlan(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	plan, err := h.mgr.ComputePlan(r.Context(), name)
@@ -197,6 +303,24 @@ type drainExecuteRequest struct {
 
 // Drain handles POST /api/nodes/{name}/drain as an NDJSON stream. Each
 // line is one DrainEvent. Mirrors the s3 deploy pattern for consistency.
+//
+// @Summary     Execute a drain as an NDJSON stream (admin)
+// @Description Streams `application/x-ndjson` — one DrainEvent per line.
+// @Description The phrase "DRAIN <NODE>" must match exactly to confirm
+// @Description (the SPA enforces this client-side too). Total wall time can
+// @Description run tens of minutes per VM on cold migrations; the route
+// @Description timeout is 60 minutes.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     application/x-ndjson
+// @Param       name path     string              true "Proxmox node name"
+// @Param       body body     drainExecuteRequest true "Operator-confirmed plan + DRAIN <NODE> phrase"
+// @Success     200 "NDJSON stream of DrainEvents"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /nodes/{name}/drain [post]
 func (h *Nodes) Drain(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var req drainExecuteRequest
@@ -242,21 +366,53 @@ func (h *Nodes) Drain(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// removeNodeResponse is the body of DELETE /api/nodes/{name}.
+type removeNodeResponse struct {
+	Message string `json:"message" example:"node removed"`
+}
+
 // Remove handles DELETE /api/nodes/{name}. Refused unless the node's
 // lock state is "drained" (the operator must run a successful drain
 // first) and the node isn't the host Nimbus itself runs on.
+//
+// @Summary     Remove a drained node from the cluster (admin)
+// @Description Refused unless the node is in state="drained" and isn't the
+// @Description host Nimbus itself runs on (self-host removal would lock the
+// @Description operator out of the admin UI).
+// @Tags        nodes
+// @Security    cookieAuth
+// @Param       name path     string true "Proxmox node name"
+// @Success     200  {object} EnvelopeOK{data=removeNodeResponse}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name} [delete]
 func (h *Nodes) Remove(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := h.mgr.Remove(r.Context(), name); err != nil {
 		writeNodeMutationError(w, err)
 		return
 	}
-	response.Success(w, map[string]string{"message": "node removed"})
+	response.Success(w, removeNodeResponse{Message: "node removed"})
 }
 
 // Binding handles GET /api/proxmox/binding. Tiny payload, polled by the
 // Nodes page. Errors inside collapse into Reachable=false rather than
 // HTTP 500 so the page can render "offline" without spamming alerts.
+//
+// @Summary     Read the active Proxmox binding (admin)
+// @Description Returns host + token-id + reachable flag. Polled by the Nodes
+// @Description page; downstream errors collapse to reachable=false rather
+// @Description than HTTP 500 so the UI can show "offline" without alerts.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=nodemgr.Binding}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /proxmox/binding [get]
 func (h *Nodes) Binding(w http.ResponseWriter, r *http.Request) {
 	var host, tokenID string
 	if h.cfg != nil {
@@ -286,6 +442,13 @@ type changeBindingRequest struct {
 	ProxmoxTokenSecret string `json:"proxmox_token_secret"`
 }
 
+// changeBindingResponse is the body of the success branch of PUT
+// /api/proxmox/binding. Restart message is for the SPA's toast; the
+// actual reload happens 500ms after the response flushes.
+type changeBindingResponse struct {
+	Message string `json:"message" example:"Proxmox connection updated. Reloading Nimbus…"`
+}
+
 // ChangeBinding handles PUT /api/proxmox/binding. Probes the new
 // credentials with a one-shot Version call (8s timeout) — fail-fast so
 // a typo doesn't get persisted; success path writes the env file with
@@ -297,6 +460,24 @@ type changeBindingRequest struct {
 // alternative (in-process pveClient swap) would require surgery in
 // every consumer of *proxmox.Client and silent re-instantiation isn't
 // safer than a 1-2s reload.
+//
+// @Summary     Reconfigure the Proxmox binding (admin)
+// @Description Persists a new host + token to the env file and re-execs the
+// @Description process to pick up the change. Empty `proxmox_token_secret`
+// @Description means "keep the current secret" — useful when swapping
+// @Description entry-point nodes (Proxmox tokens are cluster-wide).
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     changeBindingRequest  true "New Proxmox triple (secret optional)"
+// @Success     200  {object} EnvelopeOK{data=changeBindingResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     502 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /proxmox/binding [put]
 func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	if h.cfg == nil || h.restart == nil {
 		response.Error(w, http.StatusServiceUnavailable, "reconfigure not wired in this build")
@@ -363,8 +544,8 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	_ = os.Setenv("PROXMOX_TOKEN_ID", req.ProxmoxTokenID)
 	_ = os.Setenv("PROXMOX_TOKEN_SECRET", secret)
 
-	response.Success(w, map[string]string{
-		"message": "Proxmox connection updated. Reloading Nimbus…",
+	response.Success(w, changeBindingResponse{
+		Message: "Proxmox connection updated. Reloading Nimbus…",
 	})
 
 	// Defer the restart so the HTTP response flushes first.

@@ -86,6 +86,19 @@ type clusterStatsView struct {
 
 // Stats handles GET /api/cluster/stats — aggregate cluster-level stats that
 // don't fit per-node (storage pools span the cluster).
+//
+// @Summary     Aggregate cluster-level stats (admin)
+// @Description Currently just storage totals (used + total bytes). Shared
+// @Description storage pools are deduped across nodes so the totals reflect
+// @Description the actual cluster footprint, not the sum of per-node views.
+// @Tags        cluster
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=clusterStatsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /cluster/stats [get]
 func (h *Cluster) Stats(w http.ResponseWriter, r *http.Request) {
 	pools, err := h.px.GetClusterStorage(r.Context())
 	if err != nil {
@@ -118,6 +131,20 @@ func (h *Cluster) Stats(w http.ResponseWriter, r *http.Request) {
 //  2. Proxmox tags (nimbus-tier-*, nimbus-os-*) → tier and OS for foreign-Nimbus VMs.
 //  3. Proxmox ostype → best-effort OS hint for external VMs (raw "l26"/"win10"/…).
 //  4. ipconfig0 / qemu-guest-agent → IP for external and foreign-Nimbus VMs.
+//
+// @Summary     List every VM on the cluster (admin)
+// @Description Joined view: Proxmox cluster walk + Nimbus DB rows. The Source
+// @Description field distinguishes local-Nimbus / foreign-Nimbus / external
+// @Description VMs so the SPA can gate features (e.g. SSH copy needs local
+// @Description credentials, available only for source="local").
+// @Tags        cluster
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]clusterVMView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /cluster/vms [get]
 func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 	details, err := h.px.GetClusterVMDetails(r.Context())
 	if err != nil {
@@ -209,6 +236,21 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 // local-source VM by Nimbus DB row id, regardless of who provisioned it.
 // Foreign and external VMs (no DB row) cannot be reached through this
 // endpoint; they return 404.
+//
+// @Summary     Destroy a local-source VM by DB id (admin)
+// @Description Foreign / external VMs have no DB row and 404 here; route them
+// @Description through POST /cluster/vms/{node}/{vmid}/{op} with op="stop"
+// @Description and remove from Proxmox directly instead.
+// @Tags        cluster
+// @Security    cookieAuth
+// @Param       id path int true "Nimbus VM DB id"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /cluster/vms/{id} [delete]
 func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -228,6 +270,22 @@ func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 // (local, foreign, external) since it routes by (node, vmid) instead of
 // nimbus DB row id. For local rows the status column is updated
 // optimistically; the reconciler corrects any drift.
+//
+// @Summary     Run a power op on any cluster VM (admin)
+// @Description Routes by (node, vmid) so foreign + external VMs are reachable
+// @Description without a Nimbus DB row. Reboot waits on a Proxmox task — the
+// @Description handler timeout is 2 minutes.
+// @Tags        cluster
+// @Security    cookieAuth
+// @Param       node path string true "Proxmox node name"
+// @Param       vmid path int    true "Proxmox VMID"
+// @Param       op   path string true "Lifecycle op" Enums(start, shutdown, stop, reboot)
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /cluster/vms/{node}/{vmid}/{op} [post]
 func (h *Cluster) VMLifecycle(w http.ResponseWriter, r *http.Request) {
 	node := chi.URLParam(r, "node")
 	vmidStr := chi.URLParam(r, "vmid")

@@ -189,6 +189,19 @@ type oauthSettingsView struct {
 }
 
 // GetOAuth handles GET /api/settings/oauth. Secrets are never returned.
+//
+// @Summary     Read OAuth provider settings (admin)
+// @Description Secrets are never sent — only the configured/not flag and the
+// @Description resolved redirect URIs the SPA shows admins so they can
+// @Description register them with Google/GitHub.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=oauthSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/oauth [get]
 func (s *Settings) GetOAuth(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.GetOAuthSettings()
 	if err != nil {
@@ -275,6 +288,18 @@ type saveOAuthRequest struct {
 }
 
 // SaveOAuth handles PUT /api/settings/oauth.
+//
+// @Summary     Update OAuth provider credentials (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     saveOAuthRequest true "OAuth client IDs + secrets"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/oauth [put]
 func (s *Settings) SaveOAuth(w http.ResponseWriter, r *http.Request) {
 	var req saveOAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -300,6 +325,16 @@ type accessCodeView struct {
 
 // GetAccessCode handles GET /api/settings/access-code (admin only).
 // Returns the raw 8-digit code so the admin UI can reveal it on demand.
+//
+// @Summary     Reveal the current access code (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=accessCodeView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/access-code [get]
 func (s *Settings) GetAccessCode(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.GetOAuthSettings()
 	if err != nil {
@@ -321,6 +356,17 @@ type saveAuthorizedDomainsRequest struct {
 }
 
 // GetAuthorizedGoogleDomains handles GET /api/settings/google-domains (admin only).
+//
+// @Summary     List authorized Google Workspace domains (admin)
+// @Description Empty list means any verified Google account may sign in.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=authorizedDomainsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/google-domains [get]
 func (s *Settings) GetAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.GetOAuthSettings()
 	if err != nil {
@@ -338,6 +384,19 @@ func (s *Settings) GetAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Req
 }
 
 // SaveAuthorizedGoogleDomains handles PUT /api/settings/google-domains (admin only).
+//
+// @Summary     Replace the authorized Google Workspace domains (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveAuthorizedDomainsRequest true "Domain list"
+// @Success     200  {object} EnvelopeOK{data=authorizedDomainsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/google-domains [put]
 func (s *Settings) SaveAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Request) {
 	var req saveAuthorizedDomainsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -360,6 +419,17 @@ type saveAuthorizedOrgsRequest struct {
 }
 
 // GetAuthorizedGitHubOrgs handles GET /api/settings/github-orgs (admin only).
+//
+// @Summary     List authorized GitHub orgs (admin)
+// @Description Empty list means any GitHub account may sign in.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=authorizedOrgsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/github-orgs [get]
 func (s *Settings) GetAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.GetOAuthSettings()
 	if err != nil {
@@ -377,6 +447,19 @@ func (s *Settings) GetAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Reques
 }
 
 // SaveAuthorizedGitHubOrgs handles PUT /api/settings/github-orgs (admin only).
+//
+// @Summary     Replace the authorized GitHub orgs (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveAuthorizedOrgsRequest true "Org list"
+// @Success     200  {object} EnvelopeOK{data=authorizedOrgsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/github-orgs [put]
 func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Request) {
 	var req saveAuthorizedOrgsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -401,6 +484,16 @@ type gopherSettingsView struct {
 
 // GetGopher handles GET /api/settings/gopher (admin only). The API key is
 // never returned; the SPA only needs to know whether it's set.
+//
+// @Summary     Read Gopher tunnel-gateway settings (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=gopherSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/gopher [get]
 func (s *Settings) GetGopher(w http.ResponseWriter, _ *http.Request) {
 	settings, err := s.auth.GetGopherSettings()
 	if err != nil {
@@ -436,6 +529,23 @@ type saveGopherRequest struct {
 // subdomain. The admin still has to re-register the OAuth redirect URI on
 // any IdP that pinned the old hostname — the UI surfaces a confirm dialog
 // before this fires.
+//
+// @Summary     Update Gopher credentials + cloud subdomain (admin)
+// @Description Live-reloads the tunnel client across the running process —
+// @Description no restart needed. Empty api_url + api_key disables tunnels
+// @Description entirely. Changing cloud_subdomain tears down the existing
+// @Description cloud tunnel.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveGopherRequest true "Gopher creds + subdomain"
+// @Success     200  {object} EnvelopeOK{data=gopherSettingsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/gopher [put]
 func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 	var req saveGopherRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -554,6 +664,17 @@ type gpuSettingsView struct {
 }
 
 // GetGPU handles GET /api/settings/gpu (admin only).
+//
+// @Summary     Read GX10 GPU plane settings (admin)
+// @Description The worker token is never sent — pairing produces a fresh one.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=gpuSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/gpu [get]
 func (s *Settings) GetGPU(w http.ResponseWriter, _ *http.Request) {
 	settings, err := s.auth.GetGPUSettings()
 	if err != nil {
@@ -576,6 +697,21 @@ type saveGPURequest struct {
 }
 
 // SaveGPU handles PUT /api/settings/gpu (admin only).
+//
+// @Summary     Update GX10 GPU plane settings (admin)
+// @Description Live-pushes the bootstrap config to provision.Service so
+// @Description subsequent VM provisions inject the new env without restart.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveGPURequest true "GPU plane settings"
+// @Success     200  {object} EnvelopeOK{data=gpuSettingsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/gpu [put]
 func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 	var req saveGPURequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -666,6 +802,16 @@ type selfBootstrapStatusView struct {
 
 // SelfBootstrapStatus handles GET /api/settings/gopher/self-bootstrap —
 // the Settings modal polls this to render the phase indicator.
+//
+// @Summary     Read the Gopher self-bootstrap state (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=selfBootstrapStatusView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/gopher/self-bootstrap [get]
 func (s *Settings) SelfBootstrapStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.selfBootstrap == nil {
 		response.Success(w, selfBootstrapStatusView{State: ""})
@@ -686,6 +832,16 @@ func (s *Settings) SelfBootstrapStatus(w http.ResponseWriter, _ *http.Request) {
 // SelfBootstrapStart handles POST /api/settings/gopher/self-bootstrap —
 // retry hook for the modal's "Try again" button after a failure. SaveGopher
 // invokes this path automatically; this endpoint exists for explicit retry.
+//
+// @Summary     Retry the Gopher self-bootstrap (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /settings/gopher/self-bootstrap [post]
 func (s *Settings) SelfBootstrapStart(w http.ResponseWriter, r *http.Request) {
 	if s.selfBootstrap == nil {
 		response.BadRequest(w, "self-bootstrap requires Gopher to be configured")
@@ -710,6 +866,16 @@ type networkSettingsView struct {
 // IP pool range, gateway, and cloud-init prefix length. Used by the Settings
 // → Network panel and as the canonical source for the renumber /
 // force-gateway confirmation modals.
+//
+// @Summary     Read live network settings (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=networkSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/network [get]
 func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
 	settings, err := s.auth.GetNetworkSettings()
 	if err != nil {
@@ -736,6 +902,22 @@ type saveNetworkRequest struct {
 // pushes the live gateway + prefix to every registered NetworkApplier.
 // Existing VMs are NOT touched — that requires the explicit RenumberVMs /
 // ForceGatewayUpdate endpoints.
+//
+// @Summary     Update network settings (admin)
+// @Description Reseeds the IP pool and pushes the new gateway/prefix to live
+// @Description provision config. Existing VMs are not touched — use the
+// @Description renumber / force-gateway endpoints for that.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveNetworkRequest true "Network settings"
+// @Success     200  {object} EnvelopeOK{data=networkSettingsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/network [put]
 func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	var req saveNetworkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -832,6 +1014,19 @@ func toNetworkOpResponse(rep provision.NetworkOpReport) networkOpResponse {
 // (admin only). Pushes the currently-saved gateway to every managed VM via
 // `qm set --ipconfig0` and reboots running VMs so the change takes effect.
 // Disruptive — every running VM bounces.
+//
+// @Summary     Force-push the saved gateway to every managed VM (admin)
+// @Description Disruptive — every running VM bounces. Each per-VM failure
+// @Description is reported in the response; the loop doesn't abort.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=networkOpResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/network/force-gateway-update [post]
 func (s *Settings) ForceGatewayUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.networkOps == nil {
 		response.InternalError(w, "network ops not wired")
@@ -860,6 +1055,19 @@ func (s *Settings) ForceGatewayUpdate(w http.ResponseWriter, r *http.Request) {
 //
 // Refuses with 400 if the pool has fewer free addresses than the number of
 // VMs to renumber — operator must widen the pool first.
+//
+// @Summary     Renumber every managed VM into the saved pool (admin)
+// @Description Disruptive — every VM gets a fresh IP and bounces. 400 when
+// @Description the pool has fewer free addresses than VMs to renumber.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=networkOpResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/network/renumber-vms [post]
 func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
 	if s.networkOps == nil {
 		response.InternalError(w, "network ops not wired")
@@ -885,6 +1093,19 @@ func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
 // RegenerateAccessCode handles POST /api/settings/access-code/regenerate (admin only).
 // Issues a fresh code and bumps the version, invalidating every non-admin
 // user's prior verification.
+//
+// @Summary     Rotate the access code (admin)
+// @Description Bumps the version, invalidating every non-admin's prior
+// @Description verification. They'll be prompted to re-enter the new code
+// @Description on next access.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=accessCodeView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/access-code/regenerate [post]
 func (s *Settings) RegenerateAccessCode(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.RegenerateAccessCode()
 	if err != nil {

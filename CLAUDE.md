@@ -81,6 +81,7 @@ internal/
   errors/               typed error sentinels (ValidationError, ConflictError, …)
   ctxutil/              request-context helpers (current user, …)
   build/                build-time version info (ldflags)
+  api/openapi/          generated OpenAPI 3 spec (swag init output, committed)
 frontend/               React 18 + TS + Vite + Tailwind SPA
 scripts/                build.sh, dev.sh, install-deps.sh, quickinstall.sh, reinstall.sh, uninstall.sh
 scripts/gx10/           install-inference.sh + install-worker.sh (Phase 4)
@@ -157,6 +158,83 @@ If lint isn't installed locally:
 ```bash
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
 ```
+
+## OpenAPI / SwaggerUI
+
+The HTTP API is described by an OpenAPI 3 spec generated from
+[swaggo](https://github.com/swaggo/swag) annotations on each handler func.
+Generated artifacts live in `internal/api/openapi/` and are **committed to
+the repo** so a fresh checkout serves SwaggerUI without `swag` installed.
+
+Regenerate after annotating new handlers (or editing existing annotations):
+
+```bash
+make swagger          # runs `swag init -g cmd/server/main.go -o internal/api/openapi`
+```
+
+`make build` runs this automatically. The CLI is auto-installed at the
+pinned version (`SWAG_VERSION` in the Makefile, kept in lockstep with the
+runtime `swaggo/*` deps in go.mod) on first run.
+
+SwaggerUI is mounted at `/api/docs` (public — the API surface itself is
+not secret on an open-source project). The spec is registered via blank
+import of `nimbus/internal/api/openapi` in the router. Today the spec
+covers all ~95 `/api/*` routes across all 13 handler files; only the
+SwaggerUI route itself is excluded from the route-coverage assertion
+since SwaggerUI doesn't document itself.
+
+### Annotation conventions
+
+- Every annotated handler func gets `@Summary`, `@Tags`, `@Router`, plus
+  `@Success`/`@Failure` for every status code the handler can return.
+- Auth gates map to `@Security cookieAuth` (cookie session) or
+  `@Security workerAuth` (GPU worker bearer token). Define new schemes in
+  the `@securityDefinitions.*` block at the top of `cmd/server/main.go`.
+- Response bodies use the shared `EnvelopeOK{data=...}` / `EnvelopeError`
+  composition (see `internal/api/handlers/envelope.go`) so every annotated
+  endpoint advertises the same `{success, data, error}` shape.
+- For request/response payloads that are currently anonymous structs in
+  the handler, lift them into named types — swag can only reference named
+  types. The handler itself stays one-per-route, just with an explicit
+  type for the body.
+- Path params follow `@Param id path int true "Key ID"`. JSON bodies use
+  `@Param body body <NamedType> true "..."`.
+
+### The route-coverage test
+
+`internal/api/openapi_routes_test.go` walks chi's registered routes and
+asserts each `(method, path)` is annotated. The strict assertion is now
+live — only `/api/docs/*` (SwaggerUI itself) sits in `unannotatedRoutes`,
+so any new handler added without annotations fails CI. Don't expand the
+map to dodge a failure; annotate the handler instead.
+
+The test instantiates the router with `api.Deps{Config: &config.Config{}}`
+— minimal non-nil deps so handler constructors don't panic on the chained
+`d.Config.AppURL` reads. Conditional route groups (`if d.GPU != nil`,
+`if d.SelfBootstrap != nil`) are skipped under zero deps. The conditional
+GPU + self-bootstrap routes ARE annotated (their swag comments live next
+to the handlers); they just don't show up in the chi.Walk under zero
+deps, so they're effectively only covered by the spec side. If you ever
+upgrade the test to wire full deps, those routes will be exercised both
+ways automatically.
+
+### Stdlib + gorm type overrides
+
+`.swaggo` at the repo root remaps types swag can't resolve via
+`--parseInternal`:
+
+```
+replace time.Duration int64
+replace time.Time string
+replace gorm.io/gorm.DeletedAt time.Time
+replace gorm.Model object
+```
+
+Without these, deep references to `time.Duration` (in
+`bootstrap.TemplateOutcome`) or `gorm.Model` (embedded on every `db.*`
+type) fail spec generation. The alternative — `--parseDependencyLevel 1`
+— breaks our internal type resolution by re-namespacing internal package
+paths, and pushes the build past 30s.
 
 ## Git workflow
 

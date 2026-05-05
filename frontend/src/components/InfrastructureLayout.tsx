@@ -32,6 +32,7 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
     { label: 'Email', to: '/infrastructure/email', badge: 'alpha' },
     { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
     { label: 'VM network', to: '/infrastructure/network' },
+    { label: 'API docs', to: '/infrastructure/api-docs' },
   ]
 
   return (
