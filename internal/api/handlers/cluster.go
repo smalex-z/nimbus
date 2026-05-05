@@ -11,18 +11,20 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
+	"nimbus/internal/nodemgr"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 )
 
 // Cluster exposes cluster-wide views that join Proxmox state with the Nimbus DB.
 type Cluster struct {
-	px  *proxmox.Client
-	svc *provision.Service
+	px      *proxmox.Client
+	svc     *provision.Service
+	nodeMgr *nodemgr.Service
 }
 
-func NewCluster(px *proxmox.Client, svc *provision.Service) *Cluster {
-	return &Cluster{px: px, svc: svc}
+func NewCluster(px *proxmox.Client, svc *provision.Service, nodeMgr *nodemgr.Service) *Cluster {
+	return &Cluster{px: px, svc: svc, nodeMgr: nodeMgr}
 }
 
 // vmSource describes which Nimbus instance (if any) provisioned a VM.
@@ -266,6 +268,47 @@ func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// MigratePlan handles GET /api/cluster/vms/{id}/migrate-plan (admin-only).
+// Returns nodescore decisions for moving this single VM — used by the
+// migrate modal's destination dropdown to surface "(recommended)" on
+// the auto-pick and "X% RAM after" projections per candidate. Mirrors
+// the per-row Eligible shape from the drain plan endpoint, but with
+// no plannedAdd accumulation: each candidate's score reflects "this
+// VM lands here, nothing else moves" rather than the cumulative
+// landing of a whole drain batch.
+//
+// @Summary     Score migration targets for a single VM (admin)
+// @Description Same nodescore evaluation provision uses, applied to an
+// @Description existing VM. AutoPick is the highest-scoring eligible
+// @Description target — what Nimbus would pick if this were a fresh
+// @Description placement. Eligible is sorted score-desc with disabled
+// @Description options last so the dropdown order is meaningful.
+// @Tags        cluster
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "Nimbus VM DB id"
+// @Success     200 {object} EnvelopeOK{data=nodemgr.MigratePlan}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /cluster/vms/{id}/migrate-plan [get]
+func (h *Cluster) MigratePlan(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	plan, err := h.nodeMgr.ComputeMigratePlan(r.Context(), uint(id))
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, plan)
 }
 
 // migrateVMRequest is the body of POST /api/cluster/vms/{id}/migrate.

@@ -2,30 +2,35 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import { adminMigrateVM, listNodes, OnlineMigrationFailedError } from '@/api/client'
+import {
+  adminMigrateVM,
+  getMigratePlan,
+  listNodes,
+  OnlineMigrationFailedError,
+} from '@/api/client'
+import type { MigratePlan, MigratePlanEligibleTarget } from '@/api/client'
 import { TIERS, type NodeView, type TierName } from '@/types'
 
 // MigrateVMModal — admin-only flow for moving a VM between cluster nodes.
 //
 // Visually matches the drain plan's per-row dropdown + aggregate impact
-// panel: each destination option in the dropdown shows the projected RAM%
-// after the move, and a NodeImpactPanel below the picker renders the
-// source losing this VM and the target gaining it side by side. Operator
-// gets the same "is this destination going to be hot?" read they have in
-// drain, but scoped to a single VM.
+// panel. The destination dropdown is populated from the backend
+// migrate-plan endpoint: each option carries the same nodescore the
+// provision flow uses, plus the projected RAM% after this single VM
+// lands there. The auto_pick is marked "(recommended)" so the operator
+// can take Nimbus's preferred placement at a glance.
 //
-// Two-step UX matching the backend's online → offline confirmation
-// design. The first POST tries a live migration when the VM is running;
-// on rejection the server responds 409 with the upstream Proxmox reason
-// and we surface a confirmation prompt asking the operator whether to
-// stop+migrate+start. Stopped VMs go straight to offline mode.
+// Why a backend plan rather than client-side scoring: the score
+// algorithm bakes in templates-present, lock state, disk gates, and
+// soft CPU projection — replicating that in TypeScript would either
+// drift or duplicate. The endpoint is fast (one Proxmox cluster walk +
+// DB read), so fetching on modal open is cheap.
 //
-// Projection math is client-side rather than reusing /drain-plan: that
-// endpoint computes "if we drain ALL VMs on this node, where do they
-// land?" — its projected RAM% reflects all migrations, not just this
-// one's, so the numbers would mislead for a single-VM move. Computing
-// `(target.mem_allocated + tier_bytes) / target.mem_total` directly
-// here gives the honest single-VM projection.
+// Two-step UX matching the backend's online → offline confirmation:
+// the first POST tries a live migration when the VM is running; on
+// rejection the server responds 409 with the upstream Proxmox reason
+// and the modal swaps to a confirm-offline view. Stopped VMs go
+// straight to offline mode.
 
 type Props = {
   vm: {
@@ -45,26 +50,18 @@ interface Projection {
   node: string
   currentRamPct: number
   plannedRamPct: number
-  currentVMCount: number
-  plannedVMCount: number
   severity: 'ok' | 'caution' | 'high'
-  // memTotal is carried so the dropdown rendering can use the same
-  // projected RAM% the impact panel does — they're computed off the
-  // same source.
-  memTotal: number
-  memAllocated: number
 }
 
 export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
   const [view, setView] = useState<View>('picker')
   const [target, setTarget] = useState('')
+  const [plan, setPlan] = useState<MigratePlan | null>(null)
   const [nodes, setNodes] = useState<NodeView[] | null>(null)
+  const [loadErr, setLoadErr] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [offlineReason, setOfflineReason] = useState('')
 
-  // Disable Esc + backdrop dismiss while a migration is in flight — a
-  // mid-flight cancel can't actually cancel the upstream Proxmox task,
-  // so closing the modal would just hide a still-running operation.
   const busy = view === 'busy'
 
   useEffect(() => {
@@ -80,73 +77,68 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
     }
   }, [busy, onClose])
 
+  // Fetch plan + node telemetry in parallel. The plan drives the
+  // dropdown (per-target score + projected RAM%); listNodes gives us
+  // the source node's current RAM% so the impact panel can render
+  // "source loses this VM" alongside "target gains it" symmetrically.
   useEffect(() => {
-    listNodes()
-      .then(setNodes)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed to load nodes'))
-  }, [])
-
-  // Eligible targets = online nodes that aren't the VM's current node.
-  // Drained / cordoned nodes can still receive a migration — that's a
-  // policy decision Proxmox doesn't enforce, and an admin manually
-  // migrating a VM is opting into whatever placement they pick.
-  const targets = useMemo(() => {
-    if (!nodes) return []
-    return nodes.filter((n) => n.name !== vm.node && n.status === 'online')
-  }, [nodes, vm.node])
+    let cancelled = false
+    Promise.all([getMigratePlan(vm.id), listNodes()])
+      .then(([p, n]) => {
+        if (cancelled) return
+        setPlan(p)
+        setNodes(n)
+        if (p.auto_pick) setTarget(p.auto_pick)
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setLoadErr(e instanceof Error ? e.message : 'failed to load plan')
+      })
+    return () => { cancelled = true }
+  }, [vm.id])
 
   const tierBytes = TIERS[vm.tier].memMB * 1024 * 1024
 
-  // sourceProjection + projectionByNode drive both the dropdown labels
-  // (each candidate's projected RAM%) and the impact panel (source +
-  // target rows side by side). Computed once per nodes-load so a poll
-  // refresh re-runs the math without re-rendering on every keystroke.
-  const sourceProjection: Projection | null = useMemo(() => {
+  // Source projection: current vs. "after this VM leaves." The plan
+  // doesn't include the source (it's not a migration target), so we
+  // pull it from listNodes and subtract the tier bytes locally.
+  const sourceProjection = useMemo<Projection | null>(() => {
     if (!nodes) return null
     const src = nodes.find((n) => n.name === vm.node)
     if (!src) return null
     const currentRamPct = pct(src.mem_allocated, src.mem_total)
-    // After this VM leaves the source, its committed mem drops by tier_bytes.
     const plannedAlloc = Math.max(0, src.mem_allocated - tierBytes)
     const plannedRamPct = pct(plannedAlloc, src.mem_total)
     return {
       node: src.name,
       currentRamPct,
       plannedRamPct,
-      // We don't have a live VM count per node here, but cluster_vms is
-      // the source of truth and the impact panel just needs deltas. Show
-      // "—1" relative to current, leaving the absolute count blank.
-      currentVMCount: 0,
-      plannedVMCount: -1,
       severity: severityOf(plannedRamPct),
-      memTotal: src.mem_total,
-      memAllocated: src.mem_allocated,
     }
   }, [nodes, vm.node, tierBytes])
 
-  const projectionByNode = useMemo(() => {
-    const out: Record<string, Projection> = {}
-    if (!nodes) return out
-    for (const n of nodes) {
-      if (n.name === vm.node) continue
-      const currentRamPct = pct(n.mem_allocated, n.mem_total)
-      const plannedAlloc = n.mem_allocated + tierBytes
-      const plannedRamPct = pct(plannedAlloc, n.mem_total)
-      out[n.name] = {
-        node: n.name,
-        currentRamPct,
-        plannedRamPct,
-        currentVMCount: 0,
-        plannedVMCount: 1,
-        severity: severityOf(plannedRamPct),
-        memTotal: n.mem_total,
-        memAllocated: n.mem_allocated,
-      }
+  // Target projection: lifted from the plan's eligible entry for the
+  // selected target. The plan computes projected_ram_pct on the same
+  // committedMem basis the source projection uses (so the two stay
+  // comparable), with no plannedAdd accumulation — accurate for a
+  // single-VM move.
+  const targetProjection = useMemo<Projection | null>(() => {
+    if (!plan || !nodes || !target) return null
+    const opt = plan.eligible.find((e) => e.node === target)
+    if (!opt) return null
+    const node = nodes.find((n) => n.name === target)
+    if (!node) return null
+    return {
+      node: target,
+      currentRamPct: pct(node.mem_allocated, node.mem_total),
+      plannedRamPct: opt.projected_ram_pct,
+      severity: severityOf(opt.projected_ram_pct),
     }
-    return out
-  }, [nodes, vm.node, tierBytes])
+  }, [plan, nodes, target])
 
-  const targetProjection = target ? projectionByNode[target] : null
+  const targetOpt: MigratePlanEligibleTarget | null = useMemo(() => {
+    if (!plan || !target) return null
+    return plan.eligible.find((e) => e.node === target) ?? null
+  }, [plan, target])
 
   const submit = async (allowOffline: boolean) => {
     if (!target) return
@@ -196,11 +188,11 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
             tier={vm.tier}
             target={target}
             onTargetChange={setTarget}
-            targets={targets}
-            projectionByNode={projectionByNode}
+            plan={plan}
+            loadErr={loadErr}
             sourceProjection={sourceProjection}
             targetProjection={targetProjection}
-            nodesLoaded={nodes !== null}
+            targetOpt={targetOpt}
             view={view}
             error={error}
             onCancel={onClose}
@@ -218,11 +210,11 @@ function PickerBody({
   tier,
   target,
   onTargetChange,
-  targets,
-  projectionByNode,
+  plan,
+  loadErr,
   sourceProjection,
   targetProjection,
-  nodesLoaded,
+  targetOpt,
   view,
   error,
   onCancel,
@@ -232,11 +224,11 @@ function PickerBody({
   tier: TierName
   target: string
   onTargetChange: (v: string) => void
-  targets: NodeView[]
-  projectionByNode: Record<string, Projection>
+  plan: MigratePlan | null
+  loadErr: string | null
   sourceProjection: Projection | null
   targetProjection: Projection | null
-  nodesLoaded: boolean
+  targetOpt: MigratePlanEligibleTarget | null
   view: View
   error: string | null
   onCancel: () => void
@@ -244,6 +236,14 @@ function PickerBody({
 }) {
   const busy = view === 'busy'
   const tierMem = `${(TIERS[tier].memMB / 1024).toFixed(0)} GiB`
+  const planLoaded = plan !== null
+  const eligible = plan?.eligible ?? []
+  const usable = eligible.filter((e) => !e.disabled)
+  // Disable the Migrate button when the operator picked a disabled
+  // option (rare — auto_pick steers them toward usable rows — but
+  // possible if every node is ineligible and they pick anyway).
+  const targetUsable = targetOpt !== null && !targetOpt.disabled
+
   return (
     <>
       <p className="text-sm text-ink-2 leading-relaxed mb-5">
@@ -266,32 +266,49 @@ function PickerBody({
       <select
         value={target}
         onChange={(e) => onTargetChange(e.target.value)}
-        disabled={busy || !nodesLoaded || targets.length === 0}
+        disabled={busy || !planLoaded || usable.length === 0}
         className="w-full mb-1 px-3 py-2.5 rounded-[10px] border border-line-2 bg-white/85 text-sm text-ink focus:outline-none focus:border-ink disabled:opacity-50"
       >
         <option value="">
-          {!nodesLoaded
+          {!planLoaded
             ? 'Loading…'
-            : targets.length === 0
+            : usable.length === 0
               ? 'No eligible target nodes'
               : 'Choose target node…'}
         </option>
-        {targets.map((n) => {
-          const p = projectionByNode[n.name]
-          const ramAfter = p ? `${p.plannedRamPct.toFixed(0)}% RAM` : ''
+        {eligible.map((e) => {
+          const isWinner = plan?.auto_pick === e.node
+          const ramTag = `${e.projected_ram_pct.toFixed(0)}% RAM`
+          const recommended = isWinner ? ' (recommended)' : ''
+          const ineligible = e.disabled ? ' — ineligible' : ''
           return (
-            <option key={n.name} value={n.name}>
-              {n.name}
-              {ramAfter ? ` · ${ramAfter} after` : ''}
+            <option
+              key={e.node}
+              value={e.node}
+              disabled={e.disabled}
+              title={e.disabled ? e.disabled_reason : undefined}
+            >
+              {e.node}
+              {recommended}
+              {e.disabled ? ineligible : ` · ${ramTag} after · score ${e.score.toFixed(2)}`}
             </option>
           )
         })}
       </select>
-      {nodesLoaded && targets.length === 0 && (
+      {planLoaded && usable.length === 0 && (
         <p className="text-[12px] text-ink-3 mb-5 mt-1.5">
-          The VM is on the only online node. Bring another node online
-          before retrying.
+          Every other node is ineligible — bring one online or remove a
+          cordon before retrying.
         </p>
+      )}
+      {loadErr && (
+        <p className="text-[12px] text-bad mb-5 mt-1.5">{loadErr}</p>
+      )}
+
+      {target && targetOpt?.disabled && targetOpt.disabled_reason && (
+        <div className="mt-4 p-3.5 rounded-[10px] bg-[rgba(184,58,58,0.06)] border border-[rgba(184,58,58,0.2)] text-bad text-[12px]">
+          {target} is ineligible: {targetOpt.disabled_reason}
+        </div>
       )}
 
       {target && sourceProjection && targetProjection && (
@@ -315,7 +332,7 @@ function PickerBody({
         <Button variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
-        <Button onClick={onMigrate} disabled={busy || !target}>
+        <Button onClick={onMigrate} disabled={busy || !target || !targetUsable}>
           {busy ? 'Migrating…' : 'Migrate'}
         </Button>
       </div>

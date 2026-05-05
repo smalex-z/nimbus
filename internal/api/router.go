@@ -62,7 +62,7 @@ func NewRouter(d Deps) http.Handler {
 	keys := handlers.NewKeys(d.Keys)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
-	cluster := handlers.NewCluster(d.Proxmox, d.Provision)
+	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision)
@@ -250,6 +250,10 @@ func NewRouter(d Deps) http.Handler {
 				// Reboot waits on a Proxmox task — give it some headroom.
 				r.With(middleware.Timeout(2*time.Minute)).
 					Post("/cluster/vms/{node}/{vmid}/{op}", cluster.VMLifecycle)
+				// Migrate-plan is the placement preview the modal fetches on
+				// open — fast Proxmox + DB walk, no upper bound headroom
+				// needed (default route timeout is fine).
+				r.Get("/cluster/vms/{id}/migrate-plan", cluster.MigratePlan)
 				// Migration is the long path: an online migration on a busy
 				// VM can run several minutes copying memory across nodes;
 				// the offline-fallback path adds shutdown + start on top.

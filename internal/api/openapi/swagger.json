@@ -944,6 +944,82 @@
                 }
             }
         },
+        "/cluster/vms/{id}/migrate-plan": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Same nodescore evaluation provision uses, applied to an\nexisting VM. AutoPick is the highest-scoring eligible\ntarget — what Nimbus would pick if this were a fresh\nplacement. Eligible is sorted score-desc with disabled\noptions last so the dropdown order is meaningful.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "cluster"
+                ],
+                "summary": "Score migration targets for a single VM (admin)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Nimbus VM DB id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/nodemgr.MigratePlan"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/cluster/vms/{node}/{vmid}/{op}": {
             "post": {
                 "security": [
@@ -7716,6 +7792,35 @@
                 },
                 "score": {
                     "type": "number"
+                }
+            }
+        },
+        "nodemgr.MigratePlan": {
+            "type": "object",
+            "properties": {
+                "auto_pick": {
+                    "type": "string"
+                },
+                "eligible": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/nodemgr.EligibleTarget"
+                    }
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "source_node": {
+                    "type": "string"
+                },
+                "tier": {
+                    "type": "string"
+                },
+                "vm_id": {
+                    "type": "integer"
+                },
+                "vm_row_id": {
+                    "type": "integer"
                 }
             }
         },

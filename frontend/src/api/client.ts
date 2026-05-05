@@ -296,6 +296,39 @@ export interface MigrateResponse {
   was_stopped: boolean
 }
 
+// MigratePlanEligibleTarget mirrors nodemgr.EligibleTarget — reused for
+// the migrate modal's destination dropdown. Score is the raw nodescore
+// (higher = better fit); ProjectedRAMPct is the destination's RAM %
+// after this single VM lands there. Disabled options ride along so the
+// dropdown can render them dimmed with the reason as a tooltip.
+export interface MigratePlanEligibleTarget {
+  node: string
+  score: number
+  projected_ram_pct: number
+  disabled: boolean
+  disabled_reason?: string
+}
+
+// MigratePlan is the placement preview for moving a single VM. The
+// modal fetches this on open and uses Eligible to populate the
+// destination dropdown (with "(recommended)" on AutoPick).
+export interface MigratePlan {
+  vm_id: number
+  vm_row_id: number
+  hostname: string
+  tier: string
+  source_node: string
+  auto_pick: string
+  eligible: MigratePlanEligibleTarget[]
+}
+
+// getMigratePlan fetches the placement preview for the named VM. Same
+// nodescore evaluation provision uses, applied to an existing VM.
+export async function getMigratePlan(id: number): Promise<MigratePlan> {
+  const { data } = await api.get<MigratePlan>(`/cluster/vms/${id}/migrate-plan`)
+  return data
+}
+
 // OnlineMigrationFailedError is thrown by adminMigrateVM when Proxmox
 // refuses the live (online=1) migration. The SPA dispatches on it to
 // render the "continue offline?" confirmation prompt; the wrapped

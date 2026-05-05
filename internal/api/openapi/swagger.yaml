@@ -1080,6 +1080,25 @@ definitions:
       score:
         type: number
     type: object
+  nodemgr.MigratePlan:
+    properties:
+      auto_pick:
+        type: string
+      eligible:
+        items:
+          $ref: '#/definitions/nodemgr.EligibleTarget'
+        type: array
+      hostname:
+        type: string
+      source_node:
+        type: string
+      tier:
+        type: string
+      vm_id:
+        type: integer
+      vm_row_id:
+        type: integer
+    type: object
   nodemgr.NodeProjection:
     properties:
       current_ram_pct:
@@ -2003,6 +2022,57 @@ paths:
       security:
       - cookieAuth: []
       summary: Migrate a VM to a different cluster node (admin)
+      tags:
+      - cluster
+  /cluster/vms/{id}/migrate-plan:
+    get:
+      description: |-
+        Same nodescore evaluation provision uses, applied to an
+        existing VM. AutoPick is the highest-scoring eligible
+        target — what Nimbus would pick if this were a fresh
+        placement. Eligible is sorted score-desc with disabled
+        options last so the dropdown order is meaningful.
+      parameters:
+      - description: Nimbus VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/nodemgr.MigratePlan'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Score migration targets for a single VM (admin)
       tags:
       - cluster
   /cluster/vms/{node}/{vmid}/{op}:
