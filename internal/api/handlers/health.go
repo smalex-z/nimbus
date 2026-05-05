@@ -28,6 +28,17 @@ type healthResponse struct {
 }
 
 // Check handles GET /api/health.
+//
+// @Summary     Liveness + Proxmox reachability probe
+// @Description Returns the build version, current timestamp, and the result of
+// @Description a 3-second Proxmox `/version` probe. Always 200 — the
+// @Description proxmox_ok field carries the dependency result so dashboards
+// @Description can distinguish "Nimbus is up but Proxmox is sad" from "Nimbus
+// @Description is down".
+// @Tags        health
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=healthResponse}
+// @Router      /health [get]
 func (h *Health) Check(w http.ResponseWriter, r *http.Request) {
 	out := healthResponse{
 		Status:    "ok",

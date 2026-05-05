@@ -50,6 +50,26 @@ type createVMRequest struct {
 // `error` (failure) line. Validation failures still respond with the
 // regular {success,error} JSON envelope and a 4xx status, since headers
 // haven't been flushed yet at that point.
+//
+// @Summary     Provision a new VM (NDJSON event stream)
+// @Description Streams `application/x-ndjson` once headers flush — one
+// @Description `{type:"progress", step, label}` line per phase, then a
+// @Description terminal `{type:"result", data: ...}` (success) or
+// @Description `{type:"error", code, message}` (failure). Total wall time
+// @Description 30-60s for the provision, plus 1-3min if Gopher bootstrap
+// @Description waits on dpkg locks during cloud-init contention. Validation
+// @Description failures pre-stream return the standard {success,error}
+// @Description envelope with the appropriate 4xx status.
+// @Tags        vms
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     application/x-ndjson
+// @Param       body body createVMRequest true "VM provisioning request"
+// @Success     200 "NDJSON stream of progress events terminated by a result or error line"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /vms [post]
 func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	var req createVMRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -162,6 +182,19 @@ func classifyProvisionError(err error) string {
 // rows that pre-date owner tracking (see service.List). The same scope
 // applies for both members and admins; cluster-wide views live on the Admin
 // dashboard.
+//
+// @Summary     List the caller's VMs
+// @Description Includes legacy rows that pre-date owner tracking (owner_id
+// @Description NULL). Live status is fetched from Proxmox at request time.
+// @Description Cluster-wide views are admin-only and live under /cluster/vms.
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]db.VM}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /vms [get]
 func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -180,6 +213,21 @@ func (h *VMs) List(w http.ResponseWriter, r *http.Request) {
 // its IP, and removes the local row. Strict ownership: only the user who
 // originally provisioned the VM can delete it. Returns 404 (not 403) for
 // cross-user or legacy (owner_id NULL) rows so we don't disclose existence.
+//
+// @Summary     Destroy one of the caller's VMs
+// @Description Cross-user and legacy (owner_id NULL) rows return 404 by
+// @Description design — existence is not disclosed across ownership
+// @Description boundaries. Admin-side destruction goes through
+// @Description DELETE /cluster/vms/{id} instead.
+// @Tags        vms
+// @Security    cookieAuth
+// @Param       id  path int true "VM DB id"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /vms/{id} [delete]
 func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -202,6 +250,18 @@ func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
 // Lifecycle handles POST /api/vms/{id}/{op} where op is one of
 // start | shutdown | stop | reboot. Owner-gated like Delete: a non-owning
 // requester gets 404 so existence isn't disclosed.
+//
+// @Summary     Run a power op on the caller's VM
+// @Tags        vms
+// @Security    cookieAuth
+// @Param       id  path int    true "VM DB id"
+// @Param       op  path string true "Lifecycle op" Enums(start, shutdown, stop, reboot)
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /vms/{id}/{op} [post]
 func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -229,6 +289,19 @@ func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
 // Phase 1 has no auth, so this is reachable to anyone who can hit the API
 // (matching the rest of the surface). Once OAuth lands, owner gating goes
 // here first.
+//
+// @Summary     Download the private SSH key for one of the caller's VMs
+// @Description 404 when no private key was deposited for this VM. Owner-gated:
+// @Description non-owners get 404 (existence not disclosed).
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id path int true "VM DB id"
+// @Success     200 {object} EnvelopeOK{data=privateKeyResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /vms/{id}/private-key [get]
 func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -246,15 +319,26 @@ func (h *VMs) GetPrivateKey(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, err)
 		return
 	}
-	response.Success(w, map[string]string{
-		"key_name":    keyName,
-		"private_key": privateKey,
+	response.Success(w, privateKeyResponse{
+		KeyName:    keyName,
+		PrivateKey: privateKey,
 	})
 }
 
 // Get handles GET /api/vms/{id}. Owner-gated: a non-owning requester gets
 // 404 (not 403) so existence isn't disclosed — same convention as Delete and
 // Lifecycle.
+//
+// @Summary     Get one of the caller's VMs by id
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "VM DB id"
+// @Success     200 {object} EnvelopeOK{data=db.VM}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /vms/{id} [get]
 func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -279,6 +363,19 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 // tunnel attached to this VM. Returns an empty array for VMs without a
 // Gopher machine record (and for tunnel-disabled deployments). Owner-gated
 // to prevent enumeration of another user's tunnel layout.
+//
+// @Summary     List per-port tunnels attached to one of the caller's VMs
+// @Description Empty array for VMs without a Gopher machine record and for
+// @Description tunnel-disabled deployments. Owner-gated.
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "VM DB id"
+// @Success     200 {object} EnvelopeOK{data=[]tunnel.Tunnel}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /vms/{id}/tunnels [get]
 func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -314,6 +411,20 @@ type createTunnelRequest struct {
 // body shape; see Gopher's OpenAPI spec for field semantics + UDP/bot-
 // protection coercion rules. Owner-gated: only the VM owner may attach
 // internet-facing tunnels to it.
+//
+// @Summary     Attach a per-port tunnel to one of the caller's VMs
+// @Description Mirrors Gopher's tunnel-creation body shape.
+// @Tags        vms
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       id   path     int                  true "VM DB id"
+// @Param       body body     createTunnelRequest  true "Per-port tunnel spec"
+// @Success     201  {object} EnvelopeOK{data=tunnel.Tunnel}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Router      /vms/{id}/tunnels [post]
 func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -347,7 +458,24 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	response.Created(w, t)
 }
 
+// deleteTunnelResponse is the body of DELETE /api/vms/{id}/tunnels/{tunnelId}.
+type deleteTunnelResponse struct {
+	Message string `json:"message" example:"tunnel deleted"`
+}
+
 // DeleteTunnel handles DELETE /api/vms/{id}/tunnels/{tunnelId}. Owner-gated.
+//
+// @Summary     Detach a per-port tunnel from one of the caller's VMs
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id        path     int    true "VM DB id"
+// @Param       tunnelId  path     string true "Gopher tunnel id"
+// @Success     200 {object} EnvelopeOK{data=deleteTunnelResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /vms/{id}/tunnels/{tunnelId} [delete]
 func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseVMID(w, r)
 	if !ok {
@@ -367,7 +495,7 @@ func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, err)
 		return
 	}
-	response.Success(w, map[string]string{"message": "tunnel deleted"})
+	response.Success(w, deleteTunnelResponse{Message: "tunnel deleted"})
 }
 
 // parseVMID extracts and validates the {id} URL param common to the
@@ -434,6 +562,18 @@ func validateCreate(req createVMRequest) error {
 // been observed for vacateMissThreshold consecutive runs. Refuses to act when
 // Proxmox returns an empty cluster snapshot (transient API failure → would
 // otherwise wipe every row).
+//
+// @Summary     Force a vms-table reconcile against Proxmox (admin)
+// @Description Refuses on an empty cluster snapshot to avoid soft-deleting
+// @Description every row when the Proxmox API blips.
+// @Tags        vms
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=provision.VMSyncReport}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /vms/reconcile [post]
 func (h *VMs) Reconcile(w http.ResponseWriter, r *http.Request) {
 	rep, err := h.svc.ReconcileVMs(r.Context())
 	if err != nil {

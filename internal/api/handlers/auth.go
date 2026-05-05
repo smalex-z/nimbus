@@ -187,6 +187,13 @@ func looksLikeLocalhostURL(u string) bool {
 // render. Password sign-in stays available unless the admin has
 // turned on RequirePasswordlessAuth and zero users still depend on
 // password access — see service.IsPasswordSignInActive for the rule.
+//
+// @Summary     Available authentication providers (public)
+// @Description Drives which sign-in buttons render on /login.
+// @Tags        auth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Router      /auth/providers [get]
 func (a *Auth) Providers(w http.ResponseWriter, r *http.Request) {
 	settings, err := a.auth.GetOAuthSettings()
 	out := map[string]any{
@@ -238,6 +245,20 @@ type registerRequest struct {
 }
 
 // Register handles POST /api/auth/register.
+//
+// @Summary     Register a new user account (public)
+// @Description Open-self-signup is gated by RequirePasswordlessAuth in
+// @Description production deployments — this endpoint always responds, but
+// @Description new accounts may be unable to sign in until they link OAuth.
+// @Tags        auth
+// @Accept      json
+// @Produce     json
+// @Param       body body     registerRequest true "New account"
+// @Success     201  {object} EnvelopeOK{data=service.UserView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /auth/register [post]
 func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -277,12 +298,29 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 	response.Created(w, user)
 }
 
+// loginRequest is the body of POST /api/auth/login.
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 // Login handles POST /api/auth/login.
+//
+// @Summary     Email/password sign-in (public)
+// @Description Sets the session cookie inline on success. 403 with
+// @Description message "Account suspended" when the user row is suspended.
+// @Tags        auth
+// @Accept      json
+// @Produce     json
+// @Param       body body     loginRequest true "Credentials"
+// @Success     200  {object} EnvelopeOK{data=service.UserView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /auth/login [post]
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "Invalid request body")
 		return
@@ -313,6 +351,14 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 
 // Me handles GET /api/me.
 // The user is guaranteed to be present by the requireAuth middleware.
+//
+// @Summary     The current session's user
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=service.UserView}
+// @Failure     401 {object} EnvelopeError
+// @Router      /me [get]
 func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, ctxutil.User(r.Context()))
 }
@@ -321,6 +367,15 @@ func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 // Admins receive every account in the richer management shape (with
 // signup time, verification status, and provider hints); non-admins
 // receive only their own self-view (no list of peers).
+//
+// @Summary     List users (admin sees all, member sees self)
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /users [get]
 func (a *Auth) ListUsers(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user.IsAdmin {
@@ -358,6 +413,21 @@ type promoteUserRequest struct {
 // admin after re-confirming the requesting admin's password. Idempotent
 // when the target is already admin (returns 200), but the requester
 // must still pass the password gate so the action stays auditable.
+//
+// @Summary     Promote a user to admin (admin)
+// @Description Requires the requesting admin's own password as a re-auth gate.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path     int                 true "User id"
+// @Param       body body     promoteUserRequest  true "Re-auth password"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /users/{id}/promote [post]
 func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -424,6 +494,25 @@ type deleteUserRequest struct {
 // Step 2 happens outside any transaction because it crosses to Proxmox.
 // If a VM destroy fails partway through, we abort and return — the user
 // row stays, and the admin can retry. Steps 3-4 are atomic.
+//
+// @Summary     Delete a user (admin)
+// @Description vm_action must be "delete" or "transfer". "delete" destroys
+// @Description their VMs on Proxmox; "transfer" reassigns ownership to the
+// @Description requesting admin and leaves them running. SSH keys + GPU jobs
+// @Description follow the same disposition.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path     int                true "User id"
+// @Param       body body     deleteUserRequest  true "VM disposition"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     503  {object} EnvelopeError
+// @Router      /users/{id} [delete]
 func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -531,6 +620,15 @@ type accountView struct {
 // Account handles GET /api/account — current user's profile + the
 // linked-providers state so the /account page can decide which
 // Connect buttons to render.
+//
+// @Summary     Current user's profile + linked-provider state
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=accountView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /account [get]
 func (a *Auth) Account(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -565,6 +663,20 @@ type changePasswordRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
+// ChangePassword handles PUT /api/account/password.
+//
+// @Summary     Rotate the current user's password
+// @Description Requires the current password — a stolen session alone
+// @Description shouldn't let an attacker lock the real owner out.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     changePasswordRequest true "Current + new password"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /account/password [put]
 func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -606,6 +718,24 @@ type passwordlessToggleRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+// SetPasswordlessAuth handles PUT /api/settings/oauth/passwordless.
+//
+// @Summary     Toggle passwordless-only sign-in (admin)
+// @Description Hard-gate: rejected with 409 when the requesting admin
+// @Description hasn't linked OAuth themselves, or when any active
+// @Description password-only user remains. Surface the message verbatim
+// @Description so the admin can act on it.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     passwordlessToggleRequest true "Toggle"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/oauth/passwordless [put]
 func (a *Auth) SetPasswordlessAuth(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -647,6 +777,16 @@ func (a *Auth) SetPasswordlessAuth(w http.ResponseWriter, r *http.Request) {
 // action that suspends every active user without OAuth (excluding the
 // requester). Used by the passwordless toggle's "Suspend stragglers"
 // button to clear the gate in one click.
+//
+// @Summary     Suspend every active password-only user (admin)
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /users/suspend-unlinked [post]
 func (a *Auth) SuspendUnlinked(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -668,6 +808,23 @@ type suspendRequest struct {
 	Suspended bool `json:"suspended"`
 }
 
+// SetSuspended handles POST /api/users/{id}/suspend-status.
+//
+// @Summary     Set one user's suspended flag (admin)
+// @Description Cannot self-suspend; cannot suspend the last remaining admin.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path     int             true "User id"
+// @Param       body body     suspendRequest  true "Desired state"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /users/{id}/suspend-status [post]
 func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -704,6 +861,16 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 // readiness. The Users page uses these to render the toggle, the
 // straggler explanation, the bulk-suspend button, and the (currently
 // disabled) "Email N unlinked users" button.
+//
+// @Summary     Passwordless-only sign-in status (admin)
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/oauth/passwordless [get]
 func (a *Auth) PasswordlessStatus(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -741,6 +908,18 @@ func (a *Auth) PasswordlessStatus(w http.ResponseWriter, r *http.Request) {
 // GetSMTP handles GET /api/settings/smtp. Admin-only. Returns the
 // SMTPSettingsView (no ciphertext, just `has_password: bool` so the
 // /email form can render "(unchanged)" placeholder copy).
+//
+// @Summary     Read SMTP settings (admin)
+// @Description The password ciphertext is never sent — `has_password`
+// @Description tells the SPA whether to render an "(unchanged)" placeholder.
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=service.SMTPSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/smtp [get]
 func (a *Auth) GetSMTP(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -760,6 +939,20 @@ func (a *Auth) GetSMTP(w http.ResponseWriter, r *http.Request) {
 // body's password field follows the standard "edit secrets" pattern:
 // omitting the field leaves the existing ciphertext untouched, sending
 // an empty string clears it, sending a non-empty string replaces it.
+//
+// @Summary     Update SMTP settings (admin)
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     service.SaveSMTPRequest true "SMTP settings"
+// @Success     200 {object} EnvelopeOK{data=service.SMTPSettingsView}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /settings/smtp [put]
 func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -803,6 +996,22 @@ const magicLinkTTL = 24 * time.Hour
 // address. Used as a confidence check after filling in the /email
 // form: if the dial / auth / TLS handshake works for the requester,
 // the bulk magic-link send will too.
+//
+// @Summary     Send a SMTP test email to the requesting admin (admin)
+// @Description The dial/auth/TLS error string is surfaced verbatim on 502
+// @Description so admins debugging SMTP have the underlying message.
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     502 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /settings/smtp/test [post]
 func (a *Auth) SendTestEmail(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -859,6 +1068,14 @@ func (a *Auth) SendTestEmail(w http.ResponseWriter, r *http.Request) {
 // if needed, and redirects them to /account so they can connect an
 // OAuth provider. Bad/expired/used tokens redirect to a sign-in page
 // with an explanatory query param.
+//
+// @Summary     Magic-link sign-in (public, single-use)
+// @Description Always returns 307 — to /account?from=magic on success or to
+// @Description /login?magic=<reason> when the token is invalid/expired/used.
+// @Tags        auth
+// @Param       token path string true "Magic-link token"
+// @Success     307 "Redirect"
+// @Router      /auth/magic/{token} [get]
 func (a *Auth) MagicLinkSignIn(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	if token == "" {
@@ -920,6 +1137,21 @@ type EmailUnlinkedResult struct {
 // theory that "host unreachable" or "auth failed" affects everyone
 // equally, but per-recipient rejects (mailbox doesn't exist, etc.)
 // are recorded and we move on.
+//
+// @Summary     Email magic-link recovery to all unlinked users (admin)
+// @Description Per-recipient SMTP rejects (e.g. "mailbox doesn't exist")
+// @Description are recorded in `failures` and the loop continues. The
+// @Description first dial/auth/TLS error aborts the whole batch.
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=EmailUnlinkedResult}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /users/email-unlinked [post]
 func (a *Auth) EmailUnlinked(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -1025,6 +1257,16 @@ type QuotaSettingsView struct {
 // GetQuotas handles GET /api/settings/quotas — admin-only read of
 // the workspace quota defaults (caps that apply when a user has no
 // per-row override set).
+//
+// @Summary     Read workspace quota defaults (admin)
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=QuotaSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/quotas [get]
 func (a *Auth) GetQuotas(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -1047,6 +1289,20 @@ func (a *Auth) GetQuotas(w http.ResponseWriter, r *http.Request) {
 // the workspace defaults. Request body matches QuotaSettingsView.
 // Either field can be omitted to leave it untouched, but a field
 // present with a negative value is a 400 (the service rejects).
+//
+// @Summary     Update workspace quota defaults (admin)
+// @Description Either field can be omitted to leave it untouched.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     QuotaSettingsView true "Workspace defaults"
+// @Success     200  {object} EnvelopeOK{data=QuotaSettingsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/quotas [put]
 func (a *Auth) SaveQuotas(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -1101,6 +1357,23 @@ type userQuotaRequest struct {
 // SetUserQuota handles PUT /api/users/{id}/quota — admin-only patch
 // of one user's quota override columns. See userQuotaRequest for the
 // three-state JSON semantics.
+//
+// @Summary     Patch one user's quota overrides (admin)
+// @Description Each field has three-state semantics: absent = leave alone,
+// @Description JSON null = clear the override (revert to workspace default),
+// @Description number = set explicit cap.
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path     int                true "User id"
+// @Param       body body     userQuotaRequest   true "Override patch"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /users/{id}/quota [put]
 func (a *Auth) SetUserQuota(w http.ResponseWriter, r *http.Request) {
 	requester := ctxutil.User(r.Context())
 	if requester == nil || !requester.IsAdmin {
@@ -1186,6 +1459,15 @@ func decodeQuotaPatch(raw json.RawMessage, field string) (set bool, value int, c
 
 // VerifyStatus handles GET /api/access-code/status — returns whether the
 // authenticated user is verified against the current access code version.
+//
+// @Summary     Whether the user has verified the current access code
+// @Tags        auth
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /access-code/status [get]
 func (a *Auth) VerifyStatus(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -1207,6 +1489,17 @@ type verifyAccessCodeRequest struct {
 // VerifyAccessCode handles POST /api/access-code/verify — checks the supplied
 // code against the current access code and, on success, marks the user as
 // verified.
+//
+// @Summary     Verify the current access code
+// @Tags        auth
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     verifyAccessCodeRequest true "Access code"
+// @Success     200  {object} EnvelopeOK
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /access-code/verify [post]
 func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -1231,6 +1524,13 @@ func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
 }
 
 // Logout handles POST /api/auth/logout.
+//
+// @Summary     End the current session
+// @Description Always returns 204 — no body — even when the cookie is
+// @Description missing or invalid.
+// @Tags        auth
+// @Success     204 "No Content"
+// @Router      /auth/logout [post]
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = a.auth.Logout(cookie.Value)
@@ -1315,6 +1615,16 @@ func clearOAuthIntent(w http.ResponseWriter) {
 
 // --- GitHub OAuth -----------------------------------------------------------
 
+// GitHubStart handles GET /api/auth/github.
+//
+// @Summary     Start the GitHub OAuth sign-in flow (public)
+// @Description Sets short-lived state + intent cookies, then redirects to
+// @Description GitHub's authorization URL.
+// @Tags        auth
+// @Success     307 "Redirect to GitHub OAuth consent"
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /auth/github [get]
 func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.githubProvider(), "signin")(w, r)
 }
@@ -1323,6 +1633,17 @@ func (a *Auth) GitHubStart(w http.ResponseWriter, r *http.Request) {
 // attach the resulting identity to the current session's user instead
 // of creating/finding a user by email. Requires an authenticated
 // session — middleware enforces that at the route level.
+// GitHubLinkStart handles GET /api/auth/github/link.
+//
+// @Summary     Start the GitHub OAuth flow in link mode
+// @Description Same callback as sign-in mode but the intent cookie tells
+// @Description the callback to attach to the current session rather than
+// @Description mint a new one.
+// @Tags        auth
+// @Success     307 "Redirect to GitHub OAuth consent"
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /auth/github/link [get]
 func (a *Auth) GitHubLinkStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.githubProvider(), "link")(w, r)
 }
@@ -1332,6 +1653,19 @@ func (a *Auth) GitHubLinkStart(w http.ResponseWriter, r *http.Request) {
 // list are blocked before any account is created. Every login refreshes the
 // user's stored org snapshot so the dynamic bypass in IsUserVerified always
 // reflects the most recent login's memberships.
+// GitHubCallback handles GET /api/auth/github/callback.
+//
+// @Summary     GitHub OAuth callback (public)
+// @Description Validates the state cookie, exchanges the code, and either
+// @Description signs the user in or links the GitHub account to the
+// @Description existing session (per the intent cookie). Always responds
+// @Description with a redirect — to the SPA on success, or back to /login
+// @Description with an explanatory query param on failure.
+// @Tags        auth
+// @Param       code  query string true "Authorization code"
+// @Param       state query string true "CSRF state echoed by GitHub"
+// @Success     307 "Redirect"
+// @Router      /auth/github/callback [get]
 func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	provider := a.githubProvider()
 	if provider == nil {
@@ -1473,6 +1807,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 // --- Google OAuth -----------------------------------------------------------
 
+// GoogleStart handles GET /api/auth/google.
+//
+// @Summary     Start the Google OAuth sign-in flow (public)
+// @Tags        auth
+// @Success     307 "Redirect to Google OAuth consent"
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /auth/google [get]
 func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.googleProvider(r), "signin")(w, r)
 }
@@ -1480,6 +1822,14 @@ func (a *Auth) GoogleStart(w http.ResponseWriter, r *http.Request) {
 // GoogleLinkStart is the link-mode counterpart of GoogleStart; the
 // callback attaches the identity to the current session's user. See
 // GitHubLinkStart for the rationale.
+// GoogleLinkStart handles GET /api/auth/google/link.
+//
+// @Summary     Start the Google OAuth flow in link mode
+// @Tags        auth
+// @Success     307 "Redirect to Google OAuth consent"
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /auth/google/link [get]
 func (a *Auth) GoogleLinkStart(w http.ResponseWriter, r *http.Request) {
 	a.oauthStart(a.googleProvider(r), "link")(w, r)
 }
@@ -1489,6 +1839,15 @@ func (a *Auth) GoogleLinkStart(w http.ResponseWriter, r *http.Request) {
 // authorized-domain list are blocked before any account is created;
 // returning users whose domain IS authorized are auto-verified against the
 // current access code version so they bypass the /verify form.
+// GoogleCallback handles GET /api/auth/google/callback.
+//
+// @Summary     Google OAuth callback (public)
+// @Description See the GitHub callback for the shared sign-in/link semantics.
+// @Tags        auth
+// @Param       code  query string true "Authorization code"
+// @Param       state query string true "CSRF state echoed by Google"
+// @Success     307 "Redirect"
+// @Router      /auth/google/callback [get]
 func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	provider := a.googleProvider(r)
 	if provider == nil {

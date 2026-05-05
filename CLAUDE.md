@@ -178,7 +178,10 @@ runtime `swaggo/*` deps in go.mod) on first run.
 
 SwaggerUI is mounted at `/api/docs` (public — the API surface itself is
 not secret on an open-source project). The spec is registered via blank
-import of `nimbus/internal/api/openapi` in the router.
+import of `nimbus/internal/api/openapi` in the router. Today the spec
+covers all ~95 `/api/*` routes across all 13 handler files; only the
+SwaggerUI route itself is excluded from the route-coverage assertion
+since SwaggerUI doesn't document itself.
 
 ### Annotation conventions
 
@@ -200,19 +203,38 @@ import of `nimbus/internal/api/openapi` in the router.
 ### The route-coverage test
 
 `internal/api/openapi_routes_test.go` walks chi's registered routes and
-asserts each `(method, path)` is annotated. Routes that haven't been
-annotated yet sit in the `unannotatedRoutes` allowlist at the top of the
-file — **shrink that map as you annotate handlers**. When it's empty, the
-test becomes strict and will fail any PR adding a handler without
-annotations. Don't expand the map to dodge a failure; annotate the
-handler instead.
+asserts each `(method, path)` is annotated. The strict assertion is now
+live — only `/api/docs/*` (SwaggerUI itself) sits in `unannotatedRoutes`,
+so any new handler added without annotations fails CI. Don't expand the
+map to dodge a failure; annotate the handler instead.
 
 The test instantiates the router with `api.Deps{Config: &config.Config{}}`
 — minimal non-nil deps so handler constructors don't panic on the chained
 `d.Config.AppURL` reads. Conditional route groups (`if d.GPU != nil`,
-`if d.SelfBootstrap != nil`) are skipped under zero deps; that's fine for
-the route inventory but means GPU/self-bootstrap annotation work needs
-its routes added to `unannotatedRoutes` until phase 2 covers them.
+`if d.SelfBootstrap != nil`) are skipped under zero deps. The conditional
+GPU + self-bootstrap routes ARE annotated (their swag comments live next
+to the handlers); they just don't show up in the chi.Walk under zero
+deps, so they're effectively only covered by the spec side. If you ever
+upgrade the test to wire full deps, those routes will be exercised both
+ways automatically.
+
+### Stdlib + gorm type overrides
+
+`.swaggo` at the repo root remaps types swag can't resolve via
+`--parseInternal`:
+
+```
+replace time.Duration int64
+replace time.Time string
+replace gorm.io/gorm.DeletedAt time.Time
+replace gorm.Model object
+```
+
+Without these, deep references to `time.Duration` (in
+`bootstrap.TemplateOutcome`) or `gorm.Model` (embedded on every `db.*`
+type) fail spec generation. The alternative — `--parseDependencyLevel 1`
+— breaks our internal type resolution by re-namespacing internal package
+paths, and pushes the build past 30s.
 
 ## Git workflow
 

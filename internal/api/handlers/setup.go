@@ -38,7 +38,23 @@ func NewSetupWithAuth(cfg *config.Config, restart func(), auth *service.AuthServ
 	return &Setup{cfg: cfg, restart: restart, auth: auth}
 }
 
+// setupStatusView is the JSON shape returned by GET /api/setup/status.
+type setupStatusView struct {
+	Configured      bool `json:"configured"`
+	NeedsAdminSetup bool `json:"needs_admin_setup"`
+}
+
 // Status handles GET /api/setup/status.
+//
+// @Summary     First-run setup status
+// @Description Public endpoint the SPA polls before the wizard renders.
+// @Description `configured` reflects whether Proxmox + IP-pool config is
+// @Description present; `needs_admin_setup` reflects whether the user table
+// @Description is empty (so the wizard should prompt for an admin account).
+// @Tags        setup
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=setupStatusView}
+// @Router      /setup/status [get]
 func (h *Setup) Status(w http.ResponseWriter, r *http.Request) {
 	needsAdminSetup := true
 	if h.auth != nil {
@@ -47,9 +63,9 @@ func (h *Setup) Status(w http.ResponseWriter, r *http.Request) {
 			needsAdminSetup = !has
 		}
 	}
-	response.Success(w, map[string]any{
-		"configured":        h.cfg.IsConfigured(),
-		"needs_admin_setup": needsAdminSetup,
+	response.Success(w, setupStatusView{
+		Configured:      h.cfg.IsConfigured(),
+		NeedsAdminSetup: needsAdminSetup,
 	})
 }
 
@@ -199,6 +215,20 @@ type createAdminRequest struct {
 
 // CreateAdmin handles POST /api/setup/admin — creates the first admin account
 // and opens a session. Returns 409 if any user already exists.
+//
+// @Summary     Create the first admin account
+// @Description One-shot endpoint used by the install wizard. 409 once any
+// @Description user exists. On success, sets the session cookie inline.
+// @Tags        setup
+// @Accept      json
+// @Produce     json
+// @Param       body body     createAdminRequest true "Admin account"
+// @Success     200  {object} EnvelopeOK{data=service.UserView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     503  {object} EnvelopeError
+// @Router      /setup/admin [post]
 func (h *Setup) CreateAdmin(w http.ResponseWriter, r *http.Request) {
 	if h.auth == nil {
 		response.Error(w, http.StatusServiceUnavailable, "server is in setup mode")
@@ -281,6 +311,20 @@ type discoverResult struct {
 // SuggestedGateway is populated from /proc/net/route's default route on
 // every install (not just hypervisors) — the LAN VM running Nimbus
 // usually shares the gateway with the cluster's VMs.
+//
+// @Summary     Discover Proxmox endpoints on this network (admin)
+// @Description Same handler is also mounted as /setup/discover in the install
+// @Description wizard. Merges corosync.conf membership (authoritative on PVE
+// @Description nodes) with a TLS handshake scan of port 8006 across local
+// @Description subnets (cert CN gives the node hostname for free). Capped at
+// @Description 1024 addresses scanned, 6s ctx.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=discoverResult}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Router      /proxmox/discover [get]
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	result := discoverResult{Endpoints: []DiscoveredEndpoint{}}
 	result.SuggestedGateway = defaultGateway()

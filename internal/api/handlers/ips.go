@@ -30,6 +30,20 @@ func NewIPs(pool *ippool.Pool, reconciler reconcileRunner) *IPs {
 }
 
 // List handles GET /api/ips.
+//
+// @Summary     List the static IP pool with per-row state
+// @Description Admin-only view of the local cache: free/reserved/allocated +
+// @Description who holds each IP. The reconciler converges this against
+// @Description Proxmox in the background; use POST /ips/reconcile to force
+// @Description a fresh diff on demand.
+// @Tags        ips
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]ippool.IPAllocation}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /ips [get]
 func (h *IPs) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.pool.List(r.Context())
 	if err != nil {
@@ -42,6 +56,21 @@ func (h *IPs) List(w http.ResponseWriter, r *http.Request) {
 // Reconcile handles POST /api/ips/reconcile. Forces a fresh diff against the
 // Proxmox cluster and returns the resulting Report. Used by operators to
 // surface conflicts on demand without waiting for the background loop.
+//
+// @Summary     Force an IP-pool reconcile against Proxmox (admin)
+// @Description Bypasses the background loop and runs a one-shot diff. Returns
+// @Description the resulting Report (adopted / conflicts / freed / vacated).
+// @Description Even on partial failure the response is 200 — the report still
+// @Description carries the rows that were touched, with the error string
+// @Description alongside.
+// @Tags        ips
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=ippool.Report}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /ips/reconcile [post]
 func (h *IPs) Reconcile(w http.ResponseWriter, r *http.Request) {
 	if h.reconciler == nil {
 		response.ServiceUnavailable(w, "reconciliation is not configured on this instance")

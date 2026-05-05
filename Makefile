@@ -1,7 +1,8 @@
 .PHONY: dev build install test lint clean gx10-worker gx10-bundle swagger
 
-# Pinned to match the runtime swaggo/* deps in go.mod. Bump in lockstep.
-SWAG_VERSION := v1.8.1
+# Pinned to match the runtime swaggo/* deps in go.mod. Bump in lockstep —
+# the generated docs.go uses Spec fields tied to the swag library version.
+SWAG_VERSION := v1.16.4
 SWAG := $(shell go env GOPATH)/bin/swag
 
 dev:

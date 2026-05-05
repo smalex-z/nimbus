@@ -1,0 +1,8 @@
+// Type-resolution overrides for `swag init`. Without these, swag fails on
+// stdlib + gorm types it can't reach via --parseInternal alone (the
+// alternative, --parseDependencyLevel 1, breaks our internal type
+// resolution by re-namespacing internal package paths).
+replace time.Duration int64
+replace time.Time string
+replace gorm.io/gorm.DeletedAt time.Time
+replace gorm.Model object
