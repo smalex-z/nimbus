@@ -853,17 +853,17 @@ function SchedulingPanel() {
 
   return (
     <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 0', minWidth: 0 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Overcommit ratios</span>
-          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5, maxWidth: 720 }}>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
             How much committed capacity each node accepts as a multiple of physical capacity. CPU 4× lets 32 vCPUs land
             on an 8-thread host (homelab default — most VMs idle far below their declared cores). RAM 1× = strict no-overcommit;
-            bump to 1.2-1.5 only if your VMs sit well below declared <code>MaxMem</code>. Disk 1× is fine since LVM-thin already
-            thin-provisions. Each value clamps to [1, 64].
+            OpenStack Nova ships 1.5× by default and bumping toward there is fine if your VMs sit well below declared <code>MaxMem</code>.
+            Disk 1× is fine since LVM-thin already thin-provisions. Each value clamps to [1, 64].
           </p>
         </div>
-        <div style={{ display: 'inline-flex', gap: 8 }}>
+        <div style={{ display: 'inline-flex', gap: 8, flexShrink: 0 }}>
           {dirty && (
             <button
               type="button"
