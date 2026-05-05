@@ -1164,6 +1164,13 @@ definitions:
         type: string
       disk_total:
         type: integer
+      disk_type:
+        description: |-
+          DiskType is "nvme" | "ssd" | "hdd" | "" — strongest class
+          observed via /disks/list during the background reconcile.
+          Surfaces on the SPA card in place of the pool name so storage
+          tier is comparable across nodes at a glance.
+        type: string
       disk_used:
         description: |-
           DiskUsed/DiskTotal are the configured VM-disk pool's capacity

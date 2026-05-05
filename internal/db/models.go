@@ -460,8 +460,15 @@ type Node struct {
 	// HasGPU is currently NVIDIA-only (vendor 0x10de); AMD and Intel
 	// discrete cards aren't reliably distinguishable from iGPUs via
 	// the PCI vendor list and are left for operator tagging.
-	HasSSD     bool      `gorm:"column:has_ssd;default:false"       json:"-"`
-	HasGPU     bool      `gorm:"column:has_gpu;default:false"       json:"-"`
+	HasSSD bool `gorm:"column:has_ssd;default:false"       json:"-"`
+	HasGPU bool `gorm:"column:has_gpu;default:false"       json:"-"`
+	// DiskType is the strongest disk class observed via /disks/list:
+	// "nvme" > "ssd" > "hdd" > "" (unknown). Surfaces on the SPA card
+	// in place of the Proxmox pool name so operators can compare
+	// storage tiers at a glance. Distinct from has_ssd because the
+	// auto-tag stays a binary union (nvme also flips ssd) — has_ssd
+	// drives placement filtering, disk_type drives display.
+	DiskType   string    `gorm:"column:disk_type;default:''"        json:"-"`
 	LastSeenAt time.Time `gorm:"column:last_seen_at"                json:"last_seen_at"`
 	CreatedAt  time.Time `gorm:"column:created_at"                  json:"created_at"`
 	UpdatedAt  time.Time `gorm:"column:updated_at"                  json:"updated_at"`

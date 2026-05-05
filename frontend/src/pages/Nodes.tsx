@@ -287,32 +287,29 @@ function NodeCard({ node: n }: { node: NodeView }) {
         opacity: offline ? 0.55 : 1,
       }}
     >
-      {/* Header — name + tier counts on the left, status pills on the
-          right. Specs row uses "Nc/Mt" so the i5-1035G1 reads as 4c/8t
-          rather than the previously misleading 8c (Proxmox's max_cpu
-          is logical threads, not cores). The full CPU model lives on
-          its own line below to keep the specs row from wrapping when
-          the model name is long. Swap signal annotates the RAM bar
-          subhint below — keeps the header layout stable. */}
+      {/* Header — name + one-line specs on the left, status pills on
+          the right. Specs format:
+            `4c/8t i5-1035G1 · 7.5 GiB · 141.6 GiB SSD · 1/1 VM`
+          CPU count + threads + short model collapse into the same line
+          so the card stays compact. The full cpu_model lives on the
+          row's title tooltip; storage shows the disk class (NVMe / SSD
+          / HDD) instead of the Proxmox pool name (the pool name moves
+          to the title tooltip too). Swap signal annotates the RAM
+          bar subhint below — keeps the header layout stable. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
             {n.is_self_host && <SelfPill />}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2 }}>
-            {cpuCountLabel(n)} · {formatBytes(n.mem_total)}
-            {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
+          <div
+            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={cardTitle(n)}
+          >
+            {cpuLabel(n)} · {formatBytes(n.mem_total)}
+            {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {diskClass(n)}</>}
             {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
           </div>
-          {n.cpu_model && (
-            <div
-              style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={n.cpu_model}
-            >
-              {shortCPUModel(n.cpu_model)}
-            </div>
-          )}
         </div>
         <div style={{ display: 'flex', gap: 4 }}>
           <LockChip state={n.lock_state} reason={n.lock_reason} />
@@ -434,18 +431,49 @@ function MiniBar({ label, pct, hint, accent, subhint, subhintTitle }: {
 // pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
 // "allocated" cells where high values flag overcommit risk and the
 // operator's eye should snap to them.
-// cpuCountLabel renders the CPU count slot of the specs row. When
-// physical cores ≠ threads we show "Nc/Mt" so a 4c/8t laptop chip is
-// distinct from a real 8c desktop chip; when they match (no SMT, e.g.
-// Apple silicon) we just show "Mc". When cpu_cores is 0 (older PVE /
-// nested-virt failed status fanout) we fall back to "Mt" since the
-// historic "8c" rendering was misleading (max_cpu is logical threads).
-function cpuCountLabel(n: NodeView): string {
+// cpuLabel renders the CPU slot of the specs row: cores/threads count
+// + a short model name. When physical cores ≠ threads we render
+// "Nc/Mt" (e.g. "4c/8t i5-1035G1") so a laptop chip is distinct from
+// a real desktop chip; when they match (no SMT, e.g. Apple silicon)
+// we collapse to "Mc". When cpu_cores is 0 (older PVE / nested-virt
+// failed status fanout) we fall back to "Mt" alone — the historic
+// "8c" rendering was misleading (max_cpu is logical threads, not
+// cores). Drops the "Core "/"Xeon "/etc. family prefix from the
+// shortened model so we keep more of the part number visible inline.
+function cpuLabel(n: NodeView): string {
   const threads = n.max_cpu
   const cores = n.cpu_cores ?? 0
-  if (cores <= 0) return `${threads}t`
-  if (cores === threads) return `${cores}c`
-  return `${cores}c/${threads}t`
+  let count: string
+  if (cores <= 0) count = `${threads}t`
+  else if (cores === threads) count = `${cores}c`
+  else count = `${cores}c/${threads}t`
+  const model = shortCPUModel(n.cpu_model).replace(/^Core\s+/i, '').replace(/^Xeon\s+/i, '')
+  return model ? `${count} ${model}` : count
+}
+
+// diskClass returns the storage classifier (NVMe / SSD / HDD) shown
+// in the disk slot of the specs row, replacing the operationally-
+// noisy Proxmox pool name (e.g. "local-lvm") with something the
+// operator can compare across nodes at a glance. Falls back to the
+// pool name when the auto-detection couldn't decide (e.g. /disks/list
+// returned 403 to a limited token).
+function diskClass(n: NodeView): string {
+  switch (n.disk_type) {
+    case 'nvme': return 'NVMe'
+    case 'ssd': return 'SSD'
+    case 'hdd': return 'HDD'
+    default: return n.disk_pool_name || 'disk'
+  }
+}
+
+// cardTitle composes the hover-tooltip for the specs row — full CPU
+// model + the original Proxmox pool name, since both got abbreviated
+// in the visible row.
+function cardTitle(n: NodeView): string {
+  const parts: string[] = []
+  if (n.cpu_model) parts.push(n.cpu_model)
+  if (n.disk_pool_name) parts.push(`disk pool: ${n.disk_pool_name}`)
+  return parts.join(' · ')
 }
 
 // shortCPUModel strips the noisy boilerplate Intel/AMD pack into their

@@ -212,6 +212,11 @@ export interface NodeView {
   // Pool name actually queried; empty when disk telemetry is off.
   // Surfaced so the SPA can label the bar (e.g. "local-lvm").
   disk_pool_name?: string
+  // Strongest disk class observed via /disks/list — "nvme" | "ssd" |
+  // "hdd" | undefined. Card displays this instead of the pool name
+  // so operators can compare storage tier across nodes at a glance;
+  // the pool name moves to the row's title tooltip.
+  disk_type?: 'nvme' | 'ssd' | 'hdd'
   vm_count: number
   vm_count_total: number
   // Corosync ring address for this node, when available. The IP-pool table

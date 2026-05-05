@@ -169,15 +169,20 @@ type View struct {
 	// "what would fill if every VM grew to its declared size" number.
 	// All three zero when no pool name is configured (cfg.VMDiskStorage
 	// empty) or when this node doesn't expose the pool.
-	DiskUsed      uint64    `json:"disk_used"`
-	DiskTotal     uint64    `json:"disk_total"`
-	DiskAllocated uint64    `json:"disk_allocated"`
-	DiskPoolName  string    `json:"disk_pool_name,omitempty"`
-	VMCount       int       `json:"vm_count"`       // running, non-template
-	VMCountTotal  int       `json:"vm_count_total"` // all non-template
-	IP            string    `json:"ip,omitempty"`
-	LastSeenAt    time.Time `json:"last_seen_at"`
-	IsSelfHost    bool      `json:"is_self_host"` // true for the node Nimbus runs on
+	DiskUsed      uint64 `json:"disk_used"`
+	DiskTotal     uint64 `json:"disk_total"`
+	DiskAllocated uint64 `json:"disk_allocated"`
+	DiskPoolName  string `json:"disk_pool_name,omitempty"`
+	// DiskType is "nvme" | "ssd" | "hdd" | "" — strongest class
+	// observed via /disks/list during the background reconcile.
+	// Surfaces on the SPA card in place of the pool name so storage
+	// tier is comparable across nodes at a glance.
+	DiskType     string    `json:"disk_type,omitempty"`
+	VMCount      int       `json:"vm_count"`       // running, non-template
+	VMCountTotal int       `json:"vm_count_total"` // all non-template
+	IP           string    `json:"ip,omitempty"`
+	LastSeenAt   time.Time `json:"last_seen_at"`
+	IsSelfHost   bool      `json:"is_self_host"` // true for the node Nimbus runs on
 }
 
 // ListView is the cluster-wide view-model the SPA renders on /nodes. Lifts
@@ -282,6 +287,7 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 			DiskTotal:     disk.Total,
 			DiskAllocated: a.diskAllocated,
 			DiskPoolName:  s.cfg.VMDiskStorage,
+			DiskType:      row.DiskType,
 			VMCount:       a.running,
 			VMCountTotal:  a.total,
 			IP:            nodeIP[n.Name],
@@ -371,13 +377,14 @@ func (s *Service) fanoutNodeStatus(ctx context.Context, nodes []proxmox.Node) ma
 
 // hwUpdate carries optional hardware-introspection results for one node.
 // nil pointers mean "unknown — don't update the column"; non-nil values
-// (including zero values) replace the stored field. Empty CPUModel
-// behaves the same way (skip update). This split lets the foreground
-// List() refresh only cpu_model (free, since /status is fanned out
-// anyway) while the slower background Reconcile() also refreshes the
-// disk + PCI signals via fanoutHardware.
+// (including zero values) replace the stored field. Empty CPUModel /
+// DiskType strings behave the same way (skip update). This split lets
+// the foreground List() refresh only cpu_model (free, since /status is
+// fanned out anyway) while the slower background Reconcile() also
+// refreshes the disk + PCI signals via fanoutHardware.
 type hwUpdate struct {
 	CPUModel string
+	DiskType string // strongest class observed: "nvme" > "ssd" > "hdd" > ""
 	HasSSD   *bool
 	HasGPU   *bool
 }
@@ -401,14 +408,32 @@ func (s *Service) fanoutHardware(ctx context.Context, nodes []proxmox.Node) map[
 			defer wg.Done()
 			var hu hwUpdate
 			if disks, err := s.px.ListDisks(ctx, name); err == nil {
+				// Walk all disks once; record the strongest class
+				// (nvme > ssd > hdd) for display, plus the binary
+				// has_ssd that drives the auto-tag. nvme is treated
+				// as a superset of ssd for tag-matching purposes —
+				// a `required_tags=ssd` constraint placing on an
+				// NVMe-only node should pass.
 				ssd := false
+				class := ""
 				for _, d := range disks {
-					if d.Type == "ssd" || d.Type == "nvme" {
+					switch d.Type {
+					case "nvme":
+						class = "nvme"
 						ssd = true
-						break
+					case "ssd":
+						if class != "nvme" {
+							class = "ssd"
+						}
+						ssd = true
+					case "hdd":
+						if class == "" {
+							class = "hdd"
+						}
 					}
 				}
 				hu.HasSSD = &ssd
+				hu.DiskType = class
 			}
 			if devs, err := s.px.ListPCIDevices(ctx, name); err == nil {
 				// NVIDIA discrete GPUs only — vendor 0x10de. AMD (1002)
@@ -475,6 +500,10 @@ func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node
 		if hu.CPUModel != "" && hu.CPUModel != row.CPUModel {
 			updates["cpu_model"] = hu.CPUModel
 			row.CPUModel = hu.CPUModel
+		}
+		if hu.DiskType != "" && hu.DiskType != row.DiskType {
+			updates["disk_type"] = hu.DiskType
+			row.DiskType = hu.DiskType
 		}
 		if hu.HasSSD != nil && *hu.HasSSD != row.HasSSD {
 			updates["has_ssd"] = *hu.HasSSD

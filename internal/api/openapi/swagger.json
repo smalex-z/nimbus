@@ -7813,6 +7813,10 @@
                 "disk_total": {
                     "type": "integer"
                 },
+                "disk_type": {
+                    "description": "DiskType is \"nvme\" | \"ssd\" | \"hdd\" | \"\" — strongest class\nobserved via /disks/list during the background reconcile.\nSurfaces on the SPA card in place of the pool name so storage\ntier is comparable across nodes at a glance.",
+                    "type": "string"
+                },
                 "disk_used": {
                     "description": "DiskUsed/DiskTotal are the configured VM-disk pool's capacity\non this node (from /cluster/resources?type=storage filtered by\ncfg.VMDiskStorage). DiskAllocated is the sum of every non-\ntemplate VM's configured maxdisk on this node — the pessimistic\n\"what would fill if every VM grew to its declared size\" number.\nAll three zero when no pool name is configured (cfg.VMDiskStorage\nempty) or when this node doesn't expose the pool.",
                     "type": "integer"
