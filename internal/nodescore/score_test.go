@@ -65,9 +65,29 @@ func TestScore_Gates(t *testing.T) {
 			wantReasons: []nodescore.Reason{nodescore.ReasonNoCapacity, nodescore.ReasonInsufficientMem},
 		},
 		{
-			name:        "insufficient cores rejects",
+			name: "insufficient cores rejects under strict 1:1 ratio",
+			node: nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
+			// Default cpuRatio (4.0) would let medium's 2 vCPUs land on
+			// a 1-thread host (cap=4); strict 1:1 forces the reject we
+			// want to assert here.
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), CPUAllocationRatio: 1.0},
+			wantReasons: []nodescore.Reason{nodescore.ReasonInsufficientCores},
+		},
+		{
+			name: "cpu overcommit cap allows medium on 1-thread host",
+			// With the default 4.0 cpuRatio, a 1-thread host has a 4-vCPU
+			// soft cap → medium (2 vCPU) lands. Verifies the relaxation.
 			node:        nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
-			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha")},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: nil,
+		},
+		{
+			name: "cpu overcommit cap rejects when committed sum exceeds cap",
+			// 1-thread host with default 4.0 ratio = cap 4 vCPU. Already
+			// committed 3 vCPUs; medium adds 2 → 5 > 4 → reject.
+			node:        nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			rt:          nodescore.NodeRuntime{CommittedCPU: 3},
 			wantReasons: []nodescore.Reason{nodescore.ReasonInsufficientCores},
 		},
 		{

@@ -177,6 +177,31 @@ type QuotaSettings struct {
 	MemberMaxActiveJobs int  `gorm:"default:5"`
 }
 
+// SchedulingSettings stores cluster-wide overcommit ratios the scheduler
+// uses when deciding whether a node can host a tier. Only a single row
+// (ID=1) is used. Defaults are seeded on first read so existing
+// deployments don't change behaviour silently.
+//
+//   - CPUAllocationRatio (default 4.0): allowed sum-of-vCPU on a node
+//     as a multiple of physical thread count. 4.0 lets you stack 32
+//     vCPUs of declared capacity on an 8-thread host (typical homelab
+//     density — most VMs idle far below their declared cores).
+//   - RAMAllocationRatio (default 1.0): allowed committed RAM as a
+//     multiple of physical RAM. 1.0 = no overcommit (Linux-host safe
+//     default — RAM oversub trades free disk swap for RAM-pressure
+//     surprises). Operators bump this to 1.2-1.5 only when their VMs
+//     genuinely sit far below declared MaxMem.
+//   - DiskAllocationRatio (default 1.0): allowed committed VM disk as
+//     a multiple of pool capacity. 1.0 even though LVM-thin already
+//     thin-provisions — the scheduler's job is to refuse placement
+//     before the operator cuts off their own filesystem.
+type SchedulingSettings struct {
+	ID                  uint    `gorm:"primaryKey"`
+	CPUAllocationRatio  float64 `gorm:"column:cpu_allocation_ratio;default:4.0"  json:"cpu_allocation_ratio"`
+	RAMAllocationRatio  float64 `gorm:"column:ram_allocation_ratio;default:1.0"  json:"ram_allocation_ratio"`
+	DiskAllocationRatio float64 `gorm:"column:disk_allocation_ratio;default:1.0" json:"disk_allocation_ratio"`
+}
+
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single
 // row (ID=1) is used. Empty APIURL means tunnel integration is disabled.
 //

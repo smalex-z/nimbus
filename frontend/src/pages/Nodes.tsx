@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getProxmoxBinding, listNodes, listNodesWithScores } from '@/api/client'
+import { getProxmoxBinding, getSchedulingSettings, listNodes, listNodesWithScores, saveSchedulingSettings } from '@/api/client'
 import type { ProxmoxBinding } from '@/api/client'
-import type { NodeView, NodeViewWithScores, Specialization, TierName } from '@/types'
+import type { NodeView, NodeViewWithScores, SchedulingSettings, Specialization, TierName } from '@/types'
 import { CordonModal, DrainPlanModal, RemoveNodeModal, TagsModal } from '@/components/NodeActionModals'
 import ProxmoxBindingModal, { ChangeBindingModal } from '@/components/ProxmoxBindingModal'
 import { formatBytes } from '@/lib/format'
@@ -81,6 +81,7 @@ export default function Nodes() {
         <>
           <CardGrid rows={rows} />
           <ManageTable rows={rows} onAction={setPending} />
+          <SchedulingPanel />
           <ScoringMatrix />
         </>
       )}
@@ -800,6 +801,157 @@ function ActionBtn({
     >
       {label}
     </button>
+  )
+}
+
+// SchedulingPanel renders the cluster-wide overcommit ratios and lets
+// the operator edit them. Sits between the management table and the
+// scoring matrix because it directly affects what the matrix shows
+// (raise the CPU ratio → previously-rejected nodes start scoring; the
+// matrix re-renders the change).
+//
+// Dirty-state UX: the inputs reflect the saved value on load; an
+// orange "Save" button lights up only when at least one input differs
+// from the saved baseline. Clicking Save round-trips and seeds a fresh
+// baseline. The server clamps to [1.0, 64.0]; sub-1 values are silently
+// promoted, so we display the clamped result rather than the typed-in
+// value when they diverge.
+function SchedulingPanel() {
+  const [saved, setSaved] = useState<SchedulingSettings | null>(null)
+  const [draft, setDraft] = useState<SchedulingSettings | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    getSchedulingSettings()
+      .then((row) => { setSaved(row); setDraft(row); setError(null) })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }, [])
+
+  const dirty = saved && draft && (
+    saved.cpu_allocation_ratio !== draft.cpu_allocation_ratio ||
+    saved.ram_allocation_ratio !== draft.ram_allocation_ratio ||
+    saved.disk_allocation_ratio !== draft.disk_allocation_ratio
+  )
+
+  const submit = async () => {
+    if (!draft) return
+    setSaving(true)
+    try {
+      const next = await saveSchedulingSettings(draft)
+      setSaved(next)
+      setDraft(next)
+      setError(null)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const reset = () => { if (saved) setDraft(saved) }
+
+  return (
+    <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Overcommit ratios</span>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5, maxWidth: 720 }}>
+            How much committed capacity each node accepts as a multiple of physical capacity. CPU 4× lets 32 vCPUs land
+            on an 8-thread host (homelab default — most VMs idle far below their declared cores). RAM 1× = strict no-overcommit;
+            bump to 1.2-1.5 only if your VMs sit well below declared <code>MaxMem</code>. Disk 1× is fine since LVM-thin already
+            thin-provisions. Each value clamps to [1, 64].
+          </p>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 8 }}>
+          {dirty && (
+            <button
+              type="button"
+              onClick={reset}
+              disabled={saving}
+              style={{
+                fontSize: 11, padding: '4px 12px', borderRadius: 5,
+                border: '1px solid var(--line)', cursor: saving ? 'default' : 'pointer',
+                background: 'transparent', color: 'var(--ink-mute)',
+                fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.06em',
+              }}
+            >
+              Reset
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!dirty || saving}
+            style={{
+              fontSize: 11, padding: '4px 12px', borderRadius: 5,
+              border: 'none', cursor: (!dirty || saving) ? 'default' : 'pointer',
+              background: dirty ? '#9a5c2e' : 'rgba(20,18,28,0.06)',
+              color: dirty ? 'white' : 'var(--ink-mute)',
+              fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500,
+            }}
+          >
+            {saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
+          </button>
+        </div>
+      </div>
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
+      {!saved && !error && (
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)' }}>Loading…</p>
+      )}
+      {draft && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <RatioInput
+            label="CPU"
+            value={draft.cpu_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, cpu_allocation_ratio: v })}
+            hint="vCPU sum cap = threads × ratio"
+          />
+          <RatioInput
+            label="RAM"
+            value={draft.ram_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, ram_allocation_ratio: v })}
+            hint="committed RAM cap = physical × ratio"
+          />
+          <RatioInput
+            label="Disk"
+            value={draft.disk_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, disk_allocation_ratio: v })}
+            hint="committed disk cap = pool × ratio"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RatioInput({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180, flex: '1 1 200px' }}>
+      <label style={{ fontSize: 10, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'Geist Mono, monospace' }}>
+        {label}
+      </label>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <input
+          type="number"
+          min={1}
+          max={64}
+          step={0.1}
+          value={value}
+          onChange={(e) => {
+            const v = parseFloat(e.target.value)
+            if (Number.isFinite(v)) onChange(v)
+          }}
+          style={{
+            width: 70, fontSize: 13, padding: '4px 8px', borderRadius: 5,
+            border: '1px solid var(--line)', background: 'white',
+            fontFamily: 'Geist Mono, monospace', color: 'var(--ink)',
+          }}
+        />
+          <span style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace' }}>×</span>
+      </div>
+      <span style={{ fontSize: 10, color: 'var(--ink-mute)', lineHeight: 1.4 }}>{hint}</span>
+    </div>
   )
 }
 

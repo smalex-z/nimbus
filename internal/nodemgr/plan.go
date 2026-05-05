@@ -118,12 +118,14 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 	// Aggregate per-node committed mem from the cluster snapshot. Keyed
 	// by node so we can mutate as we plan migrations.
 	committedMem := make(map[string]uint64, len(nodes))
+	committedCPU := make(map[string]int, len(nodes))
 	currentVMCount := make(map[string]int, len(nodes))
 	for _, vm := range vms {
 		if vm.Template != 0 {
 			continue
 		}
 		committedMem[vm.Node] += vm.MaxMem
+		committedCPU[vm.Node] += vm.MaxCPU
 		currentVMCount[vm.Node]++
 	}
 	// Capacity (MaxMem) per node for projection arithmetic.
@@ -169,6 +171,7 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 
 	plan := &DrainPlan{SourceNode: sourceNode, Migrations: make([]PlannedMigration, 0, len(managed))}
 	plannedAdd := make(map[string]uint64) // additional committed mem to add per dest
+	plannedCPU := make(map[string]int)    // additional committed vCPUs per dest
 
 	for _, vm := range managed {
 		tier, ok := nodescore.Tiers[vm.Tier]
@@ -193,6 +196,7 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			runtime[c.Name] = nodescore.NodeRuntime{
 				VMCount:           currentVMCount[c.Name] + countPlanned(plan.Migrations, c.Name),
 				CommittedMemBytes: committedMem[c.Name] + plannedAdd[c.Name],
+				CommittedCPU:      committedCPU[c.Name] + plannedCPU[c.Name],
 			}
 		}
 
@@ -212,10 +216,14 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		// originally provisioned against) so drain replacement only
 		// migrates to nodes carrying those tags. Empty = no
 		// constraint; placement is capacity-only.
+		cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 		env := nodescore.Env{
-			TemplatesPresent: templatesPresent,
-			StorageByNode:    perVMStorage,
-			RequiredTags:     splitVMTags(vm.RequiredTags),
+			TemplatesPresent:    templatesPresent,
+			StorageByNode:       perVMStorage,
+			RequiredTags:        splitVMTags(vm.RequiredTags),
+			CPUAllocationRatio:  cpuRatio,
+			RAMAllocationRatio:  ramRatio,
+			DiskAllocationRatio: diskRatio,
 		}
 		decisions := nodescore.Evaluate(candidates, runtime, tier, env)
 		winner, _ := nodescore.Pick(decisions)
@@ -237,10 +245,11 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		// only seed the initial view.
 		row.Warnings = warningsForTarget(row.AutoPick, row.Eligible)
 
-		// Apply this VM's planned mem AND disk to the destination's
+		// Apply this VM's planned mem, vCPU, AND disk to the destination's
 		// running tally so the next VM's runtime + storage view see them.
 		if winner != nil {
 			plannedAdd[winner.Node.Name] += uint64(tier.MemMB) * (1 << 20)
+			plannedCPU[winner.Node.Name] += tier.CPU
 			plannedDiskAdd[winner.Node.Name] += uint64(tier.DiskGB) * (1 << 30)
 		}
 

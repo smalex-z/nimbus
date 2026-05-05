@@ -70,12 +70,14 @@ func (s *Service) ScoreClusterAtTier(ctx context.Context, previewTier string) (m
 	storageByNode := s.buildStorageByNode(storeRows, nodes)
 
 	committedMem := make(map[string]uint64, len(nodes))
+	committedCPU := make(map[string]int, len(nodes))
 	vmCount := make(map[string]int, len(nodes))
 	for _, vm := range vms {
 		if vm.Template != 0 {
 			continue
 		}
 		committedMem[vm.Node] += vm.MaxMem
+		committedCPU[vm.Node] += vm.MaxCPU
 		vmCount[vm.Node]++
 	}
 
@@ -102,12 +104,17 @@ func (s *Service) ScoreClusterAtTier(ctx context.Context, previewTier string) (m
 		runtime[n.Name] = nodescore.NodeRuntime{
 			VMCount:           vmCount[n.Name],
 			CommittedMemBytes: committedMem[n.Name],
+			CommittedCPU:      committedCPU[n.Name],
 		}
 	}
 
+	cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 	env := nodescore.Env{
-		TemplatesPresent: templatesPresent,
-		StorageByNode:    storageByNode,
+		TemplatesPresent:    templatesPresent,
+		StorageByNode:       storageByNode,
+		CPUAllocationRatio:  cpuRatio,
+		RAMAllocationRatio:  ramRatio,
+		DiskAllocationRatio: diskRatio,
 	}
 	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
 
@@ -155,8 +162,10 @@ func (s *Service) ScoreNode(ctx context.Context, nodeName, tierName string, requ
 		}
 		rt.VMCount++
 		rt.CommittedMemBytes += vm.MaxMem
+		rt.CommittedCPU += vm.MaxCPU
 	}
 
+	cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 	row := dbNodes[nodeName]
 	res := nodescore.Score(
 		nodescore.Node{
@@ -167,14 +176,41 @@ func (s *Service) ScoreNode(ctx context.Context, nodeName, tierName string, requ
 		},
 		tier,
 		nodescore.Env{
-			TemplatesPresent: map[string]bool{nodeName: true},
-			StorageByNode:    storageByNode,
-			RequiredTags:     requiredTags,
+			TemplatesPresent:    map[string]bool{nodeName: true},
+			StorageByNode:       storageByNode,
+			RequiredTags:        requiredTags,
+			CPUAllocationRatio:  cpuRatio,
+			RAMAllocationRatio:  ramRatio,
+			DiskAllocationRatio: diskRatio,
 		},
 		rt,
 	)
 	out := breakdownFrom(res)
 	return &out, nil
+}
+
+// schedulingRatios returns the cluster-wide overcommit ratios. Falls
+// back to nodescore defaults on any read error so a transient SQLite
+// hiccup never strands scoring.
+func (s *Service) schedulingRatios(ctx context.Context) (cpu, ram, disk float64) {
+	cpu, ram, disk = 4.0, 1.0, 1.0
+	if s == nil || s.db == nil {
+		return
+	}
+	row, err := s.GetSchedulingSettings(ctx)
+	if err != nil || row == nil {
+		return
+	}
+	if row.CPUAllocationRatio >= 1.0 {
+		cpu = row.CPUAllocationRatio
+	}
+	if row.RAMAllocationRatio >= 1.0 {
+		ram = row.RAMAllocationRatio
+	}
+	if row.DiskAllocationRatio >= 1.0 {
+		disk = row.DiskAllocationRatio
+	}
+	return
 }
 
 // breakdownFrom converts a nodescore.Result into the SPA-facing shape.

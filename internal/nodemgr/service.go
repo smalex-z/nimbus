@@ -678,6 +678,60 @@ func (s *Service) markDrainDone(name string) {
 	delete(s.drainsInFlight, name)
 }
 
+// GetSchedulingSettings returns the cluster-wide overcommit ratios. Creates
+// a defaults row (4.0/1.0/1.0) on first call so the SPA always renders the
+// current value rather than blanks. Defaults match nodescore's fallback
+// constants — a fresh deployment behaves identically whether or not the
+// row exists yet.
+func (s *Service) GetSchedulingSettings(ctx context.Context) (*db.SchedulingSettings, error) {
+	var row db.SchedulingSettings
+	err := s.db.WithContext(ctx).
+		Where(&db.SchedulingSettings{ID: 1}).
+		Attrs(&db.SchedulingSettings{
+			ID:                  1,
+			CPUAllocationRatio:  4.0,
+			RAMAllocationRatio:  1.0,
+			DiskAllocationRatio: 1.0,
+		}).
+		FirstOrCreate(&row).Error
+	if err != nil {
+		return nil, fmt.Errorf("read scheduling settings: %w", err)
+	}
+	return &row, nil
+}
+
+// SaveSchedulingSettings persists new ratios. Each ratio is clamped to
+// [1.0, 64.0] — sub-1 silently strands physical capacity, and >64x is far
+// past anything reasonable for a homelab (Nova caps at 16x by default).
+func (s *Service) SaveSchedulingSettings(ctx context.Context, next db.SchedulingSettings) (*db.SchedulingSettings, error) {
+	clamp := func(v, lo, hi float64) float64 {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	cpuR := clamp(next.CPUAllocationRatio, 1.0, 64.0)
+	ramR := clamp(next.RAMAllocationRatio, 1.0, 64.0)
+	diskR := clamp(next.DiskAllocationRatio, 1.0, 64.0)
+	if _, err := s.GetSchedulingSettings(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&db.SchedulingSettings{}).
+		Where("id = ?", 1).
+		Updates(map[string]any{
+			"cpu_allocation_ratio":  cpuR,
+			"ram_allocation_ratio":  ramR,
+			"disk_allocation_ratio": diskR,
+		}).Error; err != nil {
+		return nil, fmt.Errorf("save scheduling settings: %w", err)
+	}
+	return &db.SchedulingSettings{ID: 1, CPUAllocationRatio: cpuR, RAMAllocationRatio: ramR, DiskAllocationRatio: diskR}, nil
+}
+
 func lockOrNone(s string) string {
 	if s == "" {
 		return "none"

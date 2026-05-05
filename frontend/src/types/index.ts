@@ -233,6 +233,15 @@ export interface NodeView {
   is_self_host: boolean
 }
 
+// SchedulingSettings is the cluster-wide overcommit policy. All three
+// ratios are clamped server-side to [1.0, 64.0]. Changes take effect
+// immediately on the next provision/drain — no restart required.
+export interface SchedulingSettings {
+  cpu_allocation_ratio: number
+  ram_allocation_ratio: number
+  disk_allocation_ratio: number
+}
+
 export interface ClusterStats {
   storage_used: number
   storage_total: number

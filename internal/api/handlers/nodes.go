@@ -15,6 +15,7 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
+	"nimbus/internal/db"
 	"nimbus/internal/nodemgr"
 	"nimbus/internal/proxmox"
 )
@@ -553,6 +554,77 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		h.restart()
 	}()
+}
+
+// schedulingSettingsRequest is the body of PUT /api/scheduling. All
+// three fields are required; missing/zero values are rejected so the
+// operator can't silently strand physical capacity.
+type schedulingSettingsRequest struct {
+	CPUAllocationRatio  float64 `json:"cpu_allocation_ratio"`
+	RAMAllocationRatio  float64 `json:"ram_allocation_ratio"`
+	DiskAllocationRatio float64 `json:"disk_allocation_ratio"`
+}
+
+// GetSchedulingSettings handles GET /api/scheduling. Returns the
+// cluster-wide overcommit ratios used by the placement scorer. Defaults
+// (4.0/1.0/1.0) are seeded on first read so the SPA always renders
+// concrete values.
+//
+// @Summary     Read cluster overcommit ratios (admin)
+// @Description Returns the placement scheduler's cpu/ram/disk allocation
+// @Description ratios. Defaults are seeded on first read so the value is
+// @Description never empty.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=db.SchedulingSettings}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /scheduling [get]
+func (h *Nodes) GetSchedulingSettings(w http.ResponseWriter, r *http.Request) {
+	out, err := h.mgr.GetSchedulingSettings(r.Context())
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, out)
+}
+
+// SaveSchedulingSettings handles PUT /api/scheduling. Persists new
+// ratios; each is clamped to [1.0, 64.0] inside the service layer so a
+// negative or absurdly large value can't break placement.
+//
+// @Summary     Update cluster overcommit ratios (admin)
+// @Description Persists the placement scheduler's cpu/ram/disk allocation
+// @Description ratios. Each is clamped to [1.0, 64.0]. Takes effect on
+// @Description the next provision/drain — no restart required.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     schedulingSettingsRequest true "New ratios"
+// @Success     200  {object} EnvelopeOK{data=db.SchedulingSettings}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /scheduling [put]
+func (h *Nodes) SaveSchedulingSettings(w http.ResponseWriter, r *http.Request) {
+	var req schedulingSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	out, err := h.mgr.SaveSchedulingSettings(r.Context(), db.SchedulingSettings{
+		CPUAllocationRatio:  req.CPUAllocationRatio,
+		RAMAllocationRatio:  req.RAMAllocationRatio,
+		DiskAllocationRatio: req.DiskAllocationRatio,
+	})
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, out)
 }
 
 // writeNodeMutationError maps nodemgr's typed errors to HTTP statuses.

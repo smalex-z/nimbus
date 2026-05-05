@@ -248,6 +248,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		}
 		rt.VMCount++
 		rt.CommittedMemBytes += v.MaxMem
+		rt.CommittedCPU += v.MaxCPU
 	}
 
 	// Storage telemetry for the disk gate — same shape ComputePlan
@@ -276,10 +277,14 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 	// review that doesn't carry the required tags, fail fast here.
 	// Without this gate the migrate goes through but ends up on a
 	// node that violates the constraint.
+	cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 	env := nodescore.Env{
-		TemplatesPresent: map[string]bool{target: true}, // migration doesn't need templates
-		StorageByNode:    storageByNode,
-		RequiredTags:     splitVMTags(vm.RequiredTags),
+		TemplatesPresent:    map[string]bool{target: true}, // migration doesn't need templates
+		StorageByNode:       storageByNode,
+		RequiredTags:        splitVMTags(vm.RequiredTags),
+		CPUAllocationRatio:  cpuRatio,
+		RAMAllocationRatio:  ramRatio,
+		DiskAllocationRatio: diskRatio,
 	}
 	got := nodescore.Score(*targetNode, tier, env, rt)
 	if got.Score == 0 {

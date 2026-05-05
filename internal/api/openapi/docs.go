@@ -3334,6 +3334,131 @@ const docTemplate = `{
                 }
             }
         },
+        "/scheduling": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Returns the placement scheduler's cpu/ram/disk allocation\nratios. Defaults are seeded on first read so the value is\nnever empty.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "nodes"
+                ],
+                "summary": "Read cluster overcommit ratios (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/db.SchedulingSettings"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Persists the placement scheduler's cpu/ram/disk allocation\nratios. Each is clamped to [1.0, 64.0]. Takes effect on\nthe next provision/drain — no restart required.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "nodes"
+                ],
+                "summary": "Update cluster overcommit ratios (admin)",
+                "parameters": [
+                    {
+                        "description": "New ratios",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.schedulingSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/db.SchedulingSettings"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/access-code": {
             "get": {
                 "security": [
@@ -6294,6 +6419,23 @@ const docTemplate = `{
                 }
             }
         },
+        "db.SchedulingSettings": {
+            "type": "object",
+            "properties": {
+                "cpu_allocation_ratio": {
+                    "type": "number"
+                },
+                "disk_allocation_ratio": {
+                    "type": "number"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "ram_allocation_ratio": {
+                    "type": "number"
+                }
+            }
+        },
         "db.VM": {
             "type": "object",
             "properties": {
@@ -7355,6 +7497,20 @@ const docTemplate = `{
                 },
                 "google_client_secret": {
                     "type": "string"
+                }
+            }
+        },
+        "handlers.schedulingSettingsRequest": {
+            "type": "object",
+            "properties": {
+                "cpu_allocation_ratio": {
+                    "type": "number"
+                },
+                "disk_allocation_ratio": {
+                    "type": "number"
+                },
+                "ram_allocation_ratio": {
+                    "type": "number"
                 }
             }
         },

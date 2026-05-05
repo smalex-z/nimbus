@@ -1363,6 +1363,7 @@ func (s *Service) pickNode(
 		rt := runtime[vm.Node]
 		rt.VMCount++
 		rt.CommittedMemBytes += vm.MaxMem
+		rt.CommittedCPU += vm.MaxCPU
 		runtime[vm.Node] = rt
 	}
 
@@ -1414,13 +1415,19 @@ func (s *Service) pickNode(
 		})
 	}
 
+	// Read cluster-wide overcommit ratios. Empty/missing row defaults
+	// to the nodescore fallback constants — never a fatal error.
+	cpuRatio, ramRatio, diskRatio := readSchedulingRatios(ctx, s.db)
 	env := nodescore.Env{
-		Excluded:         s.cfg.ExcludedNodes,
-		TemplatesPresent: templatesPresent,
-		StorageByNode:    storageByNode,
-		MemBufferMiB:     s.cfg.MemBufferMiB,
-		CPULoadFactor:    s.cfg.CPULoadFactor,
-		RequiredTags:     requiredTags,
+		Excluded:            s.cfg.ExcludedNodes,
+		TemplatesPresent:    templatesPresent,
+		StorageByNode:       storageByNode,
+		MemBufferMiB:        s.cfg.MemBufferMiB,
+		CPULoadFactor:       s.cfg.CPULoadFactor,
+		RequiredTags:        requiredTags,
+		CPUAllocationRatio:  cpuRatio,
+		RAMAllocationRatio:  ramRatio,
+		DiskAllocationRatio: diskRatio,
 	}
 	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
 	winner, all := nodescore.Pick(decisions)
@@ -1499,6 +1506,35 @@ func splitCSVTags(csv string) []string {
 // (admittedly cosmetic) clarity at provision-Request call sites —
 // reads as "the operator-typed required tags from the request, parsed."
 func splitRequiredTags(csv string) []string { return splitCSVTags(csv) }
+
+// readSchedulingRatios fetches the cluster-wide overcommit ratios from
+// the SchedulingSettings singleton. Falls back to the nodescore default
+// constants on any error (missing table, busy SQLite, etc.) so a
+// transient read failure doesn't strand provisioning. Logged at info
+// level when fallback fires.
+func readSchedulingRatios(ctx context.Context, gdb *gorm.DB) (cpu, ram, disk float64) {
+	cpu, ram, disk = 4.0, 1.0, 1.0
+	if gdb == nil {
+		return
+	}
+	var row db.SchedulingSettings
+	if err := gdb.WithContext(ctx).
+		Where(&db.SchedulingSettings{ID: 1}).
+		First(&row).Error; err != nil {
+		// Row not yet seeded — use defaults.
+		return
+	}
+	if row.CPUAllocationRatio >= 1.0 {
+		cpu = row.CPUAllocationRatio
+	}
+	if row.RAMAllocationRatio >= 1.0 {
+		ram = row.RAMAllocationRatio
+	}
+	if row.DiskAllocationRatio >= 1.0 {
+		disk = row.DiskAllocationRatio
+	}
+	return
+}
 
 // formatRejections renders one "node=reason1,reason2" entry per rejected
 // decision — used in the conflict-error message where every entry is a

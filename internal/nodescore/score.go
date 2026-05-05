@@ -79,8 +79,17 @@ type StorageInfo struct {
 // (sum of every non-template VM's configured MaxMem on this node, running or
 // not) for the reservation-based memory gate.
 type NodeRuntime struct {
-	VMCount           int
+	VMCount int
+	// CommittedMemBytes is the sum of every non-template VM's configured
+	// MaxMem on this node (running or not) — the pessimistic
+	// reservation-based number the RAM gate compares against.
 	CommittedMemBytes uint64
+	// CommittedCPU is the sum of every non-template VM's configured
+	// max vCPUs on this node (running or not). Used by the CPU gate
+	// so cumulative oversubscription respects the allocation ratio
+	// (e.g. with ratio=4 on an 8-thread host, cap at 32 committed
+	// vCPUs across all VMs).
+	CommittedCPU int
 }
 
 // Reason names a single rejection cause. A node may carry multiple reasons
@@ -241,6 +250,18 @@ type Env struct {
 	MemBufferMiB     uint64                 // RAM headroom on top of tier; default 256
 	CPULoadFactor    float64                // K, share of new VM's cores assumed used; default 0.5
 	RequiredTags     []string               // operator-defined affinity constraints
+
+	// Allocation ratios — cluster-wide overcommit knobs. A node's
+	// effective capacity for placement is `physical × ratio`; the
+	// hard gate rejects when committed + needed exceeds that. Zero
+	// values fall back to the defaults below (4.0/1.0/1.0). Anything
+	// less than 1.0 is clamped to 1.0 — sub-1 ratios would *under*-
+	// commit, which is what the buffer/load-factor knobs already do
+	// from the score side, and would silently leave physical capacity
+	// unusable.
+	CPUAllocationRatio  float64
+	RAMAllocationRatio  float64
+	DiskAllocationRatio float64
 }
 
 // Result is what Score returns per node. Score == 0 ⇔ rejected; Reasons is
@@ -283,6 +304,12 @@ const tieBreakDelta = 0.05
 const (
 	defaultMemBufferMiB  uint64  = 256
 	defaultCPULoadFactor float64 = 0.5
+	// Default allocation ratios — homelab-friendly. CPU 4× because
+	// most VMs idle far below their declared vCPUs; RAM/disk 1× to
+	// avoid OOM/no-space surprises.
+	defaultCPURatio  float64 = 4.0
+	defaultRAMRatio  float64 = 1.0
+	defaultDiskRatio float64 = 1.0
 )
 
 const (
@@ -305,6 +332,20 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	cpuLoadFactor := env.CPULoadFactor
 	if cpuLoadFactor == 0 {
 		cpuLoadFactor = defaultCPULoadFactor
+	}
+	// Allocation ratios — clamp to ≥1.0 so a misconfigured 0/negative
+	// value can't silently strand physical capacity.
+	cpuRatio := env.CPUAllocationRatio
+	if cpuRatio < 1.0 {
+		cpuRatio = defaultCPURatio
+	}
+	ramRatio := env.RAMAllocationRatio
+	if ramRatio < 1.0 {
+		ramRatio = defaultRAMRatio
+	}
+	diskRatio := env.DiskAllocationRatio
+	if diskRatio < 1.0 {
+		diskRatio = defaultDiskRatio
 	}
 	spec := DetectSpecialization(n)
 
@@ -342,21 +383,30 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	if n.MaxMem == 0 {
 		reasons = append(reasons, ReasonNoCapacity)
 	}
-	if t.CPU > n.MaxCPU {
+	// CPU gate: the new VM's vCPUs plus everything already committed
+	// must fit inside `MaxCPU × cpuRatio`. With ratio=4 on an
+	// 8-thread host that's a 32-vCPU sum cap. Operators typically
+	// land at ratio 2-4 for homelab density; 1.0 = strict 1:1 (Nova
+	// strict mode equivalent).
+	cpuCap := int(float64(n.MaxCPU) * cpuRatio)
+	if rt.CommittedCPU+t.CPU > cpuCap {
 		reasons = append(reasons, ReasonInsufficientCores)
 	}
 
 	// usedMem takes the larger of live host usage (which already includes file
 	// cache and ZFS ARC) and the sum of every VM's configured RAM (which
 	// includes stopped VMs). Pessimistic-by-design: never under-reports what
-	// would be consumed if every VM were running flat-out.
+	// would be consumed if every VM were running flat-out. With overcommit,
+	// the comparison happens against `MaxMem × ramRatio` so the operator can
+	// dial in 1.2× / 1.5× density when their VMs sit far below declared
+	// MaxMem.
 	usedMem := n.Mem
 	if rt.CommittedMemBytes > usedMem {
 		usedMem = rt.CommittedMemBytes
 	}
 	var freeMem int64
 	if n.MaxMem > 0 {
-		freeMem = int64(n.MaxMem) - int64(usedMem)
+		freeMem = int64(float64(n.MaxMem)*ramRatio) - int64(usedMem)
 	}
 	needMem := int64(t.MemMB+memBufferMiB) * int64(mibBytes)
 	if freeMem < needMem {
@@ -366,6 +416,9 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	// Disk gate is optional — only enforced when the caller supplied storage
 	// telemetry. A node missing from StorageByNode is treated as having zero
 	// free bytes (the operator's configured pool isn't visible there at all).
+	// Effective capacity = `TotalBytes × diskRatio` — typically left at 1.0
+	// since LVM-thin already thin-provisions; bumping this only makes sense
+	// when the operator has a specific capacity-management story.
 	var (
 		diskGateOn   bool
 		freeDisk     int64
@@ -376,7 +429,7 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 		diskGateOn = true
 		s := env.StorageByNode[n.Name]
 		totalDisk = s.TotalBytes
-		freeDisk = int64(s.TotalBytes) - int64(s.UsedBytes)
+		freeDisk = int64(float64(s.TotalBytes)*diskRatio) - int64(s.UsedBytes)
 		if freeDisk < needDiskByte {
 			reasons = append(reasons, ReasonInsufficientDisk)
 		}

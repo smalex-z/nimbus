@@ -47,6 +47,17 @@ definitions:
       updated_at:
         type: string
     type: object
+  db.SchedulingSettings:
+    properties:
+      cpu_allocation_ratio:
+        type: number
+      disk_allocation_ratio:
+        type: number
+      id:
+        type: integer
+      ram_allocation_ratio:
+        type: number
+    type: object
   db.VM:
     properties:
       error_msg:
@@ -816,6 +827,15 @@ definitions:
         type: string
       google_client_secret:
         type: string
+    type: object
+  handlers.schedulingSettingsRequest:
+    properties:
+      cpu_allocation_ratio:
+        type: number
+      disk_allocation_ratio:
+        type: number
+      ram_allocation_ratio:
+        type: number
     type: object
   handlers.selfBootstrapStatusView:
     properties:
@@ -3569,6 +3589,86 @@ paths:
       summary: Deploy the singleton MinIO storage VM (admin)
       tags:
       - s3
+  /scheduling:
+    get:
+      description: |-
+        Returns the placement scheduler's cpu/ram/disk allocation
+        ratios. Defaults are seeded on first read so the value is
+        never empty.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.SchedulingSettings'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read cluster overcommit ratios (admin)
+      tags:
+      - nodes
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Persists the placement scheduler's cpu/ram/disk allocation
+        ratios. Each is clamped to [1.0, 64.0]. Takes effect on
+        the next provision/drain — no restart required.
+      parameters:
+      - description: New ratios
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.schedulingSettingsRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.SchedulingSettings'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update cluster overcommit ratios (admin)
+      tags:
+      - nodes
   /settings/access-code:
     get:
       produces:
