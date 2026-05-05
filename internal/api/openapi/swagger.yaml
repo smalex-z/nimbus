@@ -337,9 +337,21 @@ definitions:
       password:
         type: string
     type: object
+  handlers.createBucketBody:
+    properties:
+      name:
+        example: uploads
+        type: string
+    type: object
   handlers.createBucketRequest:
     properties:
       name:
+        type: string
+    type: object
+  handlers.createBucketResp:
+    properties:
+      name:
+        example: kevin-u3-uploads
         type: string
     type: object
   handlers.createBucketResponse:
@@ -434,6 +446,23 @@ definitions:
         type: string
       tunnel_port:
         type: integer
+    type: object
+  handlers.credentialsView:
+    properties:
+      access_key:
+        type: string
+      endpoint:
+        type: string
+      prefix:
+        type: string
+      secret_key:
+        type: string
+    type: object
+  handlers.deleteBucketResp:
+    properties:
+      message:
+        example: bucket deleted
+        type: string
     type: object
   handlers.deleteBucketResponse:
     properties:
@@ -873,6 +902,17 @@ definitions:
         type: integer
       cleanup_cmd:
         type: string
+    type: object
+  handlers.userBucketView:
+    properties:
+      created_at:
+        type: string
+      name:
+        type: string
+      object_count:
+        type: integer
+      total_size_bytes:
+        type: integer
     type: object
   handlers.userQuotaRequest:
     type: object
@@ -1785,6 +1825,186 @@ paths:
       summary: Register a new user account (public)
       tags:
       - auth
+  /buckets:
+    get:
+      description: |-
+        Bucket name, creation time, object count, and total size for
+        each bucket owned by the caller. Returns 503 with a stable
+        substring ("no s3 storage deployed" / "not ready") when the
+        shared storage host hasn't been deployed by an admin yet —
+        the SPA distinguishes these from real errors and renders an
+        empty-state card.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.userBucketView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the calling user's MinIO buckets
+      tags:
+      - buckets
+    post:
+      consumes:
+      - application/json
+      description: |-
+        The user supplies only the suffix half of the bucket name
+        (3-30 chars, lowercase alnum + hyphen, no leading/trailing
+        hyphen). Server composes the full name as
+        `<owner-prefix>-<suffix>` so cross-user collisions are
+        impossible. Service account is auto-minted on first call
+        if the user doesn't already have one.
+      parameters:
+      - description: Bucket suffix
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createBucketBody'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.createBucketResp'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a bucket owned by the calling user
+      tags:
+      - buckets
+  /buckets/{name}:
+    delete:
+      description: |-
+        404 if the bucket isn't owned by the caller (existence is not
+        disclosed across ownership boundaries). 409 if the bucket is
+        not empty — the user must empty it first; Nimbus does not
+        force-delete object data.
+      parameters:
+      - description: Bucket name (full composed form)
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.deleteBucketResp'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a bucket owned by the calling user
+      tags:
+      - buckets
+  /buckets/credentials:
+    get:
+      description: |-
+        Endpoint + access key + secret key + bucket name prefix the
+        user's policy allows. The secret is returned every time;
+        treat it as the primary share surface, not a one-time view.
+        Auto-mints the service account on first call if needed.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.credentialsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read the calling user's MinIO service-account credentials
+      tags:
+      - buckets
   /cluster/stats:
     get:
       description: |-

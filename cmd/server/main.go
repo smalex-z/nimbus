@@ -144,6 +144,7 @@ func main() {
 		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
+		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
 		ippool.Model(),
 	)
@@ -518,6 +519,7 @@ func main() {
 	syncCancel()
 
 	s3Svc := s3storage.New(database.DB)
+	userBucketsSvc := s3storage.NewUserBucketService(database.DB, cipher, s3Svc)
 
 	// GPU plane (Phase 4). Service is constructed unconditionally — when
 	// admins disable GPU in settings, the API handlers reject submissions
@@ -583,6 +585,7 @@ func main() {
 		TunnelURL:     gopherSettings.APIURL,
 		SelfBootstrap: selfTunnelSvc,
 		S3:            s3Svc,
+		UserBuckets:   userBucketsSvc,
 		GPU:           gpuSvc,
 		GX10Assets:    gx10AssetsFS,
 		NodeMgr:       nodeMgrSvc,

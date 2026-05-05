@@ -931,18 +931,55 @@ export async function deleteS3Storage(): Promise<void> {
   await api.delete('/s3/storage')
 }
 
-export async function listS3Buckets(): Promise<S3Bucket[]> {
-  const { data } = await api.get<S3Bucket[]>('/s3/buckets')
+// ── User-scoped buckets (per-user prefixed buckets on the shared MinIO) ──
+
+export interface UserBucket {
+  name: string
+  created_at: string
+  object_count: number
+  total_size_bytes: number
+}
+
+export interface BucketCredentials {
+  endpoint: string
+  access_key: string
+  secret_key: string
+  prefix: string
+}
+
+// listBuckets returns the calling user's buckets. Throws on real errors.
+// Returns an empty array (not a thrown error) when storage isn't deployed
+// — callers can call isStorageNotDeployed(err) to distinguish.
+export async function listBuckets(): Promise<UserBucket[]> {
+  const { data } = await api.get<UserBucket[]>('/buckets')
   return data ?? []
 }
 
-export async function createS3Bucket(name: string): Promise<{ name: string }> {
-  const { data } = await api.post<{ name: string }>('/s3/buckets', { name })
+export async function createBucket(name: string): Promise<UserBucket> {
+  const { data } = await api.post<UserBucket>('/buckets', { name })
   return data
 }
 
-export async function deleteS3Bucket(name: string): Promise<void> {
-  await api.delete(`/s3/buckets/${encodeURIComponent(name)}`)
+export async function deleteBucket(name: string): Promise<void> {
+  await api.delete(`/buckets/${encodeURIComponent(name)}`)
+}
+
+export async function getBucketCredentials(): Promise<BucketCredentials> {
+  const { data } = await api.get<BucketCredentials>('/buckets/credentials')
+  return data
+}
+
+// isStorageNotDeployed pattern-matches the stable 503 error string the
+// backend returns when no S3 storage VM has been deployed yet. The SPA
+// uses this to render an empty-state card vs a real error toast.
+export function isStorageNotDeployed(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.message.includes('no s3 storage deployed')
+}
+
+export function isStorageNotReady(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.message.includes('s3 storage is not ready')
 }
 
 // ──────────────────────── GPU plane (Phase 4) ────────────────────────

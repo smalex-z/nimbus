@@ -1,13 +1,11 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
-  createS3Bucket,
-  deleteS3Bucket,
   deleteS3Storage,
   deployS3Storage,
   getS3Storage,
-  listS3Buckets,
 } from '@/api/client'
-import type { S3Bucket, S3DeployProgress, S3StorageView } from '@/api/client'
+import type { S3DeployProgress, S3StorageView } from '@/api/client'
 import DeleteS3Confirm from '@/components/ui/DeleteS3Confirm'
 
 // Phase-3 admin page. The page has two states:
@@ -25,18 +23,6 @@ const PROGRESS_LABELS: Record<string, string> = {
   configure_vm: 'Configured cloud-init',
   start_vm: 'Started VM',
   wait_guest_agent: 'Guest agent reachable',
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
 }
 
 function StatusPill({ status }: { status: S3StorageView['status'] }) {
@@ -298,143 +284,34 @@ function Row({
   )
 }
 
-function BucketsPanel({ disabled }: { disabled: boolean }) {
-  const [buckets, setBuckets] = useState<S3Bucket[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [newName, setNewName] = useState('')
-  const [creating, setCreating] = useState(false)
-
-  const refresh = async () => {
-    setError(null)
-    try {
-      setBuckets(await listS3Buckets())
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load buckets')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (disabled) {
-      setLoading(false)
-      return
-    }
-    refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [disabled])
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    const name = newName.trim().toLowerCase()
-    if (!name) return
-    setCreating(true)
-    try {
-      await createS3Bucket(name)
-      setNewName('')
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Create failed')
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const handleDelete = async (name: string) => {
-    if (!confirm(`Delete bucket "${name}"? This is permanent.`)) return
-    setError(null)
-    try {
-      await deleteS3Bucket(name)
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed')
-    }
-  }
-
+// BucketsPointer replaces the old in-place admin bucket CRUD. Per-user
+// prefixed buckets now live at /buckets so every bucket has an owner; the
+// admin manages buckets through their own user account too.
+function BucketsPointer({ disabled }: { disabled: boolean }) {
   return (
     <div
       className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>Buckets</span>
-        <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-          {buckets.length} {buckets.length === 1 ? 'bucket' : 'buckets'}
-        </span>
-      </div>
-
+      <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>Buckets</span>
       {disabled ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
           MinIO is not ready yet. Buckets become manageable once status flips to “ready”.
         </p>
       ) : (
         <>
-          <form onSubmit={handleCreate} style={{ display: 'flex', gap: 8 }}>
-            <input
-              className="n-input"
-              type="text"
-              placeholder="bucket-name (lowercase, 3-63 chars)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              disabled={creating}
-              style={{ flex: 1 }}
-            />
-            <button
-              type="submit"
-              className="n-btn n-btn-primary"
-              disabled={creating || !newName.trim()}
-            >
-              {creating ? 'Creating…' : 'Create'}
-            </button>
-          </form>
-
-          {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-
-          {loading ? (
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
-          ) : buckets.length === 0 ? (
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
-              No buckets yet. Create one above.
-            </p>
-          ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead>
-                <tr style={{ textAlign: 'left', color: 'var(--ink-mute)' }}>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Name</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Objects</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Size</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Created</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {buckets.map((b) => (
-                  <tr key={b.name} style={{ borderTop: '1px solid var(--line)' }}>
-                    <td style={{ padding: '8px 0', color: 'var(--ink)' }}>{b.name}</td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-body)' }}>{b.object_count}</td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-body)' }}>
-                      {formatBytes(b.total_size_bytes)}
-                    </td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-mute)' }}>
-                      {new Date(b.created_at).toLocaleDateString()}
-                    </td>
-                    <td style={{ padding: '8px 0', textAlign: 'right' }}>
-                      <button
-                        type="button"
-                        className="n-btn n-btn-ghost"
-                        onClick={() => handleDelete(b.name)}
-                        style={{ color: 'var(--err)' }}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+            Bucket management moved to a per-user surface — every bucket is
+            owned by a Nimbus user (admins included) and gets a stable name
+            prefix to keep namespaces from colliding.
+          </p>
+          <Link
+            to="/buckets"
+            className="n-btn n-btn-secondary"
+            style={{ alignSelf: 'flex-start' }}
+          >
+            Open buckets →
+          </Link>
         </>
       )}
     </div>
@@ -489,7 +366,7 @@ export default function S3() {
           ) : storage ? (
             <>
               <StatusPanel storage={storage} onDelete={() => setStorage(null)} />
-              <BucketsPanel disabled={storage.status !== 'ready'} />
+              <BucketsPointer disabled={storage.status !== 'ready'} />
             </>
           ) : (
             <DeployPanel onDeployed={(s) => setStorage(s)} />

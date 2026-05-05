@@ -40,6 +40,7 @@ type Deps struct {
 	TunnelURL     string         // configured Gopher URL; surfaced via /api/tunnels/info
 	SelfBootstrap *selftunnel.Service
 	S3            *s3storage.Service
+	UserBuckets   *s3storage.UserBucketService
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
@@ -66,6 +67,9 @@ func NewRouter(d Deps) http.Handler {
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision)
+	if d.UserBuckets != nil {
+		auth = auth.WithBucketPurger(d.UserBuckets)
+	}
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
 	settingsBuilder := handlers.NewSettings(d.Auth).
 		WithTunnelAppliers(d.Provision).
@@ -81,6 +85,7 @@ func NewRouter(d Deps) http.Handler {
 	}
 	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
+	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU
 	var gpuScripts *handlers.ScriptHandler
@@ -299,11 +304,10 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(5*time.Minute)).
 					Delete("/s3/storage", s3.DeleteStorage)
 
-				// Bucket CRUD on the deployed MinIO. Returns 503 from
-				// writeBucketsError when storage is absent or not ready.
-				r.Get("/s3/buckets", s3.ListBuckets)
-				r.Post("/s3/buckets", s3.CreateBucket)
-				r.Delete("/s3/buckets/{name}", s3.DeleteBucket)
+				// Note: bucket CRUD now lives at the user-scoped /buckets
+				// route group below. Every bucket has an owner and is
+				// reachable through that path; the admin /s3 page is
+				// storage-VM-lifecycle only.
 
 				// GPU plane — admin-only configuration + the pairing-token
 				// minter. The job submission/list endpoints are exposed
@@ -350,6 +354,17 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}/private-key", keys.PrivateKey)
 					r.Post("/{id}/private-key", keys.AttachPrivateKey)
 					r.Post("/{id}/default", keys.SetDefault)
+				})
+
+				// User-owned buckets on the shared MinIO host. Each user has
+				// a stable name prefix (`<sanitized-name>-u<id>`); composed
+				// bucket names look like `kevin-u3-uploads`. Service account
+				// is auto-minted on first /buckets visit or first create.
+				r.Route("/buckets", func(r chi.Router) {
+					r.Get("/", buckets.List)
+					r.Post("/", buckets.Create)
+					r.Get("/credentials", buckets.Credentials)
+					r.Delete("/{name}", buckets.Delete)
 				})
 
 				// GPU plane — submit/list/cancel jobs, inference status.

@@ -412,6 +412,49 @@ type S3Storage struct {
 // TableName pins the table name; without this GORM would pluralize to "s3_storages".
 func (S3Storage) TableName() string { return "s3_storage" }
 
+// S3ServiceAccount is the per-user MinIO service account Nimbus mints lazily on
+// the user's first /buckets visit (or first bucket-create). Each user gets one
+// account; its policy is scoped to bucket names matching `<Prefix>-*`.
+//
+// SecretCT/SecretNonce hold the AES-256-GCM ciphertext of the MinIO secret
+// key (encrypted via secrets.Cipher). The access key is stored plaintext —
+// it appears in HTTP Authorization headers anyway and is paired with the
+// secret in the same response only via an authenticated session.
+//
+// Prefix is computed once at mint time from the user's display name (ASCII-
+// sanitized + `-u<id>` suffix) and is immutable thereafter — even if the
+// user renames themselves, their bucket prefix and existing buckets stay
+// valid.
+type S3ServiceAccount struct {
+	gorm.Model
+	OwnerID     uint   `gorm:"column:owner_id;uniqueIndex;not null"   json:"owner_id"`
+	Prefix      string `gorm:"column:prefix;uniqueIndex;not null"     json:"prefix"`
+	AccessKey   string `gorm:"column:access_key;uniqueIndex;not null" json:"-"`
+	SecretCT    []byte `gorm:"column:secret_ct"                       json:"-"`
+	SecretNonce []byte `gorm:"column:secret_nonce"                    json:"-"`
+}
+
+// TableName pins the table name; without this GORM would pluralize.
+func (S3ServiceAccount) TableName() string { return "s3_service_accounts" }
+
+// S3Bucket is one user-owned bucket on the shared MinIO host. Name is the
+// fully-composed `<owner-prefix>-<userPart>` form; the user never controls
+// the prefix half. The DB is the source of truth for ownership — bucket
+// listing in the UI filters by OwnerID, never by querying MinIO directly.
+//
+// Hard-deleted (along with S3ServiceAccount) when the storage VM is torn
+// down (s3storage.Service.Delete) or when the owning user is deleted from
+// Nimbus (s3storage.UserBucketService.PurgeForUser).
+type S3Bucket struct {
+	gorm.Model
+	OwnerID uint   `gorm:"column:owner_id;index;not null"       json:"owner_id"`
+	Name    string `gorm:"column:name;uniqueIndex;not null"     json:"name"`
+}
+
+// TableName pins the table name; without this GORM would pluralize to "s3_buckets" anyway,
+// but pinning is consistent with the rest of the s3 tables.
+func (S3Bucket) TableName() string { return "s3_buckets" }
+
 // Node is the local cache row for one Proxmox cluster node. Holds operator-
 // owned state (lock state, tags, lock-context metadata) that doesn't live in
 // Proxmox itself. Live telemetry (CPU/RAM/status) is read straight from

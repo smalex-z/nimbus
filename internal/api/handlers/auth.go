@@ -53,12 +53,21 @@ type userVMActor interface {
 	TransferUserVMs(ctx context.Context, fromID, toID uint) (int64, error)
 }
 
+// userBucketPurger is the subset of s3storage.UserBucketService the user-
+// deletion endpoint needs. Defined here per the "accept interfaces" idiom
+// so the handler doesn't take a hard dependency on the full UserBucketService
+// surface.
+type userBucketPurger interface {
+	PurgeForUser(ctx context.Context, userID uint) error
+}
+
 // Auth handles authentication endpoints.
 type Auth struct {
-	auth       *service.AuthService
-	appURL     string
-	reconciler loginReconciler
-	vms        userVMActor // optional; when nil, /api/users/:id DELETE returns 503
+	auth        *service.AuthService
+	appURL      string
+	reconciler  loginReconciler
+	vms         userVMActor      // optional; when nil, /api/users/:id DELETE returns 503
+	userBuckets userBucketPurger // optional; when nil, s3 cleanup on user delete is a no-op
 }
 
 // NewAuth creates a new Auth handler. appURL is the env-configured fallback
@@ -75,6 +84,16 @@ func NewAuth(auth *service.AuthService, appURL string, reconciler loginReconcile
 // Auth without threading the provision service.
 func (a *Auth) WithVMActor(vms userVMActor) *Auth {
 	a.vms = vms
+	return a
+}
+
+// WithBucketPurger injects the s3 cleanup dependency. When set, DeleteUser
+// purges the target user's MinIO buckets + service account before tearing
+// down VMs/sessions. Best-effort: a hung MinIO host is logged but does not
+// block user deletion — the storage VM might be down for unrelated reasons
+// and we still want admins to be able to remove users.
+func (a *Auth) WithBucketPurger(p userBucketPurger) *Auth {
+	a.userBuckets = p
 	return a
 }
 
@@ -578,7 +597,17 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. DB resources (sessions, ssh_keys, gpu_jobs).
+	// 2. S3 cleanup — buckets + service account on MinIO, plus the local
+	// s3_buckets / s3_service_accounts rows. Best-effort on the MinIO side
+	// (storage VM might be down); we log and continue rather than wedge
+	// user deletion on it. The DB rows are always cleared.
+	if a.userBuckets != nil {
+		if err := a.userBuckets.PurgeForUser(ctx, targetID); err != nil {
+			log.Printf("delete user %d: purge s3 buckets: %v", targetID, err)
+		}
+	}
+
+	// 3. DB resources (sessions, ssh_keys, gpu_jobs).
 	var transferTo *uint
 	if body.VMAction == "transfer" {
 		id := requester.ID
@@ -590,7 +619,7 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. User row.
+	// 4. User row.
 	if err := a.auth.DeleteUserRecord(targetID); err != nil {
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
