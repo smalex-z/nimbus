@@ -211,6 +211,12 @@ export interface NodeView {
   // dashboard renders them; the new /nodes admin page hides them.
   swap_used: number
   swap_total: number
+  // CPU model + clock speed from cpuinfo. Empty/0 when Proxmox didn't
+  // return them (nested-virt or older PVE). The dashboard renders
+  // "<model> @ <ghz>" alongside the core count so operators can tell
+  // node generations apart at a glance.
+  cpu_model?: string
+  cpu_mhz?: number
   // Per-node VM-disk pool metrics (the storage backend identified by
   // cfg.VMDiskStorage, default local-lvm). disk_allocated is the sum
   // of every non-template VM's configured maxdisk on this node — the

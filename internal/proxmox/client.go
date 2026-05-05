@@ -1485,3 +1485,11 @@ func (c *Client) collectNodeIPs(ctx context.Context, node string) ([]ClusterIP, 
 	}
 	return out, nil
 }
+
+// parseFloatLenient parses Proxmox's mixed string/numeric float fields.
+// `cpuinfo.mhz` ships as a quoted string like "3600.000"; we strip
+// trailing whitespace and parse. Returns the same zero+error shape
+// strconv.ParseFloat does so callers can decide how to handle "unknown".
+func parseFloatLenient(s string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSpace(s), 64)
+}

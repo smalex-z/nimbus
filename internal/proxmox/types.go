@@ -32,11 +32,47 @@ type MemPair struct {
 	Free  uint64 `json:"free"`
 }
 
-// NodeStatus is the subset of /nodes/{node}/status we read — currently just
-// the swap counters (the physical memory totals are already on Node).
+// NodeStatus is the subset of /nodes/{node}/status we read. Memory + Swap
+// are the headline fields; CPUInfo carries the model + clock-speed strings
+// the dashboard displays alongside core count so operators can tell a
+// 14th-gen i5 apart from a 2nd-gen i5 (the Proxmox web UI shows the same
+// data on Datacenter → Node → Summary).
 type NodeStatus struct {
-	Memory MemPair `json:"memory"`
-	Swap   MemPair `json:"swap"`
+	Memory  MemPair  `json:"memory"`
+	Swap    MemPair  `json:"swap"`
+	CPUInfo *CPUInfo `json:"cpuinfo,omitempty"`
+}
+
+// CPUInfo mirrors the cpuinfo block from /nodes/{node}/status. Proxmox
+// reports `mhz` as a quoted string (e.g. "3600.000"); we parse to a
+// numeric value for the SPA via the MHz() helper rather than exporting
+// the raw string.
+//
+// Cores is the per-socket count; Cpus is the total logical-thread count.
+// We don't always need both — Cpus matches what Node.MaxCPU already
+// returns, but having Cores helps render "16c (8c × 2 sockets)" on
+// dashboards if we ever want that detail.
+type CPUInfo struct {
+	Model   string `json:"model"`
+	MHzRaw  string `json:"mhz"`
+	Cpus    int    `json:"cpus"`
+	Sockets int    `json:"sockets"`
+	Cores   int    `json:"cores"`
+}
+
+// MHz parses the quoted clock-speed string. Returns 0 when unparseable
+// (Proxmox occasionally reports "unknown" on virtualized nodes / nested
+// virt). Callers treat 0 as "unknown" and hide the field rather than
+// rendering "0 MHz".
+func (c *CPUInfo) MHz() float64 {
+	if c == nil || c.MHzRaw == "" {
+		return 0
+	}
+	v, err := parseFloatLenient(c.MHzRaw)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // VMStatus is the subset of /nodes/{node}/qemu data we consume.

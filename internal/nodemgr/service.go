@@ -133,6 +133,13 @@ type View struct {
 	// node never blanks the table.
 	SwapUsed  uint64 `json:"swap_used"`
 	SwapTotal uint64 `json:"swap_total"`
+	// CPUModel is the human-readable CPU string from cpuinfo.model
+	// (e.g. "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"). Empty when
+	// the per-node status call failed or Proxmox didn't return it.
+	CPUModel string `json:"cpu_model,omitempty"`
+	// CPUMHz is the parsed clock speed in MHz. Zero when unknown.
+	// Proxmox reports a string like "3600.000" — see proxmox.CPUInfo.MHz.
+	CPUMHz float64 `json:"cpu_mhz,omitempty"`
 	// DiskUsed/DiskTotal are the configured VM-disk pool's capacity
 	// on this node (from /cluster/resources?type=storage filtered by
 	// cfg.VMDiskStorage). DiskAllocated is the sum of every non-
@@ -208,7 +215,7 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	// node in parallel. Failures fall back to zero so a single dead node
 	// doesn't blank the rest of the table. Mirrors the original handler's
 	// behaviour so the Admin dashboard's swap UsageBars keep working.
-	swapByNode := s.fanoutSwap(ctx, nodes)
+	statusByNode := s.fanoutNodeStatus(ctx, nodes)
 
 	// Reconcile DB rows: ensure each observed node has a row, bump
 	// LastSeenAt on every observation. This piggy-backs on every List
@@ -222,9 +229,9 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	for _, n := range nodes {
 		a := perNode[n.Name]
 		row := persistByName[n.Name]
-		swap := swapByNode[n.Name]
+		status := statusByNode[n.Name]
 		disk := diskByNode[n.Name]
-		out = append(out, View{
+		view := View{
 			Name:          n.Name,
 			Status:        n.Status,
 			LockState:     lockOrNone(row.LockState),
@@ -237,8 +244,8 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 			MemUsed:       n.Mem,
 			MemTotal:      n.MaxMem,
 			MemAllocated:  a.memAllocated,
-			SwapUsed:      swap.Used,
-			SwapTotal:     swap.Total,
+			SwapUsed:      status.Swap.Used,
+			SwapTotal:     status.Swap.Total,
 			DiskUsed:      disk.Used,
 			DiskTotal:     disk.Total,
 			DiskAllocated: a.diskAllocated,
@@ -248,7 +255,12 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 			IP:            nodeIP[n.Name],
 			LastSeenAt:    row.LastSeenAt,
 			IsSelfHost:    s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
-		})
+		}
+		if status.CPU != nil {
+			view.CPUModel = status.CPU.Model
+			view.CPUMHz = status.CPU.MHz()
+		}
+		out = append(out, view)
 	}
 	return &ListView{Nodes: out}, nil
 }
@@ -287,12 +299,22 @@ func (s *Service) fanoutDisk(ctx context.Context) map[string]diskCapacity {
 	return out
 }
 
-// fanoutSwap reads /nodes/{node}/status in parallel for each online node
-// and returns name→Swap. Per-node failures fall through with zeroes — the
-// caller renders empty swap bars for that node rather than erroring out
-// the whole table.
-func (s *Service) fanoutSwap(ctx context.Context, nodes []proxmox.Node) map[string]proxmox.MemPair {
-	out := make(map[string]proxmox.MemPair, len(nodes))
+// nodeStatusSnapshot is the per-node payload fanoutNodeStatus pulls back.
+// Aggregates the swap counters + CPU info so the call site doesn't have
+// to fan out twice for related fields from the same /nodes/{node}/status
+// endpoint.
+type nodeStatusSnapshot struct {
+	Swap  proxmox.MemPair
+	CPU   *proxmox.CPUInfo
+	Found bool
+}
+
+// fanoutNodeStatus reads /nodes/{node}/status in parallel for each online
+// node and returns name→snapshot. Per-node failures fall through with the
+// zero value (Found=false) — the caller renders empty bars for that node
+// rather than erroring out the whole table.
+func (s *Service) fanoutNodeStatus(ctx context.Context, nodes []proxmox.Node) map[string]nodeStatusSnapshot {
+	out := make(map[string]nodeStatusSnapshot, len(nodes))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, n := range nodes {
@@ -307,7 +329,7 @@ func (s *Service) fanoutSwap(ctx context.Context, nodes []proxmox.Node) map[stri
 				return
 			}
 			mu.Lock()
-			out[name] = st.Swap
+			out[name] = nodeStatusSnapshot{Swap: st.Swap, CPU: st.CPUInfo, Found: true}
 			mu.Unlock()
 		}(n.Name)
 	}

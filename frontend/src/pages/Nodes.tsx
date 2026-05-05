@@ -300,6 +300,15 @@ function NodeCard({ node: n }: { node: NodeView }) {
             {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
             {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
           </div>
+          {(n.cpu_model || n.cpu_mhz) && (
+            <div
+              style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={n.cpu_model || ''}
+            >
+              {shortCPUModel(n.cpu_model)}
+              {n.cpu_mhz ? ` @ ${(n.cpu_mhz / 1000).toFixed(1)} GHz` : ''}
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <div style={{ display: 'flex', gap: 4 }}>
@@ -399,6 +408,21 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
 // pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
 // "allocated" cells where high values flag overcommit risk and the
 // operator's eye should snap to them.
+// shortCPUModel strips the noisy boilerplate Intel/AMD pack into their
+// model strings ("Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" → "Core
+// i7-9700K"). Keeps the family + part number — enough to tell
+// generations apart at a glance.
+function shortCPUModel(raw?: string): string {
+  if (!raw) return ''
+  let s = raw
+  s = s.replace(/\(R\)/g, '').replace(/\(TM\)/g, '')
+  s = s.replace(/Intel\s+/i, '').replace(/AMD\s+/i, '')
+  s = s.replace(/\s+CPU\s+@\s+\S+/i, '') // strip "CPU @ 3.60GHz" — we render mhz separately
+  s = s.replace(/\s+@\s+\S+/i, '') // older format without "CPU"
+  s = s.replace(/\s+/g, ' ').trim()
+  return s
+}
+
 function pctColor(pct: number): string {
   if (pct > 85) return 'var(--err)'
   if (pct > 60) return '#9a5c2e'
