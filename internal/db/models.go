@@ -358,6 +358,11 @@ type SSHKey struct {
 	IsDefault    bool   `gorm:"column:is_default;index"                json:"is_default"`
 	OwnerID      *uint  `gorm:"column:owner_id;index"                  json:"owner_id,omitempty"`
 	Source       string `gorm:"column:source"                          json:"source,omitempty"`
+	// SystemGenerated marks keys auto-minted by Nimbus for internal VMs
+	// (e.g. the S3 storage VM bootstrap) rather than created by users
+	// through the Keys page. The Keys UI hides them by default behind a
+	// toggle, and s3storage.Service.Delete garbage-collects them.
+	SystemGenerated bool `gorm:"column:system_generated;index;default:false" json:"system_generated"`
 }
 
 // HasPrivateKey reports whether this key has a vaulted private half. Used by
@@ -398,6 +403,12 @@ type S3Storage struct {
 	// on the Nimbus row id, not the Proxmox VMID). Nullable because a
 	// crash mid-deploy can leave the row before Provision returns.
 	VMRowID      *uint  `gorm:"column:vm_row_id;index"             json:"vm_row_id,omitempty"`
+	// SSHKeyID points at the auto-generated SSH key created during the
+	// deploy flow. Persisted by Deploy after Provision returns; consumed
+	// by Service.Delete to garbage-collect the key when the storage VM is
+	// torn down. Nullable for legacy rows from before the cleanup
+	// landed — the startup backfill (cleanup.go) backfills the link.
+	SSHKeyID     *uint  `gorm:"column:ssh_key_id;index"            json:"-"`
 	VMID         int    `gorm:"column:vmid;uniqueIndex;not null"   json:"vmid"`
 	Node         string `gorm:"column:node;not null"               json:"node"`
 	IP           string `gorm:"column:ip"                          json:"ip,omitempty"`

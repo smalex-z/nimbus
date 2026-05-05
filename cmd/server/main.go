@@ -521,6 +521,15 @@ func main() {
 	s3Svc := s3storage.New(database.DB)
 	userBucketsSvc := s3storage.NewUserBucketService(database.DB, cipher, s3Svc)
 
+	// Backfill: pre-cleanup deploys minted SSH keys (`nimbus-nimbus-s3-*`)
+	// per attempt and never garbage-collected them. Mark the live one
+	// system-generated, hard-delete orphans from failed past attempts.
+	if cleaned, marked, err := s3Svc.MigrateOrphanS3Keys(); err != nil {
+		log.Printf("warning: orphan s3 ssh-key cleanup failed: %v", err)
+	} else if cleaned > 0 || marked > 0 {
+		log.Printf("backfill: cleaned %d orphan s3 ssh keys, marked %d as system-generated", cleaned, marked)
+	}
+
 	// GPU plane (Phase 4). Service is constructed unconditionally — when
 	// admins disable GPU in settings, the API handlers reject submissions
 	// at the request layer; the queue table just sits idle. The on-disk

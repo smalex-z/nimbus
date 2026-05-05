@@ -24,32 +24,34 @@ func NewKeys(svc *sshkeys.Service) *Keys { return &Keys{svc: svc} }
 // the DB struct hides the encrypted blobs (json:"-") and the frontend wants a
 // derived has_private_key flag.
 type keyView struct {
-	ID            uint   `json:"id"`
-	Name          string `json:"name"`
-	Label         string `json:"label,omitempty"`
-	PublicKey     string `json:"public_key"`
-	Fingerprint   string `json:"fingerprint,omitempty"`
-	IsDefault     bool   `json:"is_default"`
-	OwnerID       *uint  `json:"owner_id,omitempty"`
-	Source        string `json:"source,omitempty"`
-	HasPrivateKey bool   `json:"has_private_key"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID              uint   `json:"id"`
+	Name            string `json:"name"`
+	Label           string `json:"label,omitempty"`
+	PublicKey       string `json:"public_key"`
+	Fingerprint     string `json:"fingerprint,omitempty"`
+	IsDefault       bool   `json:"is_default"`
+	OwnerID         *uint  `json:"owner_id,omitempty"`
+	Source          string `json:"source,omitempty"`
+	HasPrivateKey   bool   `json:"has_private_key"`
+	SystemGenerated bool   `json:"system_generated"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 func toKeyView(k *db.SSHKey) keyView {
 	return keyView{
-		ID:            k.ID,
-		Name:          k.Name,
-		Label:         k.Label,
-		PublicKey:     k.PublicKey,
-		Fingerprint:   k.Fingerprint,
-		IsDefault:     k.IsDefault,
-		OwnerID:       k.OwnerID,
-		Source:        k.Source,
-		HasPrivateKey: k.HasPrivateKey(),
-		CreatedAt:     k.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		UpdatedAt:     k.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		ID:              k.ID,
+		Name:            k.Name,
+		Label:           k.Label,
+		PublicKey:       k.PublicKey,
+		Fingerprint:     k.Fingerprint,
+		IsDefault:       k.IsDefault,
+		OwnerID:         k.OwnerID,
+		Source:          k.Source,
+		HasPrivateKey:   k.HasPrivateKey(),
+		SystemGenerated: k.SystemGenerated,
+		CreatedAt:       k.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:       k.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
 
