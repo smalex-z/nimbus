@@ -110,6 +110,22 @@ type submitJobRequest struct {
 }
 
 // SubmitJob handles POST /api/gpu/jobs.
+//
+// @Summary     Submit a GPU job
+// @Description Enqueued onto the FIFO single-host queue. Members are subject
+// @Description to the active-jobs cap from QuotaSettings; admins bypass.
+// @Tags        gpu
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     submitJobRequest true "Job spec"
+// @Success     201  {object} EnvelopeOK{data=gpuJobView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     503  {object} EnvelopeError
+// @Router      /gpu/jobs [post]
 func (h *GPU) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -148,6 +164,17 @@ func (h *GPU) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 // ListJobs handles GET /api/gpu/jobs. Admins see every job; non-admins see
 // their own only. Optional `?status=running` narrows.
+//
+// @Summary     List GPU jobs (admin sees all, member sees own)
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Param       status query    string false "Narrow by status (queued|running|succeeded|failed|cancelled)"
+// @Success     200 {object} EnvelopeOK{data=[]gpuJobView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /gpu/jobs [get]
 func (h *GPU) ListJobs(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -171,6 +198,18 @@ func (h *GPU) ListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetJob handles GET /api/gpu/jobs/{id}.
+//
+// @Summary     Get one GPU job by id
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "Job id"
+// @Success     200 {object} EnvelopeOK{data=gpuJobView}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /gpu/jobs/{id} [get]
 func (h *GPU) GetJob(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -191,6 +230,19 @@ func (h *GPU) GetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // CancelJob handles POST /api/gpu/jobs/{id}/cancel.
+//
+// @Summary     Cancel a queued or running GPU job
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "Job id"
+// @Success     200 {object} EnvelopeOK{data=gpuJobView}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Router      /gpu/jobs/{id}/cancel [post]
 func (h *GPU) CancelJob(w http.ResponseWriter, r *http.Request) {
 	user := ctxutil.User(r.Context())
 	if user == nil {
@@ -221,6 +273,19 @@ type inferenceView struct {
 // Inference handles GET /api/gpu/inference. Includes a best-effort health
 // probe of the configured base URL — short timeout so a flaky GX10 doesn't
 // stall the page.
+//
+// @Summary     Inference plane status + base URL
+// @Description The 2-second probe never blocks the page. Status: up | down |
+// @Description unconfigured. The base_url is what the SPA wires into the
+// @Description "OPENAI_BASE_URL" hint copy on the playground.
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=inferenceView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /gpu/inference [get]
 func (h *GPU) Inference(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.auth.GetGPUSettings()
 	if err != nil {
@@ -296,6 +361,20 @@ type unpairView struct {
 // The handler returns a cleanup-command string the SPA shows the operator
 // for the GX10-side teardown. Idempotent: calling Unpair on an unpaired
 // instance is a successful no-op (0 jobs cancelled).
+//
+// @Summary     Unpair the GX10 (admin)
+// @Description Cancels every queued/running job, wipes GPU settings, and
+// @Description returns the GX10-side cleanup command. The handler can't
+// @Description reach the GX10 to tear down the systemd units itself —
+// @Description operator runs the returned snippet by hand.
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=unpairView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/gpu/unpair [post]
 func (h *GPU) Unpair(w http.ResponseWriter, r *http.Request) {
 	n, err := h.svc.CancelAllNonTerminal(r.Context())
 	if err != nil {
@@ -331,6 +410,20 @@ func (h *GPU) Unpair(w http.ResponseWriter, r *http.Request) {
 // otherwise we'd hand back a curl with `localhost` baked in, which the
 // GX10 obviously can't reach. The operator either browses Nimbus at its
 // LAN/public hostname or sets APP_URL before retrying.
+//
+// @Summary     Mint a 5-minute GX10 pairing token (admin)
+// @Description Returns a one-shot curl the operator pastes onto the GX10.
+// @Description 412 when r.Host and APP_URL are both localhost — the GX10
+// @Description can't phone home to a loopback address.
+// @Tags        gpu
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=pairingView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     412 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/gpu/pairing [post]
 func (h *GPU) MintPairing(w http.ResponseWriter, r *http.Request) {
 	base := h.resolveBase(r)
 	if base == "" {
@@ -369,6 +462,16 @@ func (h *GPU) MintPairing(w http.ResponseWriter, r *http.Request) {
 // The pairing token alone doesn't carry permissions — it can only be
 // consumed once, and only inside its 5-min window. Leaking the URL
 // post-expiry is harmless.
+//
+// @Summary     GX10 install bash script (public, pairing-token-auth)
+// @Description Validates ?token= against the active pairing window. The
+// @Description script body posts to /api/gpu/register and runs the
+// @Description install-inference / install-worker scripts.
+// @Tags        gpu
+// @Param       token query    string true "Pairing token"
+// @Success     200 "Bash script body"
+// @Failure     401 {object} EnvelopeError
+// @Router      /gpu/install.sh [get]
 func (h *GPU) InstallScript(w http.ResponseWriter, r *http.Request) {
 	pairing := r.URL.Query().Get("token")
 	if !h.auth.VerifyGPUPairingToken(pairing) {
@@ -468,6 +571,17 @@ type gpuRegisterResponse struct {
 // Trades a valid pairing token for a fresh worker token, recording the
 // GX10's self-reported IP + model. Single use: a successful register
 // clears the pairing token, so the GX10 effectively "claims" the seat.
+//
+// @Summary     Exchange a pairing token for a worker token (public, pairing-token-auth)
+// @Tags        gpu
+// @Accept      json
+// @Produce     json
+// @Param       body body     gpuRegisterRequest true "Pairing handshake"
+// @Success     200  {object} EnvelopeOK{data=gpuRegisterResponse}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /gpu/register [post]
 func (h *GPU) Register(w http.ResponseWriter, r *http.Request) {
 	var req gpuRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -594,6 +708,17 @@ var allowedScripts = map[string]bool{
 	"demo-mnist.py":        true, // Phase 4 smoke-test; safe to expose, no secrets
 }
 
+// Serve.
+//
+// @Summary     Serve a whitelisted GX10 install script (public)
+// @Description Public so the GX10's curl-bootstrap can fetch them. Whitelist:
+// @Description install-inference.sh, install-worker.sh, gx10-worker (ARM64
+// @Description binary), demo-mnist.py.
+// @Tags        gpu
+// @Param       name path string true "Script name"
+// @Success     200 "Asset bytes"
+// @Failure     404 "Asset not found or not in whitelist"
+// @Router      /gpu/scripts/{name} [get]
 func (h *ScriptHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if !allowedScripts[name] {
@@ -620,6 +745,19 @@ func (h *ScriptHandler) Serve(w http.ResponseWriter, r *http.Request) {
 // ----------------- worker-facing routes -----------------
 
 // ClaimNext handles POST /api/gpu/worker/claim. 200 with one job, or 204.
+//
+// @Summary     Worker: claim the next queued GPU job (worker token)
+// @Description 200 with a job view (worker should run it), or 204 when the
+// @Description queue is empty.
+// @Tags        gpu-worker
+// @Security    workerAuth
+// @Produce     json
+// @Param       X-Worker-ID header string false "Worker identifier (logged)"
+// @Success     200 {object} EnvelopeOK{data=gpuJobView}
+// @Success     204 "No queued jobs"
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /gpu/worker/claim [post]
 func (h *GPU) ClaimNext(w http.ResponseWriter, r *http.Request) {
 	workerID := r.Header.Get("X-Worker-ID")
 	if workerID == "" {
@@ -642,6 +780,21 @@ func (h *GPU) ClaimNext(w http.ResponseWriter, r *http.Request) {
 // SQLite happy and prevent a runaway client from filling /var/lib.
 const maxLogChunk = 1 << 20 // 1 MB
 
+// AppendLogs.
+//
+// @Summary     Worker: append a log chunk to a running job (worker token)
+// @Description Body is raw stdout+stderr (any content type). Capped at 1 MB
+// @Description per call.
+// @Tags        gpu-worker
+// @Security    workerAuth
+// @Accept      plain
+// @Param       id path int true "Job id"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     413 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /gpu/worker/jobs/{id}/logs [post]
 func (h *GPU) AppendLogs(w http.ResponseWriter, r *http.Request) {
 	id, err := parseUintParam(r, "id")
 	if err != nil {
@@ -673,6 +826,18 @@ type workerStatusRequest struct {
 }
 
 // ReportStatus handles POST /api/gpu/worker/jobs/{id}/status.
+//
+// @Summary     Worker: report terminal status for a job (worker token)
+// @Tags        gpu-worker
+// @Security    workerAuth
+// @Accept      json
+// @Param       id   path     int                  true "Job id"
+// @Param       body body     workerStatusRequest  true "Terminal status"
+// @Success     204  "No Content"
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /gpu/worker/jobs/{id}/status [post]
 func (h *GPU) ReportStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := parseUintParam(r, "id")
 	if err != nil {

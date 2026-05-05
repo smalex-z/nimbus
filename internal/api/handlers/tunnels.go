@@ -32,6 +32,12 @@ func (h *Tunnels) SetClient(c *tunnel.Client, apiURL string) {
 	h.apiURL = apiURL
 }
 
+// tunnelInfoView is the JSON shape returned by GET /api/tunnels/info.
+type tunnelInfoView struct {
+	Enabled bool   `json:"enabled"`
+	Host    string `json:"host,omitempty"`
+}
+
 // Info handles GET /api/tunnels/info. Public endpoint used by the SPA to
 // preview where a user's SSH tunnel will land before provisioning. Returns
 // {enabled, host} — host is the routable hostname Gopher will expose SSH on.
@@ -43,6 +49,15 @@ func (h *Tunnels) SetClient(c *tunnel.Client, apiURL string) {
 //	the gateway — return the shorter apex form. If they diverge (operator
 //	runs personal site on the apex), return the API host. SSH is exposed
 //	at <host>:<port>, where port is allocated by Gopher post-provision.
+//
+// @Summary     Routing-host preview for the Gopher tunnel gateway
+// @Description Public so the Provision form can render the disabled-checkbox
+// @Description hint copy with the right hostname before submitting. `enabled`
+// @Description reflects whether Gopher credentials are configured at all.
+// @Tags        tunnels
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=tunnelInfoView}
+// @Router      /tunnels/info [get]
 func (h *Tunnels) Info(w http.ResponseWriter, r *http.Request) {
 	host := ""
 	if h.apiURL != "" {
@@ -52,9 +67,9 @@ func (h *Tunnels) Info(w http.ResponseWriter, r *http.Request) {
 			host = preferredTunnelHost(ctx, u.Hostname())
 		}
 	}
-	response.Success(w, map[string]any{
-		"enabled": h.client != nil,
-		"host":    host,
+	response.Success(w, tunnelInfoView{
+		Enabled: h.client != nil,
+		Host:    host,
 	})
 }
 
@@ -102,6 +117,20 @@ func apexOf(host string) string {
 // doesn't cache. The admin view is *machines* (each is an exposed VM);
 // per-port tunnels-on-top are a future surface. Returns 503 when tunnel
 // support is disabled (operator hasn't configured Gopher).
+//
+// @Summary     List Gopher-registered machines (admin)
+// @Description Pass-through to the upstream Gopher `/machines` endpoint,
+// @Description scoped to this Nimbus's API key. Returns 503 when Gopher
+// @Description credentials aren't configured.
+// @Tags        tunnels
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]tunnel.Machine}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /tunnels [get]
 func (h *Tunnels) List(w http.ResponseWriter, r *http.Request) {
 	if h.client == nil {
 		response.ServiceUnavailable(w, "tunnel integration disabled (Gopher API URL not configured)")

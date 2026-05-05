@@ -61,6 +61,19 @@ func toStorageView(row *db.S3Storage) storageView {
 // GetStorage handles GET /api/s3/storage. Returns 404 with a structured
 // payload (so the SPA can distinguish "not deployed" from a real error)
 // when no row exists.
+//
+// @Summary     Read the singleton MinIO storage row (admin)
+// @Description 404 with a structured payload when no S3 storage is deployed,
+// @Description so the SPA can render the deploy form vs the live view.
+// @Tags        s3
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=storageView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /s3/storage [get]
 func (h *S3) GetStorage(w http.ResponseWriter, _ *http.Request) {
 	row, err := h.svc.Get()
 	if errors.Is(err, s3storage.ErrNotDeployed) {
@@ -83,6 +96,21 @@ type deployStorageRequest struct {
 // response — same shape as POST /api/vms. Each line is one event:
 // progress events from the underlying provision flow, then a single
 // terminal `result` or `error` line.
+//
+// @Summary     Deploy the singleton MinIO storage VM (admin)
+// @Description Streams NDJSON progress events, terminating in result/error.
+// @Description Long-running (up to 15min on cold pull) — the route timeout
+// @Description is set generously to accommodate the SSH bootstrap.
+// @Tags        s3
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     application/x-ndjson
+// @Param       body body deployStorageRequest true "Disk size (10–120 GB)"
+// @Success     200  "NDJSON stream of progress events terminating in result or error"
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Router      /s3/storage [post]
 func (h *S3) CreateStorage(w http.ResponseWriter, r *http.Request) {
 	var req deployStorageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -129,9 +157,25 @@ func (h *S3) CreateStorage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// deleteStorageResponse is the body of DELETE /api/s3/storage.
+type deleteStorageResponse struct {
+	Message string `json:"message" example:"s3 storage deleted"`
+}
+
 // DeleteStorage handles DELETE /api/s3/storage. Tears down the underlying
 // VM, releases its IP, and removes the singleton row. Returns 404 if no
 // storage is deployed.
+//
+// @Summary     Tear down the MinIO storage VM (admin)
+// @Tags        s3
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=deleteStorageResponse}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /s3/storage [delete]
 func (h *S3) DeleteStorage(w http.ResponseWriter, r *http.Request) {
 	row, err := h.svc.Get()
 	if errors.Is(err, s3storage.ErrNotDeployed) {
@@ -165,10 +209,24 @@ func (h *S3) DeleteStorage(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "delete row: "+err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"message": "s3 storage deleted"})
+	response.Success(w, deleteStorageResponse{Message: "s3 storage deleted"})
 }
 
 // ListBuckets handles GET /api/s3/buckets.
+//
+// @Summary     List MinIO buckets (admin)
+// @Description 503 when storage is absent or not yet ready (deploy in flight,
+// @Description or VM still booting). The reconciler converges status; the
+// @Description SPA polls until ready.
+// @Tags        s3
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]s3storage.BucketStat}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /s3/buckets [get]
 func (h *S3) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	bc, err := h.svc.Buckets()
 	if err != nil {
@@ -191,7 +249,30 @@ type createBucketRequest struct {
 	Name string `json:"name"`
 }
 
+// createBucketResponse is the body of POST /api/s3/buckets.
+type createBucketResponse struct {
+	Name string `json:"name"`
+}
+
 // CreateBucket handles POST /api/s3/buckets.
+//
+// @Summary     Create a MinIO bucket (admin)
+// @Description Bucket name must match the AWS S3 stricter ruleset: 3-63
+// @Description chars, lowercase letters/digits/hyphens, no leading/trailing
+// @Description hyphen.
+// @Tags        s3
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     createBucketRequest true "Bucket spec"
+// @Success     201  {object} EnvelopeOK{data=createBucketResponse}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     503  {object} EnvelopeError
+// @Router      /s3/buckets [post]
 func (h *S3) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	var req createBucketRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -215,10 +296,30 @@ func (h *S3) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "create bucket: "+err.Error())
 		return
 	}
-	response.Created(w, map[string]string{"name": req.Name})
+	response.Created(w, createBucketResponse(req))
+}
+
+// deleteBucketResponse is the body of DELETE /api/s3/buckets/{name}.
+type deleteBucketResponse struct {
+	Message string `json:"message" example:"bucket deleted"`
 }
 
 // DeleteBucket handles DELETE /api/s3/buckets/{name}.
+//
+// @Summary     Delete a MinIO bucket (admin)
+// @Description 409 when the bucket isn't empty — empty it first.
+// @Tags        s3
+// @Security    cookieAuth
+// @Produce     json
+// @Param       name path     string true "Bucket name"
+// @Success     200  {object} EnvelopeOK{data=deleteBucketResponse}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     409  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     503  {object} EnvelopeError
+// @Router      /s3/buckets/{name} [delete]
 func (h *S3) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if !bucketNameRE.MatchString(name) {
@@ -238,7 +339,7 @@ func (h *S3) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "delete bucket: "+err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"message": "bucket deleted"})
+	response.Success(w, deleteBucketResponse{Message: "bucket deleted"})
 }
 
 // writeBucketsError converts s3storage sentinels to appropriate HTTP

@@ -1,10 +1,25 @@
-.PHONY: dev build install test lint clean gx10-worker gx10-bundle
+.PHONY: dev build install test lint clean gx10-worker gx10-bundle swagger
+
+# Pinned to match the runtime swaggo/* deps in go.mod. Bump in lockstep —
+# the generated docs.go uses Spec fields tied to the swag library version.
+SWAG_VERSION := v1.16.4
+SWAG := $(shell go env GOPATH)/bin/swag
 
 dev:
 	./scripts/dev.sh
 
-build: gx10-bundle
+build: swagger gx10-bundle
 	./scripts/build.sh
+
+# swagger regenerates the OpenAPI 3 spec from swaggo annotations on the
+# handler funcs. Output lands in internal/api/openapi/ and is committed to
+# the repo so SwaggerUI works in any checkout without `swag` installed.
+# `make build` runs this automatically; rerun manually after annotating
+# new handlers, then commit the regenerated docs.go + swagger.{json,yaml}.
+swagger:
+	@command -v $(SWAG) >/dev/null 2>&1 || \
+		go install github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION)
+	$(SWAG) init -g cmd/server/main.go -o internal/api/openapi --parseInternal
 
 install:
 	sudo ./scripts/install.sh

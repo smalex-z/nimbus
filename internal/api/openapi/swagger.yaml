@@ -1,0 +1,5248 @@
+basePath: /api
+definitions:
+  bootstrap.Result:
+    properties:
+      created:
+        items:
+          $ref: '#/definitions/bootstrap.TemplateOutcome'
+        type: array
+      failed:
+        items:
+          $ref: '#/definitions/bootstrap.TemplateOutcome'
+        type: array
+      skipped:
+        items:
+          $ref: '#/definitions/bootstrap.TemplateOutcome'
+        type: array
+    type: object
+  bootstrap.TemplateOutcome:
+    properties:
+      duration:
+        type: integer
+      error:
+        type: string
+      node:
+        type: string
+      os:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  db.Node:
+    properties:
+      created_at:
+        type: string
+      last_seen_at:
+        type: string
+      lock_reason:
+        type: string
+      lock_state:
+        type: string
+      locked_at:
+        type: string
+      locked_by:
+        type: integer
+      name:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  db.VM:
+    properties:
+      error_msg:
+        type: string
+      hostname:
+        type: string
+      ip:
+        type: string
+      key_name:
+        description: |-
+          KeyName is denormalized for convenient list rendering — clients still
+          want "ssh -i ~/.ssh/{key_name}" without joining to ssh_keys. Set to the
+          linked key's Name at provision time.
+        type: string
+      missed_cycles:
+        description: |-
+          MissedCycles counts consecutive VM-reconciler runs in which Proxmox
+          reported no VM at this row's (node, vmid). Reset to 0 whenever the VM
+          is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
+          Default 0 — pre-existing rows behave correctly without backfill.
+        type: integer
+      node:
+        type: string
+      os_template:
+        type: string
+      owner_id:
+        type: integer
+      ssh_key_id:
+        description: |-
+          SSHKeyID points to the row in the ssh_keys table that owns the SSH
+          material for this VM. nullable: set NULL when the key is deleted, so the
+          VM record outlives its key. Replaces the legacy per-VM KeyName/CT/Nonce
+          columns going forward.
+        type: integer
+      ssh_pubkey:
+        description: Public half of the SSH key, stored as the raw "ssh-<algo> <base64>
+          <comment>" line.
+        type: string
+      status:
+        type: string
+      tier:
+        type: string
+      tunnel_error:
+        type: string
+      tunnel_id:
+        description: |-
+          Tunnel fields (Phase 2 — Gopher integration). Empty when the user did
+          not request a public tunnel; TunnelError is non-empty when registration
+          or bootstrap failed but the VM itself is fine.
+        type: string
+      tunnel_url:
+        type: string
+      username:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  handlers.DiscoveredEndpoint:
+    properties:
+      ip:
+        type: string
+      node_name:
+        type: string
+      source:
+        description: |-
+          Source tells the SPA where this entry came from so it can group
+          or label appropriately. "localhost" only appears on hypervisor
+          installs; "corosync" comes from /etc/pve/corosync.conf;
+          "scan" comes from the LAN TLS scan (CN extracted from the cert).
+        type: string
+      url:
+        type: string
+    type: object
+  handlers.EmailUnlinkedResult:
+    properties:
+      failed:
+        type: integer
+      failures:
+        items:
+          type: string
+        type: array
+      sent:
+        type: integer
+    type: object
+  handlers.EnvelopeError:
+    properties:
+      error:
+        example: invalid id
+        type: string
+      success:
+        example: false
+        type: boolean
+    type: object
+  handlers.EnvelopeOK:
+    properties:
+      data: {}
+      success:
+        example: true
+        type: boolean
+    type: object
+  handlers.QuotaSettingsView:
+    properties:
+      member_max_active_jobs:
+        type: integer
+      member_max_vms:
+        type: integer
+    type: object
+  handlers.accessCodeView:
+    properties:
+      access_code:
+        type: string
+      version:
+        type: integer
+    type: object
+  handlers.accountView:
+    properties:
+      email:
+        type: string
+      github_connected:
+        type: boolean
+      google_connected:
+        type: boolean
+      has_password:
+        type: boolean
+      id:
+        type: integer
+      is_admin:
+        type: boolean
+      name:
+        type: string
+    type: object
+  handlers.attachPrivateKeyRequest:
+    properties:
+      private_key:
+        type: string
+    type: object
+  handlers.authorizedDomainsView:
+    properties:
+      domains:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.authorizedOrgsView:
+    properties:
+      orgs:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.bootstrapRequest:
+    properties:
+      force:
+        type: boolean
+      nodes:
+        items:
+          type: string
+        type: array
+      os:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.bootstrapStatusView:
+    properties:
+      bootstrapped:
+        type: boolean
+    type: object
+  handlers.changeBindingRequest:
+    properties:
+      proxmox_host:
+        type: string
+      proxmox_token_id:
+        type: string
+      proxmox_token_secret:
+        type: string
+    type: object
+  handlers.changeBindingResponse:
+    properties:
+      message:
+        example: Proxmox connection updated. Reloading Nimbus…
+        type: string
+    type: object
+  handlers.changePasswordRequest:
+    properties:
+      current_password:
+        type: string
+      new_password:
+        type: string
+    type: object
+  handlers.clusterStatsView:
+    properties:
+      storage_total:
+        type: integer
+      storage_used:
+        type: integer
+    type: object
+  handlers.clusterVMView:
+    properties:
+      created_at:
+        type: string
+      hostname:
+        description: local-only Nimbus hostname
+        type: string
+      id:
+        description: |-
+          ID is the Nimbus DB row id, set only for local-source VMs. Used by the
+          admin SSH modal to call the per-VM private-key download endpoint.
+        type: integer
+      ip:
+        type: string
+      ip_source:
+        description: ipconfig0 | agent
+        type: string
+      key_name:
+        description: |-
+          KeyName is the SSH key file name, set only for local-source VMs that
+          were provisioned with a vault-stored key.
+        type: string
+      name:
+        type: string
+      nimbus_managed:
+        description: |-
+          NimbusManaged is true for both local and foreign Nimbus VMs. Retained
+          for backward compatibility with frontend code that predates Source.
+        type: boolean
+      node:
+        type: string
+      os_id:
+        description: |-
+          OS detail block — best-effort agent osinfo, surfaced to the frontend
+          so it can render an icon, version label, and a hover popover with
+          kernel/arch details. Empty string when unavailable.
+        type: string
+      os_kernel:
+        description: '"5.15.0-91-generic"'
+        type: string
+      os_machine:
+        description: '"x86_64"'
+        type: string
+      os_pretty:
+        description: '"Ubuntu 22.04.3 LTS"'
+        type: string
+      os_template:
+        type: string
+      os_version:
+        description: '"22.04.3 LTS (Jammy Jellyfish)"'
+        type: string
+      os_version_id:
+        description: '"22.04"'
+        type: string
+      source:
+        allOf:
+        - $ref: '#/definitions/handlers.vmSource'
+        description: |-
+          Source distinguishes local-Nimbus / foreign-Nimbus / external. The
+          frontend uses this for the SOURCE column and to gate features that need
+          local credentials (e.g. SSH copy).
+      status:
+        description: running, stopped, paused
+        type: string
+      tier:
+        description: small/medium/large/xl, "custom" for external
+        type: string
+      tunnel_url:
+        description: |-
+          TunnelURL is "host:port" when the VM has an established Gopher SSH
+          tunnel. Set only for local-source VMs; surfaced so the admin SSH
+          modal can render the public ssh command alongside the LAN one.
+        type: string
+      username:
+        description: local-only SSH username
+        type: string
+      vmid:
+        type: integer
+    type: object
+  handlers.cordonRequest:
+    properties:
+      reason:
+        type: string
+    type: object
+  handlers.createAdminRequest:
+    properties:
+      email:
+        type: string
+      name:
+        type: string
+      password:
+        type: string
+    type: object
+  handlers.createBucketRequest:
+    properties:
+      name:
+        type: string
+    type: object
+  handlers.createBucketResponse:
+    properties:
+      name:
+        type: string
+    type: object
+  handlers.createKeyRequest:
+    properties:
+      generate:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      private_key:
+        type: string
+      public_key:
+        type: string
+      set_default:
+        type: boolean
+    type: object
+  handlers.createKeyResponse:
+    properties:
+      created_at:
+        type: string
+      fingerprint:
+        type: string
+      has_private_key:
+        type: boolean
+      id:
+        type: integer
+      is_default:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      owner_id:
+        type: integer
+      private_key:
+        type: string
+      public_key:
+        type: string
+      source:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handlers.createTunnelRequest:
+    properties:
+      bot_protection_allow_ip:
+        type: string
+      bot_protection_enabled:
+        type: boolean
+      bot_protection_ttl:
+        type: integer
+      no_tls:
+        type: boolean
+      private:
+        type: boolean
+      subdomain:
+        type: string
+      target_port:
+        type: integer
+      tls_skip_verify:
+        type: boolean
+      transport:
+        type: string
+    type: object
+  handlers.createVMRequest:
+    properties:
+      enable_gpu:
+        type: boolean
+      generate_key:
+        type: boolean
+      hostname:
+        type: string
+      os_template:
+        type: string
+      public_tunnel:
+        type: boolean
+      ssh_key_id:
+        type: integer
+      ssh_privkey:
+        type: string
+      ssh_pubkey:
+        type: string
+      subdomain:
+        type: string
+      tier:
+        type: string
+      tunnel_port:
+        type: integer
+    type: object
+  handlers.deleteBucketResponse:
+    properties:
+      message:
+        example: bucket deleted
+        type: string
+    type: object
+  handlers.deleteStorageResponse:
+    properties:
+      message:
+        example: s3 storage deleted
+        type: string
+    type: object
+  handlers.deleteTunnelResponse:
+    properties:
+      message:
+        example: tunnel deleted
+        type: string
+    type: object
+  handlers.deleteUserRequest:
+    properties:
+      vm_action:
+        type: string
+    type: object
+  handlers.deployStorageRequest:
+    properties:
+      disk_gb:
+        type: integer
+    type: object
+  handlers.discoverResult:
+    properties:
+      endpoints:
+        items:
+          $ref: '#/definitions/handlers.DiscoveredEndpoint'
+        type: array
+      is_hypervisor:
+        type: boolean
+      suggested_gateway:
+        type: string
+    type: object
+  handlers.drainExecuteRequest:
+    properties:
+      choices:
+        items:
+          properties:
+            target:
+              type: string
+            vm_id:
+              type: integer
+          type: object
+        type: array
+      confirm_phrase:
+        description: |-
+          ConfirmPhrase must match "DRAIN <NODE>" exactly. The SPA enforces
+          this client-side too; the server check is the authoritative gate
+          in case the SPA bug-bypasses.
+        type: string
+    type: object
+  handlers.gopherSettingsView:
+    properties:
+      api_url:
+        type: string
+      cloud_subdomain:
+        description: |-
+          CloudSubdomain is the *effective* leftmost label of the public URL —
+          empty in the DB collapses to selftunnel.DefaultCloudSubdomain ("cloud")
+          here so the UI never has to guess the fallback.
+        type: string
+      configured:
+        type: boolean
+    type: object
+  handlers.gpuJobView:
+    properties:
+      artifact_path:
+        type: string
+      command:
+        type: string
+      env:
+        additionalProperties:
+          type: string
+        type: object
+      error_msg:
+        type: string
+      exit_code:
+        type: integer
+      finished_at:
+        type: string
+      id:
+        type: integer
+      image:
+        type: string
+      log_tail:
+        type: string
+      owner_id:
+        type: integer
+      queued_at:
+        type: string
+      started_at:
+        type: string
+      status:
+        type: string
+      vm_id:
+        type: integer
+      worker_id:
+        type: string
+    type: object
+  handlers.gpuRegisterRequest:
+    properties:
+      hostname:
+        type: string
+      ip:
+        type: string
+      model:
+        type: string
+      pairing_token:
+        type: string
+      port:
+        type: integer
+    type: object
+  handlers.gpuRegisterResponse:
+    properties:
+      base_url:
+        type: string
+      worker_token:
+        type: string
+    type: object
+  handlers.gpuSettingsView:
+    properties:
+      base_url:
+        type: string
+      configured:
+        type: boolean
+      enabled:
+        type: boolean
+      gx10_hostname:
+        description: self-reported at pairing time
+        type: string
+      inference_model:
+        type: string
+    type: object
+  handlers.healthResponse:
+    properties:
+      proxmox_error:
+        type: string
+      proxmox_ok:
+        type: boolean
+      proxmox_version:
+        type: string
+      status:
+        type: string
+      timestamp:
+        type: string
+      version:
+        type: string
+    type: object
+  handlers.inferenceView:
+    properties:
+      base_url:
+        type: string
+      enabled:
+        type: boolean
+      model:
+        type: string
+      status:
+        description: up | down | unconfigured
+        type: string
+    type: object
+  handlers.keyView:
+    properties:
+      created_at:
+        type: string
+      fingerprint:
+        type: string
+      has_private_key:
+        type: boolean
+      id:
+        type: integer
+      is_default:
+        type: boolean
+      label:
+        type: string
+      name:
+        type: string
+      owner_id:
+        type: integer
+      public_key:
+        type: string
+      source:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handlers.loginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  handlers.networkOpFailureView:
+    properties:
+      error:
+        type: string
+      hostname:
+        type: string
+      vm_row_id:
+        type: integer
+      vmid:
+        type: integer
+    type: object
+  handlers.networkOpResponse:
+    properties:
+      failures:
+        items:
+          $ref: '#/definitions/handlers.networkOpFailureView'
+        type: array
+      updated:
+        type: integer
+    type: object
+  handlers.networkSettingsView:
+    properties:
+      gateway_ip:
+        type: string
+      ip_pool_end:
+        type: string
+      ip_pool_start:
+        type: string
+      prefix_len:
+        type: integer
+    type: object
+  handlers.oauthSettingsView:
+    properties:
+      github_callback_url:
+        description: |-
+          GitHubCallbackURL is the matching value for GitHub's "Authorization
+          callback URL" field. GitHub doesn't accept a redirect_uri query param
+          the way Google does — it uses whatever is registered on the OAuth app
+          — so this is purely informational for the admin.
+        type: string
+      github_client_id:
+        type: string
+      github_configured:
+        type: boolean
+      google_client_id:
+        type: string
+      google_configured:
+        type: boolean
+      google_redirect_uri:
+        description: |-
+          GoogleRedirectURI is the exact URI Nimbus will send to Google on the
+          next OAuth start — must be registered byte-for-byte in Google Cloud
+          Console. Empty if the resolver isn't wired (older callers).
+        type: string
+      redirect_uri_source:
+        description: |-
+          RedirectURISource explains where the host portion came from so the UI
+          can show the right hint. One of: "cloud_tunnel" | "app_url" |
+          "request_host" | "" (resolver missing).
+        type: string
+      redirect_uri_warning:
+        description: |-
+          RedirectURIWarning is set when the resolved host is something Google
+          will reject (raw IP other than 127.0.0.1, loopback). Empty when the
+          host looks acceptable.
+        type: string
+    type: object
+  handlers.pairingView:
+    properties:
+      curl:
+        type: string
+      expires_in_seconds:
+        type: integer
+      token:
+        type: string
+    type: object
+  handlers.passwordlessToggleRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
+  handlers.privateKeyResponse:
+    properties:
+      key_name:
+        type: string
+      private_key:
+        type: string
+    type: object
+  handlers.promoteUserRequest:
+    properties:
+      password:
+        type: string
+    type: object
+  handlers.registerRequest:
+    properties:
+      email:
+        type: string
+      name:
+        type: string
+      password:
+        type: string
+    type: object
+  handlers.removeNodeResponse:
+    properties:
+      message:
+        example: node removed
+        type: string
+    type: object
+  handlers.saveAuthorizedDomainsRequest:
+    properties:
+      domains:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.saveAuthorizedOrgsRequest:
+    properties:
+      orgs:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.saveGPURequest:
+    properties:
+      base_url:
+        type: string
+      enabled:
+        type: boolean
+      inference_model:
+        type: string
+    type: object
+  handlers.saveGopherRequest:
+    properties:
+      api_key:
+        type: string
+      api_url:
+        type: string
+      cloud_subdomain:
+        description: |-
+          CloudSubdomain is the leftmost label of the public hostname Nimbus's
+          self-tunnel exposes the dashboard at. Empty preserves the existing
+          stored value (same rule as APIURL/APIKey). Validated as a DNS label
+          before persisting so a typo never reaches Gopher.
+        type: string
+    type: object
+  handlers.saveNetworkRequest:
+    properties:
+      gateway_ip:
+        type: string
+      ip_pool_end:
+        type: string
+      ip_pool_start:
+        type: string
+      prefix_len:
+        type: integer
+    type: object
+  handlers.saveOAuthRequest:
+    properties:
+      github_client_id:
+        type: string
+      github_client_secret:
+        type: string
+      google_client_id:
+        type: string
+      google_client_secret:
+        type: string
+    type: object
+  handlers.selfBootstrapStatusView:
+    properties:
+      error:
+        type: string
+      state:
+        type: string
+      tunnel_url:
+        type: string
+    type: object
+  handlers.setTagsRequest:
+    properties:
+      tags:
+        items:
+          type: string
+        type: array
+    type: object
+  handlers.setupStatusView:
+    properties:
+      configured:
+        type: boolean
+      needs_admin_setup:
+        type: boolean
+    type: object
+  handlers.storageView:
+    properties:
+      disk_gb:
+        type: integer
+      endpoint:
+        type: string
+      error_msg:
+        type: string
+      node:
+        type: string
+      root_password:
+        type: string
+      root_user:
+        type: string
+      status:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  handlers.submitJobRequest:
+    properties:
+      command:
+        type: string
+      env:
+        additionalProperties:
+          type: string
+        type: object
+      image:
+        type: string
+      vm_id:
+        type: integer
+    type: object
+  handlers.suspendRequest:
+    properties:
+      suspended:
+        type: boolean
+    type: object
+  handlers.tunnelInfoView:
+    properties:
+      enabled:
+        type: boolean
+      host:
+        type: string
+    type: object
+  handlers.unpairView:
+    properties:
+      cancelled_jobs:
+        type: integer
+      cleanup_cmd:
+        type: string
+    type: object
+  handlers.userQuotaRequest:
+    type: object
+  handlers.verifyAccessCodeRequest:
+    properties:
+      code:
+        type: string
+    type: object
+  handlers.vmSource:
+    enum:
+    - local
+    - foreign
+    - external
+    type: string
+    x-enum-varnames:
+    - sourceLocal
+    - sourceForeign
+    - sourceExternal
+  handlers.workerStatusRequest:
+    properties:
+      artifact_path:
+        type: string
+      error_msg:
+        type: string
+      exit_code:
+        type: integer
+      status:
+        type: string
+    type: object
+  ippool.AdoptedRow:
+    properties:
+      hostname:
+        type: string
+      ip:
+        type: string
+      prior_status:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  ippool.ConflictRow:
+    properties:
+      ip:
+        type: string
+      local_vmid:
+        type: integer
+      node:
+        type: string
+      proxmox_vmid:
+        type: integer
+    type: object
+  ippool.IPAllocation:
+    properties:
+      allocated_at:
+        type: string
+      hostname:
+        type: string
+      ip:
+        type: string
+      last_seen_at:
+        type: string
+      missed_cycles:
+        type: integer
+      reserved_at:
+        type: string
+      source:
+        type: string
+      status:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  ippool.Report:
+    properties:
+      adopted:
+        items:
+          $ref: '#/definitions/ippool.AdoptedRow'
+        type: array
+      conflicts:
+        items:
+          $ref: '#/definitions/ippool.ConflictRow'
+        type: array
+      freed:
+        items:
+          type: string
+        type: array
+      no_ops:
+        type: integer
+      snapshot_at:
+        type: string
+      vacated:
+        items:
+          type: string
+        type: array
+    type: object
+  nodemgr.Binding:
+    properties:
+      cluster_name:
+        description: empty for single-node deployments
+        type: string
+      connected_node:
+        description: |-
+          ConnectedNode is the cluster member whose Proxmox API actually
+          served this request (the node where corosync `Local=1`). For
+          single-host deployments it equals the only node; for multi-node
+          clusters it's the entry-point node — telling the operator "you
+          reach the cluster *through* this host." Distinct from
+          ClusterName, which is the corosync-wide identifier.
+        type: string
+      host:
+        description: configured Proxmox base URL
+        type: string
+      last_seen:
+        description: wall time of the last successful call
+        type: string
+      node_count:
+        type: integer
+      reachable:
+        description: false when ALL the calls failed
+        type: boolean
+      token_id:
+        description: |-
+          TokenID is the user@realm!tokenname half of the Proxmox token
+          (the secret stays write-only). Returned so the change-binding
+          modal can pre-fill rather than asking the operator to retype it.
+          Not actually a secret — anyone with read access to the env file
+          can read it; surfacing here just saves a copy-paste step.
+        type: string
+      version:
+        description: e.g. "8.2.7"
+        type: string
+    type: object
+  nodemgr.DrainPlan:
+    properties:
+      aggregate:
+        items:
+          $ref: '#/definitions/nodemgr.NodeProjection'
+        type: array
+      has_blocked:
+        description: |-
+          HasBlocked is a derived flag the SPA gates the "Start drain" button
+          on. True iff any row has Eligible == [] or Override pointing at a
+          disabled target (the executor would refuse).
+        type: boolean
+      migrations:
+        items:
+          $ref: '#/definitions/nodemgr.PlannedMigration'
+        type: array
+      source_node:
+        type: string
+    type: object
+  nodemgr.DrainWarning:
+    properties:
+      message:
+        type: string
+      severity:
+        description: '"soft"/"caution"/"high"/"blocked"'
+        type: string
+    type: object
+  nodemgr.EligibleTarget:
+    properties:
+      disabled:
+        type: boolean
+      disabled_reason:
+        type: string
+      node:
+        type: string
+      projected_ram_pct:
+        type: number
+      score:
+        type: number
+    type: object
+  nodemgr.NodeProjection:
+    properties:
+      current_ram_pct:
+        type: number
+      current_vm_count:
+        type: integer
+      node:
+        type: string
+      planned_ram_pct:
+        type: number
+      planned_vm_count:
+        type: integer
+      severity:
+        description: '"ok"/"caution"/"high"'
+        type: string
+    type: object
+  nodemgr.PlannedMigration:
+    properties:
+      auto_pick:
+        type: string
+      eligible:
+        items:
+          $ref: '#/definitions/nodemgr.EligibleTarget'
+        type: array
+      hostname:
+        type: string
+      override:
+        type: string
+      tier:
+        type: string
+      vm_id:
+        type: integer
+      vm_row_id:
+        type: integer
+      warnings:
+        items:
+          $ref: '#/definitions/nodemgr.DrainWarning'
+        type: array
+    type: object
+  nodemgr.View:
+    properties:
+      cpu:
+        type: number
+      disk_allocated:
+        type: integer
+      disk_pool_name:
+        type: string
+      disk_total:
+        type: integer
+      disk_used:
+        description: |-
+          DiskUsed/DiskTotal are the configured VM-disk pool's capacity
+          on this node (from /cluster/resources?type=storage filtered by
+          cfg.VMDiskStorage). DiskAllocated is the sum of every non-
+          template VM's configured maxdisk on this node — the pessimistic
+          "what would fill if every VM grew to its declared size" number.
+          All three zero when no pool name is configured (cfg.VMDiskStorage
+          empty) or when this node doesn't expose the pool.
+        type: integer
+      ip:
+        type: string
+      is_self_host:
+        description: true for the node Nimbus runs on
+        type: boolean
+      last_seen_at:
+        type: string
+      lock_reason:
+        type: string
+      lock_state:
+        description: '"none"/"cordoned"/"draining"/"drained"'
+        type: string
+      locked_at:
+        type: string
+      locked_by:
+        type: integer
+      max_cpu:
+        type: integer
+      mem_allocated:
+        type: integer
+      mem_total:
+        type: integer
+      mem_used:
+        type: integer
+      name:
+        type: string
+      status:
+        description: '"online" / "offline" / "unknown" — from Proxmox'
+        type: string
+      swap_total:
+        type: integer
+      swap_used:
+        description: |-
+          SwapUsed/SwapTotal come from /nodes/{node}/status (fan-out per
+          online node). Both 0 when the per-node call fails — single dead
+          node never blanks the table.
+        type: integer
+      tags:
+        items:
+          type: string
+        type: array
+      vm_count:
+        description: running, non-template
+        type: integer
+      vm_count_total:
+        description: all non-template
+        type: integer
+    type: object
+  provision.VMDeleted:
+    properties:
+      hostname:
+        type: string
+      node:
+        type: string
+      vm_row_id:
+        type: integer
+      vmid:
+        type: integer
+    type: object
+  provision.VMMigration:
+    properties:
+      from_node:
+        type: string
+      hostname:
+        type: string
+      to_node:
+        type: string
+      vm_row_id:
+        type: integer
+      vmid:
+        type: integer
+    type: object
+  provision.VMMiss:
+    properties:
+      hostname:
+        type: string
+      missed_cycles:
+        type: integer
+      node:
+        type: string
+      vm_row_id:
+        type: integer
+      vmid:
+        type: integer
+    type: object
+  provision.VMSyncReport:
+    properties:
+      deleted:
+        items:
+          $ref: '#/definitions/provision.VMDeleted'
+        type: array
+      migrated:
+        items:
+          $ref: '#/definitions/provision.VMMigration'
+        type: array
+      missed:
+        items:
+          $ref: '#/definitions/provision.VMMiss'
+        type: array
+      no_ops:
+        type: integer
+      snapshot_at:
+        type: string
+    type: object
+  s3storage.BucketStat:
+    properties:
+      created_at:
+        type: string
+      name:
+        type: string
+      object_count:
+        type: integer
+      total_size_bytes:
+        type: integer
+    type: object
+  service.SMTPSettingsView:
+    properties:
+      configured:
+        type: boolean
+      enabled:
+        type: boolean
+      encryption:
+        type: string
+      from_address:
+        type: string
+      has_password:
+        type: boolean
+      host:
+        type: string
+      port:
+        type: integer
+      username:
+        type: string
+    type: object
+  service.SaveSMTPRequest:
+    properties:
+      enabled:
+        type: boolean
+      encryption:
+        type: string
+      from_address:
+        type: string
+      host:
+        type: string
+      password:
+        type: string
+      port:
+        type: integer
+      username:
+        type: string
+    type: object
+  service.UserView:
+    properties:
+      email:
+        type: string
+      id:
+        type: integer
+      is_admin:
+        type: boolean
+      name:
+        type: string
+    type: object
+  tunnel.Machine:
+    properties:
+      bootstrap_url:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: string
+      public_ssh:
+        type: boolean
+      public_ssh_host:
+        type: string
+      public_ssh_port:
+        type: integer
+      status:
+        type: string
+    type: object
+  tunnel.Tunnel:
+    properties:
+      bot_protection_allow_ip:
+        type: string
+      bot_protection_enabled:
+        description: |-
+          Alpha features — bot protection (PoW JS challenge) requires a
+          subdomain + TCP. Gopher silently coerces these server-side, so the
+          response reflects the actual stored state, not just what we asked for.
+        type: boolean
+      bot_protection_ttl:
+        type: integer
+      created_at:
+        type: string
+      error:
+        type: string
+      id:
+        type: string
+      machine_id:
+        type: string
+      no_tls:
+        description: NoTLS asks Caddy to serve http:// rather than https://.
+        type: boolean
+      private:
+        description: Private flips the gateway-side bind to 127.0.0.1 (VPS-local).
+        type: boolean
+      server_port:
+        description: |-
+          ServerPort is the port Gopher allocated on the gateway; needed for
+          UDP/port-only tunnels where there's no friendly subdomain URL.
+        type: integer
+      status:
+        type: string
+      subdomain:
+        type: string
+      target_ip:
+        type: string
+      target_port:
+        type: integer
+      tls_skip_verify:
+        type: boolean
+      transport:
+        description: |-
+          Transport is "tcp" (default) or "udp". UDP tunnels skip Caddy and the
+          subdomain — they're reached at <gateway>:<server_port>.
+        type: string
+      tunnel_url:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    Self-hosted VM provisioning portal for Proxmox VE. The API is
+    wrapped in a uniform `{success, data, error}` envelope on every
+    response — see EnvelopeOK / EnvelopeError schemas below.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  title: Nimbus HTTP API
+  version: "1.0"
+paths:
+  /access-code/status:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Whether the user has verified the current access code
+      tags:
+      - auth
+  /access-code/verify:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Access code
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.verifyAccessCodeRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Verify the current access code
+      tags:
+      - auth
+  /account:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.accountView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Current user's profile + linked-provider state
+      tags:
+      - auth
+  /account/password:
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Requires the current password — a stolen session alone
+        shouldn't let an attacker lock the real owner out.
+      parameters:
+      - description: Current + new password
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.changePasswordRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Rotate the current user's password
+      tags:
+      - auth
+  /admin/bootstrap-status:
+    get:
+      description: |-
+        Read-only yes/no — both admins and members need it so the
+        Provision UI can decide whether to render the form (templates
+        ready) or the "admin access required" card.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.bootstrapStatusView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Whether at least one VM template exists
+      tags:
+      - bootstrap
+  /admin/bootstrap-templates:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Long-running (up to ~20 min) — downloads cloud images, clones,
+        and converts to templates. Empty body uses defaults (all
+        catalogue OSes on all online nodes). The 30-minute route
+        timeout in the router accommodates the slowest path.
+      parameters:
+      - description: Optional override of node/OS scope and force-rebuild flag
+        in: body
+        name: body
+        schema:
+          $ref: '#/definitions/handlers.bootstrapRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/bootstrap.Result'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Build VM templates on cluster nodes (admin)
+      tags:
+      - bootstrap
+  /auth/github:
+    get:
+      description: |-
+        Sets short-lived state + intent cookies, then redirects to
+        GitHub's authorization URL.
+      responses:
+        "307":
+          description: Redirect to GitHub OAuth consent
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Start the GitHub OAuth sign-in flow (public)
+      tags:
+      - auth
+  /auth/github/callback:
+    get:
+      description: |-
+        Validates the state cookie, exchanges the code, and either
+        signs the user in or links the GitHub account to the
+        existing session (per the intent cookie). Always responds
+        with a redirect — to the SPA on success, or back to /login
+        with an explanatory query param on failure.
+      parameters:
+      - description: Authorization code
+        in: query
+        name: code
+        required: true
+        type: string
+      - description: CSRF state echoed by GitHub
+        in: query
+        name: state
+        required: true
+        type: string
+      responses:
+        "307":
+          description: Redirect
+      summary: GitHub OAuth callback (public)
+      tags:
+      - auth
+  /auth/github/link:
+    get:
+      description: |-
+        Same callback as sign-in mode but the intent cookie tells
+        the callback to attach to the current session rather than
+        mint a new one.
+      responses:
+        "307":
+          description: Redirect to GitHub OAuth consent
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Start the GitHub OAuth flow in link mode
+      tags:
+      - auth
+  /auth/google:
+    get:
+      responses:
+        "307":
+          description: Redirect to Google OAuth consent
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Start the Google OAuth sign-in flow (public)
+      tags:
+      - auth
+  /auth/google/callback:
+    get:
+      description: See the GitHub callback for the shared sign-in/link semantics.
+      parameters:
+      - description: Authorization code
+        in: query
+        name: code
+        required: true
+        type: string
+      - description: CSRF state echoed by Google
+        in: query
+        name: state
+        required: true
+        type: string
+      responses:
+        "307":
+          description: Redirect
+      summary: Google OAuth callback (public)
+      tags:
+      - auth
+  /auth/google/link:
+    get:
+      responses:
+        "307":
+          description: Redirect to Google OAuth consent
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Start the Google OAuth flow in link mode
+      tags:
+      - auth
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Sets the session cookie inline on success. 403 with
+        message "Account suspended" when the user row is suspended.
+      parameters:
+      - description: Credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.loginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.UserView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Email/password sign-in (public)
+      tags:
+      - auth
+  /auth/logout:
+    post:
+      description: |-
+        Always returns 204 — no body — even when the cookie is
+        missing or invalid.
+      responses:
+        "204":
+          description: No Content
+      summary: End the current session
+      tags:
+      - auth
+  /auth/magic/{token}:
+    get:
+      description: |-
+        Always returns 307 — to /account?from=magic on success or to
+        /login?magic=<reason> when the token is invalid/expired/used.
+      parameters:
+      - description: Magic-link token
+        in: path
+        name: token
+        required: true
+        type: string
+      responses:
+        "307":
+          description: Redirect
+      summary: Magic-link sign-in (public, single-use)
+      tags:
+      - auth
+  /auth/providers:
+    get:
+      description: Drives which sign-in buttons render on /login.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+      summary: Available authentication providers (public)
+      tags:
+      - auth
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Open-self-signup is gated by RequirePasswordlessAuth in
+        production deployments — this endpoint always responds, but
+        new accounts may be unable to sign in until they link OAuth.
+      parameters:
+      - description: New account
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.registerRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.UserView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Register a new user account (public)
+      tags:
+      - auth
+  /cluster/stats:
+    get:
+      description: |-
+        Currently just storage totals (used + total bytes). Shared
+        storage pools are deduped across nodes so the totals reflect
+        the actual cluster footprint, not the sum of per-node views.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.clusterStatsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Aggregate cluster-level stats (admin)
+      tags:
+      - cluster
+  /cluster/vms:
+    get:
+      description: |-
+        Joined view: Proxmox cluster walk + Nimbus DB rows. The Source
+        field distinguishes local-Nimbus / foreign-Nimbus / external
+        VMs so the SPA can gate features (e.g. SSH copy needs local
+        credentials, available only for source="local").
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.clusterVMView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List every VM on the cluster (admin)
+      tags:
+      - cluster
+  /cluster/vms/{id}:
+    delete:
+      description: |-
+        Foreign / external VMs have no DB row and 404 here; route them
+        through POST /cluster/vms/{node}/{vmid}/{op} with op="stop"
+        and remove from Proxmox directly instead.
+      parameters:
+      - description: Nimbus VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Destroy a local-source VM by DB id (admin)
+      tags:
+      - cluster
+  /cluster/vms/{node}/{vmid}/{op}:
+    post:
+      description: |-
+        Routes by (node, vmid) so foreign + external VMs are reachable
+        without a Nimbus DB row. Reboot waits on a Proxmox task — the
+        handler timeout is 2 minutes.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: node
+        required: true
+        type: string
+      - description: Proxmox VMID
+        in: path
+        name: vmid
+        required: true
+        type: integer
+      - description: Lifecycle op
+        enum:
+        - start
+        - shutdown
+        - stop
+        - reboot
+        in: path
+        name: op
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Run a power op on any cluster VM (admin)
+      tags:
+      - cluster
+  /gpu/inference:
+    get:
+      description: |-
+        The 2-second probe never blocks the page. Status: up | down |
+        unconfigured. The base_url is what the SPA wires into the
+        "OPENAI_BASE_URL" hint copy on the playground.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.inferenceView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Inference plane status + base URL
+      tags:
+      - gpu
+  /gpu/install.sh:
+    get:
+      description: |-
+        Validates ?token= against the active pairing window. The
+        script body posts to /api/gpu/register and runs the
+        install-inference / install-worker scripts.
+      parameters:
+      - description: Pairing token
+        in: query
+        name: token
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Bash script body
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: GX10 install bash script (public, pairing-token-auth)
+      tags:
+      - gpu
+  /gpu/jobs:
+    get:
+      parameters:
+      - description: Narrow by status (queued|running|succeeded|failed|cancelled)
+        in: query
+        name: status
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.gpuJobView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List GPU jobs (admin sees all, member sees own)
+      tags:
+      - gpu
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Enqueued onto the FIFO single-host queue. Members are subject
+        to the active-jobs cap from QuotaSettings; admins bypass.
+      parameters:
+      - description: Job spec
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.submitJobRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuJobView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Submit a GPU job
+      tags:
+      - gpu
+  /gpu/jobs/{id}:
+    get:
+      parameters:
+      - description: Job id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuJobView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get one GPU job by id
+      tags:
+      - gpu
+  /gpu/jobs/{id}/cancel:
+    post:
+      parameters:
+      - description: Job id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuJobView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Cancel a queued or running GPU job
+      tags:
+      - gpu
+  /gpu/register:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Pairing handshake
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.gpuRegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuRegisterResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Exchange a pairing token for a worker token (public, pairing-token-auth)
+      tags:
+      - gpu
+  /gpu/scripts/{name}:
+    get:
+      description: |-
+        Public so the GX10's curl-bootstrap can fetch them. Whitelist:
+        install-inference.sh, install-worker.sh, gx10-worker (ARM64
+        binary), demo-mnist.py.
+      parameters:
+      - description: Script name
+        in: path
+        name: name
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Asset bytes
+        "404":
+          description: Asset not found or not in whitelist
+      summary: Serve a whitelisted GX10 install script (public)
+      tags:
+      - gpu
+  /gpu/worker/claim:
+    post:
+      description: |-
+        200 with a job view (worker should run it), or 204 when the
+        queue is empty.
+      parameters:
+      - description: Worker identifier (logged)
+        in: header
+        name: X-Worker-ID
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuJobView'
+              type: object
+        "204":
+          description: No queued jobs
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - workerAuth: []
+      summary: 'Worker: claim the next queued GPU job (worker token)'
+      tags:
+      - gpu-worker
+  /gpu/worker/jobs/{id}/logs:
+    post:
+      consumes:
+      - text/plain
+      description: |-
+        Body is raw stdout+stderr (any content type). Capped at 1 MB
+        per call.
+      parameters:
+      - description: Job id
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "413":
+          description: Request Entity Too Large
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - workerAuth: []
+      summary: 'Worker: append a log chunk to a running job (worker token)'
+      tags:
+      - gpu-worker
+  /gpu/worker/jobs/{id}/status:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Job id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Terminal status
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.workerStatusRequest'
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - workerAuth: []
+      summary: 'Worker: report terminal status for a job (worker token)'
+      tags:
+      - gpu-worker
+  /health:
+    get:
+      description: |-
+        Returns the build version, current timestamp, and the result of
+        a 3-second Proxmox `/version` probe. Always 200 — the
+        proxmox_ok field carries the dependency result so dashboards
+        can distinguish "Nimbus is up but Proxmox is sad" from "Nimbus
+        is down".
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.healthResponse'
+              type: object
+      summary: Liveness + Proxmox reachability probe
+      tags:
+      - health
+  /ips:
+    get:
+      description: |-
+        Admin-only view of the local cache: free/reserved/allocated +
+        who holds each IP. The reconciler converges this against
+        Proxmox in the background; use POST /ips/reconcile to force
+        a fresh diff on demand.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/ippool.IPAllocation'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the static IP pool with per-row state
+      tags:
+      - ips
+  /ips/reconcile:
+    post:
+      description: |-
+        Bypasses the background loop and runs a one-shot diff. Returns
+        the resulting Report (adopted / conflicts / freed / vacated).
+        Even on partial failure the response is 200 — the report still
+        carries the rows that were touched, with the error string
+        alongside.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/ippool.Report'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Force an IP-pool reconcile against Proxmox (admin)
+      tags:
+      - ips
+  /keys:
+    get:
+      description: |-
+        Returns the caller's stored SSH keys. Public-key + metadata only;
+        the encrypted private half is fetched via GET /keys/{id}/private-key.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.keyView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List SSH keys
+      tags:
+      - keys
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Either generates a new ed25519 keypair (`generate=true`) or stores
+        an imported public/private key. The freshly generated private half
+        is returned only on this response — re-download via /keys/{id}/private-key later.
+      parameters:
+      - description: Key creation request
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createKeyRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.createKeyResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create or import an SSH key
+      tags:
+      - keys
+  /keys/{id}:
+    delete:
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete an SSH key
+      tags:
+      - keys
+    get:
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.keyView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get a single SSH key
+      tags:
+      - keys
+  /keys/{id}/default:
+    post:
+      description: |-
+        Default keys are auto-attached at provision time when the request
+        body doesn't specify a key explicitly.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Mark this key as the caller's default
+      tags:
+      - keys
+  /keys/{id}/private-key:
+    get:
+      description: |-
+        Returns the decrypted private key. Available only to the key owner;
+        fails with 404 if no private half is stored.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.privateKeyResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Download the private half of an SSH key
+      tags:
+      - keys
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Vaults the private half of a key originally imported as a public
+        key only. After this call, has_private_key flips true.
+      parameters:
+      - description: Key ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Private key payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.attachPrivateKeyRequest'
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Attach a private key to a public-only key
+      tags:
+      - keys
+  /me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.UserView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: The current session's user
+      tags:
+      - auth
+  /nodes:
+    get:
+      description: |-
+        Joins Proxmox live telemetry (cpu/mem/storage) with the
+        Nimbus-side lock state (none/cordoned/draining/drained) and
+        operator-set tags. Powers both the Admin dashboard and the
+        /nodes page.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/nodemgr.View'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List cluster nodes with lock state + telemetry (admin)
+      tags:
+      - nodes
+  /nodes/{name}:
+    delete:
+      description: |-
+        Refused unless the node is in state="drained" and isn't the
+        host Nimbus itself runs on (self-host removal would lock the
+        operator out of the admin UI).
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.removeNodeResponse'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Remove a drained node from the cluster (admin)
+      tags:
+      - nodes
+  /nodes/{name}/cordon:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Marks the node as ineligible for new VM placement. Refused
+        while a drain is in-flight on this node.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Optional reason for the cordon
+        in: body
+        name: body
+        schema:
+          $ref: '#/definitions/handlers.cordonRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.Node'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Cordon a node (admin)
+      tags:
+      - nodes
+  /nodes/{name}/drain:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Streams `application/x-ndjson` — one DrainEvent per line.
+        The phrase "DRAIN <NODE>" must match exactly to confirm
+        (the SPA enforces this client-side too). Total wall time can
+        run tens of minutes per VM on cold migrations; the route
+        timeout is 60 minutes.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Operator-confirmed plan + DRAIN <NODE> phrase
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.drainExecuteRequest'
+      produces:
+      - application/x-ndjson
+      responses:
+        "200":
+          description: NDJSON stream of DrainEvents
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Execute a drain as an NDJSON stream (admin)
+      tags:
+      - nodes
+  /nodes/{name}/drain-plan:
+    get:
+      description: |-
+        Per-VM recommendations + per-destination aggregate. Renders in
+        the drain-confirm modal so the operator can override
+        placement before executing.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/nodemgr.DrainPlan'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Compute the drain plan for a node (admin)
+      tags:
+      - nodes
+  /nodes/{name}/tags:
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Replaces the entire set; pass an empty array to clear. Tags
+        are operator-set labels surfaced in the Admin dashboard;
+        Nimbus doesn't interpret them today.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: New tag set
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.setTagsRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.Node'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Replace a node's tag set (admin)
+      tags:
+      - nodes
+  /nodes/{name}/uncordon:
+    post:
+      description: |-
+        Refused while a drain is in-flight; the operator must let it
+        complete first. Reverts cordoned/drained → none.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.Node'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Lift the cordon on a node (admin)
+      tags:
+      - nodes
+  /proxmox/binding:
+    get:
+      description: |-
+        Returns host + token-id + reachable flag. Polled by the Nodes
+        page; downstream errors collapse to reachable=false rather
+        than HTTP 500 so the UI can show "offline" without alerts.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/nodemgr.Binding'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read the active Proxmox binding (admin)
+      tags:
+      - nodes
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Persists a new host + token to the env file and re-execs the
+        process to pick up the change. Empty `proxmox_token_secret`
+        means "keep the current secret" — useful when swapping
+        entry-point nodes (Proxmox tokens are cluster-wide).
+      parameters:
+      - description: New Proxmox triple (secret optional)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.changeBindingRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.changeBindingResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Reconfigure the Proxmox binding (admin)
+      tags:
+      - nodes
+  /proxmox/discover:
+    get:
+      description: |-
+        Same handler is also mounted as /setup/discover in the install
+        wizard. Merges corosync.conf membership (authoritative on PVE
+        nodes) with a TLS handshake scan of port 8006 across local
+        subnets (cert CN gives the node hostname for free). Capped at
+        1024 addresses scanned, 6s ctx.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.discoverResult'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Discover Proxmox endpoints on this network (admin)
+      tags:
+      - nodes
+  /s3/buckets:
+    get:
+      description: |-
+        503 when storage is absent or not yet ready (deploy in flight,
+        or VM still booting). The reconciler converges status; the
+        SPA polls until ready.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/s3storage.BucketStat'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List MinIO buckets (admin)
+      tags:
+      - s3
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Bucket name must match the AWS S3 stricter ruleset: 3-63
+        chars, lowercase letters/digits/hyphens, no leading/trailing
+        hyphen.
+      parameters:
+      - description: Bucket spec
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createBucketRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.createBucketResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a MinIO bucket (admin)
+      tags:
+      - s3
+  /s3/buckets/{name}:
+    delete:
+      description: 409 when the bucket isn't empty — empty it first.
+      parameters:
+      - description: Bucket name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.deleteBucketResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a MinIO bucket (admin)
+      tags:
+      - s3
+  /s3/storage:
+    delete:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.deleteStorageResponse'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Tear down the MinIO storage VM (admin)
+      tags:
+      - s3
+    get:
+      description: |-
+        404 with a structured payload when no S3 storage is deployed,
+        so the SPA can render the deploy form vs the live view.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.storageView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read the singleton MinIO storage row (admin)
+      tags:
+      - s3
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Streams NDJSON progress events, terminating in result/error.
+        Long-running (up to 15min on cold pull) — the route timeout
+        is set generously to accommodate the SSH bootstrap.
+      parameters:
+      - description: Disk size (10–120 GB)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.deployStorageRequest'
+      produces:
+      - application/x-ndjson
+      responses:
+        "200":
+          description: NDJSON stream of progress events terminating in result or error
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Deploy the singleton MinIO storage VM (admin)
+      tags:
+      - s3
+  /settings/access-code:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.accessCodeView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Reveal the current access code (admin)
+      tags:
+      - settings
+  /settings/access-code/regenerate:
+    post:
+      description: |-
+        Bumps the version, invalidating every non-admin's prior
+        verification. They'll be prompted to re-enter the new code
+        on next access.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.accessCodeView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Rotate the access code (admin)
+      tags:
+      - settings
+  /settings/github-orgs:
+    get:
+      description: Empty list means any GitHub account may sign in.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.authorizedOrgsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List authorized GitHub orgs (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Org list
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveAuthorizedOrgsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.authorizedOrgsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Replace the authorized GitHub orgs (admin)
+      tags:
+      - settings
+  /settings/google-domains:
+    get:
+      description: Empty list means any verified Google account may sign in.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.authorizedDomainsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List authorized Google Workspace domains (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Domain list
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveAuthorizedDomainsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.authorizedDomainsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Replace the authorized Google Workspace domains (admin)
+      tags:
+      - settings
+  /settings/gopher:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gopherSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read Gopher tunnel-gateway settings (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Live-reloads the tunnel client across the running process —
+        no restart needed. Empty api_url + api_key disables tunnels
+        entirely. Changing cloud_subdomain tears down the existing
+        cloud tunnel.
+      parameters:
+      - description: Gopher creds + subdomain
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveGopherRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gopherSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update Gopher credentials + cloud subdomain (admin)
+      tags:
+      - settings
+  /settings/gopher/self-bootstrap:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.selfBootstrapStatusView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read the Gopher self-bootstrap state (admin)
+      tags:
+      - settings
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Retry the Gopher self-bootstrap (admin)
+      tags:
+      - settings
+  /settings/gpu:
+    get:
+      description: The worker token is never sent — pairing produces a fresh one.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read GX10 GPU plane settings (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Live-pushes the bootstrap config to provision.Service so
+        subsequent VM provisions inject the new env without restart.
+      parameters:
+      - description: GPU plane settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveGPURequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.gpuSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update GX10 GPU plane settings (admin)
+      tags:
+      - settings
+  /settings/gpu/pairing:
+    post:
+      description: |-
+        Returns a one-shot curl the operator pastes onto the GX10.
+        412 when r.Host and APP_URL are both localhost — the GX10
+        can't phone home to a loopback address.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.pairingView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "412":
+          description: Precondition Failed
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Mint a 5-minute GX10 pairing token (admin)
+      tags:
+      - gpu
+  /settings/gpu/unpair:
+    post:
+      description: |-
+        Cancels every queued/running job, wipes GPU settings, and
+        returns the GX10-side cleanup command. The handler can't
+        reach the GX10 to tear down the systemd units itself —
+        operator runs the returned snippet by hand.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.unpairView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Unpair the GX10 (admin)
+      tags:
+      - gpu
+  /settings/network:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read live network settings (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Reseeds the IP pool and pushes the new gateway/prefix to live
+        provision config. Existing VMs are not touched — use the
+        renumber / force-gateway endpoints for that.
+      parameters:
+      - description: Network settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveNetworkRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update network settings (admin)
+      tags:
+      - settings
+  /settings/network/force-gateway-update:
+    post:
+      description: |-
+        Disruptive — every running VM bounces. Each per-VM failure
+        is reported in the response; the loop doesn't abort.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkOpResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Force-push the saved gateway to every managed VM (admin)
+      tags:
+      - settings
+  /settings/network/renumber-vms:
+    post:
+      description: |-
+        Disruptive — every VM gets a fresh IP and bounces. 400 when
+        the pool has fewer free addresses than VMs to renumber.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkOpResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Renumber every managed VM into the saved pool (admin)
+      tags:
+      - settings
+  /settings/oauth:
+    get:
+      description: |-
+        Secrets are never sent — only the configured/not flag and the
+        resolved redirect URIs the SPA shows admins so they can
+        register them with Google/GitHub.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.oauthSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read OAuth provider settings (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: OAuth client IDs + secrets
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveOAuthRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update OAuth provider credentials (admin)
+      tags:
+      - settings
+  /settings/oauth/passwordless:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Passwordless-only sign-in status (admin)
+      tags:
+      - auth
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Hard-gate: rejected with 409 when the requesting admin
+        hasn't linked OAuth themselves, or when any active
+        password-only user remains. Surface the message verbatim
+        so the admin can act on it.
+      parameters:
+      - description: Toggle
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.passwordlessToggleRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Toggle passwordless-only sign-in (admin)
+      tags:
+      - auth
+  /settings/quotas:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.QuotaSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read workspace quota defaults (admin)
+      tags:
+      - auth
+    put:
+      consumes:
+      - application/json
+      description: Either field can be omitted to leave it untouched.
+      parameters:
+      - description: Workspace defaults
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.QuotaSettingsView'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.QuotaSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update workspace quota defaults (admin)
+      tags:
+      - auth
+  /settings/smtp:
+    get:
+      description: |-
+        The password ciphertext is never sent — `has_password`
+        tells the SPA whether to render an "(unchanged)" placeholder.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.SMTPSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read SMTP settings (admin)
+      tags:
+      - auth
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: SMTP settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/service.SaveSMTPRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.SMTPSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update SMTP settings (admin)
+      tags:
+      - auth
+  /settings/smtp/test:
+    post:
+      description: |-
+        The dial/auth/TLS error string is surfaced verbatim on 502
+        so admins debugging SMTP have the underlying message.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Send a SMTP test email to the requesting admin (admin)
+      tags:
+      - auth
+  /setup/admin:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        One-shot endpoint used by the install wizard. 409 once any
+        user exists. On success, sets the session cookie inline.
+      parameters:
+      - description: Admin account
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createAdminRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/service.UserView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      summary: Create the first admin account
+      tags:
+      - setup
+  /setup/status:
+    get:
+      description: |-
+        Public endpoint the SPA polls before the wizard renders.
+        `configured` reflects whether Proxmox + IP-pool config is
+        present; `needs_admin_setup` reflects whether the user table
+        is empty (so the wizard should prompt for an admin account).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.setupStatusView'
+              type: object
+      summary: First-run setup status
+      tags:
+      - setup
+  /tunnels:
+    get:
+      description: |-
+        Pass-through to the upstream Gopher `/machines` endpoint,
+        scoped to this Nimbus's API key. Returns 503 when Gopher
+        credentials aren't configured.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/tunnel.Machine'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List Gopher-registered machines (admin)
+      tags:
+      - tunnels
+  /tunnels/info:
+    get:
+      description: |-
+        Public so the Provision form can render the disabled-checkbox
+        hint copy with the right hostname before submitting. `enabled`
+        reflects whether Gopher credentials are configured at all.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.tunnelInfoView'
+              type: object
+      summary: Routing-host preview for the Gopher tunnel gateway
+      tags:
+      - tunnels
+  /users:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List users (admin sees all, member sees self)
+      tags:
+      - auth
+  /users/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: |-
+        vm_action must be "delete" or "transfer". "delete" destroys
+        their VMs on Proxmox; "transfer" reassigns ownership to the
+        requesting admin and leaves them running. SSH keys + GPU jobs
+        follow the same disposition.
+      parameters:
+      - description: User id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: VM disposition
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.deleteUserRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a user (admin)
+      tags:
+      - auth
+  /users/{id}/promote:
+    post:
+      consumes:
+      - application/json
+      description: Requires the requesting admin's own password as a re-auth gate.
+      parameters:
+      - description: User id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Re-auth password
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.promoteUserRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Promote a user to admin (admin)
+      tags:
+      - auth
+  /users/{id}/quota:
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Each field has three-state semantics: absent = leave alone,
+        JSON null = clear the override (revert to workspace default),
+        number = set explicit cap.
+      parameters:
+      - description: User id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Override patch
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.userQuotaRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Patch one user's quota overrides (admin)
+      tags:
+      - auth
+  /users/{id}/suspend-status:
+    post:
+      consumes:
+      - application/json
+      description: Cannot self-suspend; cannot suspend the last remaining admin.
+      parameters:
+      - description: User id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Desired state
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.suspendRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Set one user's suspended flag (admin)
+      tags:
+      - auth
+  /users/email-unlinked:
+    post:
+      description: |-
+        Per-recipient SMTP rejects (e.g. "mailbox doesn't exist")
+        are recorded in `failures` and the loop continues. The
+        first dial/auth/TLS error aborts the whole batch.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.EmailUnlinkedResult'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Email magic-link recovery to all unlinked users (admin)
+      tags:
+      - auth
+  /users/suspend-unlinked:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeOK'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Suspend every active password-only user (admin)
+      tags:
+      - auth
+  /vms:
+    get:
+      description: |-
+        Includes legacy rows that pre-date owner tracking (owner_id
+        NULL). Live status is fetched from Proxmox at request time.
+        Cluster-wide views are admin-only and live under /cluster/vms.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/db.VM'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the caller's VMs
+      tags:
+      - vms
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Streams `application/x-ndjson` once headers flush — one
+        `{type:"progress", step, label}` line per phase, then a
+        terminal `{type:"result", data: ...}` (success) or
+        `{type:"error", code, message}` (failure). Total wall time
+        30-60s for the provision, plus 1-3min if Gopher bootstrap
+        waits on dpkg locks during cloud-init contention. Validation
+        failures pre-stream return the standard {success,error}
+        envelope with the appropriate 4xx status.
+      parameters:
+      - description: VM provisioning request
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createVMRequest'
+      produces:
+      - application/x-ndjson
+      responses:
+        "200":
+          description: NDJSON stream of progress events terminated by a result or
+            error line
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Provision a new VM (NDJSON event stream)
+      tags:
+      - vms
+  /vms/{id}:
+    delete:
+      description: |-
+        Cross-user and legacy (owner_id NULL) rows return 404 by
+        design — existence is not disclosed across ownership
+        boundaries. Admin-side destruction goes through
+        DELETE /cluster/vms/{id} instead.
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Destroy one of the caller's VMs
+      tags:
+      - vms
+    get:
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.VM'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get one of the caller's VMs by id
+      tags:
+      - vms
+  /vms/{id}/{op}:
+    post:
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Lifecycle op
+        enum:
+        - start
+        - shutdown
+        - stop
+        - reboot
+        in: path
+        name: op
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Run a power op on the caller's VM
+      tags:
+      - vms
+  /vms/{id}/private-key:
+    get:
+      description: |-
+        404 when no private key was deposited for this VM. Owner-gated:
+        non-owners get 404 (existence not disclosed).
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.privateKeyResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Download the private SSH key for one of the caller's VMs
+      tags:
+      - vms
+  /vms/{id}/tunnels:
+    get:
+      description: |-
+        Empty array for VMs without a Gopher machine record and for
+        tunnel-disabled deployments. Owner-gated.
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/tunnel.Tunnel'
+                  type: array
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List per-port tunnels attached to one of the caller's VMs
+      tags:
+      - vms
+    post:
+      consumes:
+      - application/json
+      description: Mirrors Gopher's tunnel-creation body shape.
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Per-port tunnel spec
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createTunnelRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/tunnel.Tunnel'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Attach a per-port tunnel to one of the caller's VMs
+      tags:
+      - vms
+  /vms/{id}/tunnels/{tunnelId}:
+    delete:
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Gopher tunnel id
+        in: path
+        name: tunnelId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.deleteTunnelResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Detach a per-port tunnel from one of the caller's VMs
+      tags:
+      - vms
+  /vms/reconcile:
+    post:
+      description: |-
+        Refuses on an empty cluster snapshot to avoid soft-deleting
+        every row when the Proxmox API blips.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/provision.VMSyncReport'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Force a vms-table reconcile against Proxmox (admin)
+      tags:
+      - vms
+securityDefinitions:
+  cookieAuth:
+    description: |-
+      Session cookie set by /api/auth/login. Required by all routes
+      outside the public auth + setup surface.
+    in: cookie
+    name: nimbus_sid
+    type: apiKey
+  workerAuth:
+    description: |-
+      Bearer token used by the GX10 GPU worker daemon. Format:
+      `Bearer <hex>`. Mint via the Settings → GPU page.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

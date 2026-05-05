@@ -24,7 +24,24 @@ type bootstrapRequest struct {
 	Force bool     `json:"force,omitempty"`
 }
 
+// bootstrapStatusView is the body of GET /api/admin/bootstrap-status.
+type bootstrapStatusView struct {
+	Bootstrapped bool `json:"bootstrapped"`
+}
+
 // BootstrapStatus handles GET /api/admin/bootstrap-status.
+//
+// @Summary     Whether at least one VM template exists
+// @Description Read-only yes/no — both admins and members need it so the
+// @Description Provision UI can decide whether to render the form (templates
+// @Description ready) or the "admin access required" card.
+// @Tags        bootstrap
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=bootstrapStatusView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /admin/bootstrap-status [get]
 func (h *Bootstrap) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -33,7 +50,7 @@ func (h *Bootstrap) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "db error: "+err.Error())
 		return
 	}
-	response.Success(w, map[string]bool{"bootstrapped": has})
+	response.Success(w, bootstrapStatusView{Bootstrapped: has})
 }
 
 // BootstrapTemplates handles POST /api/admin/bootstrap-templates.
@@ -44,6 +61,23 @@ func (h *Bootstrap) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
 //
 // Empty body is valid: it kicks off the default flow (every catalogue OS on
 // every online node).
+//
+// @Summary     Build VM templates on cluster nodes (admin)
+// @Description Long-running (up to ~20 min) — downloads cloud images, clones,
+// @Description and converts to templates. Empty body uses defaults (all
+// @Description catalogue OSes on all online nodes). The 30-minute route
+// @Description timeout in the router accommodates the slowest path.
+// @Tags        bootstrap
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     bootstrapRequest false "Optional override of node/OS scope and force-rebuild flag"
+// @Success     200  {object} EnvelopeOK{data=bootstrap.Result}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /admin/bootstrap-templates [post]
 func (h *Bootstrap) BootstrapTemplates(w http.ResponseWriter, r *http.Request) {
 	var req bootstrapRequest
 	// Allow empty body for "use defaults" — only fail on actively malformed JSON.

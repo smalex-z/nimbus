@@ -62,6 +62,25 @@ type createKeyRequest struct {
 	SetDefault bool   `json:"set_default,omitempty"`
 }
 
+// createKeyResponse extends the standard keyView with the freshly-minted
+// private key, which is only returned on the generate path. Lifted out of an
+// anonymous struct so swag can reference the type in @Success annotations.
+type createKeyResponse struct {
+	keyView
+	PrivateKey string `json:"private_key,omitempty"`
+}
+
+// privateKeyResponse is the body of GET /keys/{id}/private-key.
+type privateKeyResponse struct {
+	KeyName    string `json:"key_name"`
+	PrivateKey string `json:"private_key"`
+}
+
+// attachPrivateKeyRequest is the body of POST /keys/{id}/private-key.
+type attachPrivateKeyRequest struct {
+	PrivateKey string `json:"private_key"`
+}
+
 // requesterID returns the signed-in user's ID for owner-gating, or writes a
 // 401 and returns (0, false) when the request is somehow unauthenticated
 // (shouldn't happen behind requireAuth, but cheap to defend).
@@ -77,6 +96,20 @@ func requesterID(w http.ResponseWriter, r *http.Request) (uint, bool) {
 // Create handles POST /api/keys. On generate, the response includes the
 // freshly minted private key (the only time it'll ever cross the wire from
 // the server's perspective unless re-downloaded later).
+//
+// @Summary     Create or import an SSH key
+// @Description Either generates a new ed25519 keypair (`generate=true`) or stores
+// @Description an imported public/private key. The freshly generated private half
+// @Description is returned only on this response — re-download via /keys/{id}/private-key later.
+// @Tags        keys
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     createKeyRequest true "Key creation request"
+// @Success     201  {object} EnvelopeOK{data=createKeyResponse}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Router      /keys [post]
 func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -102,10 +135,7 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := struct {
-		keyView
-		PrivateKey string `json:"private_key,omitempty"`
-	}{keyView: toKeyView(row)}
+	body := createKeyResponse{keyView: toKeyView(row)}
 
 	// Surface the private key in the response only when we just generated it
 	// — for imports the user already has it.
@@ -119,6 +149,16 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // List handles GET /api/keys — strictly scoped to the caller's own keys.
+//
+// @Summary     List SSH keys
+// @Description Returns the caller's stored SSH keys. Public-key + metadata only;
+// @Description the encrypted private half is fetched via GET /keys/{id}/private-key.
+// @Tags        keys
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=[]keyView}
+// @Failure     401 {object} EnvelopeError
+// @Router      /keys [get]
 func (h *Keys) List(w http.ResponseWriter, r *http.Request) {
 	uid, ok := requesterID(w, r)
 	if !ok {
@@ -137,6 +177,17 @@ func (h *Keys) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // Get handles GET /api/keys/{id}.
+//
+// @Summary     Get a single SSH key
+// @Tags        keys
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "Key ID"
+// @Success     200 {object} EnvelopeOK{data=keyView}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /keys/{id} [get]
 func (h *Keys) Get(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
@@ -155,6 +206,19 @@ func (h *Keys) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // PrivateKey handles GET /api/keys/{id}/private-key.
+//
+// @Summary     Download the private half of an SSH key
+// @Description Returns the decrypted private key. Available only to the key owner;
+// @Description fails with 404 if no private half is stored.
+// @Tags        keys
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id  path     int true "Key ID"
+// @Success     200 {object} EnvelopeOK{data=privateKeyResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /keys/{id}/private-key [get]
 func (h *Keys) PrivateKey(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
@@ -169,15 +233,29 @@ func (h *Keys) PrivateKey(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, err)
 		return
 	}
-	response.Success(w, map[string]string{
-		"key_name":    name,
-		"private_key": priv,
+	response.Success(w, privateKeyResponse{
+		KeyName:    name,
+		PrivateKey: priv,
 	})
 }
 
 // AttachPrivateKey handles POST /api/keys/{id}/private-key. Body:
 // `{"private_key":"<PEM/OpenSSH>"}`. Used to vault a private half on a
 // public-only key after the fact.
+//
+// @Summary     Attach a private key to a public-only key
+// @Description Vaults the private half of a key originally imported as a public
+// @Description key only. After this call, has_private_key flips true.
+// @Tags        keys
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path     int                     true "Key ID"
+// @Param       body body     attachPrivateKeyRequest true "Private key payload"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /keys/{id}/private-key [post]
 func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
@@ -187,9 +265,7 @@ func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req struct {
-		PrivateKey string `json:"private_key"`
-	}
+	var req attachPrivateKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid JSON body")
 		return
@@ -206,6 +282,18 @@ func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetDefault handles POST /api/keys/{id}/default.
+//
+// @Summary     Mark this key as the caller's default
+// @Description Default keys are auto-attached at provision time when the request
+// @Description body doesn't specify a key explicitly.
+// @Tags        keys
+// @Security    cookieAuth
+// @Param       id  path     int true "Key ID"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /keys/{id}/default [post]
 func (h *Keys) SetDefault(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
@@ -223,6 +311,16 @@ func (h *Keys) SetDefault(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete handles DELETE /api/keys/{id}.
+//
+// @Summary     Delete an SSH key
+// @Tags        keys
+// @Security    cookieAuth
+// @Param       id  path     int true "Key ID"
+// @Success     204 "No Content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Router      /keys/{id} [delete]
 func (h *Keys) Delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
