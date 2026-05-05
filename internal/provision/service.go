@@ -81,6 +81,7 @@ type ProxmoxClient interface {
 	RebootVM(ctx context.Context, node string, vmid int) (string, error)
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
+	MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error)
 }
 
 // Config holds the deployment-specific knobs the Service needs at construction

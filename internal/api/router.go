@@ -250,6 +250,12 @@ func NewRouter(d Deps) http.Handler {
 				// Reboot waits on a Proxmox task — give it some headroom.
 				r.With(middleware.Timeout(2*time.Minute)).
 					Post("/cluster/vms/{node}/{vmid}/{op}", cluster.VMLifecycle)
+				// Migration is the long path: an online migration on a busy
+				// VM can run several minutes copying memory across nodes;
+				// the offline-fallback path adds shutdown + start on top.
+				// 35 min covers the worst case.
+				r.With(middleware.Timeout(35*time.Minute)).
+					Post("/cluster/vms/{id}/migrate", cluster.MigrateVM)
 				r.Get("/cluster/stats", cluster.Stats)
 
 				// Reconcile can run a few seconds on a busy cluster

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -8,6 +10,7 @@ import (
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
+	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 )
@@ -263,6 +266,99 @@ func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// migrateVMRequest is the body of POST /api/cluster/vms/{id}/migrate.
+//
+// AllowOffline is a confirmation flag the SPA flips after the operator
+// dismisses the "live migration unavailable" prompt. When false (or
+// absent), the handler refuses to fall back to offline migration so the
+// admin retains the cancel option.
+type migrateVMRequest struct {
+	TargetNode   string `json:"target_node"`
+	AllowOffline bool   `json:"allow_offline,omitempty"`
+}
+
+// migrateVMResponse is the body of a successful migrate.
+type migrateVMResponse struct {
+	Mode       provision.MigrationMode `json:"mode" example:"online"`
+	TargetNode string                  `json:"target_node" example:"pve-2"`
+	WasStopped bool                    `json:"was_stopped" example:"false"`
+}
+
+// onlineMigrationFailedResponse is the structured 409 the SPA recognises
+// to render the "continue offline?" confirmation prompt. Code is the
+// stable token clients dispatch on; Reason is the upstream Proxmox
+// message verbatim so the admin can see the actual cause (no shared
+// storage, snapshot present, local CD/DVD, etc.).
+type onlineMigrationFailedResponse struct {
+	Success bool   `json:"success" example:"false"`
+	Code    string `json:"code" example:"online_migration_failed"`
+	Error   string `json:"error" example:"live migration unavailable"`
+	Reason  string `json:"reason" example:"VM has a snapshot; live migration not possible"`
+}
+
+// MigrateVM handles POST /api/cluster/vms/{id}/migrate (admin-only). Two-
+// step UX: the first call tries an online migration when the VM is
+// running and surfaces a structured 409 if Proxmox refuses; the SPA then
+// re-POSTs with allow_offline=true to do a stop → migrate → restart
+// cycle. Stopped VMs migrate offline directly on the first call.
+//
+// @Summary     Migrate a VM to a different cluster node (admin)
+// @Description Tries live migration when the VM is running. On rejection,
+// @Description responds 409 with `code: "online_migration_failed"` so the
+// @Description SPA can prompt the operator. Re-POST with
+// @Description `allow_offline: true` to fall back to a stop → migrate →
+// @Description restart cycle. Stopped VMs migrate offline directly. Foreign
+// @Description / external VMs (no DB row) 404 here.
+// @Tags        cluster
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       id   path     int              true "Nimbus VM DB id"
+// @Param       body body     migrateVMRequest true "Target node + offline-fallback consent"
+// @Success     200  {object} EnvelopeOK{data=migrateVMResponse}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     409  {object} onlineMigrationFailedResponse
+// @Failure     500  {object} EnvelopeError
+// @Router      /cluster/vms/{id}/migrate [post]
+func (h *Cluster) MigrateVM(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	var req migrateVMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+
+	res, err := h.svc.MigrateAdmin(r.Context(), uint(id), req.TargetNode, req.AllowOffline)
+	if err != nil {
+		var onlineFail *internalerrors.OnlineMigrationFailedError
+		if errors.As(err, &onlineFail) {
+			response.JSON(w, http.StatusConflict, onlineMigrationFailedResponse{
+				Success: false,
+				Code:    "online_migration_failed",
+				Error:   "live migration unavailable",
+				Reason:  onlineFail.Reason,
+			})
+			return
+		}
+		response.FromError(w, err)
+		return
+	}
+
+	response.Success(w, migrateVMResponse{
+		Mode:       res.Mode,
+		TargetNode: res.TargetNode,
+		WasStopped: res.WasStopped,
+	})
 }
 
 // VMLifecycle handles POST /api/cluster/vms/{node}/{vmid}/{op} where op is

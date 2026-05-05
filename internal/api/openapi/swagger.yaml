@@ -633,6 +633,26 @@ definitions:
       password:
         type: string
     type: object
+  handlers.migrateVMRequest:
+    properties:
+      allow_offline:
+        type: boolean
+      target_node:
+        type: string
+    type: object
+  handlers.migrateVMResponse:
+    properties:
+      mode:
+        allOf:
+        - $ref: '#/definitions/provision.MigrationMode'
+        example: online
+      target_node:
+        example: pve-2
+        type: string
+      was_stopped:
+        example: false
+        type: boolean
+    type: object
   handlers.networkOpFailureView:
     properties:
       error:
@@ -699,6 +719,21 @@ definitions:
           will reject (raw IP other than 127.0.0.1, loopback). Empty when the
           host looks acceptable.
         type: string
+    type: object
+  handlers.onlineMigrationFailedResponse:
+    properties:
+      code:
+        example: online_migration_failed
+        type: string
+      error:
+        example: live migration unavailable
+        type: string
+      reason:
+        example: VM has a snapshot; live migration not possible
+        type: string
+      success:
+        example: false
+        type: boolean
     type: object
   handlers.pairingView:
     properties:
@@ -1152,6 +1187,14 @@ definitions:
         description: all non-template
         type: integer
     type: object
+  provision.MigrationMode:
+    enum:
+    - online
+    - offline
+    type: string
+    x-enum-varnames:
+    - MigrationModeOnline
+    - MigrationModeOffline
   provision.VMDeleted:
     properties:
       hostname:
@@ -1896,6 +1939,70 @@ paths:
       security:
       - cookieAuth: []
       summary: Destroy a local-source VM by DB id (admin)
+      tags:
+      - cluster
+  /cluster/vms/{id}/migrate:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Tries live migration when the VM is running. On rejection,
+        responds 409 with `code: "online_migration_failed"` so the
+        SPA can prompt the operator. Re-POST with
+        `allow_offline: true` to fall back to a stop → migrate →
+        restart cycle. Stopped VMs migrate offline directly. Foreign
+        / external VMs (no DB row) 404 here.
+      parameters:
+      - description: Nimbus VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Target node + offline-fallback consent
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.migrateVMRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.migrateVMResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.onlineMigrationFailedResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Migrate a VM to a different cluster node (admin)
       tags:
       - cluster
   /cluster/vms/{node}/{vmid}/{op}:
