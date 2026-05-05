@@ -7796,12 +7796,8 @@
                 "cpu": {
                     "type": "number"
                 },
-                "cpu_mhz": {
-                    "description": "CPUMHz is the parsed clock speed in MHz. Zero when unknown.\nProxmox reports a string like \"3600.000\" — see proxmox.CPUInfo.MHz.",
-                    "type": "number"
-                },
                 "cpu_model": {
-                    "description": "CPUModel is the human-readable CPU string from cpuinfo.model\n(e.g. \"Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz\"). Empty when\nthe per-node status call failed or Proxmox didn't return it.",
+                    "description": "CPUModel is the human-readable CPU string from cpuinfo.model\n(e.g. \"Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz\"). Empty when\nthe per-node status call failed or Proxmox didn't return it.\nUsed for the SPA card display AND as the input for the auto-tag\narch detection (DeriveAutoTags).\n\nWe deliberately do NOT surface a separate clock-speed number.\nProxmox's cpuinfo.mhz reports the live throttled P-state which\ninverts the apparent ranking on idle vs busy nodes; the\nmarketing GHz embedded in the model string is base clock only,\nwhich understates a chip that boosts 3-4× higher under load.\nThe model name carries the relevant signal — operators who want\na number look up the SKU.",
                     "type": "string"
                 },
                 "disk_allocated": {

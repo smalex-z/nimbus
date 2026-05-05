@@ -299,13 +299,12 @@ function NodeCard({ node: n }: { node: NodeView }) {
             {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
             {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
           </div>
-          {(n.cpu_model || n.cpu_mhz) && (
+          {n.cpu_model && (
             <div
               style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={n.cpu_model || ''}
+              title={n.cpu_model}
             >
               {shortCPUModel(n.cpu_model)}
-              {n.cpu_mhz ? ` @ ${(n.cpu_mhz / 1000).toFixed(1)} GHz` : ''}
             </div>
           )}
         </div>

@@ -1,10 +1,5 @@
 package proxmox
 
-import (
-	"regexp"
-	"strconv"
-)
-
 // Node is the subset of /api2/json/nodes data Nimbus reads. Field names match
 // the Proxmox JSON keys after Go's standard tag-based decoding.
 type Node struct {
@@ -49,11 +44,11 @@ type NodeStatus struct {
 }
 
 // CPUInfo mirrors the cpuinfo block from /nodes/{node}/status. Proxmox
-// reports `mhz` as a quoted string (e.g. "3600.000") — but that's the
-// *current* P-state, not the base clock. On a 12700H sitting idle that
-// reads 400 MHz; under load 4.7 GHz. We surface the base-clock instead
-// (parsed from the marketing GHz embedded in the model name) so the
-// dashboard shows a stable, comparable number.
+// reports `mhz` as a quoted string (e.g. "3600.000") — that's the
+// *current* P-state from /proc/cpuinfo, not a stable base or boost
+// clock — so we don't surface it. The model string is enough for
+// dashboards (operators eyeball it) and feeds the auto-tag arch
+// detection in the scheduler.
 //
 // Cores is the per-socket count; Cpus is the total logical-thread count.
 // We don't always need both — Cpus matches what Node.MaxCPU already
@@ -61,36 +56,42 @@ type NodeStatus struct {
 // dashboards if we ever want that detail.
 type CPUInfo struct {
 	Model   string `json:"model"`
-	MHzRaw  string `json:"mhz"`
 	Cpus    int    `json:"cpus"`
 	Sockets int    `json:"sockets"`
 	Cores   int    `json:"cores"`
 }
 
-// baseGHzPattern extracts the marketing GHz off Intel/AMD model names
-// like "Intel(R) Core(TM) i7-11800H @ 2.30GHz" or "Xeon E5-2620 v3 @ 2.40GHz".
-// Apple/ARM/Ampere chips usually omit the "@ X.YYGHz" suffix.
-var baseGHzPattern = regexp.MustCompile(`@\s*([0-9]+(?:\.[0-9]+)?)\s*GHz`)
+// Disk mirrors one row from /nodes/{node}/disks/list. Type is one of
+// "ssd", "hdd", "nvme", "usb" — Proxmox's own classification, not a
+// guess from device name. Used by the auto-tag derivation to decide
+// whether a node carries fast storage.
+//
+// Other fields (vendor, serial, gpt, size, used) are present in the
+// API but unused; we only need Type today.
+type Disk struct {
+	Devpath string `json:"devpath"`
+	Type    string `json:"type"`
+	Size    uint64 `json:"size"`
+	Used    string `json:"used,omitempty"`
+}
 
-// MHz returns the base clock in MHz, parsed from the model name. Returns
-// 0 when the model doesn't embed a base clock (Apple silicon, some ARM
-// SKUs). Callers treat 0 as "unknown" and hide the field rather than
-// rendering "0 MHz". The live cpuinfo.mhz value is intentionally NOT
-// used as a fallback — it reflects the throttled current P-state, which
-// makes a busy 12th-gen i7 look slower than an idling 10th-gen i5.
-func (c *CPUInfo) MHz() float64 {
-	if c == nil {
-		return 0
-	}
-	m := baseGHzPattern.FindStringSubmatch(c.Model)
-	if len(m) < 2 {
-		return 0
-	}
-	ghz, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
-		return 0
-	}
-	return ghz * 1000
+// PCIDevice mirrors one row from /nodes/{node}/hardware/pci. The
+// `vendor` and `device_id` strings come back as 4-digit hex with a
+// leading "0x" (e.g. "0x10de" for NVIDIA). DeviceName/VendorName are
+// human-readable when Proxmox can resolve them via lspci's database;
+// empty otherwise.
+//
+// We use this to detect discrete GPU presence — currently NVIDIA-only
+// (vendor 10de). AMD (1002) overlaps with iGPUs in APUs and Intel
+// (8086) is dominated by integrated graphics, so we don't auto-tag
+// from those vendors.
+type PCIDevice struct {
+	ID         string `json:"id"`        // BDF, e.g. "0000:01:00.0"
+	Vendor     string `json:"vendor"`    // hex like "0x10de"
+	Device     string `json:"device_id"` // hex like "0x2204"
+	Class      string `json:"class"`     // hex like "0x030000" (display)
+	DeviceName string `json:"device_name,omitempty"`
+	VendorName string `json:"vendor_name,omitempty"`
 }
 
 // VMStatus is the subset of /nodes/{node}/qemu data we consume.

@@ -140,20 +140,50 @@ const (
 	weightDisk = 0.25
 )
 
+// AutoTagInput is the per-node hardware-introspection bundle the
+// scheduler-side auto-tag derivation reads. CPUModel comes from
+// /nodes/{n}/status; HasSSD from /nodes/{n}/disks/list; HasGPU from
+// /nodes/{n}/hardware/pci (NVIDIA-only today). Both Has* default false
+// when introspection hasn't run yet (new node) or returned 403 (limited
+// API token), in which case those tags simply don't appear.
+type AutoTagInput struct {
+	CPUModel string
+	HasSSD   bool
+	HasGPU   bool
+}
+
 // DeriveAutoTags returns the system-derived tags Nimbus auto-applies to a
-// node based on hardware introspection. Currently just the CPU
-// architecture: "x86" (Intel/AMD) or "arm" (ARM/Apple/Ampere/Snapdragon)
-// — empty when the model string doesn't carry enough signal.
+// node based on hardware introspection. Three signals today:
+//   - arch: "x86" (Intel/AMD) or "arm" (Apple/Ampere/Cortex/Snapdragon/
+//     Neoverse) — derived from the CPU model string.
+//   - "ssd": at least one disk on the node is type=ssd or type=nvme.
+//   - "gpu": at least one PCI device is from NVIDIA (vendor 0x10de).
 //
 // Operators don't see these as editable in the Nodes UI (they live
 // alongside operator tags but aren't writable). The scheduler treats
 // them identically to operator tags for RequiredTags matching, so a
-// user asking for ?required_tags=arm will only land on ARM hosts.
+// user asking for `required_tags=arm,gpu` will land only on ARM hosts
+// that carry an NVIDIA GPU.
 //
 // Pure function — no I/O, runs on every score call.
-func DeriveAutoTags(cpuModel string) []string {
+func DeriveAutoTags(in AutoTagInput) []string {
+	var tags []string
+	if a := archTag(in.CPUModel); a != "" {
+		tags = append(tags, a)
+	}
+	if in.HasSSD {
+		tags = append(tags, "ssd")
+	}
+	if in.HasGPU {
+		tags = append(tags, "gpu")
+	}
+	return tags
+}
+
+// archTag returns "x86" / "arm" / "" from a CPU model string.
+func archTag(cpuModel string) string {
 	if cpuModel == "" {
-		return nil
+		return ""
 	}
 	low := strings.ToLower(cpuModel)
 	switch {
@@ -166,7 +196,7 @@ func DeriveAutoTags(cpuModel string) []string {
 		strings.Contains(low, "pentium"),
 		strings.Contains(low, "celeron"),
 		strings.Contains(low, "x86"):
-		return []string{"x86"}
+		return "x86"
 	case strings.Contains(low, "arm"),
 		strings.Contains(low, "aarch64"),
 		strings.Contains(low, "cortex"),
@@ -174,9 +204,9 @@ func DeriveAutoTags(cpuModel string) []string {
 		strings.Contains(low, "ampere"),
 		strings.Contains(low, "snapdragon"),
 		strings.Contains(low, "neoverse"):
-		return []string{"arm"}
+		return "arm"
 	}
-	return nil
+	return ""
 }
 
 // DetectSpecialization classifies a node by its RAM-per-vCPU ratio. Pure;

@@ -46,6 +46,12 @@ interface FormState {
   // (e.g. "fast-cpu,nvme"). Empty = no constraint. Free-form text;
   // the cluster's existing operator-defined tags surface as quick-pick
   // chips in the AffinityPicker below.
+  //
+  // Defaults to "x86" because every cloud-init template Nimbus ships
+  // (ubuntu-22.04 / ubuntu-24.04 / debian-11 / debian-12) is x86_64 —
+  // KVM can't cross-arch, so landing one of those images on an ARM
+  // host fails at boot. Operators with ARM hardware + ARM templates
+  // remove the chip and add `arm` instead.
   requiredTags: string
   os: OSTemplate
   keyMode: KeyMode
@@ -59,7 +65,7 @@ interface FormState {
 const DEFAULT_FORM: FormState = {
   hostname: '',
   tier: 'medium',
-  requiredTags: '',
+  requiredTags: 'x86',
   os: 'ubuntu-24.04',
   keyMode: 'gen',
   savedKeyId: null,
@@ -1254,8 +1260,10 @@ function AffinityPicker({
       )}
       <p className="text-xs text-ink-3 mt-0.5 leading-relaxed">
         Comma-separated. The scheduler only places this VM on nodes carrying every listed tag —
-        operators apply tags from <a href="/nodes" className="underline">/nodes</a>. Empty = no
-        constraint, scored by capacity alone.
+        operators apply tags from <a href="/nodes" className="underline">/nodes</a>. Defaults to
+        <code className="font-mono mx-1">x86</code> because Nimbus's cloud-init templates are all
+        x86_64; remove it (and add <code className="font-mono mx-1">arm</code>) only when targeting
+        ARM hosts with an ARM-built template. Empty = no constraint.
       </p>
     </div>
   )

@@ -1461,12 +1461,17 @@ type nodeMeta struct {
 // constraint matches an ARM host even when no operator tags are set.
 func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, error) {
 	var rows []db.Node
-	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model", "has_ssd", "has_gpu").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[string]nodeMeta, len(rows))
 	for _, r := range rows {
-		tags := append(splitCSVTags(r.Tags), nodescore.DeriveAutoTags(r.CPUModel)...)
+		auto := nodescore.DeriveAutoTags(nodescore.AutoTagInput{
+			CPUModel: r.CPUModel,
+			HasSSD:   r.HasSSD,
+			HasGPU:   r.HasGPU,
+		})
+		tags := append(splitCSVTags(r.Tags), auto...)
 		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: tags}
 	}
 	return out, nil

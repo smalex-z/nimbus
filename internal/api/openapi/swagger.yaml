@@ -1133,16 +1133,21 @@ definitions:
         type: array
       cpu:
         type: number
-      cpu_mhz:
-        description: |-
-          CPUMHz is the parsed clock speed in MHz. Zero when unknown.
-          Proxmox reports a string like "3600.000" — see proxmox.CPUInfo.MHz.
-        type: number
       cpu_model:
         description: |-
           CPUModel is the human-readable CPU string from cpuinfo.model
           (e.g. "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"). Empty when
           the per-node status call failed or Proxmox didn't return it.
+          Used for the SPA card display AND as the input for the auto-tag
+          arch detection (DeriveAutoTags).
+
+          We deliberately do NOT surface a separate clock-speed number.
+          Proxmox's cpuinfo.mhz reports the live throttled P-state which
+          inverts the apparent ranking on idle vs busy nodes; the
+          marketing GHz embedded in the model string is base clock only,
+          which understates a chip that boosts 3-4× higher under load.
+          The model name carries the relevant signal — operators who want
+          a number look up the SKU.
         type: string
       disk_allocated:
         type: integer

@@ -219,6 +219,35 @@ func (c *Client) GetNodeStatus(ctx context.Context, node string) (*NodeStatus, e
 	return &status, nil
 }
 
+// ListDisks returns the physical disks Proxmox sees on a node. Used by
+// the auto-tag derivation to decide whether a node carries SSD/NVMe
+// storage (so the scheduler can honour `ssd` host-aggregate constraints).
+//
+// /nodes/{node}/disks/list is admin-API and may 403 with limited tokens
+// — callers treat the error as "unknown" and skip the ssd auto-tag
+// rather than failing the whole reconcile.
+func (c *Client) ListDisks(ctx context.Context, node string) ([]Disk, error) {
+	var disks []Disk
+	path := fmt.Sprintf("/nodes/%s/disks/list", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &disks); err != nil {
+		return nil, err
+	}
+	return disks, nil
+}
+
+// ListPCIDevices returns PCI devices on a node. Used by the auto-tag
+// derivation to detect discrete-GPU presence (NVIDIA vendor 0x10de).
+// Like ListDisks this is admin-API and may 403; callers treat that as
+// "unknown" and skip the gpu auto-tag.
+func (c *Client) ListPCIDevices(ctx context.Context, node string) ([]PCIDevice, error) {
+	var devs []PCIDevice
+	path := fmt.Sprintf("/nodes/%s/hardware/pci", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &devs); err != nil {
+		return nil, err
+	}
+	return devs, nil
+}
+
 // ListVMs returns the QEMU VMs on a single node — used for tie-break VM
 // counts and for confirming a template VMID exists locally.
 func (c *Client) ListVMs(ctx context.Context, node string) ([]VMStatus, error) {

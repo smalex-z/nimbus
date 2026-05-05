@@ -451,7 +451,17 @@ type Node struct {
 	// can derive auto-tags (arch: x86 vs arm) without a per-call status
 	// fan-out. Refreshed on every reconcileObserved cycle. Empty when the
 	// status fan-out failed at the time of the last observation.
-	CPUModel   string    `gorm:"column:cpu_model;default:''"        json:"-"`
+	CPUModel string `gorm:"column:cpu_model;default:''"        json:"-"`
+	// HasSSD/HasGPU are auto-detected from /nodes/{n}/disks/list and
+	// /nodes/{n}/hardware/pci respectively. Populated only by the
+	// background reconcile loop (those endpoints aren't called on the
+	// 15 s foreground polling cycle). False until the first reconcile
+	// completes, which is fine — the auto-tags just don't appear yet.
+	// HasGPU is currently NVIDIA-only (vendor 0x10de); AMD and Intel
+	// discrete cards aren't reliably distinguishable from iGPUs via
+	// the PCI vendor list and are left for operator tagging.
+	HasSSD     bool      `gorm:"column:has_ssd;default:false"       json:"-"`
+	HasGPU     bool      `gorm:"column:has_gpu;default:false"       json:"-"`
 	LastSeenAt time.Time `gorm:"column:last_seen_at"                json:"last_seen_at"`
 	CreatedAt  time.Time `gorm:"column:created_at"                  json:"created_at"`
 	UpdatedAt  time.Time `gorm:"column:updated_at"                  json:"updated_at"`

@@ -354,25 +354,29 @@ func TestDetectSpecialization(t *testing.T) {
 func TestDeriveAutoTags(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		model string
-		want  []string
+		name string
+		in   nodescore.AutoTagInput
+		want []string
 	}{
-		{"intel core i7", "Intel(R) Core(TM) i7-11800H @ 2.30GHz", []string{"x86"}},
-		{"intel xeon", "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz", []string{"x86"}},
-		{"amd ryzen", "AMD Ryzen 7 5800X 8-Core Processor", []string{"x86"}},
-		{"amd epyc", "AMD EPYC 7763 64-Core Processor", []string{"x86"}},
-		{"apple silicon", "Apple M1 Pro", []string{"arm"}},
-		{"ampere altra", "Ampere(R) Altra(R) Q80-30", []string{"arm"}},
-		{"arm cortex", "ARM Cortex-A78", []string{"arm"}},
-		{"snapdragon", "Qualcomm Snapdragon X Elite", []string{"arm"}},
-		{"empty model", "", nil},
-		{"unrecognized", "Some Custom RISC-V Chip", nil},
+		{"intel core i7", nodescore.AutoTagInput{CPUModel: "Intel(R) Core(TM) i7-11800H @ 2.30GHz"}, []string{"x86"}},
+		{"intel xeon", nodescore.AutoTagInput{CPUModel: "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz"}, []string{"x86"}},
+		{"amd ryzen", nodescore.AutoTagInput{CPUModel: "AMD Ryzen 7 5800X 8-Core Processor"}, []string{"x86"}},
+		{"amd epyc", nodescore.AutoTagInput{CPUModel: "AMD EPYC 7763 64-Core Processor"}, []string{"x86"}},
+		{"apple silicon", nodescore.AutoTagInput{CPUModel: "Apple M1 Pro"}, []string{"arm"}},
+		{"ampere altra", nodescore.AutoTagInput{CPUModel: "Ampere(R) Altra(R) Q80-30"}, []string{"arm"}},
+		{"arm cortex", nodescore.AutoTagInput{CPUModel: "ARM Cortex-A78"}, []string{"arm"}},
+		{"snapdragon", nodescore.AutoTagInput{CPUModel: "Qualcomm Snapdragon X Elite"}, []string{"arm"}},
+		{"empty model", nodescore.AutoTagInput{}, nil},
+		{"unrecognized", nodescore.AutoTagInput{CPUModel: "Some Custom RISC-V Chip"}, nil},
+		{"x86 + ssd", nodescore.AutoTagInput{CPUModel: "Intel Xeon", HasSSD: true}, []string{"x86", "ssd"}},
+		{"x86 + gpu", nodescore.AutoTagInput{CPUModel: "AMD Ryzen", HasGPU: true}, []string{"x86", "gpu"}},
+		{"all three", nodescore.AutoTagInput{CPUModel: "Apple M2", HasSSD: true, HasGPU: true}, []string{"arm", "ssd", "gpu"}},
+		{"ssd alone (no cpu)", nodescore.AutoTagInput{HasSSD: true}, []string{"ssd"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got := nodescore.DeriveAutoTags(c.model)
+			got := nodescore.DeriveAutoTags(c.in)
 			if len(got) != len(c.want) {
 				t.Fatalf("len(got)=%d want %d (got=%v want=%v)", len(got), len(c.want), got, c.want)
 			}

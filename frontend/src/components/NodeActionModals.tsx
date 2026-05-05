@@ -128,9 +128,11 @@ export function TagsModal({
       <div className="eyebrow">Edit tags</div>
       <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>{node.name}</h3>
       <p style={{ margin: '0 0 18px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Comma-separated. Tags don't yet affect placement — they're recorded
-        for the future workload-aware scheduler (e.g. a future "pin GPU
-        jobs to nodes tagged <code>gpu</code>" rule).
+        Comma-separated. Tags are the host-aggregate filter the scheduler
+        uses at provision time — a VM with required tags <code>fast-cpu,nvme</code>{' '}
+        only lands on nodes carrying every listed tag. Nimbus auto-applies
+        a few derived tags (<code>x86</code>/<code>arm</code>, <code>ssd</code>,{' '}
+        <code>gpu</code>); this field is for the operator-defined rest.
       </p>
 
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

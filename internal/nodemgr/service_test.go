@@ -73,6 +73,14 @@ func (f *fakePVE) GetNodeStatus(_ context.Context, _ string) (*proxmox.NodeStatu
 	return &proxmox.NodeStatus{}, nil
 }
 
+func (f *fakePVE) ListDisks(_ context.Context, _ string) ([]proxmox.Disk, error) {
+	return nil, nil
+}
+
+func (f *fakePVE) ListPCIDevices(_ context.Context, _ string) ([]proxmox.PCIDevice, error) {
+	return nil, nil
+}
+
 func (f *fakePVE) NodeAddresses(_ context.Context) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
