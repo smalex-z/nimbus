@@ -1,5 +1,10 @@
 package proxmox
 
+import (
+	"regexp"
+	"strconv"
+)
+
 // Node is the subset of /api2/json/nodes data Nimbus reads. Field names match
 // the Proxmox JSON keys after Go's standard tag-based decoding.
 type Node struct {
@@ -44,9 +49,11 @@ type NodeStatus struct {
 }
 
 // CPUInfo mirrors the cpuinfo block from /nodes/{node}/status. Proxmox
-// reports `mhz` as a quoted string (e.g. "3600.000"); we parse to a
-// numeric value for the SPA via the MHz() helper rather than exporting
-// the raw string.
+// reports `mhz` as a quoted string (e.g. "3600.000") — but that's the
+// *current* P-state, not the base clock. On a 12700H sitting idle that
+// reads 400 MHz; under load 4.7 GHz. We surface the base-clock instead
+// (parsed from the marketing GHz embedded in the model name) so the
+// dashboard shows a stable, comparable number.
 //
 // Cores is the per-socket count; Cpus is the total logical-thread count.
 // We don't always need both — Cpus matches what Node.MaxCPU already
@@ -60,19 +67,30 @@ type CPUInfo struct {
 	Cores   int    `json:"cores"`
 }
 
-// MHz parses the quoted clock-speed string. Returns 0 when unparseable
-// (Proxmox occasionally reports "unknown" on virtualized nodes / nested
-// virt). Callers treat 0 as "unknown" and hide the field rather than
-// rendering "0 MHz".
+// baseGHzPattern extracts the marketing GHz off Intel/AMD model names
+// like "Intel(R) Core(TM) i7-11800H @ 2.30GHz" or "Xeon E5-2620 v3 @ 2.40GHz".
+// Apple/ARM/Ampere chips usually omit the "@ X.YYGHz" suffix.
+var baseGHzPattern = regexp.MustCompile(`@\s*([0-9]+(?:\.[0-9]+)?)\s*GHz`)
+
+// MHz returns the base clock in MHz, parsed from the model name. Returns
+// 0 when the model doesn't embed a base clock (Apple silicon, some ARM
+// SKUs). Callers treat 0 as "unknown" and hide the field rather than
+// rendering "0 MHz". The live cpuinfo.mhz value is intentionally NOT
+// used as a fallback — it reflects the throttled current P-state, which
+// makes a busy 12th-gen i7 look slower than an idling 10th-gen i5.
 func (c *CPUInfo) MHz() float64 {
-	if c == nil || c.MHzRaw == "" {
+	if c == nil {
 		return 0
 	}
-	v, err := parseFloatLenient(c.MHzRaw)
+	m := baseGHzPattern.FindStringSubmatch(c.Model)
+	if len(m) < 2 {
+		return 0
+	}
+	ghz, err := strconv.ParseFloat(m[1], 64)
 	if err != nil {
 		return 0
 	}
-	return v
+	return ghz * 1000
 }
 
 // VMStatus is the subset of /nodes/{node}/qemu data we consume.
