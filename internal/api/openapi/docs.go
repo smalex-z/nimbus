@@ -857,6 +857,176 @@ const docTemplate = `{
                 }
             }
         },
+        "/cluster/vms/{id}/migrate": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Tries live migration when the VM is running. On rejection,\nresponds 409 with ` + "`" + `code: \"online_migration_failed\"` + "`" + ` so the\nSPA can prompt the operator. Re-POST with\n` + "`" + `allow_offline: true` + "`" + ` to fall back to a stop → migrate →\nrestart cycle. Stopped VMs migrate offline directly. Foreign\n/ external VMs (no DB row) 404 here.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "cluster"
+                ],
+                "summary": "Migrate a VM to a different cluster node (admin)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Nimbus VM DB id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Target node + offline-fallback consent",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.migrateVMRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.migrateVMResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.onlineMigrationFailedResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/cluster/vms/{id}/migrate-plan": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Same nodescore evaluation provision uses, applied to an\nexisting VM. AutoPick is the highest-scoring eligible\ntarget — what Nimbus would pick if this were a fresh\nplacement. Eligible is sorted score-desc with disabled\noptions last so the dropdown order is meaningful.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "cluster"
+                ],
+                "summary": "Score migration targets for a single VM (admin)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Nimbus VM DB id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/nodemgr.MigratePlan"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/cluster/vms/{node}/{vmid}/{op}": {
             "post": {
                 "security": [
@@ -7000,6 +7170,38 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.migrateVMRequest": {
+            "type": "object",
+            "properties": {
+                "allow_offline": {
+                    "type": "boolean"
+                },
+                "target_node": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.migrateVMResponse": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/provision.MigrationMode"
+                        }
+                    ],
+                    "example": "online"
+                },
+                "target_node": {
+                    "type": "string",
+                    "example": "pve-2"
+                },
+                "was_stopped": {
+                    "type": "boolean",
+                    "example": false
+                }
+            }
+        },
         "handlers.networkOpFailureView": {
             "type": "object",
             "properties": {
@@ -7078,6 +7280,27 @@ const docTemplate = `{
                 "redirect_uri_warning": {
                     "description": "RedirectURIWarning is set when the resolved host is something Google\nwill reject (raw IP other than 127.0.0.1, loopback). Empty when the\nhost looks acceptable.",
                     "type": "string"
+                }
+            }
+        },
+        "handlers.onlineMigrationFailedResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "online_migration_failed"
+                },
+                "error": {
+                    "type": "string",
+                    "example": "live migration unavailable"
+                },
+                "reason": {
+                    "type": "string",
+                    "example": "VM has a snapshot; live migration not possible"
+                },
+                "success": {
+                    "type": "boolean",
+                    "example": false
                 }
             }
         },
@@ -7579,6 +7802,35 @@ const docTemplate = `{
                 }
             }
         },
+        "nodemgr.MigratePlan": {
+            "type": "object",
+            "properties": {
+                "auto_pick": {
+                    "type": "string"
+                },
+                "eligible": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/nodemgr.EligibleTarget"
+                    }
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "source_node": {
+                    "type": "string"
+                },
+                "tier": {
+                    "type": "string"
+                },
+                "vm_id": {
+                    "type": "integer"
+                },
+                "vm_row_id": {
+                    "type": "integer"
+                }
+            }
+        },
         "nodemgr.NodeProjection": {
             "type": "object",
             "properties": {
@@ -7722,6 +7974,17 @@ const docTemplate = `{
                 }
             }
         },
+        "provision.MigrationMode": {
+            "type": "string",
+            "enum": [
+                "online",
+                "offline"
+            ],
+            "x-enum-varnames": [
+                "MigrationModeOnline",
+                "MigrationModeOffline"
+            ]
+        },
         "provision.VMDeleted": {
             "type": "object",
             "properties": {
@@ -7779,6 +8042,26 @@ const docTemplate = `{
                 }
             }
         },
+        "provision.VMRename": {
+            "type": "object",
+            "properties": {
+                "from_name": {
+                    "type": "string"
+                },
+                "node": {
+                    "type": "string"
+                },
+                "to_name": {
+                    "type": "string"
+                },
+                "vm_row_id": {
+                    "type": "integer"
+                },
+                "vmid": {
+                    "type": "integer"
+                }
+            }
+        },
         "provision.VMSyncReport": {
             "type": "object",
             "properties": {
@@ -7802,6 +8085,12 @@ const docTemplate = `{
                 },
                 "no_ops": {
                     "type": "integer"
+                },
+                "renamed": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/provision.VMRename"
+                    }
                 },
                 "snapshot_at": {
                     "type": "string"

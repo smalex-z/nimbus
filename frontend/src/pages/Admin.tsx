@@ -3,6 +3,7 @@ import { adminDeleteVM, adminVMLifecycle, getClusterStats, listClusterVMs, listI
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
+import MigrateVMModal from '@/components/ui/MigrateVMModal'
 import OSIcon from '@/components/ui/OSIcon'
 import Pagination from '@/components/ui/Pagination'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
@@ -37,6 +38,11 @@ interface AdminData {
   // updateVMStatus stamps a row's status optimistically after a lifecycle
   // op. Keyed by (node, vmid) since foreign/external rows lack a nimbus id.
   updateVMStatus: (node: string, vmid: number, status: ClusterVMStatus) => void
+  // updateVMNode swaps a row's node optimistically after an admin migrate.
+  // Keyed by Nimbus DB id — only local-source VMs are migratable through
+  // this path. The 15 s poll corrects any drift if the migration actually
+  // landed somewhere different.
+  updateVMNode: (id: number, newNode: string) => void
 }
 
 // pollEachWith fires `fn` immediately, then every `intervalMs`, until the
@@ -129,7 +135,11 @@ function useAdminData(): AdminData {
     [],
   )
 
-  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus }
+  const updateVMNode = useCallback((id: number, newNode: string) => {
+    setVMs((prev) => prev.map((v) => (v.id === id ? { ...v, node: newNode } : v)))
+  }, [])
+
+  return { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus, updateVMNode }
 }
 
 interface FilterState {
@@ -144,7 +154,7 @@ const headerCellClass =
   'text-left text-[11px] font-mono uppercase tracking-wider text-ink-3 px-4 py-3 whitespace-nowrap'
 
 export default function Admin() {
-  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus } = useAdminData()
+  const { nodes, vms, ips, clusterStats, statsLoading, vmsLoading, statsError, vmsError, removeVM, updateVMStatus, updateVMNode } = useAdminData()
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
 
 
@@ -269,6 +279,7 @@ export default function Admin() {
               onClearFilters={clearFilters}
               onVMDeleted={removeVM}
               onVMStatusChanged={updateVMStatus}
+              onVMMigrated={updateVMNode}
             />
           )}
 
@@ -631,6 +642,7 @@ function VMTable({
   onClearFilters,
   onVMDeleted,
   onVMStatusChanged,
+  onVMMigrated,
 }: {
   vms: ClusterVM[]
   allVMs: ClusterVM[]
@@ -642,10 +654,12 @@ function VMTable({
   onClearFilters: () => void
   onVMDeleted: (id: number) => void
   onVMStatusChanged: (node: string, vmid: number, status: ClusterVMStatus) => void
+  onVMMigrated: (id: number, newNode: string) => void
 }) {
   const [sshTarget, setSshTarget] = useState<SSHTarget | null>(null)
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
   const [editTarget, setEditTarget] = useState<ClusterVM | null>(null)
+  const [migrateTarget, setMigrateTarget] = useState<ClusterVM | null>(null)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   // VMID column doubles as the sort control. Default desc so the most
@@ -867,6 +881,11 @@ function VMTable({
                               ? () => setEditTarget(vm)
                               : undefined
                           }
+                          onMigrate={
+                            vm.source === 'local' && vm.id !== undefined
+                              ? () => setMigrateTarget(vm)
+                              : undefined
+                          }
                         />
                       </div>
                     </td>
@@ -909,6 +928,26 @@ function VMTable({
             const id = editTarget.id!
             setEditTarget(null)
             onVMDeleted(id)
+          }}
+        />
+      )}
+      {migrateTarget && migrateTarget.id !== undefined && migrateTarget.tier && migrateTarget.tier !== 'custom' && (
+        <MigrateVMModal
+          vm={{
+            id: migrateTarget.id,
+            hostname: migrateTarget.hostname || migrateTarget.name,
+            node: migrateTarget.node,
+            tier: migrateTarget.tier,
+            status: migrateTarget.status,
+          }}
+          onClose={() => setMigrateTarget(null)}
+          onMigrated={(newNode) => {
+            // Optimistic update — patch the row's node so the operator
+            // sees the move land immediately. The 15 s /cluster/vms
+            // poll reconciles any drift from the canonical Proxmox state.
+            const id = migrateTarget.id!
+            setMigrateTarget(null)
+            onVMMigrated(id, newNode)
           }}
         />
       )}
