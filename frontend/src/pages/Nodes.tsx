@@ -287,27 +287,32 @@ function NodeCard({ node: n }: { node: NodeView }) {
         opacity: offline ? 0.55 : 1,
       }}
     >
-      {/* Header — name + one-line specs on the left, status pills on the
-          right. Specs format: `4c/8t i5-1035G1 · 7.5 GiB · 141.6 GiB
-          local-lvm · 1/1 VM`. CPU cores + threads + short model collapse
-          into the same line that previously held just the count + bytes,
-          so a node that knows its CPU shape doesn't grow a second line.
-          Swap signal moves into the RAM bar hint below — the corner
-          badge made the header rebalance every time it appeared. */}
+      {/* Header — name + tier counts on the left, status pills on the
+          right. Specs row uses "Nc/Mt" so the i5-1035G1 reads as 4c/8t
+          rather than the previously misleading 8c (Proxmox's max_cpu
+          is logical threads, not cores). The full CPU model lives on
+          its own line below to keep the specs row from wrapping when
+          the model name is long. Swap signal annotates the RAM bar
+          subhint below — keeps the header layout stable. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
             {n.is_self_host && <SelfPill />}
           </div>
-          <div
-            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-            title={n.cpu_model}
-          >
-            {cpuLabel(n)} · {formatBytes(n.mem_total)}
+          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2 }}>
+            {cpuCountLabel(n)} · {formatBytes(n.mem_total)}
             {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
             {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
           </div>
+          {n.cpu_model && (
+            <div
+              style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={n.cpu_model}
+            >
+              {shortCPUModel(n.cpu_model)}
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 4 }}>
           <LockChip state={n.lock_state} reason={n.lock_reason} />
@@ -325,19 +330,9 @@ function NodeCard({ node: n }: { node: NodeView }) {
         <MiniBar
           label="RAM"
           pct={memPct}
-          hint={
-            <>
-              {formatBytes(n.mem_used)} / {formatBytes(n.mem_total)}
-              {swapping && (
-                <span
-                  title="Allocated memory exceeded physical RAM — host is paging to swap"
-                  style={{ color: '#9a5c2e', marginLeft: 6 }}
-                >
-                  +{formatBytes(n.swap_used)} swap
-                </span>
-              )}
-            </>
-          }
+          hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
+          subhint={swapping ? `paging +${formatBytes(n.swap_used)} to swap` : undefined}
+          subhintTitle="Allocated memory exceeded physical RAM — host is paging to swap"
         />
         <MiniBar label="RAM alloc" pct={memAllocPct} hint={`${memAllocPct.toFixed(0)}%`} accent />
         {n.disk_total > 0 && (
@@ -382,7 +377,18 @@ function NodeCard({ node: n }: { node: NodeView }) {
 // → bad as percent climbs; "accent" caller forces the warn palette
 // regardless (used for "RAM allocated" so it visually distinguishes from
 // "RAM in use" even at the same percent).
-function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hint: React.ReactNode; accent?: boolean }) {
+function MiniBar({ label, pct, hint, accent, subhint, subhintTitle }: {
+  label: string
+  pct: number
+  hint: string
+  accent?: boolean
+  // subhint renders right-aligned in muted-amber underneath the bar.
+  // Used for the RAM bar's swap callout — keeps the main hint
+  // rectangle clean (right-aligned numbers stay aligned across rows)
+  // while still surfacing the warning where the eye already is.
+  subhint?: string
+  subhintTitle?: string
+}) {
   const clamped = Math.max(0, Math.min(100, pct))
   let fill = 'var(--ink-mute)'
   if (accent) {
@@ -410,6 +416,17 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
       >
         <div style={{ width: `${clamped}%`, height: '100%', background: fill, transition: 'width 200ms ease' }} />
       </div>
+      {subhint && (
+        <div
+          title={subhintTitle}
+          style={{
+            fontSize: 9, color: '#9a5c2e', fontFamily: 'Geist Mono, monospace',
+            textAlign: 'right', marginTop: 2,
+          }}
+        >
+          {subhint}
+        </div>
+      )}
     </div>
   )
 }
@@ -417,20 +434,18 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
 // pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
 // "allocated" cells where high values flag overcommit risk and the
 // operator's eye should snap to them.
-// cpuLabel collapses the previous two-line "8c\nCore i5-1035G1" header
-// into one tight string: "4c/8t i5-1035G1". When physical core count
-// isn't known (cpu_cores=0 — older PVE / nested-virt failed status
-// fanout) it falls back to "Mt" alone since the historic "8c"
-// rendering was misleading (Proxmox's max_cpu is logical threads, not
-// cores). Drops the "Core "/"Xeon "/etc. family prefix from the
-// shortened model so we keep more of the part number visible in the
-// space we have.
-function cpuLabel(n: NodeView): string {
+// cpuCountLabel renders the CPU count slot of the specs row. When
+// physical cores ≠ threads we show "Nc/Mt" so a 4c/8t laptop chip is
+// distinct from a real 8c desktop chip; when they match (no SMT, e.g.
+// Apple silicon) we just show "Mc". When cpu_cores is 0 (older PVE /
+// nested-virt failed status fanout) we fall back to "Mt" since the
+// historic "8c" rendering was misleading (max_cpu is logical threads).
+function cpuCountLabel(n: NodeView): string {
   const threads = n.max_cpu
   const cores = n.cpu_cores ?? 0
-  const count = cores > 0 && cores !== threads ? `${cores}c/${threads}t` : `${threads}t`
-  const model = shortCPUModel(n.cpu_model).replace(/^Core\s+/i, '').replace(/^Xeon\s+/i, '')
-  return model ? `${count} ${model}` : count
+  if (cores <= 0) return `${threads}t`
+  if (cores === threads) return `${cores}c`
+  return `${cores}c/${threads}t`
 }
 
 // shortCPUModel strips the noisy boilerplate Intel/AMD pack into their
