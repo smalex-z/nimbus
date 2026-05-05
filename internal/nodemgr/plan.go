@@ -111,6 +111,7 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 			LockState: lockOrNone(row.LockState),
+			Tags:      splitTags(row.Tags),
 		})
 	}
 
@@ -207,18 +208,14 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			}
 		}
 
-		// VM workload drives the Profile selection so a migrated DB VM
-		// still prefers a memory-optimized destination. Empty (legacy
-		// row) → tier-default.
-		workload := nodescore.WorkloadType(vm.WorkloadType)
-		if workload == "" {
-			workload = nodescore.DefaultWorkloadForTier(vm.Tier)
-		}
-
+		// Apply the VM's host-aggregate constraint (the tags it was
+		// originally provisioned against) so drain replacement only
+		// migrates to nodes carrying those tags. Empty = no
+		// constraint; placement is capacity-only.
 		env := nodescore.Env{
 			TemplatesPresent: templatesPresent,
 			StorageByNode:    perVMStorage,
-			Workload:         workload,
+			RequiredTags:     splitVMTags(vm.RequiredTags),
 		}
 		decisions := nodescore.Evaluate(candidates, runtime, tier, env)
 		winner, _ := nodescore.Pick(decisions)

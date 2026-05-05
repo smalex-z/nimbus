@@ -300,12 +300,15 @@ type VM struct {
 	IP       string `gorm:"column:ip;index;not null"                json:"ip"`
 	Node     string `gorm:"column:node;not null"                    json:"node"`
 	Tier     string `gorm:"column:tier;not null"                    json:"tier"`
-	// WorkloadType is the operator-supplied (or tier-defaulted) hint
-	// driving workload-aware scoring. One of "web", "database",
-	// "compute", "balanced". Empty for legacy rows; readers fall back
-	// to nodescore.DefaultWorkloadForTier(tier) so behavior stays
-	// sensible without a destructive backfill.
-	WorkloadType string `gorm:"column:workload_type;default:''"        json:"workload_type"`
+	// RequiredTags is the host-aggregate filter the user opted into
+	// at provision time, as a CSV string (e.g. "fast-cpu,nvme"). Used
+	// by drain replacement to apply the same filter — a VM that
+	// required `fast-cpu` only migrates to other `fast-cpu`-tagged
+	// nodes. Empty = no constraint. Replaces the earlier (unmerged)
+	// WorkloadType experiment; column name stays `workload_type` so
+	// the schema doesn't require a rename migration on systems that
+	// briefly ran the prior column.
+	RequiredTags string `gorm:"column:workload_type;default:''"        json:"required_tags"`
 	OSTemplate   string `gorm:"column:os_template;not null"            json:"os_template"`
 	Username     string `gorm:"column:username"                         json:"username"`
 	Status       string `gorm:"column:status;index;not null"            json:"status"`

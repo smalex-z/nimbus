@@ -455,14 +455,12 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// uses the node_templates table (filled in by bootstrap) so we don't have
 	// to fan out a TemplateExists call per node.
 	//
-	// WorkloadType drives the nodescore Profile (web/database/compute/
-	// balanced). Empty in the request falls back to a tier-based default so
-	// callers that don't pass workload still get reasonable placement.
-	workload := nodescore.WorkloadType(req.WorkloadType)
-	if workload == "" {
-		workload = nodescore.DefaultWorkloadForTier(req.Tier)
-	}
-	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate, workload)
+	// RequiredTags is the host-aggregate filter — operator tags
+	// hardware, user opts in at provision time. Empty = no constraint
+	// (score by capacity only). Persisted on db.VM so drain
+	// replacement applies the same filter.
+	requiredTags := splitRequiredTags(req.RequiredTags)
+	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate, requiredTags)
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +636,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		IP:           ip,
 		Node:         target,
 		Tier:         req.Tier,
-		WorkloadType: string(workload),
+		RequiredTags: req.RequiredTags,
 		OSTemplate:   req.OSTemplate,
 		Username:     username,
 		Status:       "running",
@@ -1311,7 +1309,7 @@ func (s *Service) pickNode(
 	ctx context.Context,
 	tier nodescore.Tier,
 	osKey string,
-	workload nodescore.WorkloadType,
+	requiredTags []string,
 ) (target string, templateVMID int, err error) {
 	// Fetch all node_templates rows for this OS in one query. Returned
 	// (node, vmid) pairs are exactly the nodes eligible to host this OS.
@@ -1397,21 +1395,22 @@ func (s *Service) pickNode(
 		}
 	}
 
-	// Lock state lives on db.Node and is set by nodemgr (Cordon/Drain).
-	// Without this lookup the scheduler ignores cordoned/draining/drained
-	// nodes' lock state — defeating the whole point of cordoning. One
-	// SELECT per provision is fine; the row count is the cluster size.
-	lockByNode, err := s.lockStatesByNode(ctx)
+	// db.Node carries the operator-set state pickNode needs — lock
+	// state for the cordoning gate, tags for the host-aggregate
+	// filter. One SELECT per provision; row count = cluster size.
+	metaByNode, err := s.nodeMetaByNode(ctx)
 	if err != nil {
-		return "", 0, fmt.Errorf("load node lock states: %w", err)
+		return "", 0, fmt.Errorf("load node meta: %w", err)
 	}
 
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
+		meta := metaByNode[n.Name]
 		scoringNodes = append(scoringNodes, nodescore.Node{
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
-			LockState: lockByNode[n.Name],
+			LockState: meta.LockState,
+			Tags:      meta.Tags,
 		})
 	}
 
@@ -1421,39 +1420,73 @@ func (s *Service) pickNode(
 		StorageByNode:    storageByNode,
 		MemBufferMiB:     s.cfg.MemBufferMiB,
 		CPULoadFactor:    s.cfg.CPULoadFactor,
-		Workload:         workload,
+		RequiredTags:     requiredTags,
 	}
 	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
 	winner, all := nodescore.Pick(decisions)
+	tagsLog := strings.Join(requiredTags, ",")
+	if tagsLog == "" {
+		tagsLog = "<none>"
+	}
 	if winner == nil {
-		log.Printf("pickNode: tier=%s os=%s workload=%s no_winner decisions: %s",
-			tier.Name, osKey, workload, formatDecisions(all))
+		log.Printf("pickNode: tier=%s os=%s tags=%s no_winner decisions: %s",
+			tier.Name, osKey, tagsLog, formatDecisions(all))
 		return "", 0, &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s workload=%s: %s",
-				tier.Name, osKey, workload, formatRejections(all)),
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s tags=%s: %s",
+				tier.Name, osKey, tagsLog, formatRejections(all)),
 		}
 	}
-	log.Printf("pickNode: tier=%s os=%s workload=%s winner=%s spec=%s decisions: %s",
-		tier.Name, osKey, workload, winner.Node.Name, winner.Result.Spec, formatDecisions(all))
+	log.Printf("pickNode: tier=%s os=%s tags=%s winner=%s spec=%s decisions: %s",
+		tier.Name, osKey, tagsLog, winner.Node.Name, winner.Result.Spec, formatDecisions(all))
 	return winner.Node.Name, templateVMIDByNode[winner.Node.Name], nil
 }
 
-// lockStatesByNode returns the operator-set lock state for every db.Node row.
-// Result is keyed by node name; missing entries default to "" (treated as
-// "none" by nodescore). Used by pickNode to filter cordoned/draining/drained
-// nodes — without this lookup nodescore's lock-state gate is dead code in
-// the provision path.
-func (s *Service) lockStatesByNode(ctx context.Context) (map[string]string, error) {
+// nodeMeta is the operator-set state pickNode reads off db.Node — lock
+// state for the cordoning gate, tags for the host-aggregate filter.
+type nodeMeta struct {
+	LockState string
+	Tags      []string
+}
+
+// nodeMetaByNode returns the per-node operator state (lock state +
+// tags) for every db.Node row. Result is keyed by node name; missing
+// entries default to a zero nodeMeta (lock "" → treated as "none";
+// empty tags). Used by pickNode to filter cordoned nodes AND apply
+// the operator's host-aggregate constraints.
+func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, error) {
 	var rows []db.Node
-	if err := s.db.WithContext(ctx).Select("name", "lock_state").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[string]string, len(rows))
+	out := make(map[string]nodeMeta, len(rows))
 	for _, r := range rows {
-		out[r.Name] = r.LockState
+		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: splitCSVTags(r.Tags)}
 	}
 	return out, nil
 }
+
+// splitCSVTags decodes the CSV string we store for db.Node.Tags +
+// db.VM.RequiredTags into a clean slice. Whitespace trimmed, empty
+// entries dropped.
+func splitCSVTags(csv string) []string {
+	if csv == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitRequiredTags is splitCSVTags with a different name for the
+// (admittedly cosmetic) clarity at provision-Request call sites —
+// reads as "the operator-typed required tags from the request, parsed."
+func splitRequiredTags(csv string) []string { return splitCSVTags(csv) }
 
 // formatRejections renders one "node=reason1,reason2" entry per rejected
 // decision — used in the conflict-error message where every entry is a

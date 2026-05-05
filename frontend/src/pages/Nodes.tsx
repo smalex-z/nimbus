@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getProxmoxBinding, getScoringProfiles, listNodes, listNodesWithScores } from '@/api/client'
+import { getProxmoxBinding, listNodes, listNodesWithScores } from '@/api/client'
 import type { ProxmoxBinding } from '@/api/client'
-import type { NodeView, NodeViewWithScores, ScoringProfile, Specialization, TierName, WorkloadType } from '@/types'
+import type { NodeView, NodeViewWithScores, Specialization, TierName } from '@/types'
 import { CordonModal, DrainPlanModal, RemoveNodeModal, TagsModal } from '@/components/NodeActionModals'
 import ProxmoxBindingModal, { ChangeBindingModal } from '@/components/ProxmoxBindingModal'
 import { formatBytes } from '@/lib/format'
 
-const WORKLOAD_ORDER: WorkloadType[] = ['web', 'database', 'compute', 'balanced']
 const TIER_PREVIEW_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 // Nodes — admin-only cluster lifecycle page. Three stacked sections:
@@ -699,18 +698,9 @@ function ActionBtn({
 function ScoringMatrix() {
   const [tier, setTier] = useState<TierName>('medium')
   const [data, setData] = useState<NodeViewWithScores[] | null>(null)
-  const [profiles, setProfiles] = useState<Record<WorkloadType, ScoringProfile> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // Profiles are static — fetch once for the whole page lifetime.
-  useEffect(() => {
-    getScoringProfiles()
-      .then(setProfiles)
-      .catch(() => { /* tooltips degrade to plain numbers */ })
-  }, [])
-
-  // Refetch scores when tier preview changes.
   useEffect(() => {
     setLoading(true)
     listNodesWithScores(tier)
@@ -721,16 +711,17 @@ function ScoringMatrix() {
 
   const sorted = useMemo(() => {
     if (!data) return []
-    return [...data].sort((a, b) => a.name.localeCompare(b.name))
+    // Highest score first — operators want to see the best fit at the top.
+    return [...data].sort((a, b) => (b.score?.score ?? 0) - (a.score?.score ?? 0))
   }, [data])
 
   return (
     <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div>
-          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Scoring matrix</span>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Placement scores</span>
           <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
-            How would each node score for each workload at the preview tier? Hover a cell for the components breakdown.
+            Where would a fresh VM at the preview tier land? Higher = more headroom after placement. Hover a score for the components breakdown.
           </p>
         </div>
         <div style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(20,18,28,0.03)' }}>
@@ -764,15 +755,8 @@ function ScoringMatrix() {
               <tr style={{ color: 'var(--ink-mute)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 <th style={{ padding: '6px 8px', fontWeight: 500 }}>Node</th>
                 <th style={{ padding: '6px 8px', fontWeight: 500 }}>Spec</th>
-                {WORKLOAD_ORDER.map((w) => (
-                  <th
-                    key={w}
-                    style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}
-                    title={profiles ? formulaText(w, profiles[w]) : undefined}
-                  >
-                    {w}
-                  </th>
-                ))}
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tags</th>
+                <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Score</th>
               </tr>
             </thead>
             <tbody>
@@ -782,18 +766,25 @@ function ScoringMatrix() {
                   <td style={{ padding: '8px 8px' }}>
                     <SpecChip spec={inferSpec(n)} />
                   </td>
-                  {WORKLOAD_ORDER.map((w) => {
-                    const cell = n.scores?.[w]
-                    return (
-                      <td
-                        key={w}
-                        style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace' }}
-                        title={cellTooltip(w, tier, cell, profiles?.[w])}
-                      >
-                        <ScoreCell breakdown={cell} />
-                      </td>
-                    )
-                  })}
+                  <td style={{ padding: '8px 8px', color: 'var(--ink-body)' }}>
+                    {n.tags.length === 0 ? <span style={{ color: 'var(--ink-mute)' }}>—</span> : (
+                      <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+                        {n.tags.map((t) => (
+                          <span key={t} style={{
+                            fontSize: 10, fontFamily: 'Geist Mono, monospace',
+                            padding: '1px 6px', borderRadius: 3,
+                            background: 'rgba(20,18,28,0.04)', border: '1px solid var(--line)',
+                          }}>{t}</span>
+                        ))}
+                      </span>
+                    )}
+                  </td>
+                  <td
+                    style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace' }}
+                    title={cellTooltip(tier, n.score)}
+                  >
+                    <ScoreCell breakdown={n.score} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -808,8 +799,7 @@ function ScoringMatrix() {
 // resource shape when the backend payload didn't include it (e.g. older
 // API responses). Mirrors nodescore.DetectSpecialization's thresholds.
 function inferSpec(n: NodeViewWithScores): Specialization {
-  const anyCell = n.scores?.web ?? n.scores?.database ?? n.scores?.compute ?? n.scores?.balanced
-  if (anyCell?.spec) return anyCell.spec
+  if (n.score?.spec) return n.score.spec
   if (n.max_cpu <= 0 || n.mem_total === 0) return 'balanced'
   const gibPerCore = n.mem_total / (1 << 30) / n.max_cpu
   if (gibPerCore < 4) return 'cpu'
@@ -847,33 +837,22 @@ function ScoreCell({ breakdown }: { breakdown?: import('@/types').ScoreBreakdown
   }
   const pct = breakdown.score * 100
   const color = pct > 70 ? 'var(--ok)' : pct > 40 ? '#9a5c2e' : 'var(--err)'
-  return (
-    <span style={{ color }}>
-      {pct.toFixed(0)}%
-      {breakdown.spec_match && <span style={{ marginLeft: 4, color: 'var(--ink-mute)' }} title="specialization-bonus active">★</span>}
-    </span>
-  )
+  return <span style={{ color }}>{pct.toFixed(0)}%</span>
 }
 
-function formulaText(w: WorkloadType, p?: ScoringProfile): string | undefined {
-  if (!p) return undefined
-  return `${w}: ${p.mem_weight.toFixed(2)}·mem + ${p.cpu_weight.toFixed(2)}·cpu + ${p.disk_weight.toFixed(2)}·disk + ${p.spec_bonus.toFixed(2)} bonus on ${p.spec_preference}-opt nodes`
-}
-
-function cellTooltip(w: WorkloadType, tier: TierName, b?: import('@/types').ScoreBreakdown, p?: ScoringProfile): string | undefined {
+function cellTooltip(tier: TierName, b?: import('@/types').ScoreBreakdown): string | undefined {
   if (!b) return undefined
   if (b.score === 0) {
-    return `${w} (${tier}): rejected — ${b.reasons?.join(', ') || 'no eligible reasons reported'}`
+    return `${tier}: rejected — ${b.reasons?.join(', ') || 'no eligible reasons reported'}`
   }
-  if (!b.components) return `${w} (${tier}): score ${(b.score * 100).toFixed(0)}%`
+  if (!b.components) return `${tier}: score ${(b.score * 100).toFixed(0)}%`
   const c = b.components
   const fmt = (k: string, label: string) => {
     const headK = `${k}_headroom`
     const wK = `${k}_weighted`
     if (c[wK] === undefined) return ''
-    return `${(p ? p[`${k}_weight` as keyof ScoringProfile] as number : 0).toFixed(2)}·${label}(${(c[headK] ?? 0).toFixed(2)})=${(c[wK] ?? 0).toFixed(3)}`
+    return `${label}(${(c[headK] ?? 0).toFixed(2)})=${(c[wK] ?? 0).toFixed(3)}`
   }
   const parts = [fmt('mem', 'mem'), fmt('cpu', 'cpu'), fmt('disk', 'disk')].filter(Boolean)
-  if ((c.spec_bonus ?? 0) > 0) parts.push(`bonus=${c.spec_bonus.toFixed(3)}`)
-  return `${w} (${tier}): ${parts.join(' + ')} = ${(c.total ?? b.score).toFixed(3)}`
+  return `${tier}: ${parts.join(' + ')} = ${(c.total ?? b.score).toFixed(3)}`
 }

@@ -31,10 +31,10 @@ func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
 type createVMRequest struct {
 	Hostname string `json:"hostname"`
 	Tier     string `json:"tier"`
-	// WorkloadType selects the nodescore Profile (web/database/compute/
-	// balanced). Empty falls back to the tier-based default in the
-	// service layer; non-empty values are validated against the enum.
-	WorkloadType string `json:"workload_type,omitempty"`
+	// RequiredTags is the host-aggregate filter as a CSV string
+	// (e.g. "fast-cpu,nvme"). Operator-defined free-form labels —
+	// no enum validation. Empty = no constraint.
+	RequiredTags string `json:"required_tags,omitempty"`
 	OSTemplate   string `json:"os_template"`
 	SSHKeyID     *uint  `json:"ssh_key_id,omitempty"`
 	SSHPubKey    string `json:"ssh_pubkey,omitempty"`
@@ -115,7 +115,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 	res, err := h.svc.Provision(r.Context(), provision.Request{
 		Hostname:         req.Hostname,
 		Tier:             req.Tier,
-		WorkloadType:     req.WorkloadType,
+		RequiredTags:     req.RequiredTags,
 		OSTemplate:       req.OSTemplate,
 		SSHKeyID:         req.SSHKeyID,
 		SSHPubKey:        req.SSHPubKey,
@@ -397,16 +397,14 @@ func validateCreate(req createVMRequest) error {
 	if _, ok := nodescore.Tiers[req.Tier]; !ok {
 		return &internalerrors.ValidationError{Field: "tier", Message: "must be one of small, medium, large"}
 	}
-	// Workload type is optional (empty → tier-default in the service);
-	// when provided it must match one of the known profiles. Reject
-	// typos at the handler so the operator gets a clear error rather
-	// than silent fallback to balanced.
-	if req.WorkloadType != "" {
-		if _, ok := nodescore.Profiles[nodescore.WorkloadType(req.WorkloadType)]; !ok {
-			return &internalerrors.ValidationError{
-				Field:   "workload_type",
-				Message: "must be one of web, database, compute, balanced",
-			}
+	// RequiredTags is operator-typed free-form text (CSV). No enum
+	// validation; the scheduler simply rejects nodes that don't carry
+	// the tag at provision time. Length cap defends against pathological
+	// pastes (operator-typed; 256 chars is generous).
+	if len(req.RequiredTags) > 256 {
+		return &internalerrors.ValidationError{
+			Field:   "required_tags",
+			Message: "must be 256 characters or fewer (comma-separated)",
 		}
 	}
 	// Per-tier authorization (member allowlist vs admin-bypass) is enforced

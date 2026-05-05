@@ -1087,21 +1087,19 @@ func TestPickNode_CordonedNodeSkipped(t *testing.T) {
 	}
 }
 
-// TestPickNode_WorkloadMatchesSpecialization is the headline test for
-// workload-aware scoring: a database VM should land on the memory-
-// optimized node, not the CPU-optimized one — even when both have
-// plenty of capacity. Without the workload Profile + spec-bonus, the
-// scorer would treat them as roughly equal and pick by tie-break VM
-// count (also equal), so the request would land non-deterministically.
-func TestPickNode_WorkloadMatchesSpecialization(t *testing.T) {
+// TestPickNode_RequiredTagsFiltersHostAggregate is the headline test for
+// the host-aggregate placement model: a VM that requires `fast-cpu`
+// must only land on a node that carries that tag, even when an untagged
+// node has more headroom. Mirrors OpenStack flavor extra-specs / K8s
+// nodeSelector.
+func TestPickNode_RequiredTagsFiltersHostAggregate(t *testing.T) {
 	t.Parallel()
 	fake := pickNodeFakePVE(t)
-	// alpha: 16c/32G = 2 GiB/c → CPU-optimized
-	// bravo: 8c/128G = 16 GiB/c → memory-optimized
+	// alpha: capacious but no tags. bravo: smaller but tagged fast-cpu.
 	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
 		return []proxmox.Node{
 			{Name: "alpha", Status: "online", MaxCPU: 16, MaxMem: 32 << 30, Mem: 1 << 30, CPU: 0.1},
-			{Name: "bravo", Status: "online", MaxCPU: 8, MaxMem: 128 << 30, Mem: 1 << 30, CPU: 0.1},
+			{Name: "bravo", Status: "online", MaxCPU: 8, MaxMem: 16 << 30, Mem: 1 << 30, CPU: 0.1},
 		}, nil
 	}
 	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
@@ -1117,7 +1115,7 @@ func TestPickNode_WorkloadMatchesSpecialization(t *testing.T) {
 		return "UPID", nil
 	}
 
-	svc, _, _ := newTestServiceWithCfg(t, fake, provision.Config{
+	svc, _, database := newTestServiceWithCfg(t, fake, provision.Config{
 		TemplateBaseVMID: 9000,
 		GatewayIP:        "10.0.0.1",
 		Nameserver:       "1.1.1.1",
@@ -1128,11 +1126,26 @@ func TestPickNode_WorkloadMatchesSpecialization(t *testing.T) {
 		VMDiskStorage:    "local-lvm",
 	})
 
-	// Provision a database workload — should pick bravo (memory-opt).
+	// Seed both node rows; tag bravo as fast-cpu. The required-tag gate
+	// should reject alpha (no fast-cpu tag) so bravo wins despite
+	// having less capacity.
+	for _, name := range []string{"alpha", "bravo"} {
+		if err := database.WithContext(context.Background()).Create(&db.Node{
+			Name: name, LockState: "none", LastSeenAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed node %s: %v", name, err)
+		}
+	}
+	if err := database.WithContext(context.Background()).Model(&db.Node{}).
+		Where("name = ?", "bravo").
+		Update("tags", "fast-cpu").Error; err != nil {
+		t.Fatalf("tag bravo: %v", err)
+	}
+
 	if _, err := svc.Provision(context.Background(), provision.Request{
-		Hostname:     "db-test-vm",
+		Hostname:     "fast-vm",
 		Tier:         "medium",
-		WorkloadType: "database",
+		RequiredTags: "fast-cpu",
 		OSTemplate:   "ubuntu-24.04",
 		SSHPubKey:    realPubKey(t),
 	}, nil); err != nil {
@@ -1140,7 +1153,7 @@ func TestPickNode_WorkloadMatchesSpecialization(t *testing.T) {
 	}
 	got := captured.Load()
 	if got == nil || *got != "bravo" {
-		t.Errorf("CloneVM target = %v, want bravo (db workload prefers mem-opt)", got)
+		t.Errorf("CloneVM target = %v, want bravo (only fast-cpu-tagged node)", got)
 	}
 }
 

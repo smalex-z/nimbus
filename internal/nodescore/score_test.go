@@ -351,83 +351,64 @@ func TestDetectSpecialization(t *testing.T) {
 	}
 }
 
-// TestDefaultWorkloadForTier — every tier resolves to balanced. The
-// helper is kept tier-aware in signature for forward-compat with
-// operator-tunable defaults; current behaviour is the conservative
-// "don't bias placement" answer.
-func TestDefaultWorkloadForTier(t *testing.T) {
+// TestScore_RequiredTagsFilter — host-aggregate gate. Node must carry
+// every tag in Env.RequiredTags; missing any → rejected with
+// ReasonMissingTag. This is the operator-driven affinity model that
+// replaced the workload-type heuristic.
+func TestScore_RequiredTagsFilter(t *testing.T) {
 	t.Parallel()
-	for _, tier := range []string{"small", "medium", "large", "xl", "unknown", ""} {
-		t.Run(tier, func(t *testing.T) {
-			t.Parallel()
-			if got := nodescore.DefaultWorkloadForTier(tier); got != nodescore.WorkloadBalanced {
-				t.Errorf("DefaultWorkloadForTier(%q) = %q, want balanced", tier, got)
-			}
-		})
-	}
-}
-
-// TestScore_WorkloadProfilesMatchSpecialization is the headline test: the
-// node specialization that matches the workload's preferred Spec wins
-// when other variables are equal. Builds two nodes with identical capacity
-// usage but different vCPU/RAM ratios, then scores each workload and
-// asserts the right node wins each.
-func TestScore_WorkloadProfilesMatchSpecialization(t *testing.T) {
-	t.Parallel()
-
-	// Both nodes idle (Mem: 1 gib used). Same total capacity in
-	// "score-relevant" terms — the difference is the vCPU/RAM ratio.
-	cpuNode := nodescore.Node{
-		Name: "cpu-opt", Status: "online",
-		MaxCPU: 16, MaxMem: 32 * gib, Mem: 1 * gib, // 2 GiB/c → CPU-opt
-	}
-	memNode := nodescore.Node{
-		Name: "mem-opt", Status: "online",
-		MaxCPU: 8, MaxMem: 128 * gib, Mem: 1 * gib, // 16 GiB/c → mem-opt
-	}
 	storageOK := map[string]nodescore.StorageInfo{
-		"cpu-opt": {TotalBytes: 500 * gib, UsedBytes: 50 * gib},
-		"mem-opt": {TotalBytes: 500 * gib, UsedBytes: 50 * gib},
+		"alpha": {TotalBytes: 500 * gib, UsedBytes: 100 * gib},
 	}
-	medium := nodescore.Tiers["medium"]
-
 	cases := []struct {
-		workload nodescore.WorkloadType
-		wantWin  string
+		name      string
+		nodeTags  []string
+		required  []string
+		wantPass  bool
+		wantMatch nodescore.Reason
 	}{
-		{nodescore.WorkloadWeb, "cpu-opt"},      // web prefers CPU-opt
-		{nodescore.WorkloadDatabase, "mem-opt"}, // db prefers mem-opt
-		{nodescore.WorkloadCompute, "cpu-opt"},  // compute strongly prefers CPU-opt
+		{"no required, no node tags → pass", nil, nil, true, ""},
+		{"no required, node has tags → pass", []string{"fast-cpu"}, nil, true, ""},
+		{"required matches → pass", []string{"fast-cpu"}, []string{"fast-cpu"}, true, ""},
+		{"superset of required → pass", []string{"fast-cpu", "nvme"}, []string{"fast-cpu"}, true, ""},
+		{"missing the only required tag → reject", nil, []string{"fast-cpu"}, false, nodescore.ReasonMissingTag},
+		{"node missing one of two → reject", []string{"fast-cpu"}, []string{"fast-cpu", "nvme"}, false, nodescore.ReasonMissingTag},
+		{"case-sensitive mismatch → reject", []string{"Fast-CPU"}, []string{"fast-cpu"}, false, nodescore.ReasonMissingTag},
 	}
 	for _, c := range cases {
-		t.Run(string(c.workload), func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
+			node := nodescore.Node{
+				Name: "alpha", Status: "online",
+				MaxCPU: 8, MaxMem: 16 * gib, Mem: 1 * gib,
+				Tags: c.nodeTags,
+			}
 			env := nodescore.Env{
-				TemplatesPresent: allTemplates("cpu-opt", "mem-opt"),
+				TemplatesPresent: allTemplates("alpha"),
 				StorageByNode:    storageOK,
-				Workload:         c.workload,
+				RequiredTags:     c.required,
 			}
-			cpuRes := nodescore.Score(cpuNode, medium, env, nodescore.NodeRuntime{})
-			memRes := nodescore.Score(memNode, medium, env, nodescore.NodeRuntime{})
-			if cpuRes.Score == 0 || memRes.Score == 0 {
-				t.Fatalf("expected both to pass gates: cpu=%v mem=%v", cpuRes, memRes)
+			got := nodescore.Score(node, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
+			if c.wantPass {
+				if got.Score == 0 {
+					t.Errorf("expected accept; got reject reasons=%v", got.Reasons)
+				}
+				return
 			}
-			gotWin := "cpu-opt"
-			if memRes.Score > cpuRes.Score {
-				gotWin = "mem-opt"
+			if got.Score != 0 {
+				t.Errorf("expected reject; got score=%v", got.Score)
 			}
-			if gotWin != c.wantWin {
-				t.Errorf("workload=%s winner=%s (cpu=%.4f mem=%.4f), want %s",
-					c.workload, gotWin, cpuRes.Score, memRes.Score, c.wantWin)
+			if !contains(got.Reasons, c.wantMatch) {
+				t.Errorf("expected reason %q in %v", c.wantMatch, got.Reasons)
 			}
 		})
 	}
 }
 
 // TestScore_ComponentsBreakdown verifies that the components map carries
-// every key the dashboard tooltip expects, and that mem_weighted +
-// cpu_weighted + disk_weighted + spec_bonus == total. This is the contract
-// the SPA renders against — keys missing here means broken tooltips.
+// every key the dashboard tooltip expects, and that the weighted
+// components sum to total. This is the contract the SPA renders against
+// — keys missing here means broken tooltips.
 func TestScore_ComponentsBreakdown(t *testing.T) {
 	t.Parallel()
 	node := nodescore.Node{
@@ -437,7 +418,6 @@ func TestScore_ComponentsBreakdown(t *testing.T) {
 	env := nodescore.Env{
 		TemplatesPresent: allTemplates("alpha"),
 		StorageByNode:    map[string]nodescore.StorageInfo{"alpha": {TotalBytes: 500 * gib, UsedBytes: 50 * gib}},
-		Workload:         nodescore.WorkloadWeb,
 	}
 	got := nodescore.Score(node, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
 	if got.Score == 0 {
@@ -446,74 +426,27 @@ func TestScore_ComponentsBreakdown(t *testing.T) {
 	wantKeys := []string{
 		"mem_headroom", "cpu_headroom", "disk_headroom",
 		"mem_weighted", "cpu_weighted", "disk_weighted",
-		"spec_match", "spec_bonus", "total",
+		"total",
 	}
 	for _, k := range wantKeys {
 		if _, ok := got.Components[k]; !ok {
 			t.Errorf("Components missing key %q (got %v)", k, got.Components)
 		}
 	}
-	// Spec is CPU-opt (16c/32G = 2 GiB/c < 4 threshold) and workload is
-	// web → spec_bonus should fire.
+	// Spec is informational — the auto-detect should still classify
+	// 16c/32G as CPU-opt even though it doesn't drive scoring anymore.
 	if got.Spec != nodescore.SpecCPU {
-		t.Errorf("Spec = %q, want cpu", got.Spec)
-	}
-	if got.Components["spec_match"] != 1.0 {
-		t.Errorf("spec_match = %v, want 1.0 (CPU-opt node + web workload)", got.Components["spec_match"])
+		t.Errorf("Spec = %q, want cpu (informational)", got.Spec)
 	}
 	// Sum check — total should equal the sum of weighted components.
 	wantTotal := got.Components["mem_weighted"] +
 		got.Components["cpu_weighted"] +
-		got.Components["disk_weighted"] +
-		got.Components["spec_bonus"]
+		got.Components["disk_weighted"]
 	if abs(got.Components["total"]-wantTotal) > 1e-9 {
 		t.Errorf("total = %v, want sum of weighted = %v", got.Components["total"], wantTotal)
 	}
 	if abs(got.Score-got.Components["total"]) > 1e-9 {
 		t.Errorf("Score (%v) != Components[total] (%v)", got.Score, got.Components["total"])
-	}
-}
-
-// TestScore_SpecBonusOnlyWhenMatched — spec_bonus must be 0 when the node's
-// detected spec doesn't match the workload's preference, and 1× the
-// profile's SpecBonus when it does.
-func TestScore_SpecBonusOnlyWhenMatched(t *testing.T) {
-	t.Parallel()
-	memNode := nodescore.Node{
-		Name: "mem-opt", Status: "online",
-		MaxCPU: 8, MaxMem: 128 * gib, Mem: 1 * gib, // mem-opt
-	}
-	env := nodescore.Env{
-		TemplatesPresent: allTemplates("mem-opt"),
-		StorageByNode:    map[string]nodescore.StorageInfo{"mem-opt": {TotalBytes: 500 * gib, UsedBytes: 50 * gib}},
-		Workload:         nodescore.WorkloadWeb, // web prefers CPU-opt
-	}
-	got := nodescore.Score(memNode, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
-	if got.Components["spec_match"] != 0.0 {
-		t.Errorf("spec_match = %v, want 0 (mem-opt node + web workload)", got.Components["spec_match"])
-	}
-	if got.Components["spec_bonus"] != 0.0 {
-		t.Errorf("spec_bonus = %v, want 0", got.Components["spec_bonus"])
-	}
-}
-
-// TestScore_EmptyWorkloadDefaultsBalanced — empty Env.Workload should
-// behave as WorkloadBalanced. Lets old callers + tests keep working
-// without explicit workload plumbing.
-func TestScore_EmptyWorkloadDefaultsBalanced(t *testing.T) {
-	t.Parallel()
-	node := nodescore.Node{
-		Name: "n", Status: "online",
-		MaxCPU: 8, MaxMem: 64 * gib, Mem: 1 * gib,
-	}
-	env := nodescore.Env{
-		TemplatesPresent: allTemplates("n"),
-		StorageByNode:    map[string]nodescore.StorageInfo{"n": {TotalBytes: 500 * gib, UsedBytes: 50 * gib}},
-		// Workload deliberately empty
-	}
-	got := nodescore.Score(node, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
-	if got.Workload != nodescore.WorkloadBalanced {
-		t.Errorf("Workload = %q, want balanced (empty default)", got.Workload)
 	}
 }
 

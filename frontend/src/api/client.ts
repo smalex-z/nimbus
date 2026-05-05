@@ -17,10 +17,8 @@ import type {
   ProvisionStep,
   SSHKey,
   VM,
-  WorkloadType,
   NodeViewWithScores,
   ScoreBreakdown,
-  ScoringProfile,
 } from '@/types'
 
 // Default-timeout client used for fast endpoints.
@@ -101,9 +99,9 @@ export async function listNodes(): Promise<NodeView[]> {
 }
 
 // listNodesWithScores requests the scoring-decorated payload — each row
-// carries a `scores` map across the four workload types under a preview
-// tier. Used by the Nodes page's scoring matrix; cheap (one cluster
-// snapshot reused across all combinations).
+// carries a `score` breakdown for the preview tier. Used by the Nodes
+// page's scoring matrix; cheap (one cluster snapshot reused across
+// all rows).
 export async function listNodesWithScores(previewTier?: string): Promise<NodeViewWithScores[]> {
   const params: Record<string, string> = { include_scores: 'true' }
   if (previewTier) params.preview_tier = previewTier
@@ -111,22 +109,14 @@ export async function listNodesWithScores(previewTier?: string): Promise<NodeVie
   return data
 }
 
-// getNodeScore drills into one (node, tier, workload) cell for the
-// matrix tooltip. Returns the full breakdown including rejection
-// reasons when the node is ineligible at this tier+workload.
-export async function getNodeScore(name: string, workload: WorkloadType, tier: string): Promise<ScoreBreakdown> {
-  const { data } = await api.get<ScoreBreakdown>(`/nodes/${encodeURIComponent(name)}/score`, {
-    params: { workload, tier },
-  })
-  return data
-}
-
-// getScoringProfiles returns the workload→Profile map. Static data
-// (matches the nodescore.Profiles constant); the dashboard caches it
-// for the lifetime of the page so formula tooltips render without
-// hard-coding weights client-side.
-export async function getScoringProfiles(): Promise<Record<WorkloadType, ScoringProfile>> {
-  const { data } = await api.get<Record<WorkloadType, ScoringProfile>>('/scoring/profiles')
+// getNodeScore drills into one (node, tier) cell with optional
+// host-aggregate constraint. Returns the full breakdown including
+// rejection reasons when the node is ineligible. tags is a
+// comma-separated list (empty = no constraint).
+export async function getNodeScore(name: string, tier: string, tags?: string): Promise<ScoreBreakdown> {
+  const params: Record<string, string> = { tier }
+  if (tags) params.tags = tags
+  const { data } = await api.get<ScoreBreakdown>(`/nodes/${encodeURIComponent(name)}/score`, { params })
   return data
 }
 

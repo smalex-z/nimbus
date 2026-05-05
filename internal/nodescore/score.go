@@ -8,11 +8,18 @@
 // reason(s) captured on the Result. A non-zero score is always greater than
 // any rejected node, so callers can rank without re-applying the gates.
 //
-// Workload-aware: every score is computed under a `WorkloadType` that
-// selects a `Profile` of weights + specialization-match bonus. Empty
-// workload behaves as `WorkloadBalanced` so callers that don't (yet)
-// pass a workload still get sensible scoring. See Profiles for the
-// per-workload weight vectors.
+// Affinity model: operators tag nodes (db.Node.Tags) per their actual
+// capabilities — gpu, fast-cpu, nvme, etc. — and the user opts into a
+// constraint at provision time via Env.RequiredTags. Nodes missing any
+// required tag get rejected with ReasonMissingTag. This mirrors OpenStack
+// host aggregates / Kubernetes nodeSelector — the operator classifies
+// hardware, the user requests a hardware profile.
+//
+// Specialization (cpu/mem/balanced) is auto-detected from the vCPU/RAM
+// ratio and exposed on Result.Spec for UI labels — informational only.
+// It does NOT drive scoring (the heuristic was too coarse to be useful
+// across heterogeneous clusters); operators use it as a hint when
+// deciding which tags to apply.
 package nodescore
 
 import (
@@ -51,6 +58,11 @@ type Node struct {
 	Mem       uint64  // bytes used (live qemu + host overhead)
 	MaxMem    uint64  // bytes total
 	LockState string  // "" / "none" / "cordoned" / "draining" / "drained"
+	// Tags are the operator-applied labels from db.Node.Tags (CSV
+	// in storage; []string here). Used by the host-aggregate filter:
+	// when Env.RequiredTags is set, this node passes only when its
+	// Tags is a superset.
+	Tags []string
 }
 
 // StorageInfo describes the configured VM-disk pool's capacity on one node.
@@ -86,34 +98,15 @@ const (
 	ReasonInsufficientCores Reason = "insufficient_cores"
 	ReasonInsufficientMem   Reason = "insufficient_mem"
 	ReasonInsufficientDisk  Reason = "insufficient_disk"
+	// ReasonMissingTag fires when Env.RequiredTags asks for a tag the
+	// node doesn't carry (operator-driven host-aggregate filter).
+	ReasonMissingTag Reason = "missing_tag"
 )
 
-// WorkloadType is the operator-supplied (or tier-defaulted) hint about what
-// kind of work the VM will do. Drives weight selection in Profiles. Empty
-// string is normalized to WorkloadBalanced inside Score.
-type WorkloadType string
-
-const (
-	WorkloadWeb      WorkloadType = "web"
-	WorkloadDatabase WorkloadType = "database"
-	WorkloadCompute  WorkloadType = "compute"
-	WorkloadBalanced WorkloadType = "balanced"
-)
-
-// AllWorkloads is the canonical iteration order for "score this node against
-// every workload" (used by the dashboard's scoring matrix). Listing them
-// here lets handlers iterate without hard-coding the enum at every call site.
-var AllWorkloads = []WorkloadType{
-	WorkloadWeb,
-	WorkloadDatabase,
-	WorkloadCompute,
-	WorkloadBalanced,
-}
-
-// Specialization classifies a node by its vCPU-to-RAM ratio. Used to apply
-// the workload-matching bonus — a database VM gets a bonus on a memory-
-// optimized node, and so on. Detection is operator-config-free: pure ratio
-// math. See DetectSpecialization for the thresholds.
+// Specialization classifies a node by its vCPU-to-RAM ratio. Surfaced
+// on Result.Spec for UI labels (the dashboard renders cpu-opt / mem-opt
+// chips per node). Informational only — does not drive scoring.
+// Operators reading the chips know how to tag the node accordingly.
 type Specialization string
 
 const (
@@ -135,35 +128,16 @@ const (
 	specMemoryMinRatio = 8.0 // GiB-per-vCPU; above → memory-optimized
 )
 
-// Profile carries the per-workload weight vector + specialization-match
-// bonus. Sums to ~1.0 + bonus; the bonus only fires when the node's
-// detected specialization matches SpecPreference.
-type Profile struct {
-	MemWeight      float64
-	CPUWeight      float64
-	DiskWeight     float64
-	SpecBonus      float64
-	SpecPreference Specialization
-}
-
-// Profiles maps workload → weight vector. Public so handlers can serve
-// /api/scoring/profiles without re-importing values; mutating from outside
-// the package is not supported.
-//
-// Tuning notes (all values per the GitHub issue spec, translated into the
-// unified-weighted-sum model):
-//   - web: CPU-leaning (web servers are CPU-bound), bonus on CPU-opt nodes.
-//   - database: memory-leaning (caches benefit from RAM), bonus on mem-opt.
-//   - compute: very CPU-leaning (training, builds, ML inference), bigger
-//     bonus on CPU-opt to push compute jobs hard onto the right hardware.
-//   - balanced: closer to the legacy 0.6/0.4 mem/cpu split with a small
-//     specialization bonus when the node is also balanced.
-var Profiles = map[WorkloadType]Profile{
-	WorkloadWeb:      {MemWeight: 0.30, CPUWeight: 0.45, DiskWeight: 0.10, SpecBonus: 0.15, SpecPreference: SpecCPU},
-	WorkloadDatabase: {MemWeight: 0.55, CPUWeight: 0.20, DiskWeight: 0.10, SpecBonus: 0.15, SpecPreference: SpecMemory},
-	WorkloadCompute:  {MemWeight: 0.15, CPUWeight: 0.55, DiskWeight: 0.10, SpecBonus: 0.20, SpecPreference: SpecCPU},
-	WorkloadBalanced: {MemWeight: 0.45, CPUWeight: 0.30, DiskWeight: 0.20, SpecBonus: 0.05, SpecPreference: SpecBalanced},
-}
+// scoreWeights is the single soft-score weight vector. With workload
+// type retired, every score uses the same formula — operators express
+// hardware preference through tags (Env.RequiredTags) instead of by
+// picking a workload label. The values below mirror the previous
+// "balanced" profile.
+const (
+	weightMem  = 0.45
+	weightCPU  = 0.30
+	weightDisk = 0.25
+)
 
 // DetectSpecialization classifies a node by its RAM-per-vCPU ratio. Pure;
 // callers compute it once per node per scoring pass.
@@ -182,34 +156,21 @@ func DetectSpecialization(n Node) Specialization {
 	}
 }
 
-// DefaultWorkloadForTier returns the workload to use when the operator
-// hasn't picked one explicitly. Always WorkloadBalanced regardless of
-// tier — the conservative default that doesn't bias placement toward
-// any specialization.
-//
-// The tierName argument is preserved for forward-compat: future
-// operator-tunable defaults (e.g. cluster-wide "small VMs are usually
-// web servers, default to web") would change this body without
-// requiring a signature change everywhere.
-func DefaultWorkloadForTier(tierName string) WorkloadType {
-	_ = tierName
-	return WorkloadBalanced
-}
-
 // Env carries cluster-wide knobs and the per-node lookups the caller has
 // already gathered. Disk telemetry is optional: a nil StorageByNode disables
 // the disk gate AND zeroes the disk weight in the soft score.
 //
-// Workload selects a Profile from Profiles; empty value is normalized to
-// WorkloadBalanced. Callers that don't (yet) plumb workload still get
-// sensible scoring.
+// RequiredTags is the host-aggregate filter: when non-empty, every tag
+// listed must appear in the node's Tags slice or the node is rejected
+// with ReasonMissingTag. Operators tag hardware ("fast-cpu", "nvme",
+// "gpu"); user opts in to a constraint at provision time.
 type Env struct {
 	Excluded         []string
 	TemplatesPresent map[string]bool
 	StorageByNode    map[string]StorageInfo // nil disables disk gate + diskweight
 	MemBufferMiB     uint64                 // RAM headroom on top of tier; default 256
 	CPULoadFactor    float64                // K, share of new VM's cores assumed used; default 0.5
-	Workload         WorkloadType           // "" → WorkloadBalanced
+	RequiredTags     []string               // operator-defined affinity constraints
 }
 
 // Result is what Score returns per node. Score == 0 ⇔ rejected; Reasons is
@@ -217,19 +178,20 @@ type Env struct {
 //
 // Components is a labelled breakdown of how the soft score was computed —
 // keys: mem_headroom, cpu_headroom, disk_headroom, mem_weighted,
-// cpu_weighted, disk_weighted, spec_match (0 or 1), spec_bonus, total.
-// Empty for rejected scores (Score == 0). Used by the dashboard tooltip
-// to render "0.30·mem(0.85) + 0.45·cpu(0.92) + …" explanations.
+// cpu_weighted, disk_weighted, total. Empty for rejected scores
+// (Score == 0). Used by the dashboard tooltip to render
+// "0.45·mem(0.85) + 0.30·cpu(0.92) + 0.25·disk(0.60) = 0.78"
+// explanations.
 //
-// Spec is the node's auto-detected specialization at score time; Workload
-// is the resolved workload (post-default-balanced normalization). Both
-// surface to the dashboard scoring matrix.
+// Spec is the node's auto-detected specialization (cpu/memory/balanced)
+// at score time. Informational only — surfaced as a chip on the
+// dashboard so operators know how to tag the node, but does not drive
+// scoring directly.
 type Result struct {
 	Score      float64
 	Reasons    []Reason
 	Components map[string]float64
 	Spec       Specialization
-	Workload   WorkloadType
 }
 
 // Decision pairs a candidate with its score result and the runtime data the
@@ -261,10 +223,10 @@ const (
 // Score evaluates one node against one tier under one environment. Pure.
 //
 // Hard gates run first in order of cheapness; any failure returns Score=0
-// with the rejecting reason(s) attached. When all gates pass, the soft score
-// projects post-placement headroom across mem/cpu/disk and adds a
-// specialization-match bonus when the node's spec matches the workload's
-// preference. Components carries the per-term breakdown for transparency.
+// with the rejecting reason(s) attached. When all gates pass, the soft
+// score projects post-placement headroom across mem/cpu/disk and returns
+// a value in (0, 1]. Components carries the per-term breakdown for
+// transparency.
 func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	memBufferMiB := env.MemBufferMiB
 	if memBufferMiB == 0 {
@@ -273,15 +235,6 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	cpuLoadFactor := env.CPULoadFactor
 	if cpuLoadFactor == 0 {
 		cpuLoadFactor = defaultCPULoadFactor
-	}
-	workload := env.Workload
-	if workload == "" {
-		workload = WorkloadBalanced
-	}
-	profile, ok := Profiles[workload]
-	if !ok {
-		profile = Profiles[WorkloadBalanced]
-		workload = WorkloadBalanced
 	}
 	spec := DetectSpecialization(n)
 
@@ -306,6 +259,12 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 		reasons = append(reasons, ReasonDraining)
 	case "drained":
 		reasons = append(reasons, ReasonDrained)
+	}
+	// Host-aggregate filter: every required tag must be on the node.
+	// Cheaper than capacity math so it runs early, but after lock-state
+	// so the operator's intent (cordon/drain) reports first.
+	if missing := missingTags(n.Tags, env.RequiredTags); len(missing) > 0 {
+		reasons = append(reasons, ReasonMissingTag)
 	}
 	if !env.TemplatesPresent[n.Name] {
 		reasons = append(reasons, ReasonNoTemplate)
@@ -354,25 +313,21 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	}
 
 	if len(reasons) > 0 {
-		return Result{Score: 0, Reasons: reasons, Spec: spec, Workload: workload}
+		return Result{Score: 0, Reasons: reasons, Spec: spec}
 	}
 
 	// Soft score — every component clamped to [0, 1] so the weighted sum
-	// stays in (0, 1+SpecBonus]. Disk component is zero when telemetry
-	// is off; the disk weight is then re-distributed across mem/cpu in
-	// proportion to their existing weights so the soft score stays
-	// roughly comparable in magnitude (otherwise no-disk-telemetry
-	// rejections would silently inflate scores by the disk weight).
+	// stays in (0, 1]. Disk component is zero when telemetry is off; the
+	// disk weight is then re-distributed across mem/cpu proportionally so
+	// the score scale stays stable when an operator hasn't configured a
+	// VM-disk pool.
 	memHeadroom := clamp01(float64(freeMem-needMem) / float64(n.MaxMem))
 	cpuHeadroom := clamp01((1.0 - n.CPU) - cpuLoadFactor*float64(t.CPU)/float64(n.MaxCPU))
 
-	memW := profile.MemWeight
-	cpuW := profile.CPUWeight
-	diskW := profile.DiskWeight
+	memW := weightMem
+	cpuW := weightCPU
+	diskW := weightDisk
 	if !diskGateOn {
-		// Redistribute disk weight proportionally — keeps the score
-		// scale stable when an operator hasn't configured a VM-disk
-		// pool. Tests + provision flows will normally have telemetry on.
 		split := memW + cpuW
 		if split > 0 {
 			memW += diskW * memW / split
@@ -389,14 +344,7 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 		diskWeighted = diskW * diskHeadroom
 	}
 
-	specMatch := 0.0
-	specBonus := 0.0
-	if spec == profile.SpecPreference {
-		specMatch = 1.0
-		specBonus = profile.SpecBonus
-	}
-
-	total := memWeighted + cpuWeighted + diskWeighted + specBonus
+	total := memWeighted + cpuWeighted + diskWeighted
 
 	return Result{
 		Score: total,
@@ -407,13 +355,30 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 			"mem_weighted":  memWeighted,
 			"cpu_weighted":  cpuWeighted,
 			"disk_weighted": diskWeighted,
-			"spec_match":    specMatch,
-			"spec_bonus":    specBonus,
 			"total":         total,
 		},
-		Spec:     spec,
-		Workload: workload,
+		Spec: spec,
 	}
+}
+
+// missingTags returns the slice of required tags that aren't present in
+// nodeTags. Empty required → empty result (no constraint). Both inputs
+// are case-sensitive; operators should keep tag casing consistent.
+func missingTags(nodeTags, required []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(nodeTags))
+	for _, t := range nodeTags {
+		have[t] = true
+	}
+	var miss []string
+	for _, t := range required {
+		if !have[t] {
+			miss = append(miss, t)
+		}
+	}
+	return miss
 }
 
 // Evaluate scores every node in input order. Use this when you want

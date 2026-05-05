@@ -15,12 +15,10 @@ type Request struct {
 	Hostname   string
 	Tier       string
 	OSTemplate string
-	// WorkloadType selects the nodescore Profile the scheduler uses
-	// (web/database/compute/balanced). Empty falls back to
-	// nodescore.DefaultWorkloadForTier(Tier), so callers that don't yet
-	// plumb workload still get sensible scoring matched to the tier
-	// they picked. Persisted on db.VM.WorkloadType.
-	WorkloadType string
+	// RequiredTags is the host-aggregate filter as a CSV string
+	// (e.g. "fast-cpu,nvme"). Empty = no constraint. Persisted on
+	// db.VM.RequiredTags so drain replacement applies the same filter.
+	RequiredTags string
 	SSHKeyID     *uint  // optional: use an existing vault entry
 	SSHPubKey    string // BYO
 	SSHPrivKey   string // optional: BYO callers may stash the private half in Nimbus's vault

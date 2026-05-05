@@ -16,7 +16,6 @@ import (
 	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/nodemgr"
-	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
 )
 
@@ -45,10 +44,9 @@ func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
 // Both the Admin dashboard and the new /nodes page consume this.
 //
 // When ?include_scores=true is passed, each row is decorated with a
-// `scores` map containing the four workload scores under a preview tier
-// (default `medium`; override with ?preview_tier=large). The Nodes
-// page's scoring matrix uses this; consumers that don't ask get the
-// plain payload they always got.
+// `score` breakdown for the preview tier (default `medium`; override
+// with ?preview_tier=large). The Nodes page's scoring matrix consumes
+// this; consumers that don't ask get the plain payload.
 func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 	view, err := h.mgr.List(r.Context())
 	if err != nil {
@@ -61,34 +59,34 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previewTier := r.URL.Query().Get("preview_tier")
-	scoresByNode, resolvedTier, err := h.mgr.ScoreAllWorkloads(r.Context(), previewTier)
+	scoreByNode, resolvedTier, err := h.mgr.ScoreClusterAtTier(r.Context(), previewTier)
 	if err != nil {
 		response.BadRequest(w, err.Error())
 		return
 	}
 	out := make([]nodemgr.NodeWithScores, 0, len(view.Nodes))
 	for _, n := range view.Nodes {
-		out = append(out, nodemgr.NodeWithScores{
-			View:        n,
-			Scores:      scoresByNode[n.Name],
-			PreviewTier: resolvedTier,
-		})
+		row := nodemgr.NodeWithScores{View: n, PreviewTier: resolvedTier}
+		if b, ok := scoreByNode[n.Name]; ok {
+			row.Score = &b
+		}
+		out = append(out, row)
 	}
 	response.Success(w, out)
 }
 
-// Score handles GET /api/nodes/{name}/score?workload=&tier=. Single-cell
-// drill-down for the matrix tooltip. Returns the full breakdown
-// (including rejection reasons when the node is ineligible) under one
-// (workload, tier) pair.
+// Score handles GET /api/nodes/{name}/score?tier=&tags=. Single-cell
+// drill-down — full breakdown including rejection reasons under the
+// given tier and host-aggregate constraint. `tags` is a comma-separated
+// list (empty = no constraint).
 func (h *Nodes) Score(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	tierName := r.URL.Query().Get("tier")
 	if tierName == "" {
 		tierName = "medium"
 	}
-	workload := nodescore.WorkloadType(r.URL.Query().Get("workload"))
-	out, err := h.mgr.ScoreOne(r.Context(), name, tierName, workload)
+	requiredTags := parseTagsParam(r.URL.Query().Get("tags"))
+	out, err := h.mgr.ScoreNode(r.Context(), name, tierName, requiredTags)
 	if err != nil {
 		writeNodeMutationError(w, err)
 		return
@@ -96,12 +94,21 @@ func (h *Nodes) Score(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, out)
 }
 
-// Profiles handles GET /api/scoring/profiles. Static data — the
-// workload → weight-vector map. Lets the SPA render formula tooltips
-// without hard-coding weights client-side; future weight tuning is a
-// backend-only change.
-func (h *Nodes) Profiles(w http.ResponseWriter, _ *http.Request) {
-	response.Success(w, nodemgr.AllProfiles())
+// parseTagsParam splits a CSV query-param into a clean tag slice.
+// Whitespace trimmed; empty entries dropped.
+func parseTagsParam(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Cordon handles POST /api/nodes/{name}/cordon. Body: {"reason": "..."}

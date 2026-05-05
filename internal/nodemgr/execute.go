@@ -231,6 +231,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 				Name: n.Name, Status: n.Status, CPU: n.CPU,
 				MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 				LockState: lockOrNone(rows[n.Name].LockState),
+				Tags:      splitTags(rows[n.Name].Tags),
 			}
 			break
 		}
@@ -270,19 +271,15 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		}
 	}
 
-	// VM workload drives the Profile, same way ComputePlan does. The
-	// re-validation pass only checks gates (specifically capacity),
-	// but threading workload keeps the soft-score path consistent if
-	// future logic gates on the resolved score too.
-	workload := nodescore.WorkloadType(vm.WorkloadType)
-	if workload == "" {
-		workload = nodescore.DefaultWorkloadForTier(vm.Tier)
-	}
-
+	// Apply the VM's host-aggregate constraint at re-validation time
+	// too — if the operator manually picked a target during drain
+	// review that doesn't carry the required tags, fail fast here.
+	// Without this gate the migrate goes through but ends up on a
+	// node that violates the constraint.
 	env := nodescore.Env{
 		TemplatesPresent: map[string]bool{target: true}, // migration doesn't need templates
 		StorageByNode:    storageByNode,
-		Workload:         workload,
+		RequiredTags:     splitVMTags(vm.RequiredTags),
 	}
 	got := nodescore.Score(*targetNode, tier, env, rt)
 	if got.Score == 0 {

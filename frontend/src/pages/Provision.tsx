@@ -6,6 +6,7 @@ import {
   getBootstrapStatus,
   bootstrapTemplates,
   listKeys,
+  listNodes,
   getTunnelInfo,
   getGPUInference,
   type BootstrapResult,
@@ -31,7 +32,6 @@ import {
   type SSHKey,
   TIERS,
   type TierName,
-  type WorkloadType,
 } from '@/types'
 
 type ViewState = 'form' | 'loading' | 'result' | 'error'
@@ -42,10 +42,11 @@ const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 interface FormState {
   hostname: string
   tier: TierName
-  // workload starts as null (= follow tier-default). The form only
-  // sets it when the operator explicitly picks a workload, so changing
-  // tier still re-derives the workload until they take control.
-  workload: WorkloadType | null
+  // requiredTags is the host-aggregate constraint as a CSV string
+  // (e.g. "fast-cpu,nvme"). Empty = no constraint. Free-form text;
+  // the cluster's existing operator-defined tags surface as quick-pick
+  // chips in the AffinityPicker below.
+  requiredTags: string
   os: OSTemplate
   keyMode: KeyMode
   savedKeyId: number | null
@@ -55,19 +56,10 @@ interface FormState {
   enableGPU: boolean
 }
 
-// defaultWorkloadForTier mirrors nodescore.DefaultWorkloadForTier on
-// the backend. Always 'balanced' regardless of tier — the conservative
-// default that doesn't bias placement toward a specialization. The
-// helper takes a tier so the signature is stable if we ever add
-// per-tier defaults via operator config.
-function defaultWorkloadForTier(_tier: TierName): WorkloadType {
-  return 'balanced'
-}
-
 const DEFAULT_FORM: FormState = {
   hostname: '',
   tier: 'medium',
-  workload: null,
+  requiredTags: '',
   os: 'ubuntu-24.04',
   keyMode: 'gen',
   savedKeyId: null,
@@ -227,11 +219,9 @@ export default function Provision() {
         {
           hostname: form.hostname,
           tier: form.tier,
-          // Empty/null workload omitted entirely so the backend
-          // applies its tier-default. Sending the explicit value when
-          // the operator has overridden lets the server log the
-          // origin in the pickNode line.
-          workload_type: form.workload ?? undefined,
+          // Empty required-tags omitted so the JSON stays clean.
+          // Server normalizes empty CSV to "no constraint" either way.
+          required_tags: form.requiredTags.trim() || undefined,
           os_template: form.os,
           ssh_key_id:
             form.keyMode === 'saved' && form.savedKeyId !== null
@@ -676,10 +666,9 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
       </div>
 
       <AdvancedSection>
-        <WorkloadPicker
-          tier={form.tier}
-          workload={form.workload}
-          onChange={(w) => updateForm('workload', w)}
+        <AffinityPicker
+          value={form.requiredTags}
+          onChange={(v) => updateForm('requiredTags', v)}
         />
         {gpuInfo?.enabled && (
           <div className="flex flex-col gap-2">
@@ -1174,77 +1163,79 @@ function ErrorView({ error, failedStep, onRetry }: ErrorViewProps) {
   )
 }
 
-// WorkloadPicker — four radio cards (web/database/compute/balanced) with
-// tier-default tracking. When form.workload is null the recommended
-// option is highlighted automatically; once the operator picks
-// explicitly the choice sticks across tier changes.
+// AffinityPicker — comma-separated tag input for the host-aggregate
+// constraint. Operators tag nodes ("fast-cpu", "nvme", "gpu") on the
+// /nodes page; the picker offers existing cluster tags as quick-pick
+// chips and lets the user free-type custom values too.
 //
-// Each card's tooltip explains the bias so an operator unfamiliar with
-// the labels gets a one-line hint without leaving the page.
-function WorkloadPicker({
-  tier,
-  workload,
+// Empty value = no constraint (capacity-based scoring only). Multiple
+// tags AND together — every required tag must be on the destination
+// node or it's filtered out.
+function AffinityPicker({
+  value,
   onChange,
 }: {
-  tier: TierName
-  workload: WorkloadType | null
-  onChange: (w: WorkloadType | null) => void
+  value: string
+  onChange: (v: string) => void
 }) {
-  const recommended = defaultWorkloadForTier(tier)
-  const effective = workload ?? recommended
-  const opts: { id: WorkloadType; label: string; tip: string }[] = [
-    { id: 'web', label: 'Web', tip: 'Web servers, API gateways. Prefers CPU-optimized nodes.' },
-    { id: 'database', label: 'Database', tip: 'Databases, caches, in-memory analytics. Prefers memory-optimized nodes.' },
-    { id: 'compute', label: 'Compute', tip: 'Builds, training, ML inference. Strongly prefers CPU-optimized nodes.' },
-    { id: 'balanced', label: 'Balanced', tip: 'General-purpose workloads. No node-shape preference.' },
-  ]
+  const [knownTags, setKnownTags] = useState<string[]>([])
+  // Lazy-load the cluster's tag inventory once on mount. The /nodes
+  // payload already carries each node's tags; we union them client-
+  // side rather than adding a dedicated endpoint.
+  useEffect(() => {
+    listNodes()
+      .then((rows) => {
+        const set = new Set<string>()
+        for (const n of rows) for (const t of n.tags || []) set.add(t)
+        setKnownTags(Array.from(set).sort())
+      })
+      .catch(() => { /* non-fatal — chip row just stays empty */ })
+  }, [])
+
+  const selected = new Set(value.split(',').map((t) => t.trim()).filter(Boolean))
+  const toggle = (tag: string) => {
+    const next = new Set(selected)
+    if (next.has(tag)) next.delete(tag)
+    else next.add(tag)
+    onChange(Array.from(next).join(', '))
+  }
+
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-baseline justify-between">
-        <label className="text-[13px] font-medium text-ink">Workload type</label>
-        {workload !== null && (
-          <button
-            type="button"
-            className="text-[11px] text-ink-3 hover:text-ink underline"
-            onClick={() => onChange(null)}
-          >
-            reset to recommended
-          </button>
-        )}
-      </div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-        {opts.map((opt) => {
-          const selected = effective === opt.id
-          const isRecommended = opt.id === recommended
-          return (
-            <button
-              key={opt.id}
-              type="button"
-              onClick={() => onChange(opt.id)}
-              title={opt.tip}
-              className={`relative text-left px-3.5 py-3 rounded-[10px] border transition-colors cursor-pointer ${
-                selected
-                  ? 'border-ink bg-[rgba(27,23,38,0.05)]'
-                  : 'border-line-2 hover:border-ink-3'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-[13px] text-ink">{opt.label}</span>
-                {isRecommended && workload === null && (
-                  <span className="font-mono text-[9px] uppercase tracking-widest text-ink-3">
-                    Auto
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-ink-3 mt-1 leading-relaxed">{opt.tip}</p>
-            </button>
-          )
-        })}
-      </div>
+      <label className="text-[13px] font-medium text-ink">Required hardware tags</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. fast-cpu, nvme"
+        className="w-full px-3.5 py-2.5 rounded-[10px] bg-white/85 font-mono text-sm text-ink border border-line-2 outline-none focus:border-ink focus:bg-white"
+      />
+      {knownTags.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+          <span className="text-[11px] text-ink-3 font-mono">cluster tags:</span>
+          {knownTags.map((tag) => {
+            const isSel = selected.has(tag)
+            return (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => toggle(tag)}
+                className={`font-mono text-[11px] px-2 py-0.5 rounded-[5px] border transition-colors cursor-pointer ${
+                  isSel
+                    ? 'bg-ink text-white border-ink'
+                    : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
+                }`}
+              >
+                {tag}
+              </button>
+            )
+          })}
+        </div>
+      )}
       <p className="text-xs text-ink-3 mt-0.5 leading-relaxed">
-        Drives node placement. Larger tiers default to{' '}
-        <code className="text-ink-2">{recommended}</code> — override if your VM doesn't fit
-        that profile.
+        Comma-separated. The scheduler only places this VM on nodes carrying every listed tag —
+        operators apply tags from <a href="/nodes" className="underline">/nodes</a>. Empty = no
+        constraint, scored by capacity alone.
       </p>
     </div>
   )
@@ -1313,7 +1304,7 @@ function keyModeBlurb(mode: KeyMode, savedKeys: SSHKey[]): string {
 }
 
 // AdvancedSection — collapsible disclosure for less-frequently-touched
-// settings. Used to wrap workload type + GPU access at the bottom of
+// settings. Used to wrap hardware tags + GPU access at the bottom of
 // the form so the default view stays focused on the core identity
 // (hostname / OS / tier / SSH / public access). Collapsed by default;
 // chevron rotates on open.
@@ -1333,7 +1324,7 @@ function AdvancedSection({ children }: { children: React.ReactNode }) {
           style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
         >▶</span>
         Advanced
-        <span className="text-[11px] text-ink-3 font-normal">workload type, GPU access</span>
+        <span className="text-[11px] text-ink-3 font-normal">hardware tags, GPU access</span>
       </button>
       {open && (
         <div className="flex flex-col gap-5 pl-1">

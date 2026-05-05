@@ -57,10 +57,10 @@ export interface VM {
 export interface ProvisionRequest {
   hostname: string
   tier: TierName
-  // Optional workload hint driving the nodescore Profile. Empty falls
-  // back to the tier-based default server-side; non-empty values are
-  // validated against the WorkloadType enum.
-  workload_type?: WorkloadType
+  // Optional host-aggregate constraint as a CSV string (e.g.
+  // "fast-cpu,nvme"). Empty = no constraint; the scheduler then
+  // places by capacity alone. Validated as ≤256 chars by the handler.
+  required_tags?: string
   os_template: OSTemplate
   ssh_key_id?: number
   ssh_pubkey?: string
@@ -142,56 +142,31 @@ export interface ProvisionProgress {
 // skips anything other than "none".
 export type NodeLockState = 'none' | 'cordoned' | 'draining' | 'drained'
 
-// WorkloadType mirrors nodescore.WorkloadType. Drives which scoring
-// Profile the scheduler uses on placement (and on drain re-placement).
-// Empty string is treated as 'balanced' both server-side and in the
-// dashboard formula renderer.
-export type WorkloadType = 'web' | 'database' | 'compute' | 'balanced'
-
 // Specialization is the auto-detected node classification (vCPU per
 // GiB ratio): more cores than memory → cpu; lots of memory per core
 // → memory; otherwise balanced. Surfaces on the node card as a chip
-// and drives the workload-match bonus in the scorer.
+// to help operators decide which tags to apply. Informational only —
+// does NOT drive scoring (that's now operator-tag-driven via the
+// host-aggregate model).
 export type Specialization = 'cpu' | 'memory' | 'balanced'
 
-// ScoreBreakdown is the SPA-facing payload for one (node, tier,
-// workload) combination. Components carries the per-term map the
-// dashboard tooltip renders ("0.30·mem(0.85) + …"). Empty when the
-// node was rejected (Score == 0); Reasons then carries the
-// nodescore.Reason strings the rejection chip displays.
+// ScoreBreakdown is the SPA-facing payload for one (node, tier) pair.
+// Components carries the per-term map the dashboard tooltip renders
+// ("0.45·mem(0.85) + 0.30·cpu(0.92) + 0.25·disk(0.60) = 0.78").
+// Empty when the node was rejected (Score == 0); Reasons then carries
+// the nodescore.Reason strings the rejection chip displays.
 export interface ScoreBreakdown {
   score: number
   components?: Record<string, number>
   spec: Specialization
-  spec_match: boolean
   reasons?: string[]
-}
-
-// NodeScores keys are workload names so the dashboard's matrix can
-// iterate over a fixed column order.
-export interface NodeScores {
-  web: ScoreBreakdown
-  database: ScoreBreakdown
-  compute: ScoreBreakdown
-  balanced: ScoreBreakdown
 }
 
 // NodeViewWithScores is the decorated payload from
 // GET /api/nodes?include_scores=true. The scoring matrix consumes it.
 export interface NodeViewWithScores extends NodeView {
-  scores?: NodeScores
+  score?: ScoreBreakdown
   preview_tier?: string
-}
-
-// ScoringProfile mirrors nodemgr.ProfileView — exposed at
-// /api/scoring/profiles so the dashboard can render formula tooltips
-// without hard-coding weights client-side.
-export interface ScoringProfile {
-  mem_weight: number
-  cpu_weight: number
-  disk_weight: number
-  spec_bonus: number
-  spec_preference: Specialization
 }
 
 export interface NodeView {
