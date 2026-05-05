@@ -351,8 +351,16 @@ function NodeCard({ node: n }: { node: NodeView }) {
         )}
       </div>
 
-      {n.tags.length > 0 && (
+      {(n.tags.length > 0 || (n.auto_tags?.length ?? 0) > 0) && (
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {(n.auto_tags ?? []).map((t) => (
+            <span key={`auto-${t}`} title="auto-detected" style={{
+              fontSize: 10, fontFamily: 'Geist Mono, monospace',
+              padding: '1px 6px', borderRadius: 3,
+              background: 'rgba(20,18,28,0.02)', border: '1px dashed var(--line)',
+              color: 'var(--ink-mute)',
+            }}>{t}</span>
+          ))}
           {n.tags.map((t) => (
             <span key={t} style={{
               fontSize: 10, fontFamily: 'Geist Mono, monospace',
@@ -420,6 +428,49 @@ function shortCPUModel(raw?: string): string {
   s = s.replace(/\s+@\s+\S+/i, '') // older format without "CPU"
   s = s.replace(/\s+/g, ' ').trim()
   return s
+}
+
+// TagsCell renders the union of operator + auto-detected tags. Auto
+// tags are styled with a dashed muted border so the operator can tell
+// at a glance which ones the system applied versus which they typed
+// in. `chips=true` always renders pill-shaped badges; default mode
+// joins operator tags as plain text + chips for auto tags so the dense
+// management table doesn't get visually crowded.
+function TagsCell({ tags, autoTags, chips }: { tags: string[]; autoTags?: string[]; chips?: boolean }) {
+  const auto = autoTags ?? []
+  if (tags.length === 0 && auto.length === 0) {
+    return <span style={{ color: 'var(--ink-mute)' }}>—</span>
+  }
+  const chipBase: React.CSSProperties = {
+    fontSize: 10, fontFamily: 'Geist Mono, monospace',
+    padding: '1px 6px', borderRadius: 3,
+  }
+  const autoChips = auto.map((t) => (
+    <span key={`auto-${t}`} title="auto-detected" style={{
+      ...chipBase,
+      background: 'rgba(20,18,28,0.02)', border: '1px dashed var(--line)',
+      color: 'var(--ink-mute)',
+    }}>{t}</span>
+  ))
+  if (chips) {
+    return (
+      <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+        {autoChips}
+        {tags.map((t) => (
+          <span key={t} style={{
+            ...chipBase,
+            background: 'rgba(20,18,28,0.04)', border: '1px solid var(--line)',
+          }}>{t}</span>
+        ))}
+      </span>
+    )
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+      {autoChips}
+      {tags.length > 0 && <span>{tags.join(', ')}</span>}
+    </span>
+  )
 }
 
 function pctColor(pct: number): string {
@@ -574,7 +625,7 @@ function ManageRow({ node: n, onAction }: { node: NodeView; onAction: (a: Pendin
         {n.vm_count}/{n.vm_count_total}
       </td>
       <td style={{ padding: '8px 8px', color: 'var(--ink-body)' }}>
-        {n.tags.length === 0 ? <span style={{ color: 'var(--ink-mute)' }}>—</span> : n.tags.join(', ')}
+        <TagsCell tags={n.tags} autoTags={n.auto_tags} />
       </td>
       <td style={{ padding: '8px 8px', textAlign: 'right' }}>
         <RowActions node={n} onAction={onAction} />
@@ -767,17 +818,7 @@ function ScoringMatrix() {
                     <SpecChip spec={inferSpec(n)} />
                   </td>
                   <td style={{ padding: '8px 8px', color: 'var(--ink-body)' }}>
-                    {n.tags.length === 0 ? <span style={{ color: 'var(--ink-mute)' }}>—</span> : (
-                      <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
-                        {n.tags.map((t) => (
-                          <span key={t} style={{
-                            fontSize: 10, fontFamily: 'Geist Mono, monospace',
-                            padding: '1px 6px', borderRadius: 3,
-                            background: 'rgba(20,18,28,0.04)', border: '1px solid var(--line)',
-                          }}>{t}</span>
-                        ))}
-                      </span>
-                    )}
+                    <TagsCell tags={n.tags} autoTags={n.auto_tags} chips />
                   </td>
                   <td
                     style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace' }}

@@ -351,6 +351,40 @@ func TestDetectSpecialization(t *testing.T) {
 	}
 }
 
+func TestDeriveAutoTags(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		model string
+		want  []string
+	}{
+		{"intel core i7", "Intel(R) Core(TM) i7-11800H @ 2.30GHz", []string{"x86"}},
+		{"intel xeon", "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz", []string{"x86"}},
+		{"amd ryzen", "AMD Ryzen 7 5800X 8-Core Processor", []string{"x86"}},
+		{"amd epyc", "AMD EPYC 7763 64-Core Processor", []string{"x86"}},
+		{"apple silicon", "Apple M1 Pro", []string{"arm"}},
+		{"ampere altra", "Ampere(R) Altra(R) Q80-30", []string{"arm"}},
+		{"arm cortex", "ARM Cortex-A78", []string{"arm"}},
+		{"snapdragon", "Qualcomm Snapdragon X Elite", []string{"arm"}},
+		{"empty model", "", nil},
+		{"unrecognized", "Some Custom RISC-V Chip", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := nodescore.DeriveAutoTags(c.model)
+			if len(got) != len(c.want) {
+				t.Fatalf("len(got)=%d want %d (got=%v want=%v)", len(got), len(c.want), got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("got[%d]=%q want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestScore_RequiredTagsFilter — host-aggregate gate. Node must carry
 // every tag in Env.RequiredTags; missing any → rejected with
 // ReasonMissingTag. This is the operator-driven affinity model that

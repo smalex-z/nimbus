@@ -7793,6 +7793,13 @@ const docTemplate = `{
         "nodemgr.View": {
             "type": "object",
             "properties": {
+                "auto_tags": {
+                    "description": "AutoTags are system-derived (currently arch: \"x86\" / \"arm\") and\nnot editable by operators. Surfaced separately so the SPA can\nlabel them differently; the scheduler treats them identically to\noperator tags for RequiredTags matching.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "cpu": {
                     "type": "number"
                 },

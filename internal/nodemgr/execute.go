@@ -231,7 +231,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 				Name: n.Name, Status: n.Status, CPU: n.CPU,
 				MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 				LockState: lockOrNone(rows[n.Name].LockState),
-				Tags:      splitTags(rows[n.Name].Tags),
+				Tags:      scoreTags(rows[n.Name]),
 			}
 			break
 		}

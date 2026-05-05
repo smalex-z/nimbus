@@ -1122,6 +1122,15 @@ definitions:
     type: object
   nodemgr.View:
     properties:
+      auto_tags:
+        description: |-
+          AutoTags are system-derived (currently arch: "x86" / "arm") and
+          not editable by operators. Surfaced separately so the SPA can
+          label them differently; the scheduler treats them identically to
+          operator tags for RequiredTags matching.
+        items:
+          type: string
+        type: array
       cpu:
         type: number
       cpu_mhz:

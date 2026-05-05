@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"nimbus/internal/db"
+	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
 )
 
@@ -116,18 +117,23 @@ func New(database *gorm.DB, px ProxmoxClient, cfg Config) *Service {
 // (lock state, tags) with live telemetry (CPU/RAM/VM count) read at
 // request time. Used by GET /api/nodes.
 type View struct {
-	Name         string     `json:"name"`
-	Status       string     `json:"status"`     // "online" / "offline" / "unknown" — from Proxmox
-	LockState    string     `json:"lock_state"` // "none"/"cordoned"/"draining"/"drained"
-	LockedAt     *time.Time `json:"locked_at,omitempty"`
-	LockedBy     *uint      `json:"locked_by,omitempty"`
-	LockReason   string     `json:"lock_reason,omitempty"`
-	Tags         []string   `json:"tags"`
-	CPU          float64    `json:"cpu"`
-	MaxCPU       int        `json:"max_cpu"`
-	MemUsed      uint64     `json:"mem_used"`
-	MemTotal     uint64     `json:"mem_total"`
-	MemAllocated uint64     `json:"mem_allocated"`
+	Name       string     `json:"name"`
+	Status     string     `json:"status"`     // "online" / "offline" / "unknown" — from Proxmox
+	LockState  string     `json:"lock_state"` // "none"/"cordoned"/"draining"/"drained"
+	LockedAt   *time.Time `json:"locked_at,omitempty"`
+	LockedBy   *uint      `json:"locked_by,omitempty"`
+	LockReason string     `json:"lock_reason,omitempty"`
+	Tags       []string   `json:"tags"`
+	// AutoTags are system-derived (currently arch: "x86" / "arm") and
+	// not editable by operators. Surfaced separately so the SPA can
+	// label them differently; the scheduler treats them identically to
+	// operator tags for RequiredTags matching.
+	AutoTags     []string `json:"auto_tags"`
+	CPU          float64  `json:"cpu"`
+	MaxCPU       int      `json:"max_cpu"`
+	MemUsed      uint64   `json:"mem_used"`
+	MemTotal     uint64   `json:"mem_total"`
+	MemAllocated uint64   `json:"mem_allocated"`
 	// SwapUsed/SwapTotal come from /nodes/{node}/status (fan-out per
 	// online node). Both 0 when the per-node call fails — single dead
 	// node never blanks the table.
@@ -220,7 +226,13 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	// Reconcile DB rows: ensure each observed node has a row, bump
 	// LastSeenAt on every observation. This piggy-backs on every List
 	// call so the row state stays current without a dedicated loop.
-	persistByName, err := s.reconcileObserved(ctx, nodes)
+	cpuByNode := make(map[string]string, len(statusByNode))
+	for name, snap := range statusByNode {
+		if snap.CPU != nil {
+			cpuByNode[name] = snap.CPU.Model
+		}
+	}
+	persistByName, err := s.reconcileObserved(ctx, nodes, cpuByNode)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile node rows: %w", err)
 	}
@@ -239,6 +251,7 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 			LockedBy:      row.LockedBy,
 			LockReason:    row.LockReason,
 			Tags:          splitTags(row.Tags),
+			AutoTags:      nodescore.DeriveAutoTags(row.CPUModel),
 			CPU:           n.CPU,
 			MaxCPU:        n.MaxCPU,
 			MemUsed:       n.Mem,
@@ -338,10 +351,13 @@ func (s *Service) fanoutNodeStatus(ctx context.Context, nodes []proxmox.Node) ma
 }
 
 // reconcileObserved upserts a db.Node for every node Proxmox returned and
-// bumps LastSeenAt. Returns the resulting rows keyed by name. Pruning of
-// long-missing nodes is intentionally NOT done here — it'd surprise the
-// operator mid-list-view; runs in a background loop instead.
-func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node) (map[string]db.Node, error) {
+// bumps LastSeenAt. cpuByNode is optional — when populated, rows whose
+// stored cpu_model differs from the observed value are updated so the
+// scheduler's auto-tag derivation stays current. Returns the resulting
+// rows keyed by name. Pruning of long-missing nodes is intentionally NOT
+// done here — it'd surprise the operator mid-list-view; runs in a
+// background loop instead.
+func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node, cpuByNode map[string]string) (map[string]db.Node, error) {
 	out := make(map[string]db.Node, len(observed))
 	now := time.Now().UTC()
 	for _, n := range observed {
@@ -363,6 +379,17 @@ func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node
 				return nil, fmt.Errorf("touch last_seen_at %s: %w", n.Name, err)
 			}
 			row.LastSeenAt = now
+		}
+		// Refresh cpu_model only when the observed value is non-empty
+		// and differs from the stored one. CPU rarely changes; the
+		// guard keeps SQLite writes minimal under the polling loop.
+		if model, ok := cpuByNode[n.Name]; ok && model != "" && model != row.CPUModel {
+			if err := s.db.WithContext(ctx).Model(&db.Node{}).
+				Where("name = ?", n.Name).
+				Update("cpu_model", model).Error; err != nil {
+				return nil, fmt.Errorf("update cpu_model %s: %w", n.Name, err)
+			}
+			row.CPUModel = model
 		}
 		out[n.Name] = row
 	}
@@ -395,7 +422,16 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 	if err != nil {
 		return 0, 0, fmt.Errorf("get nodes: %w", err)
 	}
-	if _, err := s.reconcileObserved(ctx, nodes); err != nil {
+	// Background loop also refreshes cpu_model so auto-tags stay current
+	// even when no one is hitting /api/nodes for a while.
+	statusByNode := s.fanoutNodeStatus(ctx, nodes)
+	cpuByNode := make(map[string]string, len(statusByNode))
+	for name, snap := range statusByNode {
+		if snap.CPU != nil {
+			cpuByNode[name] = snap.CPU.Model
+		}
+	}
+	if _, err := s.reconcileObserved(ctx, nodes, cpuByNode); err != nil {
 		return 0, 0, err
 	}
 	pruned, err = s.PruneMissing(ctx, cycleInterval)
@@ -513,6 +549,16 @@ func lockOrNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// scoreTags returns the union of a node row's operator tags and the
+// system-derived auto-tags (currently the CPU architecture). The
+// scorer treats them identically for RequiredTags matching, so callers
+// building a nodescore.Node should use this rather than splitTags
+// directly — otherwise a user constraint of `arm` will reject an ARM
+// host that happens to carry no operator tags.
+func scoreTags(row db.Node) []string {
+	return append(splitTags(row.Tags), nodescore.DeriveAutoTags(row.CPUModel)...)
 }
 
 // splitTags + joinTags map between the CSV column and []string the SPA

@@ -25,6 +25,7 @@ package nodescore
 import (
 	"math"
 	"sort"
+	"strings"
 )
 
 // Tier describes a VM size class.
@@ -138,6 +139,45 @@ const (
 	weightCPU  = 0.30
 	weightDisk = 0.25
 )
+
+// DeriveAutoTags returns the system-derived tags Nimbus auto-applies to a
+// node based on hardware introspection. Currently just the CPU
+// architecture: "x86" (Intel/AMD) or "arm" (ARM/Apple/Ampere/Snapdragon)
+// — empty when the model string doesn't carry enough signal.
+//
+// Operators don't see these as editable in the Nodes UI (they live
+// alongside operator tags but aren't writable). The scheduler treats
+// them identically to operator tags for RequiredTags matching, so a
+// user asking for ?required_tags=arm will only land on ARM hosts.
+//
+// Pure function — no I/O, runs on every score call.
+func DeriveAutoTags(cpuModel string) []string {
+	if cpuModel == "" {
+		return nil
+	}
+	low := strings.ToLower(cpuModel)
+	switch {
+	case strings.Contains(low, "intel"),
+		strings.Contains(low, "amd"),
+		strings.Contains(low, "xeon"),
+		strings.Contains(low, "epyc"),
+		strings.Contains(low, "ryzen"),
+		strings.Contains(low, "core(tm)"),
+		strings.Contains(low, "pentium"),
+		strings.Contains(low, "celeron"),
+		strings.Contains(low, "x86"):
+		return []string{"x86"}
+	case strings.Contains(low, "arm"),
+		strings.Contains(low, "aarch64"),
+		strings.Contains(low, "cortex"),
+		strings.Contains(low, "apple"),
+		strings.Contains(low, "ampere"),
+		strings.Contains(low, "snapdragon"),
+		strings.Contains(low, "neoverse"):
+		return []string{"arm"}
+	}
+	return nil
+}
 
 // DetectSpecialization classifies a node by its RAM-per-vCPU ratio. Pure;
 // callers compute it once per node per scoring pass.

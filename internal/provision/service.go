@@ -1443,6 +1443,8 @@ func (s *Service) pickNode(
 
 // nodeMeta is the operator-set state pickNode reads off db.Node — lock
 // state for the cordoning gate, tags for the host-aggregate filter.
+// Tags is the union of operator-set CSV tags and Nimbus's auto-derived
+// tags (CPU arch); see nodeMetaByNode for the merge.
 type nodeMeta struct {
 	LockState string
 	Tags      []string
@@ -1453,14 +1455,19 @@ type nodeMeta struct {
 // entries default to a zero nodeMeta (lock "" → treated as "none";
 // empty tags). Used by pickNode to filter cordoned nodes AND apply
 // the operator's host-aggregate constraints.
+//
+// Tags includes Nimbus's auto-derived tags (currently CPU arch from
+// the denormalized cpu_model column) so a `required_tags=arm` user
+// constraint matches an ARM host even when no operator tags are set.
 func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, error) {
 	var rows []db.Node
-	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[string]nodeMeta, len(rows))
 	for _, r := range rows {
-		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: splitCSVTags(r.Tags)}
+		tags := append(splitCSVTags(r.Tags), nodescore.DeriveAutoTags(r.CPUModel)...)
+		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: tags}
 	}
 	return out, nil
 }

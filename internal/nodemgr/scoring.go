@@ -87,7 +87,7 @@ func (s *Service) ScoreClusterAtTier(ctx context.Context, previewTier string) (m
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 			LockState: lockOrNone(row.LockState),
-			Tags:      splitTags(row.Tags),
+			Tags:      scoreTags(row),
 		})
 		// Templates are not actually relevant for the dashboard's
 		// scoring preview (the operator might be asking "how would a
@@ -163,7 +163,7 @@ func (s *Service) ScoreNode(ctx context.Context, nodeName, tierName string, requ
 			Name: target.Name, Status: target.Status, CPU: target.CPU,
 			MaxCPU: target.MaxCPU, Mem: target.Mem, MaxMem: target.MaxMem,
 			LockState: lockOrNone(row.LockState),
-			Tags:      splitTags(row.Tags),
+			Tags:      scoreTags(row),
 		},
 		tier,
 		nodescore.Env{

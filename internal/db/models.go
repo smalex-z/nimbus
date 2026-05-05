@@ -447,9 +447,14 @@ type Node struct {
 	LockedBy   *uint      `gorm:"column:locked_by"                   json:"locked_by,omitempty"`
 	LockReason string     `gorm:"column:lock_reason;default:''"      json:"lock_reason,omitempty"`
 	Tags       string     `gorm:"column:tags;default:''"             json:"-"`
-	LastSeenAt time.Time  `gorm:"column:last_seen_at"                json:"last_seen_at"`
-	CreatedAt  time.Time  `gorm:"column:created_at"                  json:"created_at"`
-	UpdatedAt  time.Time  `gorm:"column:updated_at"                  json:"updated_at"`
+	// CPUModel is denormalized from /nodes/{node}/status so the scheduler
+	// can derive auto-tags (arch: x86 vs arm) without a per-call status
+	// fan-out. Refreshed on every reconcileObserved cycle. Empty when the
+	// status fan-out failed at the time of the last observation.
+	CPUModel   string    `gorm:"column:cpu_model;default:''"        json:"-"`
+	LastSeenAt time.Time `gorm:"column:last_seen_at"                json:"last_seen_at"`
+	CreatedAt  time.Time `gorm:"column:created_at"                  json:"created_at"`
+	UpdatedAt  time.Time `gorm:"column:updated_at"                  json:"updated_at"`
 }
 
 // TableName pins the GORM table name. Without it GORM picks "nodes" which is

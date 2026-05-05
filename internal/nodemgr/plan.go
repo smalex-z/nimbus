@@ -111,7 +111,7 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 			LockState: lockOrNone(row.LockState),
-			Tags:      splitTags(row.Tags),
+			Tags:      scoreTags(row),
 		})
 	}
 

@@ -1163,10 +1163,24 @@ function ErrorView({ error, failedStep, onRetry }: ErrorViewProps) {
   )
 }
 
+// SUGGESTED_TAGS are surfaced as quick-pick chips even when no node in
+// the cluster carries them yet. `fast-cpu` is a relative-speed marker
+// the operator opts into manually — auto-assigning it would mean
+// picking "fastest in this cluster", which is meaningless across
+// deployments. Surfacing it here keeps the vocabulary discoverable.
+const SUGGESTED_TAGS = ['fast-cpu']
+
 // AffinityPicker — comma-separated tag input for the host-aggregate
 // constraint. Operators tag nodes ("fast-cpu", "nvme", "gpu") on the
 // /nodes page; the picker offers existing cluster tags as quick-pick
 // chips and lets the user free-type custom values too.
+//
+// Three sources feed the chip row:
+//   1. operator-applied tags (db.Node.Tags),
+//   2. auto-derived system tags (arch: x86 / arm — currently the only
+//      ones; emitted by nodescore.DeriveAutoTags from cpu_model),
+//   3. SUGGESTED_TAGS — curated vocabulary that appears even when no
+//      node carries the tag yet.
 //
 // Empty value = no constraint (capacity-based scoring only). Multiple
 // tags AND together — every required tag must be on the destination
@@ -1185,11 +1199,17 @@ function AffinityPicker({
   useEffect(() => {
     listNodes()
       .then((rows) => {
-        const set = new Set<string>()
-        for (const n of rows) for (const t of n.tags || []) set.add(t)
+        const set = new Set<string>(SUGGESTED_TAGS)
+        for (const n of rows) {
+          for (const t of n.tags || []) set.add(t)
+          for (const t of n.auto_tags || []) set.add(t)
+        }
         setKnownTags(Array.from(set).sort())
       })
-      .catch(() => { /* non-fatal — chip row just stays empty */ })
+      .catch(() => {
+        // Non-fatal — fall back to just the curated suggestions.
+        setKnownTags([...SUGGESTED_TAGS].sort())
+      })
   }, [])
 
   const selected = new Set(value.split(',').map((t) => t.trim()).filter(Boolean))
