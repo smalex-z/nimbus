@@ -448,7 +448,7 @@ function cpuLabel(n: NodeView): string {
   if (cores <= 0) count = `${threads}t`
   else if (cores === threads) count = `${cores}c`
   else count = `${cores}c/${threads}t`
-  const model = shortCPUModel(n.cpu_model).replace(/^Core\s+/i, '').replace(/^Xeon\s+/i, '')
+  const model = shortCPUModel(n.cpu_model)
   return model ? `${count} ${model}` : count
 }
 
@@ -468,17 +468,33 @@ function diskClass(n: NodeView): string {
 }
 
 
-// shortCPUModel strips the noisy boilerplate Intel/AMD pack into their
-// model strings ("Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" → "Core
-// i7-9700K"). Keeps the family + part number — enough to tell
-// generations apart at a glance.
+// shortCPUModel reduces vendor model strings to just the part number,
+// since the SKU itself disambiguates generation/family for anyone who
+// cares ("i7-11800H" already implies 11th-gen Intel laptop H-class).
+//
+//   "Intel(R) Core(TM) i5-1035G1 CPU @ 1.00GHz"        → "i5-1035G1"
+//   "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"   → "i7-11800H"
+//   "12th Gen Intel(R) Core(TM) i7-12700H"             → "i7-12700H"
+//   "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz"        → "Xeon E5-2620 v3"
+//   "AMD Ryzen 7 5800X 8-Core Processor"               → "Ryzen 7 5800X"
+//   "AMD EPYC 7763 64-Core Processor"                  → "EPYC 7763"
+//   "Apple M1 Pro"                                     → "Apple M1 Pro"
+//
+// We strip (R)/(TM) noise, vendor prefix, generation prefix ("11th
+// Gen "), the "Core " family word (Intel laptop chips), the trailing
+// "@ X.YGHz" base-clock marketing, and AMD's redundant
+// "N-Core Processor" tail. Xeon/EPYC family words stay because the
+// raw SKU there ("E5-2620 v3", "7763") doesn't telegraph the family.
 function shortCPUModel(raw?: string): string {
   if (!raw) return ''
   let s = raw
   s = s.replace(/\(R\)/g, '').replace(/\(TM\)/g, '')
   s = s.replace(/Intel\s+/i, '').replace(/AMD\s+/i, '')
-  s = s.replace(/\s+CPU\s+@\s+\S+/i, '') // strip "CPU @ 3.60GHz" — we render mhz separately
-  s = s.replace(/\s+@\s+\S+/i, '') // older format without "CPU"
+  s = s.replace(/\d+(st|nd|rd|th)\s+Gen\s+/i, '') // "11th Gen ", "12th Gen "
+  s = s.replace(/\bCore\s+/i, '')                 // family word — SKU implies "Core"
+  s = s.replace(/\s+CPU\s+@\s+\S+/i, '')          // "CPU @ 3.60GHz"
+  s = s.replace(/\s+@\s+\S+/i, '')                // older format without "CPU"
+  s = s.replace(/\s+\d+-Core\s+Processor\s*$/i, '') // AMD's "8-Core Processor" tail
   s = s.replace(/\s+/g, ' ').trim()
   return s
 }
