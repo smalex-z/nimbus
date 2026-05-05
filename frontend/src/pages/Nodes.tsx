@@ -302,13 +302,33 @@ function NodeCard({ node: n }: { node: NodeView }) {
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
             {n.is_self_host && <SelfPill />}
           </div>
-          <div
-            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, lineHeight: 1.5 }}
-            title={cardTitle(n)}
-          >
-            {cpuLabel(n)} · {formatBytes(n.mem_total)}
-            {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {diskClass(n)}</>}
-            {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, lineHeight: 1.5 }}>
+            <span title={n.cpu_model || 'CPU model unavailable'}>{cpuLabel(n)}</span>
+            {' · '}
+            <span title="Total physical RAM on the host">{formatBytes(n.mem_total)}</span>
+            {n.disk_total > 0 && (
+              <>
+                {' · '}
+                <span title={n.disk_pool_name ? `Proxmox pool: ${n.disk_pool_name}` : 'storage class'}>
+                  {formatBytes(n.disk_total)} {diskClass(n)}
+                </span>
+              </>
+            )}
+            {' · '}
+            <span title={`${n.vm_count} running / ${n.vm_count_total} total managed VMs`}>
+              {n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+            </span>
+            {swapping && (
+              <>
+                {' · '}
+                <span
+                  title="Allocated memory exceeded physical RAM — host is paging to swap"
+                  style={{ color: '#9a5c2e' }}
+                >
+                  +{formatBytes(n.swap_used)} swap
+                </span>
+              </>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 4 }}>
@@ -328,8 +348,6 @@ function NodeCard({ node: n }: { node: NodeView }) {
           label="RAM"
           pct={memPct}
           hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
-          subhint={swapping ? `paging +${formatBytes(n.swap_used)} to swap` : undefined}
-          subhintTitle="Allocated memory exceeded physical RAM — host is paging to swap"
         />
         <MiniBar label="RAM alloc" pct={memAllocPct} hint={`${memAllocPct.toFixed(0)}%`} accent />
         {n.disk_total > 0 && (
@@ -374,17 +392,11 @@ function NodeCard({ node: n }: { node: NodeView }) {
 // → bad as percent climbs; "accent" caller forces the warn palette
 // regardless (used for "RAM allocated" so it visually distinguishes from
 // "RAM in use" even at the same percent).
-function MiniBar({ label, pct, hint, accent, subhint, subhintTitle }: {
+function MiniBar({ label, pct, hint, accent }: {
   label: string
   pct: number
   hint: string
   accent?: boolean
-  // subhint renders right-aligned in muted-amber underneath the bar.
-  // Used for the RAM bar's swap callout — keeps the main hint
-  // rectangle clean (right-aligned numbers stay aligned across rows)
-  // while still surfacing the warning where the eye already is.
-  subhint?: string
-  subhintTitle?: string
 }) {
   const clamped = Math.max(0, Math.min(100, pct))
   let fill = 'var(--ink-mute)'
@@ -413,17 +425,6 @@ function MiniBar({ label, pct, hint, accent, subhint, subhintTitle }: {
       >
         <div style={{ width: `${clamped}%`, height: '100%', background: fill, transition: 'width 200ms ease' }} />
       </div>
-      {subhint && (
-        <div
-          title={subhintTitle}
-          style={{
-            fontSize: 9, color: '#9a5c2e', fontFamily: 'Geist Mono, monospace',
-            textAlign: 'right', marginTop: 2,
-          }}
-        >
-          {subhint}
-        </div>
-      )}
     </div>
   )
 }
@@ -466,15 +467,6 @@ function diskClass(n: NodeView): string {
   }
 }
 
-// cardTitle composes the hover-tooltip for the specs row — full CPU
-// model + the original Proxmox pool name, since both got abbreviated
-// in the visible row.
-function cardTitle(n: NodeView): string {
-  const parts: string[] = []
-  if (n.cpu_model) parts.push(n.cpu_model)
-  if (n.disk_pool_name) parts.push(`disk pool: ${n.disk_pool_name}`)
-  return parts.join(' · ')
-}
 
 // shortCPUModel strips the noisy boilerplate Intel/AMD pack into their
 // model strings ("Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" → "Core
