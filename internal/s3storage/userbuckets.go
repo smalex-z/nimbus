@@ -82,7 +82,10 @@ func (u *UserBucketService) EnsureServiceAccount(ctx context.Context, userID uin
 
 	prefix := computePrefix(userName, userID)
 	accessKey := fmt.Sprintf("nimbus_u%d", userID)
-	secretBytes, err := randomHexBytes(32)
+	// MinIO caps service-account secret keys at 40 chars (root passwords are
+	// uncapped, but per-SA creds via the admin API enforce 8–40). 20 bytes →
+	// 40 hex chars hits the max while staying inside the bound.
+	secretBytes, err := randomHexBytes(20)
 	if err != nil {
 		return nil, "", fmt.Errorf("generate secret: %w", err)
 	}
