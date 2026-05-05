@@ -27,6 +27,10 @@ interface VMActionsProps {
   canRemove: boolean
   onLifecycle: (op: VMLifecycleOp) => Promise<void> | void
   onRemove?: () => void
+  // onMigrate opens the migrate modal — admin-only surface, omitted from
+  // the user's My Machines view. Same gate as onRemove: only local-source
+  // VMs (Nimbus DB row + Proxmox row) can be migrated through this path.
+  onMigrate?: () => void
   busy?: boolean
 }
 
@@ -36,6 +40,7 @@ export default function VMActions({
   canRemove,
   onLifecycle,
   onRemove,
+  onMigrate,
   busy = false,
 }: VMActionsProps) {
   const [running, setRunning] = useState(false)
@@ -89,6 +94,22 @@ export default function VMActions({
           disabledReason={!isOn ? 'VM is already off' : undefined}
           onClick={() => fire('stop')}
         />
+        {onMigrate && (
+          <>
+            <div className="my-1 border-t border-line" />
+            <MenuItem
+              icon={<MigrateIcon />}
+              label="Migrate to…"
+              disabled={isBusy || !canRemove}
+              disabledReason={
+                !canRemove
+                  ? 'This VM was not created by nimbus — migrate it through Proxmox.'
+                  : undefined
+              }
+              onClick={() => onMigrate()}
+            />
+          </>
+        )}
         <div className="my-1 border-t border-line" />
         <MenuItem
           icon={<TrashIcon />}
@@ -172,6 +193,15 @@ function MoreIcon() {
       <circle cx="5" cy="12" r="1.6" />
       <circle cx="12" cy="12" r="1.6" />
       <circle cx="19" cy="12" r="1.6" />
+    </svg>
+  )
+}
+
+function MigrateIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12h14" />
+      <polyline points="12 5 19 12 12 19" />
     </svg>
   )
 }

@@ -78,7 +78,18 @@ const unwrap = (instance: AxiosInstance, redirectOn401 = false) => {
         }
       }
       const message = errMsg ?? error.message ?? 'unknown error'
-      return Promise.reject(new Error(message))
+      // Attach the structured response body to the rejected error so
+      // callers that need richer payloads (e.g. the migrate endpoint's
+      // `code: "online_migration_failed"` + `reason` shape) can recover
+      // them. Most call sites just read .message and ignore this — it's
+      // additive and doesn't change the existing string-based contract.
+      const wrapped = new Error(message) as Error & {
+        status?: number
+        responseData?: unknown
+      }
+      wrapped.status = error.response?.status
+      wrapped.responseData = error.response?.data
+      return Promise.reject(wrapped)
     },
   )
 }
@@ -275,6 +286,61 @@ export async function adminVMLifecycle(
   await api.post(`/cluster/vms/${encodeURIComponent(node)}/${vmid}/${op}`, undefined, {
     timeout: 2 * 60 * 1000,
   })
+}
+
+export type MigrateMode = 'online' | 'offline'
+
+export interface MigrateResponse {
+  mode: MigrateMode
+  target_node: string
+  was_stopped: boolean
+}
+
+// OnlineMigrationFailedError is thrown by adminMigrateVM when Proxmox
+// refuses the live (online=1) migration. The SPA dispatches on it to
+// render the "continue offline?" confirmation prompt; the wrapped
+// reason carries the upstream Proxmox message verbatim so the operator
+// can see the actual cause (snapshot present, local CD/DVD, no shared
+// storage, etc.).
+export class OnlineMigrationFailedError extends Error {
+  reason: string
+  constructor(reason: string) {
+    super('live migration unavailable')
+    this.name = 'OnlineMigrationFailedError'
+    this.reason = reason
+  }
+}
+
+// adminMigrateVM moves a Nimbus-managed VM to a different cluster node.
+// Two-step UX: the first call (allowOffline=false) tries an online
+// migration when the VM is running; on rejection the server responds
+// 409 with `code: "online_migration_failed"` and we throw
+// OnlineMigrationFailedError so the SPA can confirm with the operator.
+// A second call with allowOffline=true runs a stop → migrate → start
+// cycle and is what the SPA submits after the operator clicks
+// Continue offline.
+export async function adminMigrateVM(
+  id: number,
+  targetNode: string,
+  allowOffline = false,
+): Promise<MigrateResponse> {
+  try {
+    const { data } = await api.post<MigrateResponse>(
+      `/cluster/vms/${id}/migrate`,
+      { target_node: targetNode, allow_offline: allowOffline },
+      { timeout: 35 * 60 * 1000 },
+    )
+    return data
+  } catch (err) {
+    const e = err as Error & {
+      status?: number
+      responseData?: { code?: string; reason?: string; error?: string }
+    }
+    if (e.status === 409 && e.responseData?.code === 'online_migration_failed') {
+      throw new OnlineMigrationFailedError(e.responseData.reason ?? '')
+    }
+    throw err
+  }
 }
 
 export interface VMTunnel {
