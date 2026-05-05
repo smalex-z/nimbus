@@ -417,11 +417,12 @@ function SyncPanel() {
       <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
         Walks every VM row against the live Proxmox cluster. Rows whose VM
         moved to a different node (manual <code>qm migrate</code>) get their
-        node updated. Rows whose VMID hasn't been observed for 3 consecutive
-        runs get soft-deleted — typically because someone destroyed the VM
-        directly through Proxmox, leaving an orphan here. This runs on the
-        background reconcile loop every minute; the button forces an
-        immediate pass.
+        node updated. Rows whose Proxmox display name disagrees with the
+        local hostname get renamed — Proxmox is the source of truth.
+        Rows whose VMID hasn't been observed for 3 consecutive runs get
+        soft-deleted — typically because someone destroyed the VM directly
+        through Proxmox, leaving an orphan here. This runs on the background
+        reconcile loop every minute; the button forces an immediate pass.
       </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button
@@ -451,7 +452,8 @@ function SyncPanel() {
           }}
         >
           <div>
-            Migrated: <strong>{report.migrated.length}</strong> &middot; Soft-deleted:{' '}
+            Migrated: <strong>{report.migrated.length}</strong> &middot; Renamed:{' '}
+            <strong>{report.renamed.length}</strong> &middot; Soft-deleted:{' '}
             <strong>{report.deleted.length}</strong> &middot; Going stale:{' '}
             <strong>{report.missed.length}</strong> &middot; In sync:{' '}
             <strong>{report.no_ops}</strong>
@@ -461,6 +463,15 @@ function SyncPanel() {
               {report.migrated.map((m) => (
                 <li key={`mig-${m.vm_row_id}`}>
                   {m.hostname} (vmid {m.vmid}): {m.from_node} → {m.to_node}
+                </li>
+              ))}
+            </ul>
+          )}
+          {report.renamed.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {report.renamed.map((r) => (
+                <li key={`ren-${r.vm_row_id}`}>
+                  vmid {r.vmid} on {r.node}: {r.from_name} → {r.to_name}
                 </li>
               ))}
             </ul>

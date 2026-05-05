@@ -20,6 +20,7 @@ const vacateMissThreshold = 3
 // JSON body of POST /api/vms/reconcile.
 type VMSyncReport struct {
 	Migrated   []VMMigration `json:"migrated"`
+	Renamed    []VMRename    `json:"renamed"`
 	Missed     []VMMiss      `json:"missed"`
 	Deleted    []VMDeleted   `json:"deleted"`
 	NoOps      int           `json:"no_ops"`
@@ -34,6 +35,20 @@ type VMMigration struct {
 	Hostname string `json:"hostname"`
 	FromNode string `json:"from_node"`
 	ToNode   string `json:"to_node"`
+}
+
+// VMRename records a row whose Proxmox display name diverged from the
+// local hostname. Most often this means the operator renamed the VM
+// directly in PVE (or that VMID was reused — Proxmox reassigns freed
+// VMIDs, so a destroyed-and-recreated VM at the same ID shows up here
+// instead of as Missed). The reconciler treats Proxmox as the source
+// of truth and updates vms.hostname to match.
+type VMRename struct {
+	VMRowID  uint   `json:"vm_row_id"`
+	VMID     int    `json:"vmid"`
+	FromName string `json:"from_name"`
+	ToName   string `json:"to_name"`
+	Node     string `json:"node"`
 }
 
 // VMMiss records a row that Proxmox didn't return this cycle but hasn't yet
@@ -79,12 +94,16 @@ func (s *Service) SetUnreachableNodesProbe(f UnreachableNodesFunc) {
 }
 
 // ReconcileVMs walks the local vms table and converges it to the cluster
-// snapshot. Three things can happen per row:
+// snapshot. Per row, in order:
 //
-//  1. Same vmid found on the same node → reset MissedCycles, no-op.
-//  2. Same vmid found on a *different* node → update vms.node (someone ran
-//     qm migrate outside nimbus).
-//  3. vmid not found anywhere in the cluster → bump MissedCycles. After
+//  1. If found and the Proxmox display name disagrees with the local
+//     hostname, update vms.hostname to match Proxmox. Catches operator
+//     renames in PVE and stale rows whose VMID was reused after an
+//     out-of-band destroy.
+//  2. Same vmid found on the same node → reset MissedCycles, no-op.
+//  3. Same vmid found on a *different* node → update vms.node (someone
+//     ran qm migrate outside nimbus).
+//  4. vmid not found anywhere in the cluster → bump MissedCycles. After
 //     vacateMissThreshold consecutive misses, soft-delete the row.
 //
 // Refuses to act if the snapshot returned zero VMs — that's almost always a
@@ -95,6 +114,7 @@ func (s *Service) ReconcileVMs(ctx context.Context) (VMSyncReport, error) {
 	// reads .length on these without a guard.
 	rep := VMSyncReport{
 		Migrated:   []VMMigration{},
+		Renamed:    []VMRename{},
 		Missed:     []VMMiss{},
 		Deleted:    []VMDeleted{},
 		SnapshotAt: time.Now().UTC(),
@@ -130,6 +150,16 @@ func (s *Service) ReconcileVMs(ctx context.Context) (VMSyncReport, error) {
 
 	for _, vm := range rows {
 		px, found := byVMID[vm.VMID]
+		// Hostname sync runs first when the VMID is present anywhere in
+		// the cluster — both the same-node and migrated branches benefit
+		// from a corrected display name. The local copy of vm.Hostname
+		// gets updated in place so subsequent log lines and report
+		// entries show the new name rather than the stale one.
+		if found && px.Name != "" && px.Name != vm.Hostname {
+			if err := s.handleVMRenamed(ctx, vm, px.Name, &rep); err == nil {
+				vm.Hostname = px.Name
+			}
+		}
 		switch {
 		case !found:
 			// Missing from cluster snapshot AND host node is currently
@@ -149,6 +179,37 @@ func (s *Service) ReconcileVMs(ctx context.Context) (VMSyncReport, error) {
 	}
 
 	return rep, nil
+}
+
+// handleVMRenamed updates vms.hostname to match Proxmox's display name.
+// Proxmox is the source of truth for the operator-visible name: this
+// also covers the VMID-reuse case where a destroyed VM's row hadn't
+// soft-deleted before a new VM was created at the same VMID — the
+// reconciler can't tell those apart from a tag/identity perspective,
+// but the name disagreement is observable and refreshes the row to at
+// least describe what's actually there.
+//
+// The OS-level hostname (set by cloud-init at first boot) isn't
+// touched — only the Nimbus DB row's display name. SSH-into-the-VM
+// prompts may still show the old name; that's a cosmetic in-guest
+// artifact, not a Nimbus-side stale state.
+func (s *Service) handleVMRenamed(ctx context.Context, vm db.VM, newName string, rep *VMSyncReport) error {
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("id = ?", vm.ID).
+		Update("hostname", newName).Error; err != nil {
+		log.Printf("vm-reconcile: rename hostname vmid=%d row=%d %q→%q: %v",
+			vm.VMID, vm.ID, vm.Hostname, newName, err)
+		return err
+	}
+	log.Printf("vm-reconcile: renamed vmid=%d %q → %q (proxmox is source of truth)",
+		vm.VMID, vm.Hostname, newName)
+	rep.Renamed = append(rep.Renamed, VMRename{
+		VMRowID:  vm.ID,
+		VMID:     vm.VMID,
+		FromName: vm.Hostname,
+		ToName:   newName,
+		Node:     vm.Node,
+	})
+	return nil
 }
 
 // handleVMSeen resets MissedCycles to zero (idempotent — only writes when

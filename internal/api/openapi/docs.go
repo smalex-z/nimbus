@@ -8042,6 +8042,26 @@ const docTemplate = `{
                 }
             }
         },
+        "provision.VMRename": {
+            "type": "object",
+            "properties": {
+                "from_name": {
+                    "type": "string"
+                },
+                "node": {
+                    "type": "string"
+                },
+                "to_name": {
+                    "type": "string"
+                },
+                "vm_row_id": {
+                    "type": "integer"
+                },
+                "vmid": {
+                    "type": "integer"
+                }
+            }
+        },
         "provision.VMSyncReport": {
             "type": "object",
             "properties": {
@@ -8065,6 +8085,12 @@ const docTemplate = `{
                 },
                 "no_ops": {
                     "type": "integer"
+                },
+                "renamed": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/provision.VMRename"
+                    }
                 },
                 "snapshot_at": {
                     "type": "string"

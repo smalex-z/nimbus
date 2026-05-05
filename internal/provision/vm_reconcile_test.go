@@ -177,6 +177,126 @@ func TestReconcileVMs_ResetsMissedCyclesWhenSeenAgain(t *testing.T) {
 	}
 }
 
+func TestReconcileVMs_SyncsHostnameWhenProxmoxNameDiverges(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Same VMID, same node, but Proxmox display name was changed
+	// out-of-band (operator rename via PVE GUI, or VMID reuse after a
+	// destroyed-and-recreated VM). Reconciler must rename the local row
+	// to match Proxmox.
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 200, Node: "alpha", Name: "murphy", Status: "running"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "gputest3", 200, "10.0.0.2")
+
+	rep, err := svc.ReconcileVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileVMs: %v", err)
+	}
+	if len(rep.Renamed) != 1 {
+		t.Fatalf("rep.Renamed = %d, want 1", len(rep.Renamed))
+	}
+	r := rep.Renamed[0]
+	if r.FromName != "gputest3" || r.ToName != "murphy" {
+		t.Errorf("rename = %+v, want gputest3→murphy", r)
+	}
+	if r.VMID != 200 || r.Node != "alpha" {
+		t.Errorf("rename metadata = %+v, want vmid=200 node=alpha", r)
+	}
+
+	var got db.VM
+	if err := database.WithContext(context.Background()).First(&got).Error; err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.Hostname != "murphy" {
+		t.Errorf("vm.hostname = %q, want murphy (proxmox is source of truth)", got.Hostname)
+	}
+}
+
+func TestReconcileVMs_SyncsHostnameAndMigrationTogether(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Both diverged: name changed AND moved nodes. One pass should
+	// cover both — the rename runs first, then the migration.
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 200, Node: "beta", Name: "renamed-after", Status: "running"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "old-name", 200, "10.0.0.2")
+
+	rep, err := svc.ReconcileVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileVMs: %v", err)
+	}
+	if len(rep.Renamed) != 1 {
+		t.Errorf("rep.Renamed = %d, want 1", len(rep.Renamed))
+	}
+	if len(rep.Migrated) != 1 {
+		t.Errorf("rep.Migrated = %d, want 1", len(rep.Migrated))
+	}
+	// Migration entry should reflect the *new* hostname (rename runs
+	// first and updates the in-memory copy).
+	if len(rep.Migrated) > 0 && rep.Migrated[0].Hostname != "renamed-after" {
+		t.Errorf("migration.hostname = %q, want renamed-after (rename should run before migration record)",
+			rep.Migrated[0].Hostname)
+	}
+
+	var got db.VM
+	if err := database.WithContext(context.Background()).First(&got).Error; err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.Hostname != "renamed-after" || got.Node != "beta" {
+		t.Errorf("vm = {hostname:%q, node:%q}, want {renamed-after, beta}", got.Hostname, got.Node)
+	}
+}
+
+func TestReconcileVMs_NoRenameWhenNameMatches(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 200, Node: "alpha", Name: "vm-a", Status: "running"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "vm-a", 200, "10.0.0.2")
+
+	rep, err := svc.ReconcileVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileVMs: %v", err)
+	}
+	if len(rep.Renamed) != 0 {
+		t.Errorf("rep.Renamed = %d, want 0 (names already aligned)", len(rep.Renamed))
+	}
+}
+
+func TestReconcileVMs_NoRenameWhenProxmoxNameEmpty(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	// Defensive: if Proxmox returns an empty Name field for any reason,
+	// don't blow away the local hostname with "".
+	fake.getClusterVMs = func(_ context.Context) ([]proxmox.ClusterVM, error) {
+		return []proxmox.ClusterVM{{VMID: 200, Node: "alpha", Name: "", Status: "running"}}, nil
+	}
+	svc, _, database := newTestService(t, fake)
+	seedManagedVM(t, database, "vm-a", 200, "10.0.0.2")
+
+	rep, err := svc.ReconcileVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileVMs: %v", err)
+	}
+	if len(rep.Renamed) != 0 {
+		t.Errorf("rep.Renamed = %d, want 0 (empty proxmox name should not trigger rename)", len(rep.Renamed))
+	}
+
+	var got db.VM
+	if err := database.WithContext(context.Background()).First(&got).Error; err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.Hostname != "vm-a" {
+		t.Errorf("vm.hostname = %q, want vm-a (must not overwrite with empty)", got.Hostname)
+	}
+}
+
 func TestReconcileVMs_EmptyClusterErrorIsTyped(t *testing.T) {
 	t.Parallel()
 	fake := happyFakePVE(t)

@@ -1185,6 +1185,18 @@ export interface VMReconcileMigration {
   to_node: string
 }
 
+// VMReconcileRename records a row whose Proxmox display name diverged
+// from the local hostname — operator renamed in PVE, or VMID was reused
+// after an out-of-band destroy. Reconciler treats Proxmox as source of
+// truth and updates vms.hostname.
+export interface VMReconcileRename {
+  vm_row_id: number
+  vmid: number
+  from_name: string
+  to_name: string
+  node: string
+}
+
 export interface VMReconcileMiss {
   vm_row_id: number
   vmid: number
@@ -1202,6 +1214,7 @@ export interface VMReconcileDeleted {
 
 export interface VMReconcileReport {
   migrated: VMReconcileMigration[]
+  renamed: VMReconcileRename[]
   missed: VMReconcileMiss[]
   deleted: VMReconcileDeleted[]
   no_ops: number

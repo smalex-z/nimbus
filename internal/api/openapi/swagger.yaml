@@ -1251,6 +1251,19 @@ definitions:
       vmid:
         type: integer
     type: object
+  provision.VMRename:
+    properties:
+      from_name:
+        type: string
+      node:
+        type: string
+      to_name:
+        type: string
+      vm_row_id:
+        type: integer
+      vmid:
+        type: integer
+    type: object
   provision.VMSyncReport:
     properties:
       deleted:
@@ -1267,6 +1280,10 @@ definitions:
         type: array
       no_ops:
         type: integer
+      renamed:
+        items:
+          $ref: '#/definitions/provision.VMRename'
+        type: array
       snapshot_at:
         type: string
     type: object
