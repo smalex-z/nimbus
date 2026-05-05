@@ -8,6 +8,7 @@ import RequireAuth from '@/components/RequireAuth'
 import RequireVerified from '@/components/RequireVerified'
 import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
+import ApiDocs from '@/pages/ApiDocs'
 import Authentication from '@/pages/Authentication'
 import Email from '@/pages/Email'
 import InfrastructureLayout from '@/components/InfrastructureLayout'
@@ -121,6 +122,7 @@ export default function App() {
                       <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/gopher" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/network" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/api-docs" element={<RequireAdmin><InfrastructureLayout><ApiDocs /></InfrastructureLayout></RequireAdmin>} />
                       {/* Bookmark redirects. /users + /settings/sign-in
                           → /authentication. /settings/* was the prior
                           name of /infrastructure/*. /infrastructure/s3

@@ -592,6 +592,12 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
+	// Friendly shortcut: /docs → /api/docs/. Lets the SPA link to /docs
+	// without baking the /api prefix into UI copy, and gives the URL
+	// "open the docs" a stable place to live outside the API tree.
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/api/docs/", http.StatusFound)
+	})
 	mux.Handle("/", spaHandler(http.FS(distFS)))
 
 	log.Printf("nimbus %s starting on :%s (proxmox=%s, pool=%s..%s)",
