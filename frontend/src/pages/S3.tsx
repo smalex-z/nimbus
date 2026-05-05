@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  adminDeleteBucket,
   deleteS3Storage,
   deployS3Storage,
   getS3Storage,
+  listAdminBuckets,
 } from '@/api/client'
-import type { S3DeployProgress, S3StorageView } from '@/api/client'
+import type { AdminBucketStat, S3DeployProgress, S3StorageView } from '@/api/client'
+import DeleteBucketConfirm from '@/components/ui/DeleteBucketConfirm'
 import DeleteS3Confirm from '@/components/ui/DeleteS3Confirm'
 
 // Phase-3 admin page. The page has two states:
@@ -284,35 +287,157 @@ function Row({
   )
 }
 
-// BucketsPointer replaces the old in-place admin bucket CRUD. Per-user
-// prefixed buckets now live at /buckets so every bucket has an owner; the
-// admin manages buckets through their own user account too.
-function BucketsPointer({ disabled }: { disabled: boolean }) {
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+// AdminBucketsPanel is the cross-user view of every bucket on the storage
+// VM. The admin sees who owns what and can force-delete any bucket
+// (regardless of contents). Per-user creation still happens at /buckets —
+// this page is read + delete only.
+function AdminBucketsPanel({ disabled }: { disabled: boolean }) {
+  const [buckets, setBuckets] = useState<AdminBucketStat[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<AdminBucketStat | null>(null)
+
+  const refresh = async () => {
+    try {
+      setErr(null)
+      setBuckets(await listAdminBuckets())
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to load buckets')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (disabled) {
+      setLoading(false)
+      return
+    }
+    void refresh()
+  }, [disabled])
+
   return (
     <div
       className="glass"
       style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
     >
-      <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>Buckets</span>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          All buckets {buckets.length > 0 && <span style={{ color: 'var(--ink-mute)', fontWeight: 400 }}>· {buckets.length}</span>}
+        </span>
+        <Link
+          to="/buckets"
+          className="n-btn n-btn-ghost"
+          style={{ fontSize: 12 }}
+          title="Manage your own buckets via the user surface"
+        >
+          My buckets →
+        </Link>
+      </div>
+
       {disabled ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
           MinIO is not ready yet. Buckets become manageable once status flips to “ready”.
         </p>
+      ) : loading ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+      ) : err ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{err}</p>
+      ) : buckets.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
+          No buckets yet — users create them at <Link to="/buckets">/buckets</Link>.
+        </p>
       ) : (
-        <>
-          <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-            Bucket management moved to a per-user surface — every bucket is
-            owned by a Nimbus user (admins included) and gets a stable name
-            prefix to keep namespaces from colliding.
-          </p>
-          <Link
-            to="/buckets"
-            className="n-btn n-btn-secondary"
-            style={{ alignSelf: 'flex-start' }}
-          >
-            Open buckets →
-          </Link>
-        </>
+        <div style={{ overflowX: 'auto', margin: '0 -28px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: 'var(--ink-mute)', borderBottom: '1px solid var(--line)' }}>
+                <th style={{ padding: '10px 28px', fontWeight: 500 }}>Bucket</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500 }}>Owner</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500, textAlign: 'right' }}>Objects</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500, textAlign: 'right' }}>Size</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500 }}>Created</th>
+                <th style={{ padding: '10px 28px' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {buckets.map((b) => (
+                <tr key={b.name} style={{ borderTop: '1px solid var(--line)' }}>
+                  <td
+                    style={{
+                      padding: '10px 28px',
+                      color: 'var(--ink)',
+                      fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {b.name}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span>{b.owner_name || <em style={{ color: 'var(--ink-mute)' }}>&lt;unknown&gt;</em>}</span>
+                      {b.owner_email && (
+                        <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{b.owner_email}</span>
+                      )}
+                    </div>
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {b.object_count}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {formatBytes(b.total_size_bytes)}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-mute)' }}>
+                    {new Date(b.created_at).toLocaleDateString()}
+                  </td>
+                  <td style={{ padding: '10px 28px', textAlign: 'right' }}>
+                    <button
+                      type="button"
+                      className="n-btn n-btn-ghost"
+                      onClick={() => setConfirming(b)}
+                      style={{ color: 'var(--err)' }}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {confirming && (
+        <DeleteBucketConfirm
+          forceDelete
+          bucket={{
+            name: confirming.name,
+            objectCount: confirming.object_count,
+            totalSizeBytes: confirming.total_size_bytes,
+            ownerName: confirming.owner_name,
+            ownerEmail: confirming.owner_email,
+            createdAt: confirming.created_at,
+          }}
+          onConfirm={() => adminDeleteBucket(confirming.name)}
+          onDeleted={() => {
+            const name = confirming.name
+            setConfirming(null)
+            setBuckets((prev) => prev.filter((x) => x.name !== name))
+          }}
+          onCancel={() => setConfirming(null)}
+        />
       )}
     </div>
   )
@@ -366,7 +491,7 @@ export default function S3() {
           ) : storage ? (
             <>
               <StatusPanel storage={storage} onDelete={() => setStorage(null)} />
-              <BucketsPointer disabled={storage.status !== 'ready'} />
+              <AdminBucketsPanel disabled={storage.status !== 'ready'} />
             </>
           ) : (
             <DeployPanel onDeployed={(s) => setStorage(s)} />

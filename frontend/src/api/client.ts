@@ -931,6 +931,31 @@ export async function deleteS3Storage(): Promise<void> {
   await api.delete('/s3/storage')
 }
 
+// ── Admin-scoped buckets (cluster-wide listing with owner identity) ──
+
+export interface AdminBucketStat {
+  name: string
+  created_at: string
+  object_count: number
+  total_size_bytes: number
+  owner_id: number
+  owner_name: string
+  owner_email: string
+}
+
+// listAdminBuckets returns every bucket joined with owner info. Admin-only;
+// hits 503 with the standard "no s3 storage" / "not ready" substrings while
+// the storage VM is unavailable.
+export async function listAdminBuckets(): Promise<AdminBucketStat[]> {
+  const { data } = await api.get<AdminBucketStat[]>('/s3/buckets')
+  return data ?? []
+}
+
+// adminDeleteBucket force-empties + removes a bucket regardless of owner.
+export async function adminDeleteBucket(name: string): Promise<void> {
+  await api.delete(`/s3/buckets/${encodeURIComponent(name)}`)
+}
+
 // ── User-scoped buckets (per-user prefixed buckets on the shared MinIO) ──
 
 export interface UserBucket {

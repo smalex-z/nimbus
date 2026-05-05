@@ -343,20 +343,10 @@ definitions:
         example: uploads
         type: string
     type: object
-  handlers.createBucketRequest:
-    properties:
-      name:
-        type: string
-    type: object
   handlers.createBucketResp:
     properties:
       name:
         example: kevin-u3-uploads
-        type: string
-    type: object
-  handlers.createBucketResponse:
-    properties:
-      name:
         type: string
     type: object
   handlers.createKeyRequest:
@@ -398,6 +388,8 @@ definitions:
         type: string
       source:
         type: string
+      system_generated:
+        type: boolean
       updated_at:
         type: string
     type: object
@@ -652,6 +644,8 @@ definitions:
         type: string
       source:
         type: string
+      system_generated:
+        type: boolean
       updated_at:
         type: string
     type: object
@@ -1248,7 +1242,7 @@ definitions:
       snapshot_at:
         type: string
     type: object
-  s3storage.BucketStat:
+  s3storage.AdminBucketStat:
     properties:
       created_at:
         type: string
@@ -1256,6 +1250,12 @@ definitions:
         type: string
       object_count:
         type: integer
+      owner_email:
+        type: string
+      owner_id:
+        type: integer
+      owner_name:
+        type: string
       total_size_bytes:
         type: integer
     type: object
@@ -3378,9 +3378,9 @@ paths:
   /s3/buckets:
     get:
       description: |-
-        503 when storage is absent or not yet ready (deploy in flight,
-        or VM still booting). The reconciler converges status; the
-        SPA polls until ready.
+        Joins MinIO state with the s3_buckets DB rows so the admin
+        can see who owns what. 503 when storage is absent or not
+        ready yet — the SPA polls until ready.
       produces:
       - application/json
       responses:
@@ -3392,7 +3392,7 @@ paths:
             - properties:
                 data:
                   items:
-                    $ref: '#/definitions/s3storage.BucketStat'
+                    $ref: '#/definitions/s3storage.AdminBucketStat'
                   type: array
               type: object
         "401":
@@ -3413,69 +3413,18 @@ paths:
             $ref: '#/definitions/handlers.EnvelopeError'
       security:
       - cookieAuth: []
-      summary: List MinIO buckets (admin)
-      tags:
-      - s3
-    post:
-      consumes:
-      - application/json
-      description: |-
-        Bucket name must match the AWS S3 stricter ruleset: 3-63
-        chars, lowercase letters/digits/hyphens, no leading/trailing
-        hyphen.
-      parameters:
-      - description: Bucket spec
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.createBucketRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            allOf:
-            - $ref: '#/definitions/handlers.EnvelopeOK'
-            - properties:
-                data:
-                  $ref: '#/definitions/handlers.createBucketResponse'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "403":
-          description: Forbidden
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "503":
-          description: Service Unavailable
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Create a MinIO bucket (admin)
+      summary: List every bucket on the storage VM with owner info (admin)
       tags:
       - s3
   /s3/buckets/{name}:
     delete:
-      description: 409 when the bucket isn't empty — empty it first.
+      description: |-
+        Empties + removes the bucket regardless of owner or contents.
+        This is the admin "delete on behalf" path; the user-scoped
+        /api/buckets/{name} refuses non-empty buckets so users
+        can't accidentally nuke their own data.
       parameters:
-      - description: Bucket name
+      - description: Bucket name (full composed form)
         in: path
         name: name
         required: true
@@ -3504,8 +3453,8 @@ paths:
           description: Forbidden
           schema:
             $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
+        "404":
+          description: Not Found
           schema:
             $ref: '#/definitions/handlers.EnvelopeError'
         "500":
@@ -3518,7 +3467,7 @@ paths:
             $ref: '#/definitions/handlers.EnvelopeError'
       security:
       - cookieAuth: []
-      summary: Delete a MinIO bucket (admin)
+      summary: Force-delete any bucket on the storage VM (admin)
       tags:
       - s3
   /s3/storage:

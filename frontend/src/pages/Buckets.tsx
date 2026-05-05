@@ -8,6 +8,7 @@ import {
   listBuckets,
 } from '@/api/client'
 import type { BucketCredentials, UserBucket } from '@/api/client'
+import DeleteBucketConfirm from '@/components/ui/DeleteBucketConfirm'
 
 // Three states the page can render:
 //  - "no_storage": admin hasn't deployed object storage yet → empty-state card
@@ -49,21 +50,28 @@ function EmptyStorageCard({ message }: { message: string }) {
 
 function CredentialsModal({
   creds,
+  buckets,
   onClose,
 }: {
   creds: BucketCredentials
+  buckets: UserBucket[]
   onClose: () => void
 }) {
   const [revealed, setRevealed] = useState(false)
   const [tab, setTab] = useState<'env' | 'python' | 'js' | 'cli'>('env')
 
+  // Use a real bucket name if the user has one — snippets are then
+  // copy-pasteable verbatim. Otherwise insert an obvious placeholder
+  // (`<your-bucket-name>`) so the user knows exactly what to swap.
+  const hasRealBucket = buckets.length > 0
+  const bucketName = hasRealBucket ? buckets[0].name : `${creds.prefix}-<your-bucket-name>`
+
   const snippets = useMemo(() => {
-    const sample = `${creds.prefix}-uploads`
     return {
       env: `S3_ENDPOINT=${creds.endpoint}
 S3_ACCESS_KEY=${creds.access_key}
 S3_SECRET_KEY=${creds.secret_key}
-S3_BUCKET=${sample}`,
+S3_BUCKET=${bucketName}`,
       python: `import boto3
 
 s3 = boto3.client(
@@ -72,7 +80,7 @@ s3 = boto3.client(
     aws_access_key_id="${creds.access_key}",
     aws_secret_access_key="${creds.secret_key}",
 )
-s3.put_object(Bucket="${sample}", Key="hello.txt", Body=b"hi")`,
+s3.put_object(Bucket="${bucketName}", Key="hello.txt", Body=b"hi")`,
       js: `import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 
 const s3 = new S3Client({
@@ -85,14 +93,14 @@ const s3 = new S3Client({
   forcePathStyle: true,
 })
 await s3.send(new PutObjectCommand({
-  Bucket: "${sample}",
+  Bucket: "${bucketName}",
   Key: "hello.txt",
   Body: "hi",
 }))`,
-      cli: `aws --endpoint-url ${creds.endpoint} s3 ls s3://${sample}/
-aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${sample}/file.txt`,
+      cli: `aws --endpoint-url ${creds.endpoint} s3 ls s3://${bucketName}/
+aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${bucketName}/file.txt`,
     }
-  }, [creds])
+  }, [creds, bucketName])
 
   const copy = (text: string) => {
     void navigator.clipboard.writeText(text)
@@ -163,6 +171,23 @@ aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${sample}/file.txt`,
             onCopy={() => copy(creds.prefix)}
           />
         </div>
+
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+          {hasRealBucket ? (
+            <>
+              Snippets below use <code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{bucketName}</code>.
+              Swap it for any other bucket you own (suffix only — the prefix
+              part <code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{creds.prefix}-</code> is fixed).
+            </>
+          ) : (
+            <>
+              You don't have any buckets yet — the snippets show
+              {' '}<code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{bucketName}</code> as a placeholder.
+              Replace <code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{'<your-bucket-name>'}</code> with the suffix you'll
+              type when you create one (e.g. <code style={{ fontFamily: 'var(--font-mono, monospace)' }}>{creds.prefix}-uploads</code>).
+            </>
+          )}
+        </p>
 
         <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--line)' }}>
           {(['env', 'python', 'js', 'cli'] as const).map((t) => (
@@ -338,6 +363,7 @@ export default function Buckets() {
   const [showCreds, setShowCreds] = useState(false)
   const [credsErr, setCredsErr] = useState<string | null>(null)
   const [listErr, setListErr] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState<UserBucket | null>(null)
 
   const refresh = async () => {
     setListErr(null)
@@ -378,15 +404,7 @@ export default function Buckets() {
       .catch((err) => setCredsErr(err instanceof Error ? err.message : 'Failed to load credentials'))
   }, [state, creds])
 
-  const handleDelete = async (name: string) => {
-    if (!confirm(`Delete bucket "${name}"? This is permanent.`)) return
-    try {
-      await deleteBucket(name)
-      setBuckets((prev) => prev.filter((b) => b.name !== name))
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Delete failed')
-    }
-  }
+  const requestDelete = (b: UserBucket) => setConfirmingDelete(b)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
@@ -492,7 +510,7 @@ export default function Buckets() {
                         <button
                           type="button"
                           className="n-btn n-btn-ghost"
-                          onClick={() => handleDelete(b.name)}
+                          onClick={() => requestDelete(b)}
                           style={{ color: 'var(--err)' }}
                         >
                           Delete
@@ -508,7 +526,29 @@ export default function Buckets() {
       )}
 
       {showCreds && creds && (
-        <CredentialsModal creds={creds} onClose={() => setShowCreds(false)} />
+        <CredentialsModal
+          creds={creds}
+          buckets={buckets}
+          onClose={() => setShowCreds(false)}
+        />
+      )}
+
+      {confirmingDelete && (
+        <DeleteBucketConfirm
+          bucket={{
+            name: confirmingDelete.name,
+            objectCount: confirmingDelete.object_count,
+            totalSizeBytes: confirmingDelete.total_size_bytes,
+            createdAt: confirmingDelete.created_at,
+          }}
+          onConfirm={() => deleteBucket(confirmingDelete.name)}
+          onDeleted={() => {
+            const name = confirmingDelete.name
+            setConfirmingDelete(null)
+            setBuckets((prev) => prev.filter((b) => b.name !== name))
+          }}
+          onCancel={() => setConfirmingDelete(null)}
+        />
       )}
     </div>
   )

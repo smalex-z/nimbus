@@ -3087,14 +3087,14 @@ const docTemplate = `{
                         "cookieAuth": []
                     }
                 ],
-                "description": "503 when storage is absent or not yet ready (deploy in flight,\nor VM still booting). The reconciler converges status; the\nSPA polls until ready.",
+                "description": "Joins MinIO state with the s3_buckets DB rows so the admin\ncan see who owns what. 503 when storage is absent or not\nready yet — the SPA polls until ready.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "s3"
                 ],
-                "summary": "List MinIO buckets (admin)",
+                "summary": "List every bucket on the storage VM with owner info (admin)",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -3109,7 +3109,7 @@ const docTemplate = `{
                                         "data": {
                                             "type": "array",
                                             "items": {
-                                                "$ref": "#/definitions/s3storage.BucketStat"
+                                                "$ref": "#/definitions/s3storage.AdminBucketStat"
                                             }
                                         }
                                     }
@@ -3142,91 +3142,6 @@ const docTemplate = `{
                         }
                     }
                 }
-            },
-            "post": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "description": "Bucket name must match the AWS S3 stricter ruleset: 3-63\nchars, lowercase letters/digits/hyphens, no leading/trailing\nhyphen.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "s3"
-                ],
-                "summary": "Create a MinIO bucket (admin)",
-                "parameters": [
-                    {
-                        "description": "Bucket spec",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/handlers.createBucketRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/handlers.EnvelopeOK"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/handlers.createBucketResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "503": {
-                        "description": "Service Unavailable",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    }
-                }
             }
         },
         "/s3/buckets/{name}": {
@@ -3236,18 +3151,18 @@ const docTemplate = `{
                         "cookieAuth": []
                     }
                 ],
-                "description": "409 when the bucket isn't empty — empty it first.",
+                "description": "Empties + removes the bucket regardless of owner or contents.\nThis is the admin \"delete on behalf\" path; the user-scoped\n/api/buckets/{name} refuses non-empty buckets so users\ncan't accidentally nuke their own data.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "s3"
                 ],
-                "summary": "Delete a MinIO bucket (admin)",
+                "summary": "Force-delete any bucket on the storage VM (admin)",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Bucket name",
+                        "description": "Bucket name (full composed form)",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -3290,8 +3205,8 @@ const docTemplate = `{
                             "$ref": "#/definitions/handlers.EnvelopeError"
                         }
                     },
-                    "409": {
-                        "description": "Conflict",
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/handlers.EnvelopeError"
                         }
@@ -6834,28 +6749,12 @@ const docTemplate = `{
                 }
             }
         },
-        "handlers.createBucketRequest": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string"
-                }
-            }
-        },
         "handlers.createBucketResp": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
                     "example": "kevin-u3-uploads"
-                }
-            }
-        },
-        "handlers.createBucketResponse": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string"
                 }
             }
         },
@@ -6917,6 +6816,9 @@ const docTemplate = `{
                 },
                 "source": {
                     "type": "string"
+                },
+                "system_generated": {
+                    "type": "boolean"
                 },
                 "updated_at": {
                     "type": "string"
@@ -7295,6 +7197,9 @@ const docTemplate = `{
                 },
                 "source": {
                     "type": "string"
+                },
+                "system_generated": {
+                    "type": "boolean"
                 },
                 "updated_at": {
                     "type": "string"
@@ -8137,7 +8042,7 @@ const docTemplate = `{
                 }
             }
         },
-        "s3storage.BucketStat": {
+        "s3storage.AdminBucketStat": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -8148,6 +8053,15 @@ const docTemplate = `{
                 },
                 "object_count": {
                     "type": "integer"
+                },
+                "owner_email": {
+                    "type": "string"
+                },
+                "owner_id": {
+                    "type": "integer"
+                },
+                "owner_name": {
+                    "type": "string"
                 },
                 "total_size_bytes": {
                     "type": "integer"

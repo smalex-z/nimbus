@@ -154,6 +154,23 @@ func (c *BucketsClient) DeleteBucket(ctx context.Context, name string) error {
 	return nil
 }
 
+// ForceDeleteBucket empties + removes a bucket. Used only by the admin
+// "delete on behalf" path (`Service.AdminDeleteBucket`); regular users
+// must use DeleteBucket which refuses non-empty buckets so accidental
+// data loss is impossible from the user surface.
+func (c *BucketsClient) ForceDeleteBucket(ctx context.Context, name string) error {
+	objCh := c.mc.ListObjects(ctx, name, minio.ListObjectsOptions{Recursive: true})
+	for e := range c.mc.RemoveObjects(ctx, name, objCh, minio.RemoveObjectsOptions{}) {
+		if e.Err != nil {
+			return fmt.Errorf("remove object %q in %q: %w", e.ObjectName, name, e.Err)
+		}
+	}
+	if err := c.mc.RemoveBucket(ctx, name); err != nil {
+		return fmt.Errorf("remove bucket %q: %w", name, err)
+	}
+	return nil
+}
+
 // HealthCheck pings the MinIO server's basic readiness — used by the
 // deploy orchestrator's poll loop. Returns nil on first 200 from
 // ListBuckets (the cheapest authenticated request).

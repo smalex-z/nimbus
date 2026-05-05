@@ -304,10 +304,13 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(5*time.Minute)).
 					Delete("/s3/storage", s3.DeleteStorage)
 
-				// Note: bucket CRUD now lives at the user-scoped /buckets
-				// route group below. Every bucket has an owner and is
-				// reachable through that path; the admin /s3 page is
-				// storage-VM-lifecycle only.
+				// Admin-side bucket views — cross-user listing with owner
+				// info, plus a force-delete that empties non-empty buckets.
+				// User-scoped /api/buckets remains the per-user surface
+				// (own buckets only, no force-delete).
+				r.Get("/s3/buckets", s3.ListBuckets)
+				r.With(middleware.Timeout(2*time.Minute)).
+					Delete("/s3/buckets/{name}", s3.DeleteBucket)
 
 				// GPU plane — admin-only configuration + the pairing-token
 				// minter. The job submission/list endpoints are exposed
