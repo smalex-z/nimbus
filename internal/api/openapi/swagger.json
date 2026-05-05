@@ -7796,6 +7796,10 @@
                 "cpu": {
                     "type": "number"
                 },
+                "cpu_cores": {
+                    "description": "CPUCores is the physical core count (sockets × cores-per-socket)\nfrom cpuinfo. MaxCPU above is the *thread* count (Proxmox's\n`maxcpu` = total logical CPUs); the SPA renders \"Nc/Mt\" when\nCPUCores is non-zero so the operator can tell a 4c/8t laptop\nchip apart from a real 8c desktop chip. Zero when status.CPU\nis unavailable (the SPA falls back to \"Mt\").",
+                    "type": "integer"
+                },
                 "cpu_model": {
                     "description": "CPUModel is the human-readable CPU string from cpuinfo.model\n(e.g. \"Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz\"). Empty when\nthe per-node status call failed or Proxmox didn't return it.\nUsed for the SPA card display AND as the input for the auto-tag\narch detection (DeriveAutoTags).\n\nWe deliberately do NOT surface a separate clock-speed number.\nProxmox's cpuinfo.mhz reports the live throttled P-state which\ninverts the apparent ranking on idle vs busy nodes; the\nmarketing GHz embedded in the model string is base clock only,\nwhich understates a chip that boosts 3-4× higher under load.\nThe model name carries the relevant signal — operators who want\na number look up the SKU.",
                     "type": "string"

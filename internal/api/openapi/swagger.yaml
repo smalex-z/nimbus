@@ -1133,6 +1133,15 @@ definitions:
         type: array
       cpu:
         type: number
+      cpu_cores:
+        description: |-
+          CPUCores is the physical core count (sockets × cores-per-socket)
+          from cpuinfo. MaxCPU above is the *thread* count (Proxmox's
+          `maxcpu` = total logical CPUs); the SPA renders "Nc/Mt" when
+          CPUCores is non-zero so the operator can tell a 4c/8t laptop
+          chip apart from a real 8c desktop chip. Zero when status.CPU
+          is unavailable (the SPA falls back to "Mt").
+        type: integer
       cpu_model:
         description: |-
           CPUModel is the human-readable CPU string from cpuinfo.model

@@ -155,6 +155,13 @@ type View struct {
 	// The model name carries the relevant signal — operators who want
 	// a number look up the SKU.
 	CPUModel string `json:"cpu_model,omitempty"`
+	// CPUCores is the physical core count (sockets × cores-per-socket)
+	// from cpuinfo. MaxCPU above is the *thread* count (Proxmox's
+	// `maxcpu` = total logical CPUs); the SPA renders "Nc/Mt" when
+	// CPUCores is non-zero so the operator can tell a 4c/8t laptop
+	// chip apart from a real 8c desktop chip. Zero when status.CPU
+	// is unavailable (the SPA falls back to "Mt").
+	CPUCores int `json:"cpu_cores,omitempty"`
 	// DiskUsed/DiskTotal are the configured VM-disk pool's capacity
 	// on this node (from /cluster/resources?type=storage filtered by
 	// cfg.VMDiskStorage). DiskAllocated is the sum of every non-
@@ -283,6 +290,7 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 		}
 		if status.CPU != nil {
 			view.CPUModel = status.CPU.Model
+			view.CPUCores = status.CPU.Sockets * status.CPU.Cores
 		}
 		out = append(out, view)
 	}

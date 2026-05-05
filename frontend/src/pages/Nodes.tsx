@@ -287,44 +287,31 @@ function NodeCard({ node: n }: { node: NodeView }) {
         opacity: offline ? 0.55 : 1,
       }}
     >
-      {/* Header — name + tier counts on the left, status pills on the right. */}
+      {/* Header — name + one-line specs on the left, status pills on the
+          right. Specs format: `4c/8t i5-1035G1 · 7.5 GiB · 141.6 GiB
+          local-lvm · 1/1 VM`. CPU cores + threads + short model collapse
+          into the same line that previously held just the count + bytes,
+          so a node that knows its CPU shape doesn't grow a second line.
+          Swap signal moves into the RAM bar hint below — the corner
+          badge made the header rebalance every time it appeared. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
             {n.is_self_host && <SelfPill />}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2 }}>
-            {n.max_cpu}c · {formatBytes(n.mem_total)}
+          <div
+            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={n.cpu_model}
+          >
+            {cpuLabel(n)} · {formatBytes(n.mem_total)}
             {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
             {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
           </div>
-          {n.cpu_model && (
-            <div
-              style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={n.cpu_model}
-            >
-              {shortCPUModel(n.cpu_model)}
-            </div>
-          )}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <div style={{ display: 'flex', gap: 4 }}>
-            <LockChip state={n.lock_state} reason={n.lock_reason} />
-            <StatusDot status={n.status} />
-          </div>
-          {swapping && (
-            <span
-              title="Allocated memory exceeded physical RAM — host is paging to swap"
-              className="font-mono"
-              style={{
-                fontSize: 9, padding: '1px 5px', borderRadius: 3,
-                color: '#9a5c2e', background: 'rgba(248,175,130,0.15)',
-                border: '1px solid rgba(248,175,130,0.4)',
-                textTransform: 'uppercase', letterSpacing: '0.06em',
-              }}
-            >swap +{formatBytes(n.swap_used)}</span>
-          )}
+        <div style={{ display: 'flex', gap: 4 }}>
+          <LockChip state={n.lock_state} reason={n.lock_reason} />
+          <StatusDot status={n.status} />
         </div>
       </div>
 
@@ -335,7 +322,23 @@ function NodeCard({ node: n }: { node: NodeView }) {
           alongside used makes placement reasoning visible. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <MiniBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(0)}%`} />
-        <MiniBar label="RAM" pct={memPct} hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`} />
+        <MiniBar
+          label="RAM"
+          pct={memPct}
+          hint={
+            <>
+              {formatBytes(n.mem_used)} / {formatBytes(n.mem_total)}
+              {swapping && (
+                <span
+                  title="Allocated memory exceeded physical RAM — host is paging to swap"
+                  style={{ color: '#9a5c2e', marginLeft: 6 }}
+                >
+                  +{formatBytes(n.swap_used)} swap
+                </span>
+              )}
+            </>
+          }
+        />
         <MiniBar label="RAM alloc" pct={memAllocPct} hint={`${memAllocPct.toFixed(0)}%`} accent />
         {n.disk_total > 0 && (
           <>
@@ -379,7 +382,7 @@ function NodeCard({ node: n }: { node: NodeView }) {
 // → bad as percent climbs; "accent" caller forces the warn palette
 // regardless (used for "RAM allocated" so it visually distinguishes from
 // "RAM in use" even at the same percent).
-function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hint: string; accent?: boolean }) {
+function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hint: React.ReactNode; accent?: boolean }) {
   const clamped = Math.max(0, Math.min(100, pct))
   let fill = 'var(--ink-mute)'
   if (accent) {
@@ -414,6 +417,22 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
 // pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
 // "allocated" cells where high values flag overcommit risk and the
 // operator's eye should snap to them.
+// cpuLabel collapses the previous two-line "8c\nCore i5-1035G1" header
+// into one tight string: "4c/8t i5-1035G1". When physical core count
+// isn't known (cpu_cores=0 — older PVE / nested-virt failed status
+// fanout) it falls back to "Mt" alone since the historic "8c"
+// rendering was misleading (Proxmox's max_cpu is logical threads, not
+// cores). Drops the "Core "/"Xeon "/etc. family prefix from the
+// shortened model so we keep more of the part number visible in the
+// space we have.
+function cpuLabel(n: NodeView): string {
+  const threads = n.max_cpu
+  const cores = n.cpu_cores ?? 0
+  const count = cores > 0 && cores !== threads ? `${cores}c/${threads}t` : `${threads}t`
+  const model = shortCPUModel(n.cpu_model).replace(/^Core\s+/i, '').replace(/^Xeon\s+/i, '')
+  return model ? `${count} ${model}` : count
+}
+
 // shortCPUModel strips the noisy boilerplate Intel/AMD pack into their
 // model strings ("Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" → "Core
 // i7-9700K"). Keeps the family + part number — enough to tell

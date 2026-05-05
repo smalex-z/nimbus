@@ -196,6 +196,11 @@ export interface NodeView {
   // is the live P-state which inverts the apparent ranking on idle
   // vs busy nodes; the model name carries enough signal.
   cpu_model?: string
+  // cpu_cores is the physical core count (sockets × cores-per-socket).
+  // max_cpu above is the *thread* count. Card renders "Nc/Mt" when
+  // both are known so a 4c/8t laptop chip is visually distinct from
+  // a real 8c desktop chip.
+  cpu_cores?: number
   // Per-node VM-disk pool metrics (the storage backend identified by
   // cfg.VMDiskStorage, default local-lvm). disk_allocated is the sum
   // of every non-template VM's configured maxdisk on this node — the
