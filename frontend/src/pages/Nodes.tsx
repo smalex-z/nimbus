@@ -303,7 +303,7 @@ function NodeCard({ node: n }: { node: NodeView }) {
             {n.is_self_host && <SelfPill />}
           </div>
           <div
-            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, lineHeight: 1.5 }}
             title={cardTitle(n)}
           >
             {cpuLabel(n)} · {formatBytes(n.mem_total)}
