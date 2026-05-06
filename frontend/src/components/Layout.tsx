@@ -115,7 +115,7 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     <ServerIcon /><span>Infrastructure</span>
                   </NavLink>
                   <NavLink to="/s3" className={dropdownItemClass}>
-                    <DatabaseIcon /><span>S3</span><AlphaPill />
+                    <DatabaseIcon /><span>S3</span>
                   </NavLink>
                   <NavLink to="/gpu" className={dropdownItemClass}>
                     <CpuIcon /><span>GPU</span><AlphaPill />
