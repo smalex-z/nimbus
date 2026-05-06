@@ -12,6 +12,8 @@ import type {
   IPAllocation,
   NodeView,
   ProvisionProgress,
+  AuditListParams,
+  AuditListResponse,
   ProvisionRequest,
   ProvisionResult,
   ProvisionStep,
@@ -145,6 +147,22 @@ export async function getSchedulingSettings(): Promise<SchedulingSettings> {
 // SPA can show what was actually stored.
 export async function saveSchedulingSettings(next: SchedulingSettings): Promise<SchedulingSettings> {
   const { data } = await api.put<SchedulingSettings>('/scheduling', next)
+  return data
+}
+
+// listAuditEvents reads the cluster audit log. Admin-only; returns the
+// most recent events newest-first with the total count for pagination.
+// All filter fields are optional; pass action_prefix="vm." to scope to
+// VM events, etc.
+export async function listAuditEvents(params: AuditListParams = {}): Promise<AuditListResponse> {
+  const query: Record<string, string> = {}
+  if (params.actor_id !== undefined) query.actor_id = String(params.actor_id)
+  if (params.action_prefix) query.action_prefix = params.action_prefix
+  if (params.since) query.since = params.since
+  if (params.until) query.until = params.until
+  if (params.limit !== undefined) query.limit = String(params.limit)
+  if (params.offset !== undefined) query.offset = String(params.offset)
+  const { data } = await api.get<AuditListResponse>('/audit', { params: query })
   return data
 }
 

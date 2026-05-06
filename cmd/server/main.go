@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"nimbus/internal/api"
+	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
@@ -147,6 +148,7 @@ func main() {
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
+		&db.AuditEvent{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -583,6 +585,16 @@ func main() {
 	// and the next cycle retries.
 	go runNodeReconcileLoop(bgCtx, nodeMgrSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
+	auditSvc := audit.New(database.DB)
+	// Audit reaper: prune rows older than NIMBUS_AUDIT_RETENTION_DAYS
+	// (default 90). Daily cadence is plenty — audit writes are cheap
+	// but the table grows monotonically without it. Zero retention
+	// disables the reaper (operators who want unbounded retention
+	// just set NIMBUS_AUDIT_RETENTION_DAYS=0).
+	if cfg.AuditRetentionDays > 0 {
+		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
+	}
+
 	router := api.NewRouter(api.Deps{
 		Auth:          authSvc,
 		Provision:     provSvc,
@@ -599,6 +611,7 @@ func main() {
 		GPU:           gpuSvc,
 		GX10Assets:    gx10AssetsFS,
 		NodeMgr:       nodeMgrSvc,
+		Audit:         auditSvc,
 		Config:        cfg,
 		Restart:       restartSelf,
 	})
@@ -852,6 +865,36 @@ func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interv
 			if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
 				log.Printf("background reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
 					len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+			}
+		}
+	}
+}
+
+// runAuditReapLoop deletes audit_events rows older than maxAge once
+// per day. Cheap (single SQL DELETE with an index on created_at) and
+// keeps the table from growing unbounded under high-traffic clusters.
+// Operators who want unbounded retention set
+// NIMBUS_AUDIT_RETENTION_DAYS=0 — main skips the goroutine entirely.
+func runAuditReapLoop(ctx context.Context, svc *audit.Service, maxAge time.Duration) {
+	// Daily cadence: audit writes are append-only and cheap, so even
+	// large clusters can wait a day between sweeps. Faster cadences
+	// add SQLite write churn for no operator-visible benefit.
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			pruned, err := svc.Prune(runCtx, maxAge)
+			cancel()
+			if err != nil {
+				log.Printf("audit reap error: %v", err)
+				continue
+			}
+			if pruned > 0 {
+				log.Printf("audit reap: pruned=%d (older than %s)", pruned, maxAge)
 			}
 		}
 	}

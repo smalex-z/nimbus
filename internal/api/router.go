@@ -13,6 +13,7 @@ import (
 
 	"nimbus/internal/api/handlers"
 	_ "nimbus/internal/api/openapi" // registers the generated swagger spec
+	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/config"
 	"nimbus/internal/gpu"
@@ -44,6 +45,7 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
+	Audit         *audit.Service // nil-safe — handlers and emit sites no-op when unset
 	Config        *config.Config
 	Restart       func()
 }
@@ -54,19 +56,21 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Use(middleware.RequestID)
 	r.Use(corsMiddleware)
+	r.Use(auditContextMiddleware)
 	r.Use(loggingMiddleware)
 	r.Use(recoveryMiddleware)
 	r.Use(rateLimiter(100, 200))
 
 	health := handlers.NewHealth(d.Proxmox)
-	vms := handlers.NewVMs(d.Provision)
+	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit)
 	keys := handlers.NewKeys(d.Keys)
-	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart)
+	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
-	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision)
+	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
+	auditH := handlers.NewAudit(d.Audit)
 	if d.UserBuckets != nil {
 		auth = auth.WithBucketPurger(d.UserBuckets)
 	}
@@ -222,6 +226,12 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/settings/quotas", auth.GetQuotas)
 				r.Put("/settings/quotas", auth.SaveQuotas)
 				r.Put("/users/{id}/quota", auth.SetUserQuota)
+
+				// Audit log surface — read-only inspection of every
+				// recorded mutation. Write side is the audit.Service
+				// other handlers call inline; this endpoint exposes
+				// the table for the Infrastructure → Audit page.
+				r.Get("/audit", auditH.List)
 
 				r.Get("/nodes", nodes.List)
 				// Admin-facing node lifecycle. Drain streams NDJSON and

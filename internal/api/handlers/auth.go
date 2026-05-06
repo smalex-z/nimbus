@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/ippool"
@@ -68,6 +69,7 @@ type Auth struct {
 	reconciler  loginReconciler
 	vms         userVMActor      // optional; when nil, /api/users/:id DELETE returns 503
 	userBuckets userBucketPurger // optional; when nil, s3 cleanup on user delete is a no-op
+	audit       *audit.Service   // optional audit-log sink; nil-safe (Record no-ops)
 }
 
 // NewAuth creates a new Auth handler. appURL is the env-configured fallback
@@ -77,6 +79,11 @@ type Auth struct {
 func NewAuth(auth *service.AuthService, appURL string, reconciler loginReconciler) *Auth {
 	return &Auth{auth: auth, appURL: appURL, reconciler: reconciler}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil, production wires d.Audit. Returns the receiver so it
+// chains after NewAuth/WithVMActor/WithBucketPurger.
+func (h *Auth) WithAudit(a *audit.Service) *Auth { h.audit = a; return h }
 
 // WithVMActor injects the dependency the user-deletion endpoint needs to
 // either destroy or reassign a deleted user's VMs. Setter rather than a
@@ -305,15 +312,29 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 		Email:    req.Email,
 		Password: req.Password,
 	})
-	if errors.Is(err, service.ErrEmailTaken) {
-		response.Conflict(w, "An account with that email already exists")
-		return
-	}
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.register",
+			TargetType:  "user",
+			TargetLabel: req.Email,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
+		if errors.Is(err, service.ErrEmailTaken) {
+			response.Conflict(w, "An account with that email already exists")
+			return
+		}
 		response.InternalError(w, "Failed to create account")
 		return
 	}
 
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "auth.register",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Success:     true,
+	})
 	response.Created(w, user)
 }
 
@@ -350,21 +371,38 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID, user, err := a.auth.Login(req.Email, req.Password)
-	if errors.Is(err, service.ErrInvalidCredentials) {
-		response.Error(w, http.StatusUnauthorized, "Invalid email or password")
-		return
-	}
-	if errors.Is(err, service.ErrUserSuspended) {
-		response.Error(w, http.StatusForbidden, "Account suspended. Contact your admin.")
-		return
-	}
 	if err != nil {
-		response.InternalError(w, "Failed to sign in")
+		// Failed login is the highest-signal audit event in the
+		// whole system (brute-force detection, leaked-password
+		// detection). Record actor by email since there's no user
+		// row in ctx yet for failed attempts.
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.login",
+			TargetType:  "user",
+			TargetLabel: req.Email,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
+		switch {
+		case errors.Is(err, service.ErrInvalidCredentials):
+			response.Error(w, http.StatusUnauthorized, "Invalid email or password")
+		case errors.Is(err, service.ErrUserSuspended):
+			response.Error(w, http.StatusForbidden, "Account suspended. Contact your admin.")
+		default:
+			response.InternalError(w, "Failed to sign in")
+		}
 		return
 	}
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Success:     true,
+	})
 	response.Success(w, user)
 }
 
@@ -477,6 +515,13 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.PromoteToAdmin(targetID); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:     "user.promote",
+			TargetType: "user",
+			TargetID:   strconv.FormatUint(uint64(targetID), 10),
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
 			return
@@ -485,6 +530,12 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "promote failed")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:     "user.promote",
+		TargetType: "user",
+		TargetID:   strconv.FormatUint(uint64(targetID), 10),
+		Success:    true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "is_admin": true})
 }
 
@@ -621,6 +672,14 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	// 4. User row.
 	if err := a.auth.DeleteUserRecord(targetID); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:     "user.delete",
+			TargetType: "user",
+			TargetID:   strconv.FormatUint(uint64(targetID), 10),
+			Details:    map[string]any{"vm_action": body.VMAction},
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
 			return
@@ -629,6 +688,13 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to delete user record")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:     "user.delete",
+		TargetType: "user",
+		TargetID:   strconv.FormatUint(uint64(targetID), 10),
+		Details:    map[string]any{"vm_action": body.VMAction, "vm_count": len(owned)},
+		Success:    true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "vm_action": body.VMAction, "vms_handled": len(owned)})
 }
 
@@ -726,6 +792,11 @@ func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.ChangePassword(user.ID, req.CurrentPassword, req.NewPassword); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:   "auth.password.change",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		if errors.Is(err, service.ErrInvalidCredentials) {
 			response.Error(w, http.StatusUnauthorized, "Current password is incorrect")
 			return
@@ -733,6 +804,10 @@ func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "Failed to change password")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:  "auth.password.change",
+		Success: true,
+	})
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -871,6 +946,14 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.SetUserSuspended(targetID, requester.ID, body.Suspended); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:     "user.suspend",
+			TargetType: "user",
+			TargetID:   strconv.FormatUint(uint64(targetID), 10),
+			Details:    map[string]any{"suspended": body.Suspended},
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		switch {
 		case errors.Is(err, service.ErrUserNotFound):
 			response.NotFound(w, "user not found")
@@ -882,6 +965,13 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:     "user.suspend",
+		TargetType: "user",
+		TargetID:   strconv.FormatUint(uint64(targetID), 10),
+		Details:    map[string]any{"suspended": body.Suspended},
+		Success:    true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "suspended": body.Suspended})
 }
 
@@ -995,6 +1085,13 @@ func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := a.auth.SaveSMTPSettings(body)
 	if err != nil {
+		// Don't include the request body — would leak SMTP password
+		// ciphertext into the audit row.
+		a.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.smtp.update",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		if errors.Is(err, service.ErrCipherUnavailable) {
 			response.Error(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -1003,6 +1100,16 @@ func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to save SMTP settings")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action: "settings.smtp.update",
+		Details: map[string]any{
+			"host":         view.Host,
+			"port":         view.Port,
+			"username":     view.Username,
+			"from_address": view.FromAddress,
+		},
+		Success: true,
+	})
 	response.Success(w, view)
 }
 
@@ -1561,6 +1668,11 @@ func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
 // @Success     204 "No Content"
 // @Router      /auth/logout [post]
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
+	// User may or may not be in ctx — requireAuth doesn't gate this
+	// route, so deliberate logouts of an already-expired session land
+	// here too. The audit row records what we know (actor email when
+	// available, empty otherwise).
+	a.audit.Record(r.Context(), audit.Event{Action: "auth.logout", Success: true})
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = a.auth.Logout(cookie.Value)
 	}

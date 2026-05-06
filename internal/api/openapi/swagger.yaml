@@ -205,6 +205,46 @@ definitions:
       private_key:
         type: string
     type: object
+  handlers.auditEventView:
+    properties:
+      action:
+        type: string
+      actor_admin:
+        type: boolean
+      actor_email:
+        type: string
+      actor_id:
+        type: integer
+      created_at:
+        type: string
+      details_json:
+        type: string
+      error_msg:
+        type: string
+      id:
+        type: integer
+      ip_address:
+        type: string
+      request_id:
+        type: string
+      success:
+        type: boolean
+      target_id:
+        type: string
+      target_label:
+        type: string
+      target_type:
+        type: string
+    type: object
+  handlers.auditListResponse:
+    properties:
+      events:
+        items:
+          $ref: '#/definitions/handlers.auditEventView'
+        type: array
+      total:
+        type: integer
+    type: object
   handlers.authorizedDomainsView:
     properties:
       domains:
@@ -1757,6 +1797,72 @@ paths:
       summary: Build VM templates on cluster nodes (admin)
       tags:
       - bootstrap
+  /audit:
+    get:
+      description: |-
+        Read-only inspection of the cluster audit log. Newest
+        first; filterable by actor, action prefix, and time
+        range. Use the prefix form to scope by domain — e.g.
+        `action_prefix=vm.` matches every VM event;
+        `action_prefix=settings.` matches all settings updates.
+      parameters:
+      - description: filter by actor user id
+        in: query
+        name: actor_id
+        type: integer
+      - description: filter by action prefix (e.g. `vm.`, `settings.`)
+        in: query
+        name: action_prefix
+        type: string
+      - description: RFC3339 lower bound on created_at
+        in: query
+        name: since
+        type: string
+      - description: RFC3339 upper bound on created_at
+        in: query
+        name: until
+        type: string
+      - description: page size (1-500, default 100)
+        in: query
+        name: limit
+        type: integer
+      - description: row offset for pagination
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.auditListResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List audit events (admin)
+      tags:
+      - audit
   /auth/github:
     get:
       description: |-

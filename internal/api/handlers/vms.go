@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ctxutil"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
@@ -23,10 +24,16 @@ var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // VMs wraps the provision Service.
 type VMs struct {
-	svc *provision.Service
+	svc   *provision.Service
+	audit *audit.Service
 }
 
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil and production wires d.Audit. Returns the receiver so it
+// chains after NewVMs.
+func (h *VMs) WithAudit(a *audit.Service) *VMs { h.audit = a; return h }
 
 type createVMRequest struct {
 	Hostname string `json:"hostname"`
@@ -149,6 +156,19 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		RequesterIsAdmin: requesterIsAdmin,
 	}, reporter)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.provision",
+			TargetType:  "vm",
+			TargetLabel: req.Hostname,
+			Details: map[string]any{
+				"tier":       req.Tier,
+				"os":         req.OSTemplate,
+				"public_ssh": req.PublicTunnel,
+				"gpu":        req.EnableGPU,
+			},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		writeLine(map[string]any{
 			"type":    "error",
 			"code":    classifyProvisionError(err),
@@ -156,6 +176,20 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.provision",
+		TargetType:  "vm",
+		TargetID:    strconv.FormatUint(uint64(res.ID), 10),
+		TargetLabel: res.Hostname,
+		Details: map[string]any{
+			"vmid": res.VMID,
+			"node": res.Node,
+			"tier": res.Tier,
+			"os":   res.OS,
+			"ip":   res.IP,
+		},
+		Success: true,
+	})
 	writeLine(map[string]any{
 		"type": "result",
 		"data": res,
@@ -246,9 +280,22 @@ func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.Delete(r.Context(), uint(id), user.ID); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "vm.delete",
+			TargetType: "vm",
+			TargetID:   idStr,
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "vm.delete",
+		TargetType: "vm",
+		TargetID:   idStr,
+		Success:    true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -281,9 +328,22 @@ func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	op := provision.VMLifecycleOp(chi.URLParam(r, "op"))
 	if err := h.svc.LifecycleOp(r.Context(), uint(id), user.ID, op); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "vm." + string(op),
+			TargetType: "vm",
+			TargetID:   idStr,
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "vm." + string(op),
+		TargetType: "vm",
+		TargetID:   idStr,
+		Success:    true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -457,9 +517,24 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		TLSSkipVerify:        req.TLSSkipVerify,
 	}, &user.ID)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "vm.tunnel.create",
+			TargetType: "vm",
+			TargetID:   strconv.FormatUint(uint64(id), 10),
+			Details:    map[string]any{"target_port": req.TargetPort, "subdomain": req.Subdomain},
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "vm.tunnel.create",
+		TargetType: "vm",
+		TargetID:   strconv.FormatUint(uint64(id), 10),
+		Details:    map[string]any{"target_port": req.TargetPort, "subdomain": req.Subdomain, "tunnel_id": t.ID},
+		Success:    true,
+	})
 	response.Created(w, t)
 }
 
@@ -497,9 +572,24 @@ func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID, &user.ID); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "vm.tunnel.delete",
+			TargetType: "vm",
+			TargetID:   strconv.FormatUint(uint64(id), 10),
+			Details:    map[string]any{"tunnel_id": tunnelID},
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "vm.tunnel.delete",
+		TargetType: "vm",
+		TargetID:   strconv.FormatUint(uint64(id), 10),
+		Details:    map[string]any{"tunnel_id": tunnelID},
+		Success:    true,
+	})
 	response.Success(w, deleteTunnelResponse{Message: "tunnel deleted"})
 }
 

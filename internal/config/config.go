@@ -56,6 +56,13 @@ type Config struct {
 	VerifyCacheTTLSeconds    int // ListClusterIPs cache reuse     — default 5
 	VacateMissThreshold      int // consecutive missing cycles before auto-vacate — default 3
 
+	// AuditRetentionDays caps how long audit_events rows live before
+	// the daily reaper deletes them. Default 90 (matches what most
+	// enterprise audit systems land on). 0 disables the reaper —
+	// useful for small homelabs that want forever-retention but most
+	// deployments should keep this bounded.
+	AuditRetentionDays int
+
 	// Netscan — best-effort detection of non-VM hosts on the LAN that share
 	// the IP pool range (gateway, NAS, IoT, statically-assigned workstations).
 	// Closes a hole in the Proxmox reconciler, which only sees VM-claimed IPs.
@@ -123,6 +130,7 @@ func Load() (*Config, error) {
 		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
 		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
 		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
+		AuditRetentionDays:       getEnvInt("NIMBUS_AUDIT_RETENTION_DAYS", 90),
 
 		NetscanMode:         getEnv("NIMBUS_NETSCAN_MODE", "arp"),
 		NetscanIntervalSecs: getEnvInt("NIMBUS_NETSCAN_INTERVAL_SECONDS", 300),
