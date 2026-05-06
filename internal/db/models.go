@@ -402,7 +402,7 @@ type S3Storage struct {
 	// teardown path to call provision.Service.AdminDelete (which is keyed
 	// on the Nimbus row id, not the Proxmox VMID). Nullable because a
 	// crash mid-deploy can leave the row before Provision returns.
-	VMRowID      *uint  `gorm:"column:vm_row_id;index"             json:"vm_row_id,omitempty"`
+	VMRowID *uint `gorm:"column:vm_row_id;index"             json:"vm_row_id,omitempty"`
 	// SSHKeyID points at the auto-generated SSH key created during the
 	// deploy flow. Persisted by Deploy after Provision returns; consumed
 	// by Service.Delete to garbage-collect the key when the storage VM is
