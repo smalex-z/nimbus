@@ -31,6 +31,7 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/vnetmgr"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -82,6 +83,11 @@ type ProxmoxClient interface {
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 	MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error)
+	// SetVMNetwork rewrites net0's bridge (and optionally MAC) on a
+	// cloned VM. Used to switch from the template's inherited
+	// `bridge=vmbr0` to the user's per-subnet SDN VNet at provision
+	// time. mac="auto" lets Proxmox pick a fresh MAC.
+	SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge, mac string) error
 }
 
 // Config holds the deployment-specific knobs the Service needs at construction
@@ -182,6 +188,27 @@ type Service struct {
 	// constant MemberMaxVMs — preserves the path tests use without
 	// booting auth.
 	quota QuotaResolver
+
+	// subnetResolver resolves the user's SDN subnet at provision time.
+	// nil = SDN is disabled cluster-wide; provision falls through to
+	// the legacy global vmbr0 pool path. *vnetmgr.Service satisfies it.
+	subnetResolver SubnetResolver
+}
+
+// SubnetResolver is the small interface vnetmgr.Service satisfies for
+// the provision flow. Resolves a user's chosen subnet (existing /
+// inline-create / default) into a UserSubnet row whose VNet, Subnet,
+// Gateway are used to build cloud-init + the post-clone bridge override.
+// Returning (nil, nil) means SDN is disabled — caller uses the legacy
+// global vmbr0 pool.
+type SubnetResolver interface {
+	ResolveForProvision(ctx context.Context, ownerID uint, subnetID *uint, subnetName string) (*db.UserSubnet, error)
+}
+
+// SetSubnetResolver wires the resolver onto the Service. Idempotent;
+// pass nil to disable per-subnet provision (every VM lands on vmbr0).
+func (s *Service) SetSubnetResolver(r SubnetResolver) {
+	s.subnetResolver = r
 }
 
 // SetQuotaResolver wires a QuotaResolver onto the Service so the
@@ -392,8 +419,28 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 1: reserve IP. defer release on any later failure.
-	ip, err := s.pool.Reserve(ctx, req.Hostname)
+	// Step 0: resolve the per-user SDN subnet (if SDN is enabled and
+	// the user has the resolver wired). Returns nil for the legacy
+	// vmbr0 path. Lazy-creates a "default" subnet on first provision
+	// when neither SubnetID nor SubnetName is specified — same UX as
+	// SSH keys, where a fresh user never gets blocked at the gate.
+	var subnet *db.UserSubnet
+	if s.subnetResolver != nil && req.OwnerID != nil {
+		subnet, err = s.subnetResolver.ResolveForProvision(ctx, *req.OwnerID, req.SubnetID, req.SubnetName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Step 1: reserve IP. SDN path uses the per-subnet pool (scoped
+	// to one user-subnet's CIDR); legacy path uses the global pool.
+	// defer release on any later failure — same shape both paths.
+	var ip string
+	if subnet != nil {
+		ip, err = s.pool.ReserveInSubnet(ctx, subnet.VNet, req.Hostname)
+	} else {
+		ip, err = s.pool.Reserve(ctx, req.Hostname)
+	}
 	if err != nil {
 		if errors.Is(err, ippool.ErrPoolExhausted) {
 			return nil, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
@@ -403,7 +450,11 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	released := false
 	defer func() {
 		if !released {
-			_ = s.pool.Release(context.Background(), ip)
+			if subnet != nil {
+				_ = s.pool.ReleaseInSubnet(context.Background(), subnet.VNet, ip)
+			} else {
+				_ = s.pool.Release(context.Background(), ip)
+			}
 		}
 	}()
 
@@ -412,9 +463,16 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// each picked the same lowest-free IP from their independent SQLite caches).
 	// On race-loss, releases the local reservation and tries the next free IP,
 	// up to maxVerifyAttempts.
-	ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
-	if err != nil {
-		return nil, err
+	//
+	// Skipped for SDN VMs — per-subnet pools are scoped per user and
+	// drawn from a non-overlapping carve of the supernet, so the
+	// cross-Nimbus-instance race verifyAndRetryReserve guards against
+	// can't fire there.
+	if subnet == nil {
+		ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 1c: register a Gopher machine BEFORE the clone. Provision-time
@@ -489,12 +547,31 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	report(StepCloneTpl, "Cloned golden template")
 
-	// Step 4: cloud-init.
+	// SDN bridge override: clones inherit the template's
+	// `net0=virtio,bridge=vmbr0`. Switch to the user's subnet VNet
+	// before configuring cloud-init so the new IP/gateway lands on
+	// the right L2 segment. macaddr=auto avoids two cloned VMs
+	// sharing a MAC across isolated VLANs (no L2 collision but
+	// surprising during debug).
+	if subnet != nil {
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet, "auto"); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
+		}
+	}
+
+	// Step 4: cloud-init. Per-subnet path uses the subnet's gateway +
+	// CIDR prefix; legacy path uses the cluster-wide values from
+	// NetworkSettings.
+	gatewayIP, prefixLen := s.GatewayIP(), s.PrefixLen()
+	if subnet != nil {
+		gatewayIP = subnet.Gateway
+		prefixLen = vnetmgr.PrefixLenOf(subnet)
+	}
 	username := proxmox.TemplateUsername(req.OSTemplate)
 	cloudInit := proxmox.CloudInitConfig{
 		CIUser:       username,
 		SSHKeys:      sshPubKey,
-		IPConfig0:    fmt.Sprintf("ip=%s/%d,gw=%s", ip, s.PrefixLen(), s.GatewayIP()),
+		IPConfig0:    fmt.Sprintf("ip=%s/%d,gw=%s", ip, prefixLen, gatewayIP),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
@@ -624,8 +701,16 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
-	if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
-		return nil, fmt.Errorf("mark allocated: %w", err)
+	// SDN path uses the per-subnet pool variant; legacy path uses the
+	// global one. Either way, mark-allocated semantics are identical.
+	if subnet != nil {
+		if err := s.pool.MarkAllocatedInSubnet(ctx, subnet.VNet, ip, newVMID); err != nil {
+			return nil, fmt.Errorf("mark allocated: %w", err)
+		}
+	} else {
+		if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
+			return nil, fmt.Errorf("mark allocated: %w", err)
+		}
 	}
 	released = true // success path — do NOT run the deferred release
 
@@ -646,6 +731,10 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		KeyName:      keyName,
 		SSHPubKey:    sshPubKey,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
+	}
+	if subnet != nil {
+		sid := subnet.ID
+		vm.SubnetID = &sid
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -685,6 +774,19 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 // Idempotent: a VM whose tags and description are already correct is skipped
 // without any API writes. Returns the number of VMs whose Proxmox config was
 // touched. Per-VM failures are logged but do not abort the walk.
+// CountVMsOnSubnet reports how many active VMs reference a given user
+// subnet by ID. Powers vnetmgr's "refuse-delete-while-VMs-attached"
+// gate. Soft-deleted VMs are excluded by gorm's default scope.
+func (s *Service) CountVMsOnSubnet(ctx context.Context, subnetID uint) (int, error) {
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).
+		Where("subnet_id = ?", subnetID).
+		Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("count vms on subnet %d: %w", subnetID, err)
+	}
+	return int(n), nil
+}
+
 func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
 	var vms []db.VM
 	if err := s.db.WithContext(ctx).Find(&vms).Error; err != nil {
@@ -1145,7 +1247,7 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	}
 
 	if vm.IP != "" {
-		if err := s.pool.Release(ctx, vm.IP); err != nil {
+		if err := s.releaseVMIP(ctx, vm); err != nil {
 			log.Printf("delete vm %d: release ip %s: %v", vm.VMID, vm.IP, err)
 		}
 	}
@@ -1154,6 +1256,25 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 		return fmt.Errorf("delete vm row %d: %w", vm.ID, err)
 	}
 	return nil
+}
+
+// releaseVMIP returns the VM's IP to the right pool — per-subnet for
+// SDN VMs (vm.SubnetID set), global for legacy vmbr0 VMs. Looking up
+// the subnet by id gives us the VNet name needed by ReleaseInSubnet.
+// Soft-failure (logged, not propagated) on a missing subnet — the row
+// might have been deleted concurrently and the IP still needs freeing.
+func (s *Service) releaseVMIP(ctx context.Context, vm *db.VM) error {
+	if vm.SubnetID != nil {
+		var sub db.UserSubnet
+		if err := s.db.WithContext(ctx).First(&sub, *vm.SubnetID).Error; err == nil {
+			return s.pool.ReleaseInSubnet(ctx, sub.VNet, vm.IP)
+		}
+		// Subnet row gone — fall through to global release as a
+		// last-ditch attempt. Doesn't free the per-subnet row but
+		// keeps "delete is idempotent" the contract.
+		log.Printf("delete vm %d: subnet %d missing during release; falling back to global pool", vm.VMID, *vm.SubnetID)
+	}
+	return s.pool.Release(ctx, vm.IP)
 }
 
 // isAlreadyGone reports whether a Proxmox error means the VM no longer exists

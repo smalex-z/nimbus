@@ -59,6 +59,7 @@ type fakePVE struct {
 	destroyVM         func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 	migrateVM         func(context.Context, string, int, string, bool) (string, error)
+	setVMNetwork      func(context.Context, string, int, string, string, string) error
 
 	cloneCalls     atomic.Int32
 	cloudInitCalls atomic.Int32
@@ -149,6 +150,12 @@ func (f *fakePVE) MigrateVM(ctx context.Context, src string, vmid int, target st
 		return "task:migrate", nil
 	}
 	return f.migrateVM(ctx, src, vmid, target, online)
+}
+func (f *fakePVE) SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge, mac string) error {
+	if f.setVMNetwork == nil {
+		return nil
+	}
+	return f.setVMNetwork(ctx, node, vmid, dev, bridge, mac)
 }
 
 // happyFakePVE returns a fakePVE wired so that Provision() succeeds with

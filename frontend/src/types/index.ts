@@ -68,6 +68,12 @@ export interface ProvisionRequest {
   generate_key?: boolean
   public_tunnel?: boolean
   enable_gpu?: boolean
+  // SDN subnet selection — at most one of (subnet_id, subnet_name)
+  // set. Both omitted means "use the user's default subnet (auto-
+  // create on first provision)." Backend silently ignores both when
+  // SDN is disabled cluster-wide.
+  subnet_id?: number
+  subnet_name?: string
 }
 
 export interface SSHKey {

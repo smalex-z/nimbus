@@ -367,6 +367,13 @@ type VM struct {
 	// is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
 	// Default 0 — pre-existing rows behave correctly without backfill.
 	MissedCycles int `gorm:"column:missed_cycles;default:0"          json:"missed_cycles,omitempty"`
+	// SubnetID points to the user_subnets row this VM lives on. Nullable:
+	// legacy VMs provisioned before SDN landed have NULL here and stay on
+	// vmbr0 with the global IP pool; new SDN-provisioned VMs carry their
+	// owning subnet's id. Cleared on subnet delete via FK rules in the
+	// service layer (subnet delete refuses while any VM still references
+	// it, so this stays non-NULL across the VM's life by construction).
+	SubnetID *uint `gorm:"column:subnet_id;index"                   json:"subnet_id,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.
@@ -574,4 +581,63 @@ type NetworkSettings struct {
 	IPPoolEnd   string `gorm:"default:''"`
 	GatewayIP   string `gorm:"default:''"`
 	PrefixLen   int    `gorm:"default:24"`
+
+	// SDN columns (P1 of per-user VNet isolation). Off by default —
+	// existing deployments keep their flat-vmbr0 behaviour until an
+	// admin opts in via Settings → Network. SDNZoneType today only
+	// supports "simple"; the column exists so VXLAN can land in P4
+	// without another migration.
+	SDNEnabled        bool   `gorm:"column:sdn_enabled;default:false"`
+	SDNZoneName       string `gorm:"column:sdn_zone_name;default:'nimbus'"`
+	SDNZoneType       string `gorm:"column:sdn_zone_type;default:'simple'"`
+	SDNSubnetSupernet string `gorm:"column:sdn_subnet_supernet;default:''"`
+	// Subnet size carved per user (default /24, ~250 usable hosts).
+	SDNSubnetSize int    `gorm:"column:sdn_subnet_size;default:24"`
+	SDNDNSServer  string `gorm:"column:sdn_dns_server;default:''"`
+}
+
+// UserSubnet — one row per user-owned SDN subnet. Multiple subnets per
+// user are allowed (OCI-style); each maps 1:1 to a Proxmox VNet + a
+// single CIDR carved first-free from NetworkSettings.SDNSubnetSupernet.
+//
+// Each subnet is L2-isolated: a Proxmox VNet is its own broadcast
+// domain with its own NAT gateway. So user A's "web-tier" subnet and
+// user A's "db-tier" subnet cannot reach each other — VMs that need
+// to talk must share a subnet. Mirrors OCI's empty-security-list
+// default; routing between subnets is an explicit follow-up feature.
+//
+// Name + OwnerID are the user-facing identity (composite unique). VNet
+// is the Proxmox-side identity (8-char limit, generated as
+// `nbu<base36(ID)>` after row insert so we don't need a pre-allocated
+// counter). IsDefault marks the subnet new VMs land on when the
+// provision request doesn't pick one — exactly one default per user
+// is enforced by the SetDefault path; first-time auto-create names it
+// "default" and flips IsDefault=true.
+type UserSubnet struct {
+	gorm.Model
+	OwnerID uint `gorm:"column:owner_id;not null;index;uniqueIndex:idx_owner_name"`
+	// Name is the user-friendly label (DNS-label-shape). Unique
+	// per-user; the composite index above enforces.
+	Name string `gorm:"column:name;not null;uniqueIndex:idx_owner_name"`
+	// VNet is the Proxmox VNet name — globally unique across the SDN
+	// zone. 8-char max, lowercase alphanumeric, must start with a
+	// letter. Generated as "nbu" + base36(ID).
+	VNet string `gorm:"column:vnet;uniqueIndex;not null"`
+	// Subnet is the CIDR (e.g. "10.42.1.0/24"). The supernet is
+	// configured cluster-wide; per-subnet size is configurable
+	// (default /24).
+	Subnet string `gorm:"column:subnet;not null"`
+	// Gateway is the .1 of Subnet — Proxmox's auto-NAT lives here.
+	Gateway string `gorm:"column:gateway;not null"`
+	// PoolStart / PoolEnd carve the usable host range out of Subnet
+	// (typically .10..-.250 for /24). The IP pool reseeds against
+	// these on subnet create + delete.
+	PoolStart string `gorm:"column:pool_start;not null"`
+	PoolEnd   string `gorm:"column:pool_end;not null"`
+	// IsDefault marks the subnet new VMs land on when the provision
+	// request doesn't pick a subnet.
+	IsDefault bool `gorm:"column:is_default;default:false;index"`
+	// Status reports operational state. "active" = ready; "error" =
+	// Proxmox-side create failed mid-flight (admin can retry-or-delete).
+	Status string `gorm:"column:status;not null;default:'active'"`
 }

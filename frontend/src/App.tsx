@@ -26,6 +26,7 @@ import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
 import Setup from '@/pages/Setup'
+import Subnets from '@/pages/Subnets'
 import Verify from '@/pages/Verify'
 import { useAuth } from '@/hooks/useAuth'
 import { getSetupStatus } from '@/api/client'
@@ -92,6 +93,10 @@ export default function App() {
                       <Route path="/" element={<Provision />} />
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
+                      {/* /subnets is the per-user SDN subnet manager.
+                          OCI-style: users CRUD subnets and pick one
+                          (or create new inline) at provision time. */}
+                      <Route path="/subnets" element={<Subnets />} />
                       {/* /buckets is the per-user S3 surface — every
                           verified user (admin or member) lands here to
                           manage their own prefixed buckets and copy

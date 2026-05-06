@@ -44,6 +44,12 @@ type createVMRequest struct {
 	Subdomain    string `json:"subdomain,omitempty"`
 	TunnelPort   int    `json:"tunnel_port,omitempty"`
 	EnableGPU    bool   `json:"enable_gpu,omitempty"`
+	// SDN subnet selection. At most one set:
+	//   - SubnetID  → existing subnet (owner-gated)
+	//   - SubnetName → create a new subnet inline
+	//   - both empty → user's default (auto-create on first provision)
+	SubnetID   *uint  `json:"subnet_id,omitempty"`
+	SubnetName string `json:"subnet_name,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -147,6 +153,8 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		EnableGPU:        req.EnableGPU,
 		OwnerID:          ownerID,
 		RequesterIsAdmin: requesterIsAdmin,
+		SubnetID:         req.SubnetID,
+		SubnetName:       req.SubnetName,
 	}, reporter)
 	if err != nil {
 		writeLine(map[string]any{

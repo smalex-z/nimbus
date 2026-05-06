@@ -2,13 +2,16 @@ import { useEffect, useState } from 'react'
 import {
   forceGatewayUpdate,
   getNetworkSettings,
+  getSDNSettings,
   reconcileVMs,
   renumberAllVMs,
   saveNetworkSettings,
+  saveSDNSettings,
 } from '@/api/client'
 import type {
   NetworkOpReport,
   NetworkSettingsView,
+  SDNSettingsView,
   VMReconcileReport,
 } from '@/api/client'
 
@@ -517,9 +520,258 @@ export default function Network() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         <div className="lg:col-span-2 flex flex-col gap-6">
           <NetworkPanel />
+          <SDNPanel />
           <SyncPanel />
         </div>
       </div>
+    </div>
+  )
+}
+
+// SDNPanel — admin toggle + diagnostic for the per-user SDN VNet
+// isolation feature. P1 surface: enable the zone, see live status.
+// Provision-path wiring lands in P2; until then the toggle just
+// validates that Proxmox SDN is installed and our zone is reachable.
+function SDNPanel() {
+  const [view, setView] = useState<SDNSettingsView | null>(null)
+  const [enabled, setEnabled] = useState(false)
+  const [zoneName, setZoneName] = useState('nimbus')
+  const [supernet, setSupernet] = useState('')
+  const [subnetSize, setSubnetSize] = useState(24)
+  const [dnsServer, setDNSServer] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = () => {
+    getSDNSettings()
+      .then((v) => {
+        setView(v)
+        setEnabled(v.enabled)
+        setZoneName(v.zone_name || 'nimbus')
+        setSupernet(v.supernet)
+        setSubnetSize(v.subnet_size > 0 ? v.subnet_size : 24)
+        setDNSServer(v.dns_server || '')
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : 'failed to load SDN settings'),
+      )
+  }
+  useEffect(load, [])
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setSaved(false)
+    setBusy(true)
+    try {
+      const next = await saveSDNSettings({
+        enabled,
+        zone_name: zoneName,
+        zone_type: 'simple',
+        supernet,
+        subnet_size: subnetSize,
+        dns_server: dnsServer,
+      })
+      setView(next)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="glass"
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+        Per-user VNet isolation{' '}
+        <span
+          className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-px rounded"
+          style={{ marginLeft: 6, verticalAlign: 'middle' }}
+        >
+          Alpha · zone bootstrap only
+        </span>
+      </div>
+      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+        Each Nimbus user gets a dedicated Proxmox SDN VNet — VMs can talk
+        within a user's own VNet but can't reach other users' VMs or the
+        cluster's main LAN. Outbound internet works via NAT (simple zone).
+        This phase enables zone bootstrap + status; provision-path wiring
+        ships in the follow-up.
+      </p>
+
+      {view && <ZoneStatusChip view={view} />}
+
+      <form
+        onSubmit={handleSave}
+        style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+      >
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            disabled={busy}
+          />
+          Isolate users on per-user Proxmox SDN VNets
+        </label>
+
+        <div className="n-field">
+          <label className="n-label" htmlFor="sdn-zone">Zone name</label>
+          <input
+            id="sdn-zone"
+            className="n-input"
+            type="text"
+            value={zoneName}
+            onChange={(e) => setZoneName(e.target.value)}
+            placeholder="nimbus"
+            disabled={busy}
+            maxLength={8}
+          />
+        </div>
+
+        <div className="n-field">
+          <label className="n-label" htmlFor="sdn-supernet">
+            Subnet supernet (CIDR — e.g. 10.42.0.0/16)
+          </label>
+          <input
+            id="sdn-supernet"
+            className="n-input"
+            type="text"
+            value={supernet}
+            onChange={(e) => setSupernet(e.target.value)}
+            placeholder="10.42.0.0/16"
+            disabled={busy}
+          />
+          <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--ink-mute)' }}>
+            Nimbus carves a /{subnetSize} from this supernet for each user's
+            VNet. /16 supports ~256 users at /24 size.
+          </p>
+        </div>
+
+        <div className="n-field">
+          <label className="n-label" htmlFor="sdn-subnet-size">
+            Subnet size per user (/N)
+          </label>
+          <input
+            id="sdn-subnet-size"
+            className="n-input"
+            type="number"
+            min={16}
+            max={30}
+            value={subnetSize}
+            onChange={(e) => setSubnetSize(parseInt(e.target.value, 10) || 24)}
+            disabled={busy}
+          />
+        </div>
+
+        <div className="n-field">
+          <label className="n-label" htmlFor="sdn-dns">
+            DNS server (optional, applied to each subnet)
+          </label>
+          <input
+            id="sdn-dns"
+            className="n-input"
+            type="text"
+            value={dnsServer}
+            onChange={(e) => setDNSServer(e.target.value)}
+            placeholder="1.1.1.1"
+            disabled={busy}
+          />
+        </div>
+
+        {error && <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>}
+        {saved && <p style={{ margin: 0, fontSize: 13, color: 'var(--good)' }}>Saved.</p>}
+
+        <div>
+          <button
+            type="submit"
+            className="n-btn n-btn-primary"
+            disabled={busy}
+            style={{ minWidth: 120 }}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function ZoneStatusChip({ view }: { view: SDNSettingsView }) {
+  const meta = (() => {
+    switch (view.zone_status) {
+      case 'active':
+        return {
+          label: 'Zone active',
+          color: 'var(--good)',
+          bg: 'rgba(48,128,72,0.08)',
+          border: 'rgba(48,128,72,0.25)',
+        }
+      case 'pending':
+        return {
+          label: 'Zone pending — will apply on next save',
+          color: 'var(--warn)',
+          bg: 'rgba(184,101,15,0.08)',
+          border: 'rgba(184,101,15,0.25)',
+        }
+      case 'missing-pkg':
+        return {
+          label:
+            'Proxmox SDN package not installed — apt install libpve-network-perl on every node',
+          color: 'var(--err)',
+          bg: 'rgba(184,58,58,0.08)',
+          border: 'rgba(184,58,58,0.25)',
+        }
+      case 'unconfigured':
+        return {
+          label: 'Enabled but zone name unset',
+          color: 'var(--warn)',
+          bg: 'rgba(184,101,15,0.08)',
+          border: 'rgba(184,101,15,0.25)',
+        }
+      case 'error':
+        return {
+          label: `Proxmox error: ${view.proxmox_error || 'unknown'}`,
+          color: 'var(--err)',
+          bg: 'rgba(184,58,58,0.08)',
+          border: 'rgba(184,58,58,0.25)',
+        }
+      case 'disabled':
+      default:
+        return {
+          label: 'Disabled — VMs will continue using vmbr0',
+          color: 'var(--ink-mute)',
+          bg: 'rgba(20,18,28,0.04)',
+          border: 'var(--line)',
+        }
+    }
+  })()
+  return (
+    <div
+      style={{
+        padding: '10px 14px',
+        background: meta.bg,
+        border: `1px solid ${meta.border}`,
+        borderRadius: 8,
+        fontSize: 12,
+        color: meta.color,
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 12,
+      }}
+    >
+      <span>{meta.label}</span>
+      {view.zone_status === 'active' && view.vnet_count > 0 && (
+        <span>
+          {view.vnet_count} VNet{view.vnet_count === 1 ? '' : 's'}
+        </span>
+      )}
     </div>
   )
 }

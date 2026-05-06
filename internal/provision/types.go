@@ -43,6 +43,19 @@ type Request struct {
 	// queue, so we don't bake `OPENAI_BASE_URL` and the `gx10` CLI into
 	// every guest. Ignored when the GPU plane isn't configured cluster-wide.
 	EnableGPU bool
+
+	// SDN subnet selection — at most one of (SubnetID, SubnetName) set:
+	//   - SubnetID != nil → attach to an existing user-owned subnet
+	//   - SubnetName != "" → create a new subnet inline (becomes
+	//     default if the user has none yet)
+	//   - both empty → use the user's default subnet (auto-create on
+	//     first provision)
+	// Resolved via the wired SubnetResolver; nil resolver OR a
+	// resolver returning (nil, nil) means SDN is disabled cluster-wide
+	// and the legacy global vmbr0 pool is used. Same first-time UX as
+	// SSH keys: provisioning never refuses for "you have no subnets."
+	SubnetID   *uint
+	SubnetName string
 }
 
 // Result is the value returned to the user after a successful provision.

@@ -5227,6 +5227,140 @@
                 }
             }
         },
+        "/settings/sdn": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Combines the stored config with a Proxmox round-trip\nthat reports whether the zone exists and is applied.\nProxmoxError is populated (non-fatal) when the SDN\npackage isn't installed cluster-wide.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Read SDN settings + live zone status (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.sdnSettingsView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Persists config and runs zone bootstrap on enable.\nReturns the live status view with the post-save state\nso the admin UI can confirm \"zone is active\" in one\nround trip.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Update SDN settings (admin)",
+                "parameters": [
+                    {
+                        "description": "SDN settings",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.saveSDNRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.sdnSettingsView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/smtp": {
             "get": {
                 "security": [
@@ -5524,6 +5658,301 @@
                                     }
                                 }
                             ]
+                        }
+                    }
+                }
+            }
+        },
+        "/subnets": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subnets"
+                ],
+                "summary": "List the caller's SDN subnets",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/handlers.subnetView"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Carves a fresh /N from the configured supernet, creates\nthe Proxmox VNet + Subnet, seeds the per-subnet IP pool.\nSet `set_default: true` to make it the user's default\nin one round trip.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subnets"
+                ],
+                "summary": "Create a new SDN subnet",
+                "parameters": [
+                    {
+                        "description": "Subnet to create",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.createSubnetRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.subnetView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/subnets/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subnets"
+                ],
+                "summary": "Get a single subnet",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Subnet ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.subnetView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Refused while any VM still references the subnet, and\nfor an only-default subnet (no fallback to land new\nVMs on). Tears down the Proxmox VNet + Subnet + IP pool.",
+                "tags": [
+                    "subnets"
+                ],
+                "summary": "Delete a subnet",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Subnet ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/subnets/{id}/default": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "New VMs without an explicit subnet pick land on the\ndefault. Idempotent — calling on an already-default\nsubnet is a no-op.",
+                "tags": [
+                    "subnets"
+                ],
+                "summary": "Mark this subnet as the caller's default",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Subnet ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
                         }
                     }
                 }
@@ -6826,6 +7255,10 @@
                 "status": {
                     "type": "string"
                 },
+                "subnet_id": {
+                    "description": "SubnetID points to the user_subnets row this VM lives on. Nullable:\nlegacy VMs provisioned before SDN landed have NULL here and stay on\nvmbr0 with the global IP pool; new SDN-provisioned VMs carry their\nowning subnet's id. Cleared on subnet delete via FK rules in the\nservice layer (subnet delete refuses while any VM still references\nit, so this stays non-NULL across the VM's life by construction).",
+                    "type": "integer"
+                },
                 "tier": {
                     "type": "string"
                 },
@@ -7254,6 +7687,17 @@
                 }
             }
         },
+        "handlers.createSubnetRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "set_default": {
+                    "type": "boolean"
+                }
+            }
+        },
         "handlers.createTunnelRequest": {
             "type": "object",
             "properties": {
@@ -7318,6 +7762,13 @@
                     "type": "string"
                 },
                 "subdomain": {
+                    "type": "string"
+                },
+                "subnet_id": {
+                    "description": "SDN subnet selection. At most one set:\n  - SubnetID  → existing subnet (owner-gated)\n  - SubnetName → create a new subnet inline\n  - both empty → user's default (auto-create on first provision)",
+                    "type": "integer"
+                },
+                "subnet_name": {
                     "type": "string"
                 },
                 "tier": {
@@ -7933,6 +8384,29 @@
                 }
             }
         },
+        "handlers.saveSDNRequest": {
+            "type": "object",
+            "properties": {
+                "dns_server": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "subnet_size": {
+                    "type": "integer"
+                },
+                "supernet": {
+                    "type": "string"
+                },
+                "zone_name": {
+                    "type": "string"
+                },
+                "zone_type": {
+                    "type": "string"
+                }
+            }
+        },
         "handlers.schedulingSettingsRequest": {
             "type": "object",
             "properties": {
@@ -7944,6 +8418,38 @@
                 },
                 "ram_allocation_ratio": {
                     "type": "number"
+                }
+            }
+        },
+        "handlers.sdnSettingsView": {
+            "type": "object",
+            "properties": {
+                "dns_server": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "proxmox_error": {
+                    "type": "string"
+                },
+                "subnet_size": {
+                    "type": "integer"
+                },
+                "supernet": {
+                    "type": "string"
+                },
+                "vnet_count": {
+                    "type": "integer"
+                },
+                "zone_name": {
+                    "type": "string"
+                },
+                "zone_status": {
+                    "type": "string"
+                },
+                "zone_type": {
+                    "type": "string"
                 }
             }
         },
@@ -8029,6 +8535,44 @@
                 },
                 "vm_id": {
                     "type": "integer"
+                }
+            }
+        },
+        "handlers.subnetView": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "gateway": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "is_default": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "pool_end": {
+                    "type": "string"
+                },
+                "pool_start": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "subnet": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "vnet": {
+                    "type": "string"
                 }
             }
         },
@@ -8183,6 +8727,9 @@
                 },
                 "vmid": {
                     "type": "integer"
+                },
+                "vnet": {
+                    "type": "string"
                 }
             }
         },

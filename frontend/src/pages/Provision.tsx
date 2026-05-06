@@ -7,9 +7,11 @@ import {
   bootstrapTemplates,
   listKeys,
   listNodes,
+  listSubnets,
   getTunnelInfo,
   getGPUInference,
   type BootstrapResult,
+  type Subnet,
   type TunnelInfo,
 } from '@/api/client'
 import type { GPUInferenceStatus } from '@/types'
@@ -60,6 +62,15 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   enableGPU: boolean
+  // Subnet selection. Mirrors the SSH-key picker's three modes:
+  //   - 'default'  → use the user's default subnet (auto-create on first provision)
+  //   - 'existing' → pick a specific subnet by ID
+  //   - 'new'      → create a new subnet with this name inline
+  // Backend silently ignores SubnetID/SubnetName when SDN is disabled
+  // cluster-wide, so 'default' is safe even on non-SDN deployments.
+  subnetMode:    'default' | 'existing' | 'new'
+  savedSubnetId: number | null
+  newSubnetName: string
 }
 
 const DEFAULT_FORM: FormState = {
@@ -73,6 +84,9 @@ const DEFAULT_FORM: FormState = {
   privKey: '',
   publicTunnel: false,
   enableGPU: false,
+  subnetMode:    'default',
+  savedSubnetId: null,
+  newSubnetName: '',
 }
 
 export default function Provision() {
@@ -96,6 +110,12 @@ export default function Provision() {
   // Saved-key inventory. We default the picker to the user's chosen default
   // key when the page loads with at least one saved key.
   const [savedKeys, setSavedKeys] = useState<SSHKey[]>([])
+
+  // Saved subnets. Same shape as savedKeys: lazy-load, leave empty if
+  // SDN is disabled cluster-wide (the API returns []) — the form
+  // defaults to subnetMode='default' which the backend resolves to
+  // either the user's actual default or a fresh auto-create.
+  const [savedSubnets, setSavedSubnets] = useState<Subnet[]>([])
 
   // Tunnel availability + host preview. When tunnels are disabled (no
   // GOPHER_API_URL configured) we hide the public-access section entirely
@@ -137,6 +157,27 @@ export default function Provision() {
       })
       .catch(() => {
         // Non-fatal — the form still works with BYO/Generate.
+      })
+  }, [])
+
+  useEffect(() => {
+    listSubnets()
+      .then((rows) => {
+        setSavedSubnets(rows)
+        // Pre-select the user's default subnet so the picker UI
+        // shows it immediately when they switch to "existing" mode.
+        const def = rows.find((s) => s.is_default) ?? rows[0]
+        if (def) {
+          setForm((prev) =>
+            prev.savedSubnetId === null
+              ? { ...prev, savedSubnetId: def.id }
+              : prev,
+          )
+        }
+      })
+      .catch(() => {
+        // Non-fatal — SDN may be disabled cluster-wide; form still
+        // works with subnetMode='default' which the backend resolves.
       })
   }, [])
 
@@ -238,6 +279,14 @@ export default function Provision() {
           generate_key: form.keyMode === 'gen' ? true : undefined,
           public_tunnel: form.publicTunnel ? true : undefined,
           enable_gpu: form.enableGPU ? true : undefined,
+          subnet_id:
+            form.subnetMode === 'existing' && form.savedSubnetId !== null
+              ? form.savedSubnetId
+              : undefined,
+          subnet_name:
+            form.subnetMode === 'new' && form.newSubnetName.trim() !== ''
+              ? form.newSubnetName.trim()
+              : undefined,
           // No subdomain — provision-time tunnels are SSH only and Gopher
           // allocates a port on the gateway. Backend defaults the tunnel
           // identifier to the VM hostname so admins don't need to think
@@ -312,6 +361,7 @@ export default function Provision() {
               form={form}
               updateForm={updateForm}
               savedKeys={savedKeys}
+              savedSubnets={savedSubnets}
               tunnelInfo={tunnelInfo}
               gpuInfo={gpuInfo}
               selectedKeyHasPrivate={selectedKeyHasPrivate}
@@ -475,6 +525,7 @@ interface FormBodyProps {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
+  savedSubnets: Subnet[]
   tunnelInfo: TunnelInfo | null
   gpuInfo: GPUInferenceStatus | null
   // Mirrors the backend rule that public SSH needs a private half — the
@@ -483,7 +534,7 @@ interface FormBodyProps {
   selectedKeyHasPrivate: boolean
 }
 
-function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, savedSubnets, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -672,6 +723,11 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
       </div>
 
       <AdvancedSection>
+        <SubnetPicker
+          form={form}
+          updateForm={updateForm}
+          savedSubnets={savedSubnets}
+        />
         <AffinityPicker
           value={form.requiredTags}
           onChange={(v) => updateForm('requiredTags', v)}
@@ -1188,6 +1244,110 @@ const SUGGESTED_TAGS = ['fast-cpu']
 //   3. SUGGESTED_TAGS — curated vocabulary that appears even when no
 //      node carries the tag yet.
 //
+// SubnetPicker is the per-VM subnet chooser. Three modes mirroring the
+// SSH-key picker:
+//   - default  → use the user's default subnet (auto-create on first
+//                provision); no field shown
+//   - existing → dropdown of the user's saved subnets
+//   - new      → text field for the new subnet's name
+//
+// When the user has zero saved subnets the "existing" radio disables
+// gracefully — the default option still works because the backend
+// lazy-creates a `default` on first provision.
+function SubnetPicker({
+  form,
+  updateForm,
+  savedSubnets,
+}: {
+  form: FormState
+  updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
+  savedSubnets: Subnet[]
+}) {
+  const hasSaved = savedSubnets.length > 0
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="text-[13px] font-medium text-ink">Subnet</label>
+      <div className="flex flex-wrap gap-2">
+        <ModeChip
+          active={form.subnetMode === 'default'}
+          onClick={() => updateForm('subnetMode', 'default')}
+        >
+          Default {hasSaved && (() => {
+            const def = savedSubnets.find((s) => s.is_default)
+            return def ? <span className="text-ink-3">({def.name})</span> : null
+          })()}
+        </ModeChip>
+        <ModeChip
+          active={form.subnetMode === 'existing'}
+          disabled={!hasSaved}
+          onClick={() => updateForm('subnetMode', 'existing')}
+        >
+          Existing
+        </ModeChip>
+        <ModeChip
+          active={form.subnetMode === 'new'}
+          onClick={() => updateForm('subnetMode', 'new')}
+        >
+          + New subnet
+        </ModeChip>
+      </div>
+      {form.subnetMode === 'existing' && hasSaved && (
+        <select
+          value={form.savedSubnetId ?? ''}
+          onChange={(e) =>
+            updateForm('savedSubnetId', e.target.value === '' ? null : Number(e.target.value))
+          }
+          className="n-input"
+        >
+          {savedSubnets.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} ({s.subnet}){s.is_default ? ' · default' : ''}
+            </option>
+          ))}
+        </select>
+      )}
+      {form.subnetMode === 'new' && (
+        <Input
+          value={form.newSubnetName}
+          onChange={(e) => updateForm('newSubnetName', e.target.value)}
+          placeholder="web-tier"
+          maxLength={32}
+        />
+      )}
+      <p className="text-[11px] text-ink-3 leading-relaxed">
+        Subnets isolate VMs from the cluster LAN and from your other
+        subnets. Manage them on the{' '}
+        <Link to="/subnets" className="underline">Subnets</Link> page.
+      </p>
+    </div>
+  )
+}
+
+function ModeChip({
+  active,
+  disabled,
+  onClick,
+  children,
+}: {
+  active: boolean
+  disabled?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  const base =
+    'px-3 py-1.5 rounded-[8px] text-[12px] font-medium border cursor-pointer transition-colors'
+  const cls = disabled
+    ? `${base} border-line text-ink-3 cursor-not-allowed opacity-50`
+    : active
+      ? `${base} bg-ink text-white border-ink`
+      : `${base} bg-white/85 border-line-2 text-ink-2 hover:border-ink/40`
+  return (
+    <button type="button" disabled={disabled} onClick={onClick} className={cls}>
+      {children}
+    </button>
+  )
+}
+
 // Empty value = no constraint (capacity-based scoring only). Multiple
 // tags AND together — every required tag must be on the destination
 // node or it's filtered out.

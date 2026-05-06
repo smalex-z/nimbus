@@ -1414,6 +1414,10 @@ func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
 // rotate one knob without re-sending the others. No validation here — the
 // handler checks that strings parse as valid IPv4 addresses before invoking
 // this and that PrefixLen is in the legal /1..32 range.
+//
+// SDN columns are not touched here — SaveSDNSettings is the dedicated path
+// for those, so an admin updating the IP pool can't accidentally clobber
+// the SDN config (or vice versa).
 func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 	existing, err := s.GetNetworkSettings()
 	if err != nil {
@@ -1436,6 +1440,42 @@ func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 		"ip_pool_end":   next.IPPoolEnd,
 		"gateway_ip":    next.GatewayIP,
 		"prefix_len":    next.PrefixLen,
+	}).Error
+}
+
+// SaveSDNSettings persists the SDN-specific columns of NetworkSettings.
+// Separate from SaveNetworkSettings so the IP-pool admin path and the
+// SDN admin path can each save their own slice without round-tripping
+// the other's values. SDNZoneName / SDNZoneType / SDNSubnetSupernet
+// preserve-existing on empty (so the toggle can flip without re-sending
+// the rest); SDNEnabled is always written from the request because a
+// "set this to false" save must persist.
+func (s *AuthService) SaveSDNSettings(next db.NetworkSettings) error {
+	existing, err := s.GetNetworkSettings()
+	if err != nil {
+		return err
+	}
+	if next.SDNZoneName == "" {
+		next.SDNZoneName = existing.SDNZoneName
+	}
+	if next.SDNZoneType == "" {
+		next.SDNZoneType = existing.SDNZoneType
+	}
+	if next.SDNSubnetSupernet == "" {
+		next.SDNSubnetSupernet = existing.SDNSubnetSupernet
+	}
+	if next.SDNSubnetSize == 0 {
+		next.SDNSubnetSize = existing.SDNSubnetSize
+	}
+	// SDNDNSServer empty-means-clear is intentional — admin can wipe
+	// the DNS by saving an empty string.
+	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"sdn_enabled":         next.SDNEnabled,
+		"sdn_zone_name":       next.SDNZoneName,
+		"sdn_zone_type":       next.SDNZoneType,
+		"sdn_subnet_supernet": next.SDNSubnetSupernet,
+		"sdn_subnet_size":     next.SDNSubnetSize,
+		"sdn_dns_server":      next.SDNDNSServer,
 	}).Error
 }
 

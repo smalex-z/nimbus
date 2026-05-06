@@ -15,6 +15,7 @@ import (
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/vnetmgr"
 )
 
 // TunnelClientApplier is implemented by anything that holds a *tunnel.Client
@@ -60,6 +61,15 @@ type PoolReseeder interface {
 	Reseed(ctx context.Context, start, end string) (added, removedFree, stranded int, err error)
 }
 
+// SDNBootstrapper drives zone reconcile + status reads. *vnetmgr.Service
+// satisfies it. SaveSDN calls Bootstrap on a false→true transition so the
+// admin's first save lands the zone in Proxmox without a restart; GetSDN
+// is the diagnostic read for the admin UI's status panel.
+type SDNBootstrapper interface {
+	Bootstrap(ctx context.Context) error
+	Status(ctx context.Context) (*vnetmgr.StatusView, error)
+}
+
 // SelfBootstrap is implemented by selftunnel.Service. SaveGopher fires
 // Start in a goroutine after a successful credential save, and the
 // /self-bootstrap status/start endpoints proxy to it.
@@ -91,6 +101,7 @@ type Settings struct {
 	networkAppliers []NetworkApplier
 	networkOps      NetworkOps
 	pool            PoolReseeder
+	sdn             SDNBootstrapper
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -160,6 +171,14 @@ func (s *Settings) WithNetworkOps(o NetworkOps) *Settings {
 // allocation table to the new range. *ippool.Pool satisfies it.
 func (s *Settings) WithPoolReseeder(p PoolReseeder) *Settings {
 	s.pool = p
+	return s
+}
+
+// WithSDNBootstrapper wires the per-user VNet manager so SaveSDN can
+// kick a fresh zone bootstrap on enable, and GetSDN can render live
+// zone status to the admin UI. *vnetmgr.Service satisfies it.
+func (s *Settings) WithSDNBootstrapper(b SDNBootstrapper) *Settings {
+	s.sdn = b
 	return s
 }
 
@@ -1115,5 +1134,188 @@ func (s *Settings) RegenerateAccessCode(w http.ResponseWriter, r *http.Request) 
 	response.Success(w, accessCodeView{
 		AccessCode: settings.AccessCode,
 		Version:    settings.AccessCodeVersion,
+	})
+}
+
+// sdnSettingsView is the admin-facing read shape — combines the
+// stored config with live zone status from Proxmox so the admin UI can
+// render the toggle + diagnostic panel in one round trip. The status
+// is best-effort: a Proxmox blip surfaces as zone_status="error" with
+// proxmox_error populated, but the rest of the view still rendered.
+type sdnSettingsView struct {
+	Enabled      bool   `json:"enabled"`
+	ZoneName     string `json:"zone_name"`
+	ZoneType     string `json:"zone_type"`
+	Supernet     string `json:"supernet"`
+	SubnetSize   int    `json:"subnet_size"`
+	DNSServer    string `json:"dns_server,omitempty"`
+	ZoneStatus   string `json:"zone_status"`
+	VNetCount    int    `json:"vnet_count"`
+	ProxmoxError string `json:"proxmox_error,omitempty"`
+}
+
+// saveSDNRequest is the body of PUT /api/settings/sdn. SubnetSize is
+// optional — empty/0 preserves existing. DNSServer empty = clear.
+type saveSDNRequest struct {
+	Enabled    bool   `json:"enabled"`
+	ZoneName   string `json:"zone_name,omitempty"`
+	ZoneType   string `json:"zone_type,omitempty"`
+	Supernet   string `json:"supernet,omitempty"`
+	SubnetSize int    `json:"subnet_size,omitempty"`
+	DNSServer  string `json:"dns_server"`
+}
+
+// GetSDN handles GET /api/settings/sdn (admin only). Returns the
+// stored SDN config plus live zone status from Proxmox.
+//
+// @Summary     Read SDN settings + live zone status (admin)
+// @Description Combines the stored config with a Proxmox round-trip
+// @Description that reports whether the zone exists and is applied.
+// @Description ProxmoxError is populated (non-fatal) when the SDN
+// @Description package isn't installed cluster-wide.
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=sdnSettingsView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/sdn [get]
+func (s *Settings) GetSDN(w http.ResponseWriter, r *http.Request) {
+	if s.sdn == nil {
+		response.InternalError(w, "SDN bootstrapper not wired")
+		return
+	}
+	st, err := s.sdn.Status(r.Context())
+	if err != nil {
+		response.InternalError(w, "failed to load sdn status: "+err.Error())
+		return
+	}
+	response.Success(w, sdnSettingsView{
+		Enabled:      st.Enabled,
+		ZoneName:     st.ZoneName,
+		ZoneType:     st.ZoneType,
+		Supernet:     st.Supernet,
+		SubnetSize:   st.SubnetSize,
+		DNSServer:    st.DNSServer,
+		ZoneStatus:   st.ZoneStatus,
+		VNetCount:    st.VNetCount,
+		ProxmoxError: st.ProxmoxError,
+	})
+}
+
+// SaveSDN handles PUT /api/settings/sdn (admin only). Persists the
+// SDN config, then on a false→true transition (or while enabled and
+// zone-config changed) kicks a fresh Bootstrap so the zone lands in
+// Proxmox without a restart. Bootstrap failures surface as 502 so the
+// admin sees them — DB save already happened, so a retry just needs
+// to fix Proxmox-side state (install the SDN package, etc.).
+//
+// @Summary     Update SDN settings (admin)
+// @Description Persists config and runs zone bootstrap on enable.
+// @Description Returns the live status view with the post-save state
+// @Description so the admin UI can confirm "zone is active" in one
+// @Description round trip.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveSDNRequest true "SDN settings"
+// @Success     200  {object} EnvelopeOK{data=sdnSettingsView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Failure     502  {object} EnvelopeError
+// @Router      /settings/sdn [put]
+func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
+	if s.sdn == nil {
+		response.InternalError(w, "SDN bootstrapper not wired")
+		return
+	}
+	var req saveSDNRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	zone := strings.TrimSpace(req.ZoneName)
+	zoneType := strings.TrimSpace(req.ZoneType)
+	supernet := strings.TrimSpace(req.Supernet)
+
+	// Light validation. Heavy validation (does Proxmox accept this
+	// supernet?) lands in Bootstrap — it'll surface upstream errors
+	// verbatim so admins see the actual cause.
+	if req.Enabled && zone == "" {
+		// Read existing to allow a save that just flips the toggle.
+		existing, err := s.auth.GetNetworkSettings()
+		if err != nil {
+			response.InternalError(w, "load existing settings: "+err.Error())
+			return
+		}
+		if existing.SDNZoneName == "" {
+			response.BadRequest(w, "zone_name is required to enable SDN")
+			return
+		}
+	}
+	if zoneType != "" && zoneType != "simple" {
+		// VXLAN lands in P4. Hard-reject anything else for now so an
+		// admin doesn't silently misconfigure.
+		response.BadRequest(w, "zone_type must be 'simple' (VXLAN support is planned)")
+		return
+	}
+	if supernet != "" {
+		if _, _, err := net.ParseCIDR(supernet); err != nil {
+			response.BadRequest(w, "supernet must be a valid CIDR (e.g. 10.42.0.0/16): "+err.Error())
+			return
+		}
+	}
+	if req.SubnetSize != 0 && (req.SubnetSize < 16 || req.SubnetSize > 30) {
+		response.BadRequest(w, "subnet_size must be between /16 and /30")
+		return
+	}
+
+	if err := s.auth.SaveSDNSettings(db.NetworkSettings{
+		SDNEnabled:        req.Enabled,
+		SDNZoneName:       zone,
+		SDNZoneType:       zoneType,
+		SDNSubnetSupernet: supernet,
+		SDNSubnetSize:     req.SubnetSize,
+		SDNDNSServer:      req.DNSServer,
+	}); err != nil {
+		response.InternalError(w, "save sdn settings: "+err.Error())
+		return
+	}
+
+	// Always run Bootstrap when enabled — idempotent, and catches the
+	// case where a previous save persisted but the Bootstrap call
+	// failed (e.g. Proxmox was momentarily down).
+	if req.Enabled {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := s.sdn.Bootstrap(ctx); err != nil {
+			// 502 — config was saved, but the Proxmox-side apply
+			// didn't land. Admin can retry without re-saving.
+			log.Printf("save sdn: bootstrap failed: %v", err)
+			response.Error(w, http.StatusBadGateway, "settings saved, but proxmox bootstrap failed: "+err.Error())
+			return
+		}
+	}
+
+	// Re-read the live status so the response reflects what just landed.
+	st, err := s.sdn.Status(r.Context())
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload status: "+err.Error())
+		return
+	}
+	response.Success(w, sdnSettingsView{
+		Enabled:      st.Enabled,
+		ZoneName:     st.ZoneName,
+		ZoneType:     st.ZoneType,
+		Supernet:     st.Supernet,
+		SubnetSize:   st.SubnetSize,
+		DNSServer:    st.DNSServer,
+		ZoneStatus:   st.ZoneStatus,
+		VNetCount:    st.VNetCount,
+		ProxmoxError: st.ProxmoxError,
 	})
 }
