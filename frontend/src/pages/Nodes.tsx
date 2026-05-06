@@ -857,10 +857,12 @@ function SchedulingPanel() {
         <div style={{ flex: '1 1 0', minWidth: 0 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Overcommit ratios</span>
           <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
-            How much committed capacity each node accepts as a multiple of physical capacity. CPU 4× lets 32 vCPUs land
-            on an 8-thread host (homelab default — most VMs idle far below their declared cores). RAM 1× = strict no-overcommit;
+            How much declared capacity each node accepts as a multiple of physical capacity. CPU 4× lets 32 vCPUs land
+            on an 8-thread host (homelab default — most VMs idle well below their declared cores). RAM 1× = strict no-overcommit;
             OpenStack Nova ships 1.5× by default and bumping toward there is fine if your VMs sit well below declared <code>MaxMem</code>.
-            Disk 1× is fine since LVM-thin already thin-provisions. Each value clamps to [1, 64].
+            Disk 1× means Nimbus refuses to declare more than the pool's physical size, which leaves LVM-thin's overcommit
+            unused — raise to 1.5–2× on thin-capable pools (LVM-thin, Ceph thin, ZFS sparse) once a pool-fill monitor is in place;
+            keep at 1× for plain LVM, thick Ceph, or any pool that can't lazily allocate. Each value clamps to [1, 64].
           </p>
         </div>
         <div style={{ display: 'inline-flex', gap: 8, flexShrink: 0 }}>

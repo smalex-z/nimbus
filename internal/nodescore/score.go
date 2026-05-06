@@ -416,9 +416,14 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	// Disk gate is optional — only enforced when the caller supplied storage
 	// telemetry. A node missing from StorageByNode is treated as having zero
 	// free bytes (the operator's configured pool isn't visible there at all).
-	// Effective capacity = `TotalBytes × diskRatio` — typically left at 1.0
-	// since LVM-thin already thin-provisions; bumping this only makes sense
-	// when the operator has a specific capacity-management story.
+	// Effective capacity = `TotalBytes × diskRatio`. 1.0 is the safe default
+	// because every backend honors it; the failure mode of declaring past the
+	// pool size on a thick-provisioned backend is "writes fail and filesystems
+	// corrupt." Operators on thin-capable pools (LVM-thin, Ceph thin, ZFS
+	// sparse) can raise this to 1.5–2.0 to expose the storage layer's lazy
+	// allocation to placement decisions, but only once a pool-fill monitor is
+	// in place — the runtime safety net for "declared > physical" lives there,
+	// not here.
 	var (
 		diskGateOn   bool
 		freeDisk     int64
