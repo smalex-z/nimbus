@@ -8,6 +8,7 @@ import {
   listBuckets,
 } from '@/api/client'
 import type { BucketCredentials, UserBucket } from '@/api/client'
+import CopyButton from '@/components/ui/CopyButton'
 import DeleteBucketConfirm from '@/components/ui/DeleteBucketConfirm'
 
 // Three states the page can render:
@@ -102,10 +103,6 @@ aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${bucketName}/file.tx
     }
   }, [creds, bucketName])
 
-  const copy = (text: string) => {
-    void navigator.clipboard.writeText(text)
-  }
-
   return (
     <div
       role="dialog"
@@ -147,28 +144,19 @@ aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${bucketName}/file.tx
         </p>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <Field label="Endpoint" value={creds.endpoint} onCopy={() => copy(creds.endpoint)} />
-          <Field label="Access key" value={creds.access_key} onCopy={() => copy(creds.access_key)} />
+          <Field label="Endpoint" value={creds.endpoint} copyValue={creds.endpoint} />
+          <Field label="Access key" value={creds.access_key} copyValue={creds.access_key} />
           <Field
             label="Secret key"
             value={revealed ? creds.secret_key : '•'.repeat(32)}
-            onCopy={() => copy(creds.secret_key)}
-            actions={
-              <button
-                type="button"
-                className="n-btn n-btn-ghost"
-                onClick={() => setRevealed((v) => !v)}
-                style={{ padding: '2px 10px', fontSize: 12 }}
-              >
-                {revealed ? 'Hide' : 'Reveal'}
-              </button>
-            }
+            copyValue={creds.secret_key}
+            actions={<EyeToggle revealed={revealed} onToggle={() => setRevealed((v) => !v)} />}
           />
           <Field
             label="Name prefix"
             value={creds.prefix}
             help={`Buckets you create are named ${creds.prefix}-<your-name>`}
-            onCopy={() => copy(creds.prefix)}
+            copyValue={creds.prefix}
           />
         </div>
 
@@ -228,63 +216,90 @@ aws --endpoint-url ${creds.endpoint} s3 cp ./file.txt s3://${bucketName}/file.tx
           >
             {snippets[tab]}
           </pre>
-          <button
-            type="button"
-            className="n-btn n-btn-ghost"
-            onClick={() => copy(snippets[tab])}
-            style={{ position: 'absolute', top: 6, right: 6, padding: '2px 10px', fontSize: 12 }}
-          >
-            Copy
-          </button>
+          <div style={{ position: 'absolute', top: 6, right: 6 }}>
+            <CopyButton value={snippets[tab]} label="COPY ALL" />
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
+// EyeToggle is the inline show/hide affordance used on the secret-key
+// field. Uses an icon rather than a Reveal/Hide pill so the box
+// doesn't read as "two buttons" — the COPY button stays the singular
+// styled action; this is just an unobtrusive visibility flip.
+function EyeToggle({ revealed, onToggle }: { revealed: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={revealed ? 'Hide secret' : 'Show secret'}
+      title={revealed ? 'Hide' : 'Show'}
+      className="flex items-center justify-center flex-shrink-0 p-1 rounded text-ink-3 hover:text-ink cursor-pointer transition-colors"
+    >
+      {revealed ? (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M9.88 9.88a3 3 0 1 1-4.24-4.24" />
+          <path d="M10.73 5.08A10.43 10.43 0 0 0 8 4.5C5 4.5 2.27 6.27 1 9c.65 1.32 1.6 2.42 2.76 3.21" />
+          <path d="M14.5 9c-.6 1.07-1.4 2.02-2.36 2.78" />
+          <path d="M14.12 14.12 1.88 1.88" />
+        </svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M1 9s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+          <circle cx="8" cy="9" r="2.5" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
 function Field({
   label,
   value,
-  onCopy,
+  copyValue,
   actions,
   help,
 }: {
   label: string
   value: string
-  onCopy: () => void
+  // Plumbed separately from `value` because the displayed value is sometimes
+  // masked (the secret key shows bullets when not revealed) but copy should
+  // always put the real string on the clipboard.
+  copyValue: string
   actions?: React.ReactNode
   help?: string
 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <span style={{ color: 'var(--ink-mute)', fontSize: 12 }}>{label}</span>
-        <div style={{ display: 'flex', gap: 4 }}>
-          {actions}
-          <button
-            type="button"
-            className="n-btn n-btn-ghost"
-            onClick={onCopy}
-            style={{ padding: '2px 10px', fontSize: 12 }}
-          >
-            Copy
-          </button>
-        </div>
-      </div>
-      <span
+      <span style={{ color: 'var(--ink-mute)', fontSize: 12 }}>{label}</span>
+      <div
         style={{
-          fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
-          fontSize: 12,
-          color: 'var(--ink)',
-          wordBreak: 'break-all',
-          padding: '6px 10px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '4px 4px 4px 10px',
           background: 'rgba(20,18,28,0.03)',
           borderRadius: 6,
           border: '1px solid var(--line)',
         }}
       >
-        {value}
-      </span>
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
+            fontSize: 12,
+            color: 'var(--ink)',
+            wordBreak: 'break-all',
+          }}
+        >
+          {value}
+        </span>
+        {actions}
+        <CopyButton value={copyValue} />
+      </div>
       {help && <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{help}</span>}
     </div>
   )
