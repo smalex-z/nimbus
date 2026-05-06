@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/db"
 	"nimbus/internal/provision"
 	"nimbus/internal/selftunnel"
@@ -91,11 +92,16 @@ type Settings struct {
 	networkAppliers []NetworkApplier
 	networkOps      NetworkOps
 	pool            PoolReseeder
+	audit           *audit.Service
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
 	return &Settings{auth: auth}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil and production wires d.Audit.
+func (s *Settings) WithAudit(a *audit.Service) *Settings { s.audit = a; return s }
 
 // WithTunnelAppliers registers components that should be notified when Gopher
 // settings change. Variadic so callers can pass any combination.
@@ -312,9 +318,23 @@ func (s *Settings) SaveOAuth(w http.ResponseWriter, r *http.Request) {
 		GoogleClientID:     req.GoogleClientID,
 		GoogleClientSecret: req.GoogleClientSecret,
 	}); err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.oauth.update",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, "failed to save OAuth settings")
 		return
 	}
+	// Don't log secrets — just which providers were configured.
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.oauth.update",
+		Details: map[string]any{
+			"github_configured": req.GitHubClientID != "",
+			"google_configured": req.GoogleClientID != "",
+		},
+		Success: true,
+	})
 	response.Success(w, map[string]string{"message": "OAuth settings saved"})
 }
 
@@ -404,9 +424,20 @@ func (s *Settings) SaveAuthorizedGoogleDomains(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err := s.auth.SaveAuthorizedGoogleDomains(req.Domains); err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.oauth.google_domains.update",
+			Details:  map[string]any{"domains": req.Domains},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, "failed to save authorized domains")
 		return
 	}
+	s.audit.Record(r.Context(), audit.Event{
+		Action:  "settings.oauth.google_domains.update",
+		Details: map[string]any{"domains": req.Domains},
+		Success: true,
+	})
 	s.GetAuthorizedGoogleDomains(w, r)
 }
 
@@ -467,9 +498,20 @@ func (s *Settings) SaveAuthorizedGitHubOrgs(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.auth.SaveAuthorizedGitHubOrgs(req.Orgs); err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.oauth.github_orgs.update",
+			Details:  map[string]any{"orgs": req.Orgs},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, "failed to save authorized orgs")
 		return
 	}
+	s.audit.Record(r.Context(), audit.Event{
+		Action:  "settings.oauth.github_orgs.update",
+		Details: map[string]any{"orgs": req.Orgs},
+		Success: true,
+	})
 	s.GetAuthorizedGitHubOrgs(w, r)
 }
 
@@ -645,6 +687,15 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.gopher.update",
+		Details: map[string]any{
+			"api_url":         settings.APIURL,
+			"cloud_subdomain": selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
+			"configured":      client != nil,
+		},
+		Success: true,
+	})
 	response.Success(w, gopherSettingsView{
 		APIURL:         settings.APIURL,
 		CloudSubdomain: selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
@@ -761,6 +812,15 @@ func (s *Settings) SaveGPU(w http.ResponseWriter, r *http.Request) {
 		a.SetGPUBootstrapConfig(bootstrapCfg)
 	}
 
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.gpu.update",
+		Details: map[string]any{
+			"enabled":         settings.Enabled,
+			"base_url":        settings.BaseURL,
+			"inference_model": settings.InferenceModel,
+		},
+		Success: true,
+	})
 	response.Success(w, gpuSettingsView{
 		Enabled:        settings.Enabled,
 		BaseURL:        settings.BaseURL,
@@ -972,6 +1032,16 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 		a.SetPrefixLen(settings.PrefixLen)
 	}
 
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.network.update",
+		Details: map[string]any{
+			"ip_pool_start": settings.IPPoolStart,
+			"ip_pool_end":   settings.IPPoolEnd,
+			"gateway_ip":    settings.GatewayIP,
+			"prefix_len":    settings.PrefixLen,
+		},
+		Success: true,
+	})
 	response.Success(w, networkSettingsView{
 		IPPoolStart: settings.IPPoolStart,
 		IPPoolEnd:   settings.IPPoolEnd,
@@ -1043,9 +1113,24 @@ func (s *Settings) ForceGatewayUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	rep, err := s.networkOps.ForceGatewayUpdate(r.Context(), settings.GatewayIP)
 	if err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.network.force_gateway",
+			Details:  map[string]any{"gateway_ip": settings.GatewayIP},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, err.Error())
 		return
 	}
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.network.force_gateway",
+		Details: map[string]any{
+			"gateway_ip": settings.GatewayIP,
+			"updated":    rep.Updated,
+			"failures":   len(rep.Failures),
+		},
+		Success: true,
+	})
 	response.Success(w, toNetworkOpResponse(rep))
 }
 
@@ -1084,9 +1169,22 @@ func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	rep, err := s.networkOps.RenumberAllVMs(r.Context(), settings.GatewayIP, settings.IPPoolStart, settings.IPPoolEnd)
 	if err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.network.renumber_vms",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.BadRequest(w, err.Error())
 		return
 	}
+	s.audit.Record(r.Context(), audit.Event{
+		Action: "settings.network.renumber_vms",
+		Details: map[string]any{
+			"updated":  rep.Updated,
+			"failures": len(rep.Failures),
+		},
+		Success: true,
+	})
 	response.Success(w, toNetworkOpResponse(rep))
 }
 
@@ -1109,9 +1207,22 @@ func (s *Settings) RenumberVMs(w http.ResponseWriter, r *http.Request) {
 func (s *Settings) RegenerateAccessCode(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.auth.RegenerateAccessCode()
 	if err != nil {
+		s.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.access_code.regenerate",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, "failed to regenerate access code")
 		return
 	}
+	// Don't log the code itself — just the version bump. The code is
+	// shown to the admin in the response; that's the only place it
+	// should appear.
+	s.audit.Record(r.Context(), audit.Event{
+		Action:  "settings.access_code.regenerate",
+		Details: map[string]any{"version": settings.AccessCodeVersion},
+		Success: true,
+	})
 	response.Success(w, accessCodeView{
 		AccessCode: settings.AccessCode,
 		Version:    settings.AccessCodeVersion,

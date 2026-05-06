@@ -63,11 +63,11 @@ func NewRouter(d Deps) http.Handler {
 
 	health := handlers.NewHealth(d.Proxmox)
 	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit)
-	keys := handlers.NewKeys(d.Keys)
+	keys := handlers.NewKeys(d.Keys).WithAudit(d.Audit)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
-	ips := handlers.NewIPs(d.Pool, d.Reconciler)
+	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit)
-	bs := handlers.NewBootstrap(d.Bootstrap)
+	bs := handlers.NewBootstrap(d.Bootstrap).WithAudit(d.Audit)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
@@ -83,7 +83,8 @@ func NewRouter(d Deps) http.Handler {
 		WithAppURLResolver(auth).
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
-		WithPoolReseeder(d.Pool)
+		WithPoolReseeder(d.Pool).
+		WithAudit(d.Audit)
 	if d.SelfBootstrap != nil {
 		settingsBuilder = settingsBuilder.WithSelfBootstrap(d.SelfBootstrap)
 	}

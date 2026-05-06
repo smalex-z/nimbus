@@ -514,13 +514,15 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "verification failed")
 		return
 	}
+	targetEmail := a.lookupUserEmail(targetID)
 	if err := a.auth.PromoteToAdmin(targetID); err != nil {
 		a.audit.Record(r.Context(), audit.Event{
-			Action:     "user.promote",
-			TargetType: "user",
-			TargetID:   strconv.FormatUint(uint64(targetID), 10),
-			Success:    false,
-			ErrorMsg:   err.Error(),
+			Action:      "user.promote",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Success:     false,
+			ErrorMsg:    err.Error(),
 		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
@@ -531,10 +533,11 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Record(r.Context(), audit.Event{
-		Action:     "user.promote",
-		TargetType: "user",
-		TargetID:   strconv.FormatUint(uint64(targetID), 10),
-		Success:    true,
+		Action:      "user.promote",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Success:     true,
 	})
 	response.Success(w, map[string]any{"id": targetID, "is_admin": true})
 }
@@ -625,6 +628,7 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	// 1. VM disposition.
 	ctx := r.Context()
+	targetEmail := a.lookupUserEmail(targetID)
 	owned, err := a.vms.List(ctx, &targetID)
 	if err != nil {
 		log.Printf("delete user: list vms: %v", err)
@@ -673,12 +677,13 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	// 4. User row.
 	if err := a.auth.DeleteUserRecord(targetID); err != nil {
 		a.audit.Record(r.Context(), audit.Event{
-			Action:     "user.delete",
-			TargetType: "user",
-			TargetID:   strconv.FormatUint(uint64(targetID), 10),
-			Details:    map[string]any{"vm_action": body.VMAction},
-			Success:    false,
-			ErrorMsg:   err.Error(),
+			Action:      "user.delete",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Details:     map[string]any{"vm_action": body.VMAction},
+			Success:     false,
+			ErrorMsg:    err.Error(),
 		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
@@ -689,11 +694,12 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Record(r.Context(), audit.Event{
-		Action:     "user.delete",
-		TargetType: "user",
-		TargetID:   strconv.FormatUint(uint64(targetID), 10),
-		Details:    map[string]any{"vm_action": body.VMAction, "vm_count": len(owned)},
-		Success:    true,
+		Action:      "user.delete",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Details:     map[string]any{"vm_action": body.VMAction, "vm_count": len(owned)},
+		Success:     true,
 	})
 	response.Success(w, map[string]any{"id": targetID, "vm_action": body.VMAction, "vms_handled": len(owned)})
 }
@@ -945,14 +951,16 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
+	targetEmail := a.lookupUserEmail(targetID)
 	if err := a.auth.SetUserSuspended(targetID, requester.ID, body.Suspended); err != nil {
 		a.audit.Record(r.Context(), audit.Event{
-			Action:     "user.suspend",
-			TargetType: "user",
-			TargetID:   strconv.FormatUint(uint64(targetID), 10),
-			Details:    map[string]any{"suspended": body.Suspended},
-			Success:    false,
-			ErrorMsg:   err.Error(),
+			Action:      "user.suspend",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Details:     map[string]any{"suspended": body.Suspended},
+			Success:     false,
+			ErrorMsg:    err.Error(),
 		})
 		switch {
 		case errors.Is(err, service.ErrUserNotFound):
@@ -966,11 +974,12 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit.Record(r.Context(), audit.Event{
-		Action:     "user.suspend",
-		TargetType: "user",
-		TargetID:   strconv.FormatUint(uint64(targetID), 10),
-		Details:    map[string]any{"suspended": body.Suspended},
-		Success:    true,
+		Action:      "user.suspend",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Details:     map[string]any{"suspended": body.Suspended},
+		Success:     true,
 	})
 	response.Success(w, map[string]any{"id": targetID, "suspended": body.Suspended})
 }
@@ -1482,9 +1491,26 @@ func (a *Auth) SaveQuotas(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := a.auth.SaveQuotaSettings(maxVMs, maxJobs)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action: "settings.quotas.update",
+			Details: map[string]any{
+				"member_max_vms":         maxVMs,
+				"member_max_active_jobs": maxJobs,
+			},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.BadRequest(w, err.Error())
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action: "settings.quotas.update",
+		Details: map[string]any{
+			"member_max_vms":         updated.MemberMaxVMs,
+			"member_max_active_jobs": updated.MemberMaxActiveJobs,
+		},
+		Success: true,
+	})
 	response.Success(w, QuotaSettingsView{
 		MemberMaxVMs:        updated.MemberMaxVMs,
 		MemberMaxActiveJobs: updated.MemberMaxActiveJobs,
@@ -1582,6 +1608,21 @@ func (a *Auth) SetUserQuota(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "user.quota.update",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: a.lookupUserEmail(targetID),
+		Details: map[string]any{
+			"vm_set":    setVM,
+			"vm_clear":  clearVM,
+			"vm_value":  vmVal,
+			"gpu_set":   setGPU,
+			"gpu_clear": clearGPU,
+			"gpu_value": gpuVal,
+		},
+		Success: true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "ok": true})
 }
 
@@ -1741,6 +1782,18 @@ func (a *Auth) oauthStart(provider oauth.Provider, intent string) http.HandlerFu
 // OAuth callback routes are public (sign-in mode runs them with no
 // pre-existing session), so this lookup happens inside the handler
 // rather than via requireAuth middleware.
+// lookupUserEmail resolves a user ID to their email for audit-event
+// labelling. Best-effort: returns "" on lookup failure (deleted user,
+// transient DB error). Audit emit sites that label by user fall back
+// to TargetID alone in that case.
+func (a *Auth) lookupUserEmail(userID uint) string {
+	row, err := a.auth.GetUserByID(userID)
+	if err != nil || row == nil {
+		return ""
+	}
+	return row.Email
+}
+
 func (a *Auth) currentSessionUser(r *http.Request) *service.UserView {
 	c, err := r.Cookie(sessionCookieName)
 	if err != nil || c.Value == "" {
