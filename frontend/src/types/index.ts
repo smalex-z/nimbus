@@ -360,6 +360,13 @@ export interface AuditListResponse {
 export interface AuditListParams {
   actor_id?: number
   action_prefix?: string
+  // severity is a coarse outcome filter mapped to the backend's
+  // success bool: "ok" matches success=true, "failed" matches
+  // success=false, undefined leaves results unconstrained.
+  severity?: 'ok' | 'failed'
+  // search does a case-insensitive substring match across action,
+  // target_label, actor_email, and error_msg.
+  search?: string
   since?: string // RFC3339
   until?: string
   limit?: number

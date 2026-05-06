@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { listAuditEvents } from '@/api/client'
-import type { AuditEvent } from '@/types'
+import type { AuditEvent, AuditListParams } from '@/types'
 
 // Audit — read-only cluster activity log surfaced under
 // Infrastructure → Audit. The write side is the audit.Service that
 // every mutation handler calls inline; this page is just the
 // inspection surface.
 //
-// Filters land as URL query params on the wire (action_prefix, since,
-// until, actor_id, limit, offset). The UI keeps state local for v1 so
-// reload-and-share-a-link isn't a thing yet — small follow-up to mirror
-// state in the URL.
+// Three filters compose: Source (action prefix → vm. / node. / etc.),
+// Severity (success bool → ok / failed), and a free-text search that
+// the backend LIKE-matches across action / target_label / actor_email
+// / error_msg. State is kept local for v1; URL-mirroring is a small
+// follow-up that buys shareable filter links.
 //
 // Pagination is offset-based with a fixed page size. Cursor-based would
 // scale better past 100k rows, but the daily reaper keeps the table at
@@ -19,12 +20,11 @@ import type { AuditEvent } from '@/types'
 
 const PAGE_SIZE = 100
 
-// ACTION_CATEGORIES groups action prefixes for the filter pills. Each
-// pill matches with a `LIKE prefix%` query; "All" passes empty
-// action_prefix. New backend actions land without a frontend change —
-// they show up under whichever prefix-pill matches them, or under "All".
-const ACTION_CATEGORIES = [
-  { label: 'All', prefix: '' },
+// SOURCE_OPTIONS map action prefixes to dropdown labels. New backend
+// actions land without a frontend change — they show up under whichever
+// prefix matches their action, or under "All sources".
+const SOURCE_OPTIONS = [
+  { label: 'All sources', prefix: '' },
   { label: 'VMs', prefix: 'vm.' },
   { label: 'Nodes', prefix: 'node.' },
   { label: 'Auth', prefix: 'auth.' },
@@ -32,22 +32,53 @@ const ACTION_CATEGORIES = [
   { label: 'Settings', prefix: 'settings.' },
 ] as const
 
+// SEVERITY_OPTIONS map outcome to the backend's `severity` query param.
+// Backend coerces "ok"→success=true, "failed"→success=false; empty
+// leaves results unconstrained.
+const SEVERITY_OPTIONS: { label: string; value: '' | 'ok' | 'failed' }[] = [
+  { label: 'All severities', value: '' },
+  { label: 'OK', value: 'ok' },
+  { label: 'Failed', value: 'failed' },
+]
+
 export default function Audit() {
   const [events, setEvents] = useState<AuditEvent[]>([])
   const [total, setTotal] = useState(0)
   const [actionPrefix, setActionPrefix] = useState('')
+  const [severity, setSeverity] = useState<'' | 'ok' | 'failed'>('')
+  const [search, setSearch] = useState('')
+  // debounced copy — the actual value sent to the backend; updates 250 ms
+  // after the user stops typing so we don't fire a query per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
 
+  // Debounce the search input. Resets the offset when the value
+  // actually changes so the user doesn't end up on page 7 of an empty
+  // result set.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      if (debouncedSearch !== search) {
+        setDebouncedSearch(search)
+        setOffset(0)
+        setExpanded(null)
+      }
+    }, 250)
+    return () => clearTimeout(handle)
+  }, [search, debouncedSearch])
+
   const reload = useCallback(() => {
     setLoading(true)
-    listAuditEvents({
+    const params: AuditListParams = {
       action_prefix: actionPrefix || undefined,
+      severity: severity || undefined,
+      search: debouncedSearch || undefined,
       limit: PAGE_SIZE,
       offset,
-    })
+    }
+    listAuditEvents(params)
       .then((res) => {
         setEvents(res.events)
         setTotal(res.total)
@@ -55,15 +86,9 @@ export default function Audit() {
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
       .finally(() => setLoading(false))
-  }, [actionPrefix, offset])
+  }, [actionPrefix, severity, debouncedSearch, offset])
 
   useEffect(() => { reload() }, [reload])
-
-  const onPickCategory = (prefix: string) => {
-    setActionPrefix(prefix)
-    setOffset(0)
-    setExpanded(null)
-  }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1
@@ -79,24 +104,32 @@ export default function Audit() {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        {ACTION_CATEGORIES.map((cat) => {
-          const active = cat.prefix === actionPrefix
-          return (
-            <button
-              key={cat.label}
-              type="button"
-              onClick={() => onPickCategory(cat.prefix)}
-              className={`font-mono text-[11px] uppercase tracking-wider px-2.5 py-1 rounded-md border cursor-pointer transition-colors ${
-                active
-                  ? 'bg-ink text-white border-ink'
-                  : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
-              }`}
-            >
-              {cat.label}
-            </button>
-          )
-        })}
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={actionPrefix}
+          onChange={(e) => { setActionPrefix(e.target.value); setOffset(0); setExpanded(null) }}
+          className="px-3 py-1.5 rounded-md border border-line-2 bg-white/85 text-sm text-ink cursor-pointer focus:border-ink focus:bg-white outline-none"
+        >
+          {SOURCE_OPTIONS.map((opt) => (
+            <option key={opt.label} value={opt.prefix}>{opt.label}</option>
+          ))}
+        </select>
+        <select
+          value={severity}
+          onChange={(e) => { setSeverity(e.target.value as '' | 'ok' | 'failed'); setOffset(0); setExpanded(null) }}
+          className="px-3 py-1.5 rounded-md border border-line-2 bg-white/85 text-sm text-ink cursor-pointer focus:border-ink focus:bg-white outline-none"
+        >
+          {SEVERITY_OPTIONS.map((opt) => (
+            <option key={opt.label} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <input
+          type="search"
+          placeholder="Search action, target, actor, or error…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="flex-1 min-w-[220px] px-3 py-1.5 rounded-md border border-line-2 bg-white/85 text-sm text-ink focus:border-ink focus:bg-white outline-none"
+        />
       </div>
 
       {error && <div className="text-bad text-sm">Failed to load: {error}</div>}

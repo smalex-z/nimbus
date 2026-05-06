@@ -158,6 +158,8 @@ export async function listAuditEvents(params: AuditListParams = {}): Promise<Aud
   const query: Record<string, string> = {}
   if (params.actor_id !== undefined) query.actor_id = String(params.actor_id)
   if (params.action_prefix) query.action_prefix = params.action_prefix
+  if (params.severity) query.severity = params.severity
+  if (params.search) query.search = params.search
   if (params.since) query.since = params.since
   if (params.until) query.until = params.until
   if (params.limit !== undefined) query.limit = String(params.limit)

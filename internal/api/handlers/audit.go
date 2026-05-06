@@ -59,15 +59,20 @@ type auditEventView struct {
 //
 // @Summary     List audit events (admin)
 // @Description Read-only inspection of the cluster audit log. Newest
-// @Description first; filterable by actor, action prefix, and time
-// @Description range. Use the prefix form to scope by domain — e.g.
-// @Description `action_prefix=vm.` matches every VM event;
-// @Description `action_prefix=settings.` matches all settings updates.
+// @Description first; filterable by actor, action prefix, severity, free-
+// @Description text search, and time range. Use the prefix form to scope
+// @Description by domain — e.g. `action_prefix=vm.` matches every VM
+// @Description event; `action_prefix=settings.` matches all settings
+// @Description updates. The search filter does a case-insensitive
+// @Description substring match across action, target_label, actor_email,
+// @Description and error_msg.
 // @Tags        audit
 // @Security    cookieAuth
 // @Produce     json
 // @Param       actor_id      query int    false "filter by actor user id"
 // @Param       action_prefix query string false "filter by action prefix (e.g. `vm.`, `settings.`)"
+// @Param       severity      query string false "filter by outcome" Enums(ok, failed)
+// @Param       search        query string false "case-insensitive substring match across action/target/actor/error"
 // @Param       since         query string false "RFC3339 lower bound on created_at"
 // @Param       until         query string false "RFC3339 upper bound on created_at"
 // @Param       limit         query int    false "page size (1-500, default 100)"
@@ -86,6 +91,8 @@ func (h *Audit) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := audit.ListFilter{
 		ActionPrefix: q.Get("action_prefix"),
+		Severity:     q.Get("severity"),
+		Search:       q.Get("search"),
 	}
 	if v := q.Get("actor_id"); v != "" {
 		id, err := strconv.ParseUint(v, 10, 64)

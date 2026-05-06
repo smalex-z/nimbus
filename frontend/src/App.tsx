@@ -126,7 +126,7 @@ export default function App() {
                           IA. Old standalone routes — /email, /gophers,
                           /network — redirect to their /infrastructure/*
                           counterparts so bookmarks still resolve. */}
-                      <Route path="/infrastructure" element={<Navigate to="/infrastructure/audit" replace />} />
+                      <Route path="/infrastructure" element={<Navigate to="/infrastructure/email" replace />} />
                       <Route path="/infrastructure/audit" element={<RequireAdmin><InfrastructureLayout><Audit /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/gopher" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />

@@ -333,7 +333,7 @@
                         "cookieAuth": []
                     }
                 ],
-                "description": "Read-only inspection of the cluster audit log. Newest\nfirst; filterable by actor, action prefix, and time\nrange. Use the prefix form to scope by domain — e.g.\n`action_prefix=vm.` matches every VM event;\n`action_prefix=settings.` matches all settings updates.",
+                "description": "Read-only inspection of the cluster audit log. Newest\nfirst; filterable by actor, action prefix, severity, free-\ntext search, and time range. Use the prefix form to scope\nby domain — e.g. `action_prefix=vm.` matches every VM\nevent; `action_prefix=settings.` matches all settings\nupdates. The search filter does a case-insensitive\nsubstring match across action, target_label, actor_email,\nand error_msg.",
                 "produces": [
                     "application/json"
                 ],
@@ -352,6 +352,22 @@
                         "type": "string",
                         "description": "filter by action prefix (e.g. `vm.`, `settings.`)",
                         "name": "action_prefix",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "ok",
+                            "failed"
+                        ],
+                        "type": "string",
+                        "description": "filter by outcome",
+                        "name": "severity",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "case-insensitive substring match across action/target/actor/error",
+                        "name": "search",
                         "in": "query"
                     },
                     {

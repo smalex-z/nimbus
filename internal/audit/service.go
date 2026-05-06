@@ -119,9 +119,17 @@ func (s *Service) Record(ctx context.Context, evt Event) {
 
 // ListFilter narrows the result set returned by List. Empty fields are
 // no-ops (no constraint). Time bounds use Go's zero-time as "no bound."
+//
+// Severity is a coarse outcome filter mapped to the success bool: "ok"
+// matches success=true, "failed" matches success=false. Anything else
+// (including empty) means no constraint. Search is a free-text LIKE
+// match across action, target_label, actor_email, and error_msg —
+// case-insensitive — for the SPA's search box.
 type ListFilter struct {
 	ActorID      *uint
 	ActionPrefix string // "vm." matches all VM actions; "" matches everything
+	Severity     string // "ok" | "failed" | "" (no constraint)
+	Search       string // free-text substring match across the searchable columns
 	Since        time.Time
 	Until        time.Time
 	Limit        int // 0 = default 100; capped at 500
@@ -159,6 +167,22 @@ func (s *Service) List(ctx context.Context, f ListFilter) (*ListResult, error) {
 	}
 	if f.ActionPrefix != "" {
 		q = q.Where("action LIKE ?", strings.TrimSuffix(f.ActionPrefix, "%")+"%")
+	}
+	switch strings.ToLower(f.Severity) {
+	case "ok":
+		q = q.Where("success = ?", true)
+	case "failed", "fail", "error":
+		q = q.Where("success = ?", false)
+	}
+	if needle := strings.TrimSpace(f.Search); needle != "" {
+		// Lowercase both sides so the match is case-insensitive
+		// without depending on SQLite's COLLATE NOCASE (which is on
+		// for some columns and not others).
+		pattern := "%" + strings.ToLower(needle) + "%"
+		q = q.Where(
+			"LOWER(action) LIKE ? OR LOWER(target_label) LIKE ? OR LOWER(actor_email) LIKE ? OR LOWER(error_msg) LIKE ?",
+			pattern, pattern, pattern, pattern,
+		)
 	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)

@@ -29,11 +29,11 @@ interface NavItem {
 
 export default function InfrastructureLayout({ children }: InfrastructureLayoutProps) {
   const items: NavItem[] = [
-    { label: 'Audit log', to: '/infrastructure/audit' },
     { label: 'Email', to: '/infrastructure/email', badge: 'alpha' },
     { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
     { label: 'VM network', to: '/infrastructure/network' },
     { label: 'API docs', to: '/infrastructure/api-docs' },
+    { label: 'Audit log', to: '/infrastructure/audit' },
   ]
 
   return (
