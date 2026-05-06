@@ -57,6 +57,10 @@ export interface VM {
 export interface ProvisionRequest {
   hostname: string
   tier: TierName
+  // Optional host-aggregate constraint as a CSV string (e.g.
+  // "fast-cpu,nvme"). Empty = no constraint; the scheduler then
+  // places by capacity alone. Validated as ≤256 chars by the handler.
+  required_tags?: string
   os_template: OSTemplate
   ssh_key_id?: number
   ssh_pubkey?: string
@@ -142,6 +146,33 @@ export interface ProvisionProgress {
 // skips anything other than "none".
 export type NodeLockState = 'none' | 'cordoned' | 'draining' | 'drained'
 
+// Specialization is the auto-detected node classification (vCPU per
+// GiB ratio): more cores than memory → cpu; lots of memory per core
+// → memory; otherwise balanced. Surfaces on the node card as a chip
+// to help operators decide which tags to apply. Informational only —
+// does NOT drive scoring (that's now operator-tag-driven via the
+// host-aggregate model).
+export type Specialization = 'cpu' | 'memory' | 'balanced'
+
+// ScoreBreakdown is the SPA-facing payload for one (node, tier) pair.
+// Components carries the per-term map the dashboard tooltip renders
+// ("0.45·mem(0.85) + 0.30·cpu(0.92) + 0.25·disk(0.60) = 0.78").
+// Empty when the node was rejected (Score == 0); Reasons then carries
+// the nodescore.Reason strings the rejection chip displays.
+export interface ScoreBreakdown {
+  score: number
+  components?: Record<string, number>
+  spec: Specialization
+  reasons?: string[]
+}
+
+// NodeViewWithScores is the decorated payload from
+// GET /api/nodes?include_scores=true. The scoring matrix consumes it.
+export interface NodeViewWithScores extends NodeView {
+  score?: ScoreBreakdown
+  preview_tier?: string
+}
+
 export interface NodeView {
   name: string
   status: 'online' | 'offline' | 'unknown'
@@ -150,6 +181,10 @@ export interface NodeView {
   locked_by?: number
   lock_reason?: string
   tags: string[]
+  // auto_tags are system-derived (currently arch: "x86" or "arm")
+  // and are not editable by operators. The scheduler treats them as
+  // equal to operator tags for required_tags matching.
+  auto_tags: string[]
   cpu: number
   max_cpu: number
   mem_used: number
@@ -159,6 +194,17 @@ export interface NodeView {
   // dashboard renders them; the new /nodes admin page hides them.
   swap_used: number
   swap_total: number
+  // CPU model from cpuinfo (e.g. "Intel(R) Core(TM) i7-9700K CPU @
+  // 3.60GHz"). Empty when Proxmox didn't return it (nested-virt or
+  // older PVE). Clock speed is not surfaced — Proxmox's cpuinfo.mhz
+  // is the live P-state which inverts the apparent ranking on idle
+  // vs busy nodes; the model name carries enough signal.
+  cpu_model?: string
+  // cpu_cores is the physical core count (sockets × cores-per-socket).
+  // max_cpu above is the *thread* count. Card renders "Nc/Mt" when
+  // both are known so a 4c/8t laptop chip is visually distinct from
+  // a real 8c desktop chip.
+  cpu_cores?: number
   // Per-node VM-disk pool metrics (the storage backend identified by
   // cfg.VMDiskStorage, default local-lvm). disk_allocated is the sum
   // of every non-template VM's configured maxdisk on this node — the
@@ -170,6 +216,11 @@ export interface NodeView {
   // Pool name actually queried; empty when disk telemetry is off.
   // Surfaced so the SPA can label the bar (e.g. "local-lvm").
   disk_pool_name?: string
+  // Strongest disk class observed via /disks/list — "nvme" | "ssd" |
+  // "hdd" | undefined. Card displays this instead of the pool name
+  // so operators can compare storage tier across nodes at a glance;
+  // the pool name moves to the row's title tooltip.
+  disk_type?: 'nvme' | 'ssd' | 'hdd'
   vm_count: number
   vm_count_total: number
   // Corosync ring address for this node, when available. The IP-pool table
@@ -184,6 +235,15 @@ export interface NodeView {
   // page hides Cordon/Drain/Remove buttons on this row to prevent the
   // operator from locking themselves out.
   is_self_host: boolean
+}
+
+// SchedulingSettings is the cluster-wide overcommit policy. All three
+// ratios are clamped server-side to [1.0, 64.0]. Changes take effect
+// immediately on the next provision/drain — no restart required.
+export interface SchedulingSettings {
+  cpu_allocation_ratio: number
+  ram_allocation_ratio: number
+  disk_allocation_ratio: number
 }
 
 export interface ClusterStats {

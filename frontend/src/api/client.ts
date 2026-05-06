@@ -15,8 +15,11 @@ import type {
   ProvisionRequest,
   ProvisionResult,
   ProvisionStep,
+  SchedulingSettings,
   SSHKey,
   VM,
+  NodeViewWithScores,
+  ScoreBreakdown,
 } from '@/types'
 
 // Default-timeout client used for fast endpoints.
@@ -104,6 +107,44 @@ export async function getHealth(): Promise<HealthResponse> {
 
 export async function listNodes(): Promise<NodeView[]> {
   const { data } = await api.get<NodeView[]>('/nodes')
+  return data
+}
+
+// listNodesWithScores requests the scoring-decorated payload — each row
+// carries a `score` breakdown for the preview tier. Used by the Nodes
+// page's scoring matrix; cheap (one cluster snapshot reused across
+// all rows).
+export async function listNodesWithScores(previewTier?: string): Promise<NodeViewWithScores[]> {
+  const params: Record<string, string> = { include_scores: 'true' }
+  if (previewTier) params.preview_tier = previewTier
+  const { data } = await api.get<NodeViewWithScores[]>('/nodes', { params })
+  return data
+}
+
+// getNodeScore drills into one (node, tier) cell with optional
+// host-aggregate constraint. Returns the full breakdown including
+// rejection reasons when the node is ineligible. tags is a
+// comma-separated list (empty = no constraint).
+export async function getNodeScore(name: string, tier: string, tags?: string): Promise<ScoreBreakdown> {
+  const params: Record<string, string> = { tier }
+  if (tags) params.tags = tags
+  const { data } = await api.get<ScoreBreakdown>(`/nodes/${encodeURIComponent(name)}/score`, { params })
+  return data
+}
+
+// getSchedulingSettings reads the cluster's overcommit ratios. The
+// backend seeds defaults (4.0/1.0/1.0) on first read so the response
+// is always populated.
+export async function getSchedulingSettings(): Promise<SchedulingSettings> {
+  const { data } = await api.get<SchedulingSettings>('/scheduling')
+  return data
+}
+
+// saveSchedulingSettings persists new ratios. Server clamps each to
+// [1.0, 64.0]; the returned object reflects the clamped values so the
+// SPA can show what was actually stored.
+export async function saveSchedulingSettings(next: SchedulingSettings): Promise<SchedulingSettings> {
+  const { data } = await api.put<SchedulingSettings>('/scheduling', next)
   return data
 }
 

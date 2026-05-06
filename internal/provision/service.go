@@ -455,7 +455,13 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// have a template for the requested OS. The per-node templateVMID lookup
 	// uses the node_templates table (filled in by bootstrap) so we don't have
 	// to fan out a TemplateExists call per node.
-	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate)
+	//
+	// RequiredTags is the host-aggregate filter — operator tags
+	// hardware, user opts in at provision time. Empty = no constraint
+	// (score by capacity only). Persisted on db.VM so drain
+	// replacement applies the same filter.
+	requiredTags := splitRequiredTags(req.RequiredTags)
+	target, templateVMID, err := s.pickNode(ctx, tier, req.OSTemplate, requiredTags)
 	if err != nil {
 		return nil, err
 	}
@@ -626,19 +632,20 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
 	vm := &db.VM{
-		VMID:       newVMID,
-		Hostname:   req.Hostname,
-		IP:         ip,
-		Node:       target,
-		Tier:       req.Tier,
-		OSTemplate: req.OSTemplate,
-		Username:   username,
-		Status:     "running",
-		OwnerID:    req.OwnerID,
-		SSHKeyID:   &keyID,
-		KeyName:    keyName,
-		SSHPubKey:  sshPubKey,
-		ErrorMsg:   warning, // doubles as a soft-warning record on the persisted row
+		VMID:         newVMID,
+		Hostname:     req.Hostname,
+		IP:           ip,
+		Node:         target,
+		Tier:         req.Tier,
+		RequiredTags: req.RequiredTags,
+		OSTemplate:   req.OSTemplate,
+		Username:     username,
+		Status:       "running",
+		OwnerID:      req.OwnerID,
+		SSHKeyID:     &keyID,
+		KeyName:      keyName,
+		SSHPubKey:    sshPubKey,
+		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -1303,6 +1310,7 @@ func (s *Service) pickNode(
 	ctx context.Context,
 	tier nodescore.Tier,
 	osKey string,
+	requiredTags []string,
 ) (target string, templateVMID int, err error) {
 	// Fetch all node_templates rows for this OS in one query. Returned
 	// (node, vmid) pairs are exactly the nodes eligible to host this OS.
@@ -1356,6 +1364,7 @@ func (s *Service) pickNode(
 		rt := runtime[vm.Node]
 		rt.VMCount++
 		rt.CommittedMemBytes += vm.MaxMem
+		rt.CommittedCPU += vm.MaxCPU
 		runtime[vm.Node] = rt
 	}
 
@@ -1388,61 +1397,144 @@ func (s *Service) pickNode(
 		}
 	}
 
-	// Lock state lives on db.Node and is set by nodemgr (Cordon/Drain).
-	// Without this lookup the scheduler ignores cordoned/draining/drained
-	// nodes' lock state — defeating the whole point of cordoning. One
-	// SELECT per provision is fine; the row count is the cluster size.
-	lockByNode, err := s.lockStatesByNode(ctx)
+	// db.Node carries the operator-set state pickNode needs — lock
+	// state for the cordoning gate, tags for the host-aggregate
+	// filter. One SELECT per provision; row count = cluster size.
+	metaByNode, err := s.nodeMetaByNode(ctx)
 	if err != nil {
-		return "", 0, fmt.Errorf("load node lock states: %w", err)
+		return "", 0, fmt.Errorf("load node meta: %w", err)
 	}
 
 	scoringNodes := make([]nodescore.Node, 0, len(nodes))
 	for _, n := range nodes {
+		meta := metaByNode[n.Name]
 		scoringNodes = append(scoringNodes, nodescore.Node{
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
-			LockState: lockByNode[n.Name],
+			LockState: meta.LockState,
+			Tags:      meta.Tags,
 		})
 	}
 
+	// Read cluster-wide overcommit ratios. Empty/missing row defaults
+	// to the nodescore fallback constants — never a fatal error.
+	cpuRatio, ramRatio, diskRatio := readSchedulingRatios(ctx, s.db)
 	env := nodescore.Env{
-		Excluded:         s.cfg.ExcludedNodes,
-		TemplatesPresent: templatesPresent,
-		StorageByNode:    storageByNode,
-		MemBufferMiB:     s.cfg.MemBufferMiB,
-		CPULoadFactor:    s.cfg.CPULoadFactor,
+		Excluded:            s.cfg.ExcludedNodes,
+		TemplatesPresent:    templatesPresent,
+		StorageByNode:       storageByNode,
+		MemBufferMiB:        s.cfg.MemBufferMiB,
+		CPULoadFactor:       s.cfg.CPULoadFactor,
+		RequiredTags:        requiredTags,
+		CPUAllocationRatio:  cpuRatio,
+		RAMAllocationRatio:  ramRatio,
+		DiskAllocationRatio: diskRatio,
 	}
 	decisions := nodescore.Evaluate(scoringNodes, runtime, tier, env)
 	winner, all := nodescore.Pick(decisions)
+	tagsLog := strings.Join(requiredTags, ",")
+	if tagsLog == "" {
+		tagsLog = "<none>"
+	}
 	if winner == nil {
-		log.Printf("pickNode: tier=%s os=%s no_winner decisions: %s",
-			tier.Name, osKey, formatDecisions(all))
+		log.Printf("pickNode: tier=%s os=%s tags=%s no_winner decisions: %s",
+			tier.Name, osKey, tagsLog, formatDecisions(all))
 		return "", 0, &internalerrors.ConflictError{
-			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s: %s",
-				tier.Name, osKey, formatRejections(all)),
+			Message: fmt.Sprintf("no eligible node for tier=%s os_template=%s tags=%s: %s",
+				tier.Name, osKey, tagsLog, formatRejections(all)),
 		}
 	}
-	log.Printf("pickNode: tier=%s os=%s winner=%s decisions: %s",
-		tier.Name, osKey, winner.Node.Name, formatDecisions(all))
+	log.Printf("pickNode: tier=%s os=%s tags=%s winner=%s spec=%s decisions: %s",
+		tier.Name, osKey, tagsLog, winner.Node.Name, winner.Result.Spec, formatDecisions(all))
 	return winner.Node.Name, templateVMIDByNode[winner.Node.Name], nil
 }
 
-// lockStatesByNode returns the operator-set lock state for every db.Node row.
-// Result is keyed by node name; missing entries default to "" (treated as
-// "none" by nodescore). Used by pickNode to filter cordoned/draining/drained
-// nodes — without this lookup nodescore's lock-state gate is dead code in
-// the provision path.
-func (s *Service) lockStatesByNode(ctx context.Context) (map[string]string, error) {
+// nodeMeta is the operator-set state pickNode reads off db.Node — lock
+// state for the cordoning gate, tags for the host-aggregate filter.
+// Tags is the union of operator-set CSV tags and Nimbus's auto-derived
+// tags (CPU arch); see nodeMetaByNode for the merge.
+type nodeMeta struct {
+	LockState string
+	Tags      []string
+}
+
+// nodeMetaByNode returns the per-node operator state (lock state +
+// tags) for every db.Node row. Result is keyed by node name; missing
+// entries default to a zero nodeMeta (lock "" → treated as "none";
+// empty tags). Used by pickNode to filter cordoned nodes AND apply
+// the operator's host-aggregate constraints.
+//
+// Tags includes Nimbus's auto-derived tags (currently CPU arch from
+// the denormalized cpu_model column) so a `required_tags=arm` user
+// constraint matches an ARM host even when no operator tags are set.
+func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, error) {
 	var rows []db.Node
-	if err := s.db.WithContext(ctx).Select("name", "lock_state").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model", "has_ssd", "has_gpu").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[string]string, len(rows))
+	out := make(map[string]nodeMeta, len(rows))
 	for _, r := range rows {
-		out[r.Name] = r.LockState
+		auto := nodescore.DeriveAutoTags(nodescore.AutoTagInput{
+			CPUModel: r.CPUModel,
+			HasSSD:   r.HasSSD,
+			HasGPU:   r.HasGPU,
+		})
+		tags := append(splitCSVTags(r.Tags), auto...)
+		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: tags}
 	}
 	return out, nil
+}
+
+// splitCSVTags decodes the CSV string we store for db.Node.Tags +
+// db.VM.RequiredTags into a clean slice. Whitespace trimmed, empty
+// entries dropped.
+func splitCSVTags(csv string) []string {
+	if csv == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitRequiredTags is splitCSVTags with a different name for the
+// (admittedly cosmetic) clarity at provision-Request call sites —
+// reads as "the operator-typed required tags from the request, parsed."
+func splitRequiredTags(csv string) []string { return splitCSVTags(csv) }
+
+// readSchedulingRatios fetches the cluster-wide overcommit ratios from
+// the SchedulingSettings singleton. Falls back to the nodescore default
+// constants on any error (missing table, busy SQLite, etc.) so a
+// transient read failure doesn't strand provisioning. Logged at info
+// level when fallback fires.
+func readSchedulingRatios(ctx context.Context, gdb *gorm.DB) (cpu, ram, disk float64) {
+	cpu, ram, disk = 4.0, 1.0, 1.0
+	if gdb == nil {
+		return
+	}
+	var row db.SchedulingSettings
+	if err := gdb.WithContext(ctx).
+		Where(&db.SchedulingSettings{ID: 1}).
+		First(&row).Error; err != nil {
+		// Row not yet seeded — use defaults.
+		return
+	}
+	if row.CPUAllocationRatio >= 1.0 {
+		cpu = row.CPUAllocationRatio
+	}
+	if row.RAMAllocationRatio >= 1.0 {
+		ram = row.RAMAllocationRatio
+	}
+	if row.DiskAllocationRatio >= 1.0 {
+		disk = row.DiskAllocationRatio
+	}
+	return
 }
 
 // formatRejections renders one "node=reason1,reason2" entry per rejected

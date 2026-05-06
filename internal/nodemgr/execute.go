@@ -214,7 +214,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		return fmt.Errorf("unknown tier %q", vm.Tier)
 	}
 
-	nodes, vms, _, err := s.clusterSnapshot(ctx)
+	nodes, vms, storeRows, err := s.clusterSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
@@ -231,6 +231,7 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 				Name: n.Name, Status: n.Status, CPU: n.CPU,
 				MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 				LockState: lockOrNone(rows[n.Name].LockState),
+				Tags:      scoreTags(rows[n.Name]),
 			}
 			break
 		}
@@ -247,10 +248,43 @@ func (s *Service) validateTarget(ctx context.Context, vm db.VM, target string) e
 		}
 		rt.VMCount++
 		rt.CommittedMemBytes += v.MaxMem
+		rt.CommittedCPU += v.MaxCPU
 	}
 
+	// Storage telemetry for the disk gate — same shape ComputePlan
+	// builds. Without this the executor would silently skip disk
+	// re-validation at the very moment Proxmox would reject the
+	// migrate, leaving the per-VM error message vague ("no space")
+	// rather than nodescore's structured ReasonInsufficientDisk.
+	var storageByNode map[string]nodescore.StorageInfo
+	if s.cfg.VMDiskStorage != "" {
+		storageByNode = make(map[string]nodescore.StorageInfo, 1)
+		for _, st := range storeRows {
+			if st.Storage != s.cfg.VMDiskStorage {
+				continue
+			}
+			if st.Shared == 1 || st.Node == target {
+				storageByNode[target] = nodescore.StorageInfo{TotalBytes: st.Total, UsedBytes: st.Used}
+				if st.Shared == 1 {
+					break
+				}
+			}
+		}
+	}
+
+	// Apply the VM's host-aggregate constraint at re-validation time
+	// too — if the operator manually picked a target during drain
+	// review that doesn't carry the required tags, fail fast here.
+	// Without this gate the migrate goes through but ends up on a
+	// node that violates the constraint.
+	cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 	env := nodescore.Env{
-		TemplatesPresent: map[string]bool{target: true}, // migration doesn't need templates
+		TemplatesPresent:    map[string]bool{target: true}, // migration doesn't need templates
+		StorageByNode:       storageByNode,
+		RequiredTags:        splitVMTags(vm.RequiredTags),
+		CPUAllocationRatio:  cpuRatio,
+		RAMAllocationRatio:  ramRatio,
+		DiskAllocationRatio: diskRatio,
 	}
 	got := nodescore.Score(*targetNode, tier, env, rt)
 	if got.Score == 0 {

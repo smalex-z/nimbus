@@ -111,18 +111,21 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 			LockState: lockOrNone(row.LockState),
+			Tags:      scoreTags(row),
 		})
 	}
 
 	// Aggregate per-node committed mem from the cluster snapshot. Keyed
 	// by node so we can mutate as we plan migrations.
 	committedMem := make(map[string]uint64, len(nodes))
+	committedCPU := make(map[string]int, len(nodes))
 	currentVMCount := make(map[string]int, len(nodes))
 	for _, vm := range vms {
 		if vm.Template != 0 {
 			continue
 		}
 		committedMem[vm.Node] += vm.MaxMem
+		committedCPU[vm.Node] += vm.MaxCPU
 		currentVMCount[vm.Node]++
 	}
 	// Capacity (MaxMem) per node for projection arithmetic.
@@ -131,16 +134,44 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		maxMemByNode[n.Name] = n.MaxMem
 	}
 
-	// Optional disk telemetry — same shape as provision.pickNode. nil
-	// disables the disk gate. We don't know the operator's VMDiskStorage
-	// at this layer; leave it nil so the disk gate is permissive (the
-	// executor's actual migrate call will fail if the destination's
-	// storage backend can't host the VM, surfacing as a per-VM error).
-	_ = storeRows
+	// Disk telemetry: build the same StorageByNode map provision.pickNode
+	// uses so the drain plan's disk gate fires up front, surfacing
+	// no-room errors in the modal instead of letting the migrate call
+	// fail mid-batch. Disabled when the operator hasn't configured a
+	// VM-disk pool (cfg.VMDiskStorage empty).
 	var storageByNodeOpt map[string]nodescore.StorageInfo
+	if s.cfg.VMDiskStorage != "" {
+		storageByNodeOpt = make(map[string]nodescore.StorageInfo, len(nodes))
+		// Shared pools repeat per node with identical capacity; the
+		// first row wins, then stamp the same StorageInfo onto every
+		// node so the disk gate sees the same pool everywhere.
+		var sharedInfo *nodescore.StorageInfo
+		for _, st := range storeRows {
+			if st.Storage != s.cfg.VMDiskStorage {
+				continue
+			}
+			info := nodescore.StorageInfo{TotalBytes: st.Total, UsedBytes: st.Used}
+			if st.Shared == 1 {
+				if sharedInfo == nil {
+					sharedInfo = &info
+				}
+				continue
+			}
+			storageByNodeOpt[st.Node] = info
+		}
+		if sharedInfo != nil {
+			for _, n := range nodes {
+				storageByNodeOpt[n.Name] = *sharedInfo
+			}
+		}
+	}
+	// Track planned disk additions per target so each subsequent VM in
+	// the loop sees the running total (mirrors plannedAdd for memory).
+	plannedDiskAdd := make(map[string]uint64)
 
 	plan := &DrainPlan{SourceNode: sourceNode, Migrations: make([]PlannedMigration, 0, len(managed))}
 	plannedAdd := make(map[string]uint64) // additional committed mem to add per dest
+	plannedCPU := make(map[string]int)    // additional committed vCPUs per dest
 
 	for _, vm := range managed {
 		tier, ok := nodescore.Tiers[vm.Tier]
@@ -165,12 +196,34 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 			runtime[c.Name] = nodescore.NodeRuntime{
 				VMCount:           currentVMCount[c.Name] + countPlanned(plan.Migrations, c.Name),
 				CommittedMemBytes: committedMem[c.Name] + plannedAdd[c.Name],
+				CommittedCPU:      committedCPU[c.Name] + plannedCPU[c.Name],
 			}
 		}
 
+		// Build a per-VM view of disk pools that already counts what
+		// earlier-planned migrations promised — otherwise two large VMs
+		// could both be planned to land on a node that only fits one.
+		var perVMStorage map[string]nodescore.StorageInfo
+		if storageByNodeOpt != nil {
+			perVMStorage = make(map[string]nodescore.StorageInfo, len(storageByNodeOpt))
+			for name, si := range storageByNodeOpt {
+				si.UsedBytes += plannedDiskAdd[name]
+				perVMStorage[name] = si
+			}
+		}
+
+		// Apply the VM's host-aggregate constraint (the tags it was
+		// originally provisioned against) so drain replacement only
+		// migrates to nodes carrying those tags. Empty = no
+		// constraint; placement is capacity-only.
+		cpuRatio, ramRatio, diskRatio := s.schedulingRatios(ctx)
 		env := nodescore.Env{
-			TemplatesPresent: templatesPresent,
-			StorageByNode:    storageByNodeOpt,
+			TemplatesPresent:    templatesPresent,
+			StorageByNode:       perVMStorage,
+			RequiredTags:        splitVMTags(vm.RequiredTags),
+			CPUAllocationRatio:  cpuRatio,
+			RAMAllocationRatio:  ramRatio,
+			DiskAllocationRatio: diskRatio,
 		}
 		decisions := nodescore.Evaluate(candidates, runtime, tier, env)
 		winner, _ := nodescore.Pick(decisions)
@@ -192,10 +245,12 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 		// only seed the initial view.
 		row.Warnings = warningsForTarget(row.AutoPick, row.Eligible)
 
-		// Apply this VM's planned mem to the destination's running tally
-		// so the next VM's runtime sees it.
+		// Apply this VM's planned mem, vCPU, AND disk to the destination's
+		// running tally so the next VM's runtime + storage view see them.
 		if winner != nil {
 			plannedAdd[winner.Node.Name] += uint64(tier.MemMB) * (1 << 20)
+			plannedCPU[winner.Node.Name] += tier.CPU
+			plannedDiskAdd[winner.Node.Name] += uint64(tier.DiskGB) * (1 << 30)
 		}
 
 		plan.Migrations = append(plan.Migrations, row)

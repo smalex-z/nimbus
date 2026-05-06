@@ -65,9 +65,29 @@ func TestScore_Gates(t *testing.T) {
 			wantReasons: []nodescore.Reason{nodescore.ReasonNoCapacity, nodescore.ReasonInsufficientMem},
 		},
 		{
-			name:        "insufficient cores rejects",
+			name: "insufficient cores rejects under strict 1:1 ratio",
+			node: nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
+			// Default cpuRatio (4.0) would let medium's 2 vCPUs land on
+			// a 1-thread host (cap=4); strict 1:1 forces the reject we
+			// want to assert here.
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), CPUAllocationRatio: 1.0},
+			wantReasons: []nodescore.Reason{nodescore.ReasonInsufficientCores},
+		},
+		{
+			name: "cpu overcommit cap allows medium on 1-thread host",
+			// With the default 4.0 cpuRatio, a 1-thread host has a 4-vCPU
+			// soft cap → medium (2 vCPU) lands. Verifies the relaxation.
 			node:        nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
-			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha")},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			wantReasons: nil,
+		},
+		{
+			name: "cpu overcommit cap rejects when committed sum exceeds cap",
+			// 1-thread host with default 4.0 ratio = cap 4 vCPU. Already
+			// committed 3 vCPUs; medium adds 2 → 5 > 4 → reject.
+			node:        nodescore.Node{Name: "alpha", Status: "online", MaxCPU: 1, MaxMem: 16 * gib},
+			env:         nodescore.Env{TemplatesPresent: allTemplates("alpha"), StorageByNode: storageOK},
+			rt:          nodescore.NodeRuntime{CommittedCPU: 3},
 			wantReasons: []nodescore.Reason{nodescore.ReasonInsufficientCores},
 		},
 		{
@@ -313,4 +333,184 @@ func contains(reasons []nodescore.Reason, want nodescore.Reason) bool {
 		}
 	}
 	return false
+}
+
+// --- workload-aware scoring -------------------------------------------------
+
+// TestDetectSpecialization covers the GiB-per-vCPU thresholds. Boundaries
+// matter: the issue spec says "1 vCPU per 4 GiB → CPU-opt, 1 vCPU per 8 GiB
+// → mem-opt", and we want to be confident the canonical examples land in
+// the right bucket.
+func TestDetectSpecialization(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		maxCPU  int
+		maxMem  uint64
+		want    nodescore.Specialization
+		comment string
+	}{
+		{"16c/32G CPU-optimized", 16, 32 * gib, nodescore.SpecCPU, "2 GiB per core — clearly CPU-heavy"},
+		{"8c/128G memory-optimized", 8, 128 * gib, nodescore.SpecMemory, "16 GiB per core — clearly mem-heavy"},
+		{"8c/64G balanced", 8, 64 * gib, nodescore.SpecBalanced, "8 GiB per core — at the upper boundary, balanced"},
+		{"8c/32G balanced", 8, 32 * gib, nodescore.SpecBalanced, "4 GiB per core — at the lower boundary, balanced"},
+		{"4c/8G CPU-optimized", 4, 8 * gib, nodescore.SpecCPU, "2 GiB per core"},
+		{"2c/64G memory-optimized", 2, 64 * gib, nodescore.SpecMemory, "32 GiB per core"},
+		{"zero capacity falls back to balanced", 0, 0, nodescore.SpecBalanced, "guard against div-by-zero"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := nodescore.DetectSpecialization(nodescore.Node{
+				Name: "n", MaxCPU: c.maxCPU, MaxMem: c.maxMem,
+			})
+			if got != c.want {
+				t.Errorf("got %q, want %q (%s)", got, c.want, c.comment)
+			}
+		})
+	}
+}
+
+func TestDeriveAutoTags(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   nodescore.AutoTagInput
+		want []string
+	}{
+		{"intel core i7", nodescore.AutoTagInput{CPUModel: "Intel(R) Core(TM) i7-11800H @ 2.30GHz"}, []string{"x86"}},
+		{"intel xeon", nodescore.AutoTagInput{CPUModel: "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz"}, []string{"x86"}},
+		{"amd ryzen", nodescore.AutoTagInput{CPUModel: "AMD Ryzen 7 5800X 8-Core Processor"}, []string{"x86"}},
+		{"amd epyc", nodescore.AutoTagInput{CPUModel: "AMD EPYC 7763 64-Core Processor"}, []string{"x86"}},
+		{"apple silicon", nodescore.AutoTagInput{CPUModel: "Apple M1 Pro"}, []string{"arm"}},
+		{"ampere altra", nodescore.AutoTagInput{CPUModel: "Ampere(R) Altra(R) Q80-30"}, []string{"arm"}},
+		{"arm cortex", nodescore.AutoTagInput{CPUModel: "ARM Cortex-A78"}, []string{"arm"}},
+		{"snapdragon", nodescore.AutoTagInput{CPUModel: "Qualcomm Snapdragon X Elite"}, []string{"arm"}},
+		{"empty model", nodescore.AutoTagInput{}, nil},
+		{"unrecognized", nodescore.AutoTagInput{CPUModel: "Some Custom RISC-V Chip"}, nil},
+		{"x86 + ssd", nodescore.AutoTagInput{CPUModel: "Intel Xeon", HasSSD: true}, []string{"x86", "ssd"}},
+		{"x86 + gpu", nodescore.AutoTagInput{CPUModel: "AMD Ryzen", HasGPU: true}, []string{"x86", "gpu"}},
+		{"all three", nodescore.AutoTagInput{CPUModel: "Apple M2", HasSSD: true, HasGPU: true}, []string{"arm", "ssd", "gpu"}},
+		{"ssd alone (no cpu)", nodescore.AutoTagInput{HasSSD: true}, []string{"ssd"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := nodescore.DeriveAutoTags(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("len(got)=%d want %d (got=%v want=%v)", len(got), len(c.want), got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("got[%d]=%q want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestScore_RequiredTagsFilter — host-aggregate gate. Node must carry
+// every tag in Env.RequiredTags; missing any → rejected with
+// ReasonMissingTag. This is the operator-driven affinity model that
+// replaced the workload-type heuristic.
+func TestScore_RequiredTagsFilter(t *testing.T) {
+	t.Parallel()
+	storageOK := map[string]nodescore.StorageInfo{
+		"alpha": {TotalBytes: 500 * gib, UsedBytes: 100 * gib},
+	}
+	cases := []struct {
+		name      string
+		nodeTags  []string
+		required  []string
+		wantPass  bool
+		wantMatch nodescore.Reason
+	}{
+		{"no required, no node tags → pass", nil, nil, true, ""},
+		{"no required, node has tags → pass", []string{"fast-cpu"}, nil, true, ""},
+		{"required matches → pass", []string{"fast-cpu"}, []string{"fast-cpu"}, true, ""},
+		{"superset of required → pass", []string{"fast-cpu", "nvme"}, []string{"fast-cpu"}, true, ""},
+		{"missing the only required tag → reject", nil, []string{"fast-cpu"}, false, nodescore.ReasonMissingTag},
+		{"node missing one of two → reject", []string{"fast-cpu"}, []string{"fast-cpu", "nvme"}, false, nodescore.ReasonMissingTag},
+		{"case-sensitive mismatch → reject", []string{"Fast-CPU"}, []string{"fast-cpu"}, false, nodescore.ReasonMissingTag},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			node := nodescore.Node{
+				Name: "alpha", Status: "online",
+				MaxCPU: 8, MaxMem: 16 * gib, Mem: 1 * gib,
+				Tags: c.nodeTags,
+			}
+			env := nodescore.Env{
+				TemplatesPresent: allTemplates("alpha"),
+				StorageByNode:    storageOK,
+				RequiredTags:     c.required,
+			}
+			got := nodescore.Score(node, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
+			if c.wantPass {
+				if got.Score == 0 {
+					t.Errorf("expected accept; got reject reasons=%v", got.Reasons)
+				}
+				return
+			}
+			if got.Score != 0 {
+				t.Errorf("expected reject; got score=%v", got.Score)
+			}
+			if !contains(got.Reasons, c.wantMatch) {
+				t.Errorf("expected reason %q in %v", c.wantMatch, got.Reasons)
+			}
+		})
+	}
+}
+
+// TestScore_ComponentsBreakdown verifies that the components map carries
+// every key the dashboard tooltip expects, and that the weighted
+// components sum to total. This is the contract the SPA renders against
+// — keys missing here means broken tooltips.
+func TestScore_ComponentsBreakdown(t *testing.T) {
+	t.Parallel()
+	node := nodescore.Node{
+		Name: "alpha", Status: "online",
+		MaxCPU: 16, MaxMem: 32 * gib, Mem: 4 * gib, CPU: 0.2,
+	}
+	env := nodescore.Env{
+		TemplatesPresent: allTemplates("alpha"),
+		StorageByNode:    map[string]nodescore.StorageInfo{"alpha": {TotalBytes: 500 * gib, UsedBytes: 50 * gib}},
+	}
+	got := nodescore.Score(node, nodescore.Tiers["medium"], env, nodescore.NodeRuntime{})
+	if got.Score == 0 {
+		t.Fatalf("expected accept; got reject %v", got.Reasons)
+	}
+	wantKeys := []string{
+		"mem_headroom", "cpu_headroom", "disk_headroom",
+		"mem_weighted", "cpu_weighted", "disk_weighted",
+		"total",
+	}
+	for _, k := range wantKeys {
+		if _, ok := got.Components[k]; !ok {
+			t.Errorf("Components missing key %q (got %v)", k, got.Components)
+		}
+	}
+	// Spec is informational — the auto-detect should still classify
+	// 16c/32G as CPU-opt even though it doesn't drive scoring anymore.
+	if got.Spec != nodescore.SpecCPU {
+		t.Errorf("Spec = %q, want cpu (informational)", got.Spec)
+	}
+	// Sum check — total should equal the sum of weighted components.
+	wantTotal := got.Components["mem_weighted"] +
+		got.Components["cpu_weighted"] +
+		got.Components["disk_weighted"]
+	if abs(got.Components["total"]-wantTotal) > 1e-9 {
+		t.Errorf("total = %v, want sum of weighted = %v", got.Components["total"], wantTotal)
+	}
+	if abs(got.Score-got.Components["total"]) > 1e-9 {
+		t.Errorf("Score (%v) != Components[total] (%v)", got.Score, got.Components["total"])
+	}
+}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

@@ -7,11 +7,25 @@
 // function: Score returns 0 for any node that fails a hard gate, with the
 // reason(s) captured on the Result. A non-zero score is always greater than
 // any rejected node, so callers can rank without re-applying the gates.
+//
+// Affinity model: operators tag nodes (db.Node.Tags) per their actual
+// capabilities — gpu, fast-cpu, nvme, etc. — and the user opts into a
+// constraint at provision time via Env.RequiredTags. Nodes missing any
+// required tag get rejected with ReasonMissingTag. This mirrors OpenStack
+// host aggregates / Kubernetes nodeSelector — the operator classifies
+// hardware, the user requests a hardware profile.
+//
+// Specialization (cpu/mem/balanced) is auto-detected from the vCPU/RAM
+// ratio and exposed on Result.Spec for UI labels — informational only.
+// It does NOT drive scoring (the heuristic was too coarse to be useful
+// across heterogeneous clusters); operators use it as a hint when
+// deciding which tags to apply.
 package nodescore
 
 import (
 	"math"
 	"sort"
+	"strings"
 )
 
 // Tier describes a VM size class.
@@ -45,6 +59,11 @@ type Node struct {
 	Mem       uint64  // bytes used (live qemu + host overhead)
 	MaxMem    uint64  // bytes total
 	LockState string  // "" / "none" / "cordoned" / "draining" / "drained"
+	// Tags are the operator-applied labels from db.Node.Tags (CSV
+	// in storage; []string here). Used by the host-aggregate filter:
+	// when Env.RequiredTags is set, this node passes only when its
+	// Tags is a superset.
+	Tags []string
 }
 
 // StorageInfo describes the configured VM-disk pool's capacity on one node.
@@ -60,8 +79,17 @@ type StorageInfo struct {
 // (sum of every non-template VM's configured MaxMem on this node, running or
 // not) for the reservation-based memory gate.
 type NodeRuntime struct {
-	VMCount           int
+	VMCount int
+	// CommittedMemBytes is the sum of every non-template VM's configured
+	// MaxMem on this node (running or not) — the pessimistic
+	// reservation-based number the RAM gate compares against.
 	CommittedMemBytes uint64
+	// CommittedCPU is the sum of every non-template VM's configured
+	// max vCPUs on this node (running or not). Used by the CPU gate
+	// so cumulative oversubscription respects the allocation ratio
+	// (e.g. with ratio=4 on an 8-thread host, cap at 32 committed
+	// vCPUs across all VMs).
+	CommittedCPU int
 }
 
 // Reason names a single rejection cause. A node may carry multiple reasons
@@ -80,25 +108,181 @@ const (
 	ReasonInsufficientCores Reason = "insufficient_cores"
 	ReasonInsufficientMem   Reason = "insufficient_mem"
 	ReasonInsufficientDisk  Reason = "insufficient_disk"
+	// ReasonMissingTag fires when Env.RequiredTags asks for a tag the
+	// node doesn't carry (operator-driven host-aggregate filter).
+	ReasonMissingTag Reason = "missing_tag"
 )
+
+// Specialization classifies a node by its vCPU-to-RAM ratio. Surfaced
+// on Result.Spec for UI labels (the dashboard renders cpu-opt / mem-opt
+// chips per node). Informational only — does not drive scoring.
+// Operators reading the chips know how to tag the node accordingly.
+type Specialization string
+
+const (
+	SpecCPU      Specialization = "cpu"
+	SpecMemory   Specialization = "memory"
+	SpecBalanced Specialization = "balanced"
+)
+
+// Specialization detection thresholds, in GiB-of-RAM per vCPU. The GitHub
+// issue spec phrases it as "1 vCPU per 4 GiB → CPU-opt; 1 vCPU per 8 GiB →
+// mem-opt"; this is the same math written in the canonical direction
+// (ratio = MaxMem / MaxCPU, in GiB per core).
+//
+//	ratio < specCPUMaxRatio       → SpecCPU      (e.g. 16c/32G = 2 GiB/c)
+//	ratio > specMemoryMinRatio    → SpecMemory   (e.g. 8c/128G = 16 GiB/c)
+//	otherwise                     → SpecBalanced (e.g. 8c/64G = 8 GiB/c)
+const (
+	specCPUMaxRatio    = 4.0 // GiB-per-vCPU; below → CPU-optimized
+	specMemoryMinRatio = 8.0 // GiB-per-vCPU; above → memory-optimized
+)
+
+// scoreWeights is the single soft-score weight vector. With workload
+// type retired, every score uses the same formula — operators express
+// hardware preference through tags (Env.RequiredTags) instead of by
+// picking a workload label. The values below mirror the previous
+// "balanced" profile.
+const (
+	weightMem  = 0.45
+	weightCPU  = 0.30
+	weightDisk = 0.25
+)
+
+// AutoTagInput is the per-node hardware-introspection bundle the
+// scheduler-side auto-tag derivation reads. CPUModel comes from
+// /nodes/{n}/status; HasSSD from /nodes/{n}/disks/list; HasGPU from
+// /nodes/{n}/hardware/pci (NVIDIA-only today). Both Has* default false
+// when introspection hasn't run yet (new node) or returned 403 (limited
+// API token), in which case those tags simply don't appear.
+type AutoTagInput struct {
+	CPUModel string
+	HasSSD   bool
+	HasGPU   bool
+}
+
+// DeriveAutoTags returns the system-derived tags Nimbus auto-applies to a
+// node based on hardware introspection. Three signals today:
+//   - arch: "x86" (Intel/AMD) or "arm" (Apple/Ampere/Cortex/Snapdragon/
+//     Neoverse) — derived from the CPU model string.
+//   - "ssd": at least one disk on the node is type=ssd or type=nvme.
+//   - "gpu": at least one PCI device is from NVIDIA (vendor 0x10de).
+//
+// Operators don't see these as editable in the Nodes UI (they live
+// alongside operator tags but aren't writable). The scheduler treats
+// them identically to operator tags for RequiredTags matching, so a
+// user asking for `required_tags=arm,gpu` will land only on ARM hosts
+// that carry an NVIDIA GPU.
+//
+// Pure function — no I/O, runs on every score call.
+func DeriveAutoTags(in AutoTagInput) []string {
+	var tags []string
+	if a := archTag(in.CPUModel); a != "" {
+		tags = append(tags, a)
+	}
+	if in.HasSSD {
+		tags = append(tags, "ssd")
+	}
+	if in.HasGPU {
+		tags = append(tags, "gpu")
+	}
+	return tags
+}
+
+// archTag returns "x86" / "arm" / "" from a CPU model string.
+func archTag(cpuModel string) string {
+	if cpuModel == "" {
+		return ""
+	}
+	low := strings.ToLower(cpuModel)
+	switch {
+	case strings.Contains(low, "intel"),
+		strings.Contains(low, "amd"),
+		strings.Contains(low, "xeon"),
+		strings.Contains(low, "epyc"),
+		strings.Contains(low, "ryzen"),
+		strings.Contains(low, "core(tm)"),
+		strings.Contains(low, "pentium"),
+		strings.Contains(low, "celeron"),
+		strings.Contains(low, "x86"):
+		return "x86"
+	case strings.Contains(low, "arm"),
+		strings.Contains(low, "aarch64"),
+		strings.Contains(low, "cortex"),
+		strings.Contains(low, "apple"),
+		strings.Contains(low, "ampere"),
+		strings.Contains(low, "snapdragon"),
+		strings.Contains(low, "neoverse"):
+		return "arm"
+	}
+	return ""
+}
+
+// DetectSpecialization classifies a node by its RAM-per-vCPU ratio. Pure;
+// callers compute it once per node per scoring pass.
+func DetectSpecialization(n Node) Specialization {
+	if n.MaxCPU <= 0 || n.MaxMem == 0 {
+		return SpecBalanced
+	}
+	gibPerCore := float64(n.MaxMem) / float64(gibBytes) / float64(n.MaxCPU)
+	switch {
+	case gibPerCore < specCPUMaxRatio:
+		return SpecCPU
+	case gibPerCore > specMemoryMinRatio:
+		return SpecMemory
+	default:
+		return SpecBalanced
+	}
+}
 
 // Env carries cluster-wide knobs and the per-node lookups the caller has
 // already gathered. Disk telemetry is optional: a nil StorageByNode disables
-// the disk gate and reverts the soft-score weights to the legacy 0.6/0.4
-// mem/cpu split.
+// the disk gate AND zeroes the disk weight in the soft score.
+//
+// RequiredTags is the host-aggregate filter: when non-empty, every tag
+// listed must appear in the node's Tags slice or the node is rejected
+// with ReasonMissingTag. Operators tag hardware ("fast-cpu", "nvme",
+// "gpu"); user opts in to a constraint at provision time.
 type Env struct {
 	Excluded         []string
 	TemplatesPresent map[string]bool
 	StorageByNode    map[string]StorageInfo // nil disables disk gate + diskweight
 	MemBufferMiB     uint64                 // RAM headroom on top of tier; default 256
 	CPULoadFactor    float64                // K, share of new VM's cores assumed used; default 0.5
+	RequiredTags     []string               // operator-defined affinity constraints
+
+	// Allocation ratios — cluster-wide overcommit knobs. A node's
+	// effective capacity for placement is `physical × ratio`; the
+	// hard gate rejects when committed + needed exceeds that. Zero
+	// values fall back to the defaults below (4.0/1.0/1.0). Anything
+	// less than 1.0 is clamped to 1.0 — sub-1 ratios would *under*-
+	// commit, which is what the buffer/load-factor knobs already do
+	// from the score side, and would silently leave physical capacity
+	// unusable.
+	CPUAllocationRatio  float64
+	RAMAllocationRatio  float64
+	DiskAllocationRatio float64
 }
 
 // Result is what Score returns per node. Score == 0 ⇔ rejected; Reasons is
 // populated for rejections (one or more) and empty for accepts.
+//
+// Components is a labelled breakdown of how the soft score was computed —
+// keys: mem_headroom, cpu_headroom, disk_headroom, mem_weighted,
+// cpu_weighted, disk_weighted, total. Empty for rejected scores
+// (Score == 0). Used by the dashboard tooltip to render
+// "0.45·mem(0.85) + 0.30·cpu(0.92) + 0.25·disk(0.60) = 0.78"
+// explanations.
+//
+// Spec is the node's auto-detected specialization (cpu/memory/balanced)
+// at score time. Informational only — surfaced as a chip on the
+// dashboard so operators know how to tag the node, but does not drive
+// scoring directly.
 type Result struct {
-	Score   float64
-	Reasons []Reason
+	Score      float64
+	Reasons    []Reason
+	Components map[string]float64
+	Spec       Specialization
 }
 
 // Decision pairs a candidate with its score result and the runtime data the
@@ -120,6 +304,12 @@ const tieBreakDelta = 0.05
 const (
 	defaultMemBufferMiB  uint64  = 256
 	defaultCPULoadFactor float64 = 0.5
+	// Default allocation ratios — homelab-friendly. CPU 4× because
+	// most VMs idle far below their declared vCPUs; RAM/disk 1× to
+	// avoid OOM/no-space surprises.
+	defaultCPURatio  float64 = 4.0
+	defaultRAMRatio  float64 = 1.0
+	defaultDiskRatio float64 = 1.0
 )
 
 const (
@@ -130,9 +320,10 @@ const (
 // Score evaluates one node against one tier under one environment. Pure.
 //
 // Hard gates run first in order of cheapness; any failure returns Score=0
-// with the rejecting reason(s) attached. When all gates pass, the soft score
-// projects post-placement headroom across mem/cpu (and disk, when telemetry
-// is enabled) and returns a value in (0, 1].
+// with the rejecting reason(s) attached. When all gates pass, the soft
+// score projects post-placement headroom across mem/cpu/disk and returns
+// a value in (0, 1]. Components carries the per-term breakdown for
+// transparency.
 func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	memBufferMiB := env.MemBufferMiB
 	if memBufferMiB == 0 {
@@ -142,6 +333,21 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	if cpuLoadFactor == 0 {
 		cpuLoadFactor = defaultCPULoadFactor
 	}
+	// Allocation ratios — clamp to ≥1.0 so a misconfigured 0/negative
+	// value can't silently strand physical capacity.
+	cpuRatio := env.CPUAllocationRatio
+	if cpuRatio < 1.0 {
+		cpuRatio = defaultCPURatio
+	}
+	ramRatio := env.RAMAllocationRatio
+	if ramRatio < 1.0 {
+		ramRatio = defaultRAMRatio
+	}
+	diskRatio := env.DiskAllocationRatio
+	if diskRatio < 1.0 {
+		diskRatio = defaultDiskRatio
+	}
+	spec := DetectSpecialization(n)
 
 	var reasons []Reason
 
@@ -165,27 +371,42 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	case "drained":
 		reasons = append(reasons, ReasonDrained)
 	}
+	// Host-aggregate filter: every required tag must be on the node.
+	// Cheaper than capacity math so it runs early, but after lock-state
+	// so the operator's intent (cordon/drain) reports first.
+	if missing := missingTags(n.Tags, env.RequiredTags); len(missing) > 0 {
+		reasons = append(reasons, ReasonMissingTag)
+	}
 	if !env.TemplatesPresent[n.Name] {
 		reasons = append(reasons, ReasonNoTemplate)
 	}
 	if n.MaxMem == 0 {
 		reasons = append(reasons, ReasonNoCapacity)
 	}
-	if t.CPU > n.MaxCPU {
+	// CPU gate: the new VM's vCPUs plus everything already committed
+	// must fit inside `MaxCPU × cpuRatio`. With ratio=4 on an
+	// 8-thread host that's a 32-vCPU sum cap. Operators typically
+	// land at ratio 2-4 for homelab density; 1.0 = strict 1:1 (Nova
+	// strict mode equivalent).
+	cpuCap := int(float64(n.MaxCPU) * cpuRatio)
+	if rt.CommittedCPU+t.CPU > cpuCap {
 		reasons = append(reasons, ReasonInsufficientCores)
 	}
 
 	// usedMem takes the larger of live host usage (which already includes file
 	// cache and ZFS ARC) and the sum of every VM's configured RAM (which
 	// includes stopped VMs). Pessimistic-by-design: never under-reports what
-	// would be consumed if every VM were running flat-out.
+	// would be consumed if every VM were running flat-out. With overcommit,
+	// the comparison happens against `MaxMem × ramRatio` so the operator can
+	// dial in 1.2× / 1.5× density when their VMs sit far below declared
+	// MaxMem.
 	usedMem := n.Mem
 	if rt.CommittedMemBytes > usedMem {
 		usedMem = rt.CommittedMemBytes
 	}
 	var freeMem int64
 	if n.MaxMem > 0 {
-		freeMem = int64(n.MaxMem) - int64(usedMem)
+		freeMem = int64(float64(n.MaxMem)*ramRatio) - int64(usedMem)
 	}
 	needMem := int64(t.MemMB+memBufferMiB) * int64(mibBytes)
 	if freeMem < needMem {
@@ -195,6 +416,14 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	// Disk gate is optional — only enforced when the caller supplied storage
 	// telemetry. A node missing from StorageByNode is treated as having zero
 	// free bytes (the operator's configured pool isn't visible there at all).
+	// Effective capacity = `TotalBytes × diskRatio`. 1.0 is the safe default
+	// because every backend honors it; the failure mode of declaring past the
+	// pool size on a thick-provisioned backend is "writes fail and filesystems
+	// corrupt." Operators on thin-capable pools (LVM-thin, Ceph thin, ZFS
+	// sparse) can raise this to 1.5–2.0 to expose the storage layer's lazy
+	// allocation to placement decisions, but only once a pool-fill monitor is
+	// in place — the runtime safety net for "declared > physical" lives there,
+	// not here.
 	var (
 		diskGateOn   bool
 		freeDisk     int64
@@ -205,26 +434,79 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 		diskGateOn = true
 		s := env.StorageByNode[n.Name]
 		totalDisk = s.TotalBytes
-		freeDisk = int64(s.TotalBytes) - int64(s.UsedBytes)
+		freeDisk = int64(float64(s.TotalBytes)*diskRatio) - int64(s.UsedBytes)
 		if freeDisk < needDiskByte {
 			reasons = append(reasons, ReasonInsufficientDisk)
 		}
 	}
 
 	if len(reasons) > 0 {
-		return Result{Score: 0, Reasons: reasons}
+		return Result{Score: 0, Reasons: reasons, Spec: spec}
 	}
 
-	memHeadroom := float64(freeMem-needMem) / float64(n.MaxMem)
-	cpuHeadroom := (1.0 - n.CPU) - cpuLoadFactor*float64(t.CPU)/float64(n.MaxCPU)
-	cpuHeadroom = clamp01(cpuHeadroom)
+	// Soft score — every component clamped to [0, 1] so the weighted sum
+	// stays in (0, 1]. Disk component is zero when telemetry is off; the
+	// disk weight is then re-distributed across mem/cpu proportionally so
+	// the score scale stays stable when an operator hasn't configured a
+	// VM-disk pool.
+	memHeadroom := clamp01(float64(freeMem-needMem) / float64(n.MaxMem))
+	cpuHeadroom := clamp01((1.0 - n.CPU) - cpuLoadFactor*float64(t.CPU)/float64(n.MaxCPU))
 
+	memW := weightMem
+	cpuW := weightCPU
+	diskW := weightDisk
 	if !diskGateOn {
-		return Result{Score: 0.6*memHeadroom + 0.4*cpuHeadroom}
+		split := memW + cpuW
+		if split > 0 {
+			memW += diskW * memW / split
+			cpuW += diskW * cpuW / split
+		}
+		diskW = 0
 	}
 
-	diskHeadroom := float64(freeDisk-needDiskByte) / float64(totalDisk)
-	return Result{Score: 0.5*memHeadroom + 0.3*cpuHeadroom + 0.2*diskHeadroom}
+	memWeighted := memW * memHeadroom
+	cpuWeighted := cpuW * cpuHeadroom
+	var diskHeadroom, diskWeighted float64
+	if diskGateOn && totalDisk > 0 {
+		diskHeadroom = clamp01(float64(freeDisk-needDiskByte) / float64(totalDisk))
+		diskWeighted = diskW * diskHeadroom
+	}
+
+	total := memWeighted + cpuWeighted + diskWeighted
+
+	return Result{
+		Score: total,
+		Components: map[string]float64{
+			"mem_headroom":  memHeadroom,
+			"cpu_headroom":  cpuHeadroom,
+			"disk_headroom": diskHeadroom,
+			"mem_weighted":  memWeighted,
+			"cpu_weighted":  cpuWeighted,
+			"disk_weighted": diskWeighted,
+			"total":         total,
+		},
+		Spec: spec,
+	}
+}
+
+// missingTags returns the slice of required tags that aren't present in
+// nodeTags. Empty required → empty result (no constraint). Both inputs
+// are case-sensitive; operators should keep tag casing consistent.
+func missingTags(nodeTags, required []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(nodeTags))
+	for _, t := range nodeTags {
+		have[t] = true
+	}
+	var miss []string
+	for _, t := range required {
+		if !have[t] {
+			miss = append(miss, t)
+		}
+	}
+	return miss
 }
 
 // Evaluate scores every node in input order. Use this when you want

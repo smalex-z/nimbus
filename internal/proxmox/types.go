@@ -32,11 +32,66 @@ type MemPair struct {
 	Free  uint64 `json:"free"`
 }
 
-// NodeStatus is the subset of /nodes/{node}/status we read — currently just
-// the swap counters (the physical memory totals are already on Node).
+// NodeStatus is the subset of /nodes/{node}/status we read. Memory + Swap
+// are the headline fields; CPUInfo carries the model + clock-speed strings
+// the dashboard displays alongside core count so operators can tell a
+// 14th-gen i5 apart from a 2nd-gen i5 (the Proxmox web UI shows the same
+// data on Datacenter → Node → Summary).
 type NodeStatus struct {
-	Memory MemPair `json:"memory"`
-	Swap   MemPair `json:"swap"`
+	Memory  MemPair  `json:"memory"`
+	Swap    MemPair  `json:"swap"`
+	CPUInfo *CPUInfo `json:"cpuinfo,omitempty"`
+}
+
+// CPUInfo mirrors the cpuinfo block from /nodes/{node}/status. Proxmox
+// reports `mhz` as a quoted string (e.g. "3600.000") — that's the
+// *current* P-state from /proc/cpuinfo, not a stable base or boost
+// clock — so we don't surface it. The model string is enough for
+// dashboards (operators eyeball it) and feeds the auto-tag arch
+// detection in the scheduler.
+//
+// Cores is the per-socket count; Cpus is the total logical-thread count.
+// We don't always need both — Cpus matches what Node.MaxCPU already
+// returns, but having Cores helps render "16c (8c × 2 sockets)" on
+// dashboards if we ever want that detail.
+type CPUInfo struct {
+	Model   string `json:"model"`
+	Cpus    int    `json:"cpus"`
+	Sockets int    `json:"sockets"`
+	Cores   int    `json:"cores"`
+}
+
+// Disk mirrors one row from /nodes/{node}/disks/list. Type is one of
+// "ssd", "hdd", "nvme", "usb" — Proxmox's own classification, not a
+// guess from device name. Used by the auto-tag derivation to decide
+// whether a node carries fast storage.
+//
+// Other fields (vendor, serial, gpt, size, used) are present in the
+// API but unused; we only need Type today.
+type Disk struct {
+	Devpath string `json:"devpath"`
+	Type    string `json:"type"`
+	Size    uint64 `json:"size"`
+	Used    string `json:"used,omitempty"`
+}
+
+// PCIDevice mirrors one row from /nodes/{node}/hardware/pci. The
+// `vendor` and `device_id` strings come back as 4-digit hex with a
+// leading "0x" (e.g. "0x10de" for NVIDIA). DeviceName/VendorName are
+// human-readable when Proxmox can resolve them via lspci's database;
+// empty otherwise.
+//
+// We use this to detect discrete GPU presence — currently NVIDIA-only
+// (vendor 10de). AMD (1002) overlaps with iGPUs in APUs and Intel
+// (8086) is dominated by integrated graphics, so we don't auto-tag
+// from those vendors.
+type PCIDevice struct {
+	ID         string `json:"id"`        // BDF, e.g. "0000:01:00.0"
+	Vendor     string `json:"vendor"`    // hex like "0x10de"
+	Device     string `json:"device_id"` // hex like "0x2204"
+	Class      string `json:"class"`     // hex like "0x030000" (display)
+	DeviceName string `json:"device_name,omitempty"`
+	VendorName string `json:"vendor_name,omitempty"`
 }
 
 // VMStatus is the subset of /nodes/{node}/qemu data we consume.

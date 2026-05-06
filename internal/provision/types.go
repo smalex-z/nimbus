@@ -12,14 +12,18 @@ package provision
 // The service is the place this gets resolved (the handler validates only
 // shape, not key-store state).
 type Request struct {
-	Hostname    string
-	Tier        string
-	OSTemplate  string
-	SSHKeyID    *uint  // optional: use an existing vault entry
-	SSHPubKey   string // BYO
-	SSHPrivKey  string // optional: BYO callers may stash the private half in Nimbus's vault
-	GenerateKey bool
-	OwnerID     *uint // nil in Phase 1 (no auth)
+	Hostname   string
+	Tier       string
+	OSTemplate string
+	// RequiredTags is the host-aggregate filter as a CSV string
+	// (e.g. "fast-cpu,nvme"). Empty = no constraint. Persisted on
+	// db.VM.RequiredTags so drain replacement applies the same filter.
+	RequiredTags string
+	SSHKeyID     *uint  // optional: use an existing vault entry
+	SSHPubKey    string // BYO
+	SSHPrivKey   string // optional: BYO callers may stash the private half in Nimbus's vault
+	GenerateKey  bool
+	OwnerID      *uint // nil in Phase 1 (no auth)
 
 	// RequesterIsAdmin bypasses member quotas (MemberMaxVMs) and the tier
 	// allowlist (MemberAllowedTiers). Default false — the safe answer when

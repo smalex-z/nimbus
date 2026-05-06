@@ -177,6 +177,31 @@ type QuotaSettings struct {
 	MemberMaxActiveJobs int  `gorm:"default:5"`
 }
 
+// SchedulingSettings stores cluster-wide overcommit ratios the scheduler
+// uses when deciding whether a node can host a tier. Only a single row
+// (ID=1) is used. Defaults are seeded on first read so existing
+// deployments don't change behaviour silently.
+//
+//   - CPUAllocationRatio (default 4.0): allowed sum-of-vCPU on a node
+//     as a multiple of physical thread count. 4.0 lets you stack 32
+//     vCPUs of declared capacity on an 8-thread host (typical homelab
+//     density — most VMs idle far below their declared cores).
+//   - RAMAllocationRatio (default 1.0): allowed committed RAM as a
+//     multiple of physical RAM. 1.0 = no overcommit (Linux-host safe
+//     default — RAM oversub trades free disk swap for RAM-pressure
+//     surprises). Operators bump this to 1.2-1.5 only when their VMs
+//     genuinely sit far below declared MaxMem.
+//   - DiskAllocationRatio (default 1.0): allowed committed VM disk as
+//     a multiple of pool capacity. 1.0 even though LVM-thin already
+//     thin-provisions — the scheduler's job is to refuse placement
+//     before the operator cuts off their own filesystem.
+type SchedulingSettings struct {
+	ID                  uint    `gorm:"primaryKey"`
+	CPUAllocationRatio  float64 `gorm:"column:cpu_allocation_ratio;default:4.0"  json:"cpu_allocation_ratio"`
+	RAMAllocationRatio  float64 `gorm:"column:ram_allocation_ratio;default:1.0"  json:"ram_allocation_ratio"`
+	DiskAllocationRatio float64 `gorm:"column:disk_allocation_ratio;default:1.0" json:"disk_allocation_ratio"`
+}
+
 // GopherSettings stores the Gopher tunnel-gateway credentials. Only a single
 // row (ID=1) is used. Empty APIURL means tunnel integration is disabled.
 //
@@ -295,15 +320,24 @@ func (GPUJob) TableName() string { return "gpu_jobs" }
 // VM is the canonical record for a provisioned virtual machine.
 type VM struct {
 	gorm.Model
-	VMID       int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
-	Hostname   string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
-	IP         string `gorm:"column:ip;index;not null"                json:"ip"`
-	Node       string `gorm:"column:node;not null"                    json:"node"`
-	Tier       string `gorm:"column:tier;not null"                    json:"tier"`
-	OSTemplate string `gorm:"column:os_template;not null"             json:"os_template"`
-	Username   string `gorm:"column:username"                         json:"username"`
-	Status     string `gorm:"column:status;index;not null"            json:"status"`
-	OwnerID    *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
+	VMID     int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
+	Hostname string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
+	IP       string `gorm:"column:ip;index;not null"                json:"ip"`
+	Node     string `gorm:"column:node;not null"                    json:"node"`
+	Tier     string `gorm:"column:tier;not null"                    json:"tier"`
+	// RequiredTags is the host-aggregate filter the user opted into
+	// at provision time, as a CSV string (e.g. "fast-cpu,nvme"). Used
+	// by drain replacement to apply the same filter — a VM that
+	// required `fast-cpu` only migrates to other `fast-cpu`-tagged
+	// nodes. Empty = no constraint. Replaces the earlier (unmerged)
+	// WorkloadType experiment; column name stays `workload_type` so
+	// the schema doesn't require a rename migration on systems that
+	// briefly ran the prior column.
+	RequiredTags string `gorm:"column:workload_type;default:''"        json:"required_tags"`
+	OSTemplate   string `gorm:"column:os_template;not null"            json:"os_template"`
+	Username     string `gorm:"column:username"                         json:"username"`
+	Status       string `gorm:"column:status;index;not null"            json:"status"`
+	OwnerID      *uint  `gorm:"column:owner_id;index"                   json:"owner_id,omitempty"`
 	// SSHKeyID points to the row in the ssh_keys table that owns the SSH
 	// material for this VM. nullable: set NULL when the key is deleted, so the
 	// VM record outlives its key. Replaces the legacy per-VM KeyName/CT/Nonce
@@ -492,9 +526,31 @@ type Node struct {
 	LockedBy   *uint      `gorm:"column:locked_by"                   json:"locked_by,omitempty"`
 	LockReason string     `gorm:"column:lock_reason;default:''"      json:"lock_reason,omitempty"`
 	Tags       string     `gorm:"column:tags;default:''"             json:"-"`
-	LastSeenAt time.Time  `gorm:"column:last_seen_at"                json:"last_seen_at"`
-	CreatedAt  time.Time  `gorm:"column:created_at"                  json:"created_at"`
-	UpdatedAt  time.Time  `gorm:"column:updated_at"                  json:"updated_at"`
+	// CPUModel is denormalized from /nodes/{node}/status so the scheduler
+	// can derive auto-tags (arch: x86 vs arm) without a per-call status
+	// fan-out. Refreshed on every reconcileObserved cycle. Empty when the
+	// status fan-out failed at the time of the last observation.
+	CPUModel string `gorm:"column:cpu_model;default:''"        json:"-"`
+	// HasSSD/HasGPU are auto-detected from /nodes/{n}/disks/list and
+	// /nodes/{n}/hardware/pci respectively. Populated only by the
+	// background reconcile loop (those endpoints aren't called on the
+	// 15 s foreground polling cycle). False until the first reconcile
+	// completes, which is fine — the auto-tags just don't appear yet.
+	// HasGPU is currently NVIDIA-only (vendor 0x10de); AMD and Intel
+	// discrete cards aren't reliably distinguishable from iGPUs via
+	// the PCI vendor list and are left for operator tagging.
+	HasSSD bool `gorm:"column:has_ssd;default:false"       json:"-"`
+	HasGPU bool `gorm:"column:has_gpu;default:false"       json:"-"`
+	// DiskType is the strongest disk class observed via /disks/list:
+	// "nvme" > "ssd" > "hdd" > "" (unknown). Surfaces on the SPA card
+	// in place of the Proxmox pool name so operators can compare
+	// storage tiers at a glance. Distinct from has_ssd because the
+	// auto-tag stays a binary union (nvme also flips ssd) — has_ssd
+	// drives placement filtering, disk_type drives display.
+	DiskType   string    `gorm:"column:disk_type;default:''"        json:"-"`
+	LastSeenAt time.Time `gorm:"column:last_seen_at"                json:"last_seen_at"`
+	CreatedAt  time.Time `gorm:"column:created_at"                  json:"created_at"`
+	UpdatedAt  time.Time `gorm:"column:updated_at"                  json:"updated_at"`
 }
 
 // TableName pins the GORM table name. Without it GORM picks "nodes" which is

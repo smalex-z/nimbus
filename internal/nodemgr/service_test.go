@@ -73,6 +73,14 @@ func (f *fakePVE) GetNodeStatus(_ context.Context, _ string) (*proxmox.NodeStatu
 	return &proxmox.NodeStatus{}, nil
 }
 
+func (f *fakePVE) ListDisks(_ context.Context, _ string) ([]proxmox.Disk, error) {
+	return nil, nil
+}
+
+func (f *fakePVE) ListPCIDevices(_ context.Context, _ string) ([]proxmox.PCIDevice, error) {
+	return nil, nil
+}
+
 func (f *fakePVE) NodeAddresses(_ context.Context) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,6 +124,13 @@ func (f *fakePVE) DeleteNode(_ context.Context, _ string) error { return f.delet
 // service, the underlying *db.DB (so tests can seed db.VM rows), and the
 // fake Proxmox client.
 func newTestService(t *testing.T) (*nodemgr.Service, *db.DB, *fakePVE) {
+	return newTestServiceWithStorage(t, "")
+}
+
+// newTestServiceWithStorage builds the service with a configured
+// VMDiskStorage pool so the drain plan's disk gate fires. Empty string
+// disables the gate (matches the legacy default).
+func newTestServiceWithStorage(t *testing.T, pool string) (*nodemgr.Service, *db.DB, *fakePVE) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "nimbus.db")
 	database, err := db.New(dbPath, &db.User{}, &db.VM{}, &db.Node{})
@@ -127,6 +142,7 @@ func newTestService(t *testing.T) (*nodemgr.Service, *db.DB, *fakePVE) {
 		PerVMMigrateTimeout: 5 * time.Second,
 		TaskPollInterval:    10 * time.Millisecond,
 		VacateMissThreshold: 3,
+		VMDiskStorage:       pool,
 	})
 	return svc, database, fake
 }
@@ -457,6 +473,72 @@ func TestComputePlan_NoBlockedRows(t *testing.T) {
 		if !ok {
 			t.Errorf("vm %d has no usable destination in Eligible", m.VMID)
 		}
+	}
+}
+
+// TestComputePlan_DiskGateFires asserts the drain plan now considers
+// disk capacity. Before the disk-consistency fix this test would fail —
+// the planner left StorageByNode nil and the disk gate never tripped,
+// so a 100GB VM could be planned onto a 10GB-free destination and only
+// fail at execute time.
+func TestComputePlan_DiskGateFires(t *testing.T) {
+	t.Parallel()
+	svc, database, fake := newTestServiceWithStorage(t, "local-lvm")
+	fake.nodes = []proxmox.Node{
+		{Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib},
+		{Name: "beta", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 1 * gib},
+	}
+	// beta has only 5 GiB free in the configured pool — too small for
+	// the medium tier's 30 GiB requirement.
+	fake.clusterStore = []proxmox.ClusterStorage{
+		{Storage: "local-lvm", Node: "alpha", Total: 500 * gib, Used: 100 * gib, Shared: 0},
+		{Storage: "local-lvm", Node: "beta", Total: 500 * gib, Used: 495 * gib, Shared: 0},
+	}
+	ctx := context.Background()
+	if _, err := svc.List(ctx); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if err := database.WithContext(ctx).Create(&db.VM{
+		VMID: 100, Hostname: "vm1", IP: "10.0.0.10", Node: "alpha",
+		Tier: "medium", OSTemplate: "ubuntu-24.04", Status: "running",
+	}).Error; err != nil {
+		t.Fatalf("seed vm: %v", err)
+	}
+	plan, err := svc.ComputePlan(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("ComputePlan: %v", err)
+	}
+	if len(plan.Migrations) != 1 {
+		t.Fatalf("Migrations len = %d, want 1", len(plan.Migrations))
+	}
+	row := plan.Migrations[0]
+	// beta should be present in Eligible but flagged disabled with the
+	// insufficient-disk reason — this is the "still shows them, dimmed,
+	// with a hover tooltip" behaviour the spec calls for. Use an index
+	// sentinel rather than a pointer so staticcheck's SA5011 doesn't
+	// flag the post-check dereference (it doesn't always trust t.Fatalf
+	// as a terminating call across heap-pointer flows).
+	betaIdx := -1
+	for i := range row.Eligible {
+		if row.Eligible[i].Node == "beta" {
+			betaIdx = i
+			break
+		}
+	}
+	if betaIdx < 0 {
+		t.Fatalf("beta missing from Eligible options")
+	}
+	beta := row.Eligible[betaIdx]
+	if !beta.Disabled {
+		t.Errorf("beta.Disabled = false; want true (only 5GB free, need 30GB)")
+	}
+	// AutoPick should NOT be beta — the planner picked nothing
+	// (only one candidate, and it's disabled), so the row is blocked.
+	if row.AutoPick == "beta" {
+		t.Errorf("AutoPick = beta; want empty (disk-too-full)")
+	}
+	if !plan.HasBlocked {
+		t.Errorf("HasBlocked = false; want true (no usable destination)")
 	}
 }
 

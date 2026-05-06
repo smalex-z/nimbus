@@ -47,6 +47,17 @@ definitions:
       updated_at:
         type: string
     type: object
+  db.SchedulingSettings:
+    properties:
+      cpu_allocation_ratio:
+        type: number
+      disk_allocation_ratio:
+        type: number
+      id:
+        type: integer
+      ram_allocation_ratio:
+        type: number
+    type: object
   db.VM:
     properties:
       error_msg:
@@ -74,6 +85,17 @@ definitions:
         type: string
       owner_id:
         type: integer
+      required_tags:
+        description: |-
+          RequiredTags is the host-aggregate filter the user opted into
+          at provision time, as a CSV string (e.g. "fast-cpu,nvme"). Used
+          by drain replacement to apply the same filter — a VM that
+          required `fast-cpu` only migrates to other `fast-cpu`-tagged
+          nodes. Empty = no constraint. Replaces the earlier (unmerged)
+          WorkloadType experiment; column name stays `workload_type` so
+          the schema doesn't require a rename migration on systems that
+          briefly ran the prior column.
+        type: string
       ssh_key_id:
         description: |-
           SSHKeyID points to the row in the ssh_keys table that owns the SSH
@@ -426,6 +448,12 @@ definitions:
         type: string
       public_tunnel:
         type: boolean
+      required_tags:
+        description: |-
+          RequiredTags is the host-aggregate filter as a CSV string
+          (e.g. "fast-cpu,nvme"). Operator-defined free-form labels —
+          no enum validation. Empty = no constraint.
+        type: string
       ssh_key_id:
         type: integer
       ssh_privkey:
@@ -858,6 +886,15 @@ definitions:
       google_client_secret:
         type: string
     type: object
+  handlers.schedulingSettingsRequest:
+    properties:
+      cpu_allocation_ratio:
+        type: number
+      disk_allocation_ratio:
+        type: number
+      ram_allocation_ratio:
+        type: number
+    type: object
   handlers.selfBootstrapStatusView:
     properties:
       error:
@@ -1172,16 +1209,76 @@ definitions:
           $ref: '#/definitions/nodemgr.DrainWarning'
         type: array
     type: object
+  nodemgr.ScoreBreakdown:
+    properties:
+      components:
+        additionalProperties:
+          type: number
+        type: object
+      reasons:
+        items:
+          type: string
+        type: array
+      score:
+        type: number
+      spec:
+        description: |-
+          Spec is the auto-detected node specialization (cpu/memory/balanced).
+          Informational — surfaced as a chip on the dashboard so operators
+          know how to tag the node. Does NOT drive scoring.
+        type: string
+    type: object
   nodemgr.View:
     properties:
+      auto_tags:
+        description: |-
+          AutoTags are system-derived (currently arch: "x86" / "arm") and
+          not editable by operators. Surfaced separately so the SPA can
+          label them differently; the scheduler treats them identically to
+          operator tags for RequiredTags matching.
+        items:
+          type: string
+        type: array
       cpu:
         type: number
+      cpu_cores:
+        description: |-
+          CPUCores is the physical core count (sockets × cores-per-socket)
+          from cpuinfo. MaxCPU above is the *thread* count (Proxmox's
+          `maxcpu` = total logical CPUs); the SPA renders "Nc/Mt" when
+          CPUCores is non-zero so the operator can tell a 4c/8t laptop
+          chip apart from a real 8c desktop chip. Zero when status.CPU
+          is unavailable (the SPA falls back to "Mt").
+        type: integer
+      cpu_model:
+        description: |-
+          CPUModel is the human-readable CPU string from cpuinfo.model
+          (e.g. "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"). Empty when
+          the per-node status call failed or Proxmox didn't return it.
+          Used for the SPA card display AND as the input for the auto-tag
+          arch detection (DeriveAutoTags).
+
+          We deliberately do NOT surface a separate clock-speed number.
+          Proxmox's cpuinfo.mhz reports the live throttled P-state which
+          inverts the apparent ranking on idle vs busy nodes; the
+          marketing GHz embedded in the model string is base clock only,
+          which understates a chip that boosts 3-4× higher under load.
+          The model name carries the relevant signal — operators who want
+          a number look up the SKU.
+        type: string
       disk_allocated:
         type: integer
       disk_pool_name:
         type: string
       disk_total:
         type: integer
+      disk_type:
+        description: |-
+          DiskType is "nvme" | "ssd" | "hdd" | "" — strongest class
+          observed via /disks/list during the background reconcile.
+          Surfaces on the SPA card in place of the pool name so storage
+          tier is comparable across nodes at a glance.
+        type: string
       disk_used:
         description: |-
           DiskUsed/DiskTotal are the configured VM-disk pool's capacity
@@ -3129,7 +3226,23 @@ paths:
         Joins Proxmox live telemetry (cpu/mem/storage) with the
         Nimbus-side lock state (none/cordoned/draining/drained) and
         operator-set tags. Powers both the Admin dashboard and the
-        /nodes page.
+        /nodes page. When `include_scores=true`, each row carries a
+        `score` breakdown for the preview tier so the scoring matrix
+        can render without a second round-trip.
+      parameters:
+      - description: set to `true` to decorate rows with score breakdowns
+        in: query
+        name: include_scores
+        type: string
+      - description: tier to score against (default `medium`); only used when include_scores=true
+        enum:
+        - small
+        - medium
+        - large
+        - xl
+        in: query
+        name: preview_tier
+        type: string
       produces:
       - application/json
       responses:
@@ -3144,6 +3257,10 @@ paths:
                     $ref: '#/definitions/nodemgr.View'
                   type: array
               type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
         "401":
           description: Unauthorized
           schema:
@@ -3348,6 +3465,69 @@ paths:
       security:
       - cookieAuth: []
       summary: Compute the drain plan for a node (admin)
+      tags:
+      - nodes
+  /nodes/{name}/score:
+    get:
+      description: |-
+        Drill-down view used by the Nodes-page tooltip. Returns the
+        full components map plus rejection reasons (when score=0)
+        for the given (tier, required_tags) cell.
+      parameters:
+      - description: Proxmox node name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: tier the synthetic VM is sized at (default `medium`)
+        enum:
+        - small
+        - medium
+        - large
+        - xl
+        in: query
+        name: tier
+        type: string
+      - description: comma-separated host-aggregate tags the candidate must carry
+          (empty = no constraint)
+        in: query
+        name: tags
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/nodemgr.ScoreBreakdown'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Score a single node at a tier + host-aggregate constraint (admin)
       tags:
       - nodes
   /nodes/{name}/tags:
@@ -3772,6 +3952,86 @@ paths:
       summary: Deploy the singleton MinIO storage VM (admin)
       tags:
       - s3
+  /scheduling:
+    get:
+      description: |-
+        Returns the placement scheduler's cpu/ram/disk allocation
+        ratios. Defaults are seeded on first read so the value is
+        never empty.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.SchedulingSettings'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read cluster overcommit ratios (admin)
+      tags:
+      - nodes
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Persists the placement scheduler's cpu/ram/disk allocation
+        ratios. Each is clamped to [1.0, 64.0]. Takes effect on
+        the next provision/drain — no restart required.
+      parameters:
+      - description: New ratios
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.schedulingSettingsRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.SchedulingSettings'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update cluster overcommit ratios (admin)
+      tags:
+      - nodes
   /settings/access-code:
     get:
       produces:

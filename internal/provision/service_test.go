@@ -1095,6 +1095,76 @@ func TestPickNode_CordonedNodeSkipped(t *testing.T) {
 	}
 }
 
+// TestPickNode_RequiredTagsFiltersHostAggregate is the headline test for
+// the host-aggregate placement model: a VM that requires `fast-cpu`
+// must only land on a node that carries that tag, even when an untagged
+// node has more headroom. Mirrors OpenStack flavor extra-specs / K8s
+// nodeSelector.
+func TestPickNode_RequiredTagsFiltersHostAggregate(t *testing.T) {
+	t.Parallel()
+	fake := pickNodeFakePVE(t)
+	// alpha: capacious but no tags. bravo: smaller but tagged fast-cpu.
+	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", MaxCPU: 16, MaxMem: 32 << 30, Mem: 1 << 30, CPU: 0.1},
+			{Name: "bravo", Status: "online", MaxCPU: 8, MaxMem: 16 << 30, Mem: 1 << 30, CPU: 0.1},
+		}, nil
+	}
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "local-lvm", Node: "alpha", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+			{Storage: "local-lvm", Node: "bravo", Total: 500 << 30, Used: 100 << 30, Shared: 0},
+		}, nil
+	}
+	captured := atomic.Pointer[string]{}
+	fake.cloneVM = func(_ context.Context, _, target string, _, _ int, _ string) (string, error) {
+		t := target
+		captured.Store(&t)
+		return "UPID", nil
+	}
+
+	svc, _, database := newTestServiceWithCfg(t, fake, provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "local-lvm",
+	})
+
+	// Seed both node rows; tag bravo as fast-cpu. The required-tag gate
+	// should reject alpha (no fast-cpu tag) so bravo wins despite
+	// having less capacity.
+	for _, name := range []string{"alpha", "bravo"} {
+		if err := database.WithContext(context.Background()).Create(&db.Node{
+			Name: name, LockState: "none", LastSeenAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed node %s: %v", name, err)
+		}
+	}
+	if err := database.WithContext(context.Background()).Model(&db.Node{}).
+		Where("name = ?", "bravo").
+		Update("tags", "fast-cpu").Error; err != nil {
+		t.Fatalf("tag bravo: %v", err)
+	}
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:     "fast-vm",
+		Tier:         "medium",
+		RequiredTags: "fast-cpu",
+		OSTemplate:   "ubuntu-24.04",
+		SSHPubKey:    realPubKey(t),
+	}, nil); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got := captured.Load()
+	if got == nil || *got != "bravo" {
+		t.Errorf("CloneVM target = %v, want bravo (only fast-cpu-tagged node)", got)
+	}
+}
+
 func TestPickNode_SharedStorageDedupes(t *testing.T) {
 	t.Parallel()
 	fake := pickNodeFakePVE(t)

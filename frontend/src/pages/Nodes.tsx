@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getProxmoxBinding, listNodes } from '@/api/client'
+import { getProxmoxBinding, getSchedulingSettings, listNodes, listNodesWithScores, saveSchedulingSettings } from '@/api/client'
 import type { ProxmoxBinding } from '@/api/client'
-import type { NodeView } from '@/types'
+import type { NodeView, NodeViewWithScores, SchedulingSettings, Specialization, TierName } from '@/types'
 import { CordonModal, DrainPlanModal, RemoveNodeModal, TagsModal } from '@/components/NodeActionModals'
 import ProxmoxBindingModal, { ChangeBindingModal } from '@/components/ProxmoxBindingModal'
 import { formatBytes } from '@/lib/format'
+
+const TIER_PREVIEW_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 
 // Nodes — admin-only cluster lifecycle page. Three stacked sections:
 //
@@ -79,6 +81,8 @@ export default function Nodes() {
         <>
           <CardGrid rows={rows} />
           <ManageTable rows={rows} onAction={setPending} />
+          <SchedulingPanel />
+          <ScoringMatrix />
         </>
       )}
 
@@ -284,36 +288,53 @@ function NodeCard({ node: n }: { node: NodeView }) {
         opacity: offline ? 0.55 : 1,
       }}
     >
-      {/* Header — name + tier counts on the left, status pills on the right. */}
+      {/* Header — name + one-line specs on the left, status pills on
+          the right. Specs format:
+            `4c/8t i5-1035G1 · 7.5 GiB · 141.6 GiB SSD · 1/1 VM`
+          CPU count + threads + short model collapse into the same line
+          so the card stays compact. The full cpu_model lives on the
+          row's title tooltip; storage shows the disk class (NVMe / SSD
+          / HDD) instead of the Proxmox pool name (the pool name moves
+          to the title tooltip too). Swap signal annotates the RAM
+          bar subhint below — keeps the header layout stable. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.name}</span>
             {n.is_self_host && <SelfPill />}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2 }}>
-            {n.max_cpu}c · {formatBytes(n.mem_total)}
-            {n.disk_total > 0 && <> · {formatBytes(n.disk_total)} {n.disk_pool_name || 'disk'}</>}
-            {' · '}{n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+          <div style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace', marginTop: 2, lineHeight: 1.5 }}>
+            <span title={n.cpu_model || 'CPU model unavailable'}>{cpuLabel(n)}</span>
+            {' · '}
+            <span title="Total physical RAM on the host">{formatBytes(n.mem_total)}</span>
+            {n.disk_total > 0 && (
+              <>
+                {' · '}
+                <span title={n.disk_pool_name ? `Proxmox pool: ${n.disk_pool_name}` : 'storage class'}>
+                  {formatBytes(n.disk_total)} {diskClass(n)}
+                </span>
+              </>
+            )}
+            {' · '}
+            <span title={`${n.vm_count} running / ${n.vm_count_total} total managed VMs`}>
+              {n.vm_count}/{n.vm_count_total} VM{n.vm_count_total !== 1 ? 's' : ''}
+            </span>
+            {swapping && (
+              <>
+                {' · '}
+                <span
+                  title="Allocated memory exceeded physical RAM — host is paging to swap"
+                  style={{ color: '#9a5c2e' }}
+                >
+                  +{formatBytes(n.swap_used)} swap
+                </span>
+              </>
+            )}
           </div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <div style={{ display: 'flex', gap: 4 }}>
-            <LockChip state={n.lock_state} reason={n.lock_reason} />
-            <StatusDot status={n.status} />
-          </div>
-          {swapping && (
-            <span
-              title="Allocated memory exceeded physical RAM — host is paging to swap"
-              className="font-mono"
-              style={{
-                fontSize: 9, padding: '1px 5px', borderRadius: 3,
-                color: '#9a5c2e', background: 'rgba(248,175,130,0.15)',
-                border: '1px solid rgba(248,175,130,0.4)',
-                textTransform: 'uppercase', letterSpacing: '0.06em',
-              }}
-            >swap +{formatBytes(n.swap_used)}</span>
-          )}
+        <div style={{ display: 'flex', gap: 4 }}>
+          <LockChip state={n.lock_state} reason={n.lock_reason} />
+          <StatusDot status={n.status} />
         </div>
       </div>
 
@@ -324,7 +345,11 @@ function NodeCard({ node: n }: { node: NodeView }) {
           alongside used makes placement reasoning visible. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <MiniBar label="CPU" pct={cpuPct} hint={`${cpuPct.toFixed(0)}%`} />
-        <MiniBar label="RAM" pct={memPct} hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`} />
+        <MiniBar
+          label="RAM"
+          pct={memPct}
+          hint={`${formatBytes(n.mem_used)} / ${formatBytes(n.mem_total)}`}
+        />
         <MiniBar label="RAM alloc" pct={memAllocPct} hint={`${memAllocPct.toFixed(0)}%`} accent />
         {n.disk_total > 0 && (
           <>
@@ -339,8 +364,16 @@ function NodeCard({ node: n }: { node: NodeView }) {
         )}
       </div>
 
-      {n.tags.length > 0 && (
+      {(n.tags.length > 0 || (n.auto_tags?.length ?? 0) > 0) && (
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {(n.auto_tags ?? []).map((t) => (
+            <span key={`auto-${t}`} title="auto-detected" style={{
+              fontSize: 10, fontFamily: 'Geist Mono, monospace',
+              padding: '1px 6px', borderRadius: 3,
+              background: 'rgba(20,18,28,0.02)', border: '1px dashed var(--line)',
+              color: 'var(--ink-mute)',
+            }}>{t}</span>
+          ))}
           {n.tags.map((t) => (
             <span key={t} style={{
               fontSize: 10, fontFamily: 'Geist Mono, monospace',
@@ -360,7 +393,12 @@ function NodeCard({ node: n }: { node: NodeView }) {
 // → bad as percent climbs; "accent" caller forces the warn palette
 // regardless (used for "RAM allocated" so it visually distinguishes from
 // "RAM in use" even at the same percent).
-function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hint: string; accent?: boolean }) {
+function MiniBar({ label, pct, hint, accent }: {
+  label: string
+  pct: number
+  hint: string
+  accent?: boolean
+}) {
   const clamped = Math.max(0, Math.min(100, pct))
   let fill = 'var(--ink-mute)'
   if (accent) {
@@ -395,6 +433,116 @@ function MiniBar({ label, pct, hint, accent }: { label: string; pct: number; hin
 // pctColor ramps a 0–100 percentage to ink/warn/err. Used for the
 // "allocated" cells where high values flag overcommit risk and the
 // operator's eye should snap to them.
+// cpuLabel renders the CPU slot of the specs row: cores/threads count
+// + a short model name. When physical cores ≠ threads we render
+// "Nc/Mt" (e.g. "4c/8t i5-1035G1") so a laptop chip is distinct from
+// a real desktop chip; when they match (no SMT, e.g. Apple silicon)
+// we collapse to "Mc". When cpu_cores is 0 (older PVE / nested-virt
+// failed status fanout) we fall back to "Mt" alone — the historic
+// "8c" rendering was misleading (max_cpu is logical threads, not
+// cores). Drops the "Core "/"Xeon "/etc. family prefix from the
+// shortened model so we keep more of the part number visible inline.
+function cpuLabel(n: NodeView): string {
+  const threads = n.max_cpu
+  const cores = n.cpu_cores ?? 0
+  let count: string
+  if (cores <= 0) count = `${threads}t`
+  else if (cores === threads) count = `${cores}c`
+  else count = `${cores}c/${threads}t`
+  const model = shortCPUModel(n.cpu_model)
+  return model ? `${count} ${model}` : count
+}
+
+// diskClass returns the storage classifier (NVMe / SSD / HDD) shown
+// in the disk slot of the specs row, replacing the operationally-
+// noisy Proxmox pool name (e.g. "local-lvm") with something the
+// operator can compare across nodes at a glance. Falls back to the
+// pool name when the auto-detection couldn't decide (e.g. /disks/list
+// returned 403 to a limited token).
+function diskClass(n: NodeView): string {
+  switch (n.disk_type) {
+    case 'nvme': return 'NVMe'
+    case 'ssd': return 'SSD'
+    case 'hdd': return 'HDD'
+    default: return n.disk_pool_name || 'disk'
+  }
+}
+
+
+// shortCPUModel reduces vendor model strings to just the part number,
+// since the SKU itself disambiguates generation/family for anyone who
+// cares ("i7-11800H" already implies 11th-gen Intel laptop H-class).
+//
+//   "Intel(R) Core(TM) i5-1035G1 CPU @ 1.00GHz"        → "i5-1035G1"
+//   "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz"   → "i7-11800H"
+//   "12th Gen Intel(R) Core(TM) i7-12700H"             → "i7-12700H"
+//   "Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz"        → "Xeon E5-2620 v3"
+//   "AMD Ryzen 7 5800X 8-Core Processor"               → "Ryzen 7 5800X"
+//   "AMD EPYC 7763 64-Core Processor"                  → "EPYC 7763"
+//   "Apple M1 Pro"                                     → "Apple M1 Pro"
+//
+// We strip (R)/(TM) noise, vendor prefix, generation prefix ("11th
+// Gen "), the "Core " family word (Intel laptop chips), the trailing
+// "@ X.YGHz" base-clock marketing, and AMD's redundant
+// "N-Core Processor" tail. Xeon/EPYC family words stay because the
+// raw SKU there ("E5-2620 v3", "7763") doesn't telegraph the family.
+function shortCPUModel(raw?: string): string {
+  if (!raw) return ''
+  let s = raw
+  s = s.replace(/\(R\)/g, '').replace(/\(TM\)/g, '')
+  s = s.replace(/Intel\s+/i, '').replace(/AMD\s+/i, '')
+  s = s.replace(/\d+(st|nd|rd|th)\s+Gen\s+/i, '') // "11th Gen ", "12th Gen "
+  s = s.replace(/\bCore\s+/i, '')                 // family word — SKU implies "Core"
+  s = s.replace(/\s+CPU\s+@\s+\S+/i, '')          // "CPU @ 3.60GHz"
+  s = s.replace(/\s+@\s+\S+/i, '')                // older format without "CPU"
+  s = s.replace(/\s+\d+-Core\s+Processor\s*$/i, '') // AMD's "8-Core Processor" tail
+  s = s.replace(/\s+/g, ' ').trim()
+  return s
+}
+
+// TagsCell renders the union of operator + auto-detected tags. Auto
+// tags are styled with a dashed muted border so the operator can tell
+// at a glance which ones the system applied versus which they typed
+// in. `chips=true` always renders pill-shaped badges; default mode
+// joins operator tags as plain text + chips for auto tags so the dense
+// management table doesn't get visually crowded.
+function TagsCell({ tags, autoTags, chips }: { tags: string[]; autoTags?: string[]; chips?: boolean }) {
+  const auto = autoTags ?? []
+  if (tags.length === 0 && auto.length === 0) {
+    return <span style={{ color: 'var(--ink-mute)' }}>—</span>
+  }
+  const chipBase: React.CSSProperties = {
+    fontSize: 10, fontFamily: 'Geist Mono, monospace',
+    padding: '1px 6px', borderRadius: 3,
+  }
+  const autoChips = auto.map((t) => (
+    <span key={`auto-${t}`} title="auto-detected" style={{
+      ...chipBase,
+      background: 'rgba(20,18,28,0.02)', border: '1px dashed var(--line)',
+      color: 'var(--ink-mute)',
+    }}>{t}</span>
+  ))
+  if (chips) {
+    return (
+      <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+        {autoChips}
+        {tags.map((t) => (
+          <span key={t} style={{
+            ...chipBase,
+            background: 'rgba(20,18,28,0.04)', border: '1px solid var(--line)',
+          }}>{t}</span>
+        ))}
+      </span>
+    )
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+      {autoChips}
+      {tags.length > 0 && <span>{tags.join(', ')}</span>}
+    </span>
+  )
+}
+
 function pctColor(pct: number): string {
   if (pct > 85) return 'var(--err)'
   if (pct > 60) return '#9a5c2e'
@@ -547,7 +695,7 @@ function ManageRow({ node: n, onAction }: { node: NodeView; onAction: (a: Pendin
         {n.vm_count}/{n.vm_count_total}
       </td>
       <td style={{ padding: '8px 8px', color: 'var(--ink-body)' }}>
-        {n.tags.length === 0 ? <span style={{ color: 'var(--ink-mute)' }}>—</span> : n.tags.join(', ')}
+        <TagsCell tags={n.tags} autoTags={n.auto_tags} />
       </td>
       <td style={{ padding: '8px 8px', textAlign: 'right' }}>
         <RowActions node={n} onAction={onAction} />
@@ -654,4 +802,321 @@ function ActionBtn({
       {label}
     </button>
   )
+}
+
+// SchedulingPanel renders the cluster-wide overcommit ratios and lets
+// the operator edit them. Sits between the management table and the
+// scoring matrix because it directly affects what the matrix shows
+// (raise the CPU ratio → previously-rejected nodes start scoring; the
+// matrix re-renders the change).
+//
+// Dirty-state UX: the inputs reflect the saved value on load; an
+// orange "Save" button lights up only when at least one input differs
+// from the saved baseline. Clicking Save round-trips and seeds a fresh
+// baseline. The server clamps to [1.0, 64.0]; sub-1 values are silently
+// promoted, so we display the clamped result rather than the typed-in
+// value when they diverge.
+function SchedulingPanel() {
+  const [saved, setSaved] = useState<SchedulingSettings | null>(null)
+  const [draft, setDraft] = useState<SchedulingSettings | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    getSchedulingSettings()
+      .then((row) => { setSaved(row); setDraft(row); setError(null) })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+  }, [])
+
+  const dirty = saved && draft && (
+    saved.cpu_allocation_ratio !== draft.cpu_allocation_ratio ||
+    saved.ram_allocation_ratio !== draft.ram_allocation_ratio ||
+    saved.disk_allocation_ratio !== draft.disk_allocation_ratio
+  )
+
+  const submit = async () => {
+    if (!draft) return
+    setSaving(true)
+    try {
+      const next = await saveSchedulingSettings(draft)
+      setSaved(next)
+      setDraft(next)
+      setError(null)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const reset = () => { if (saved) setDraft(saved) }
+
+  return (
+    <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 0', minWidth: 0 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Overcommit ratios</span>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            How much declared capacity each node accepts as a multiple of physical capacity. CPU 4× lets 32 vCPUs land
+            on an 8-thread host (homelab default — most VMs idle well below their declared cores). RAM 1× = strict no-overcommit;
+            OpenStack Nova ships 1.5× by default and bumping toward there is fine if your VMs sit well below declared <code>MaxMem</code>.
+            Disk 1× means Nimbus refuses to declare more than the pool's physical size, which leaves LVM-thin's overcommit
+            unused — raise to 1.5–2× on thin-capable pools (LVM-thin, Ceph thin, ZFS sparse) once a pool-fill monitor is in place;
+            keep at 1× for plain LVM, thick Ceph, or any pool that can't lazily allocate. Each value clamps to [1, 64].
+          </p>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 8, flexShrink: 0 }}>
+          {dirty && (
+            <button
+              type="button"
+              onClick={reset}
+              disabled={saving}
+              style={{
+                fontSize: 11, padding: '4px 12px', borderRadius: 5,
+                border: '1px solid var(--line)', cursor: saving ? 'default' : 'pointer',
+                background: 'transparent', color: 'var(--ink-mute)',
+                fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.06em',
+              }}
+            >
+              Reset
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!dirty || saving}
+            style={{
+              fontSize: 11, padding: '4px 12px', borderRadius: 5,
+              border: 'none', cursor: (!dirty || saving) ? 'default' : 'pointer',
+              background: dirty ? '#9a5c2e' : 'rgba(20,18,28,0.06)',
+              color: dirty ? 'white' : 'var(--ink-mute)',
+              fontFamily: 'Geist Mono, monospace', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500,
+            }}
+          >
+            {saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
+          </button>
+        </div>
+      </div>
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
+      {!saved && !error && (
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)' }}>Loading…</p>
+      )}
+      {draft && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <RatioInput
+            label="CPU"
+            value={draft.cpu_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, cpu_allocation_ratio: v })}
+            hint="vCPU sum cap = threads × ratio"
+          />
+          <RatioInput
+            label="RAM"
+            value={draft.ram_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, ram_allocation_ratio: v })}
+            hint="committed RAM cap = physical × ratio"
+          />
+          <RatioInput
+            label="Disk"
+            value={draft.disk_allocation_ratio}
+            onChange={(v) => setDraft({ ...draft, disk_allocation_ratio: v })}
+            hint="committed disk cap = pool × ratio"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RatioInput({ label, value, onChange, hint }: { label: string; value: number; onChange: (v: number) => void; hint: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180, flex: '1 1 200px' }}>
+      <label style={{ fontSize: 10, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'Geist Mono, monospace' }}>
+        {label}
+      </label>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <input
+          type="number"
+          min={1}
+          max={64}
+          step={0.1}
+          value={value}
+          onChange={(e) => {
+            const v = parseFloat(e.target.value)
+            if (Number.isFinite(v)) onChange(v)
+          }}
+          style={{
+            width: 70, fontSize: 13, padding: '4px 8px', borderRadius: 5,
+            border: '1px solid var(--line)', background: 'white',
+            fontFamily: 'Geist Mono, monospace', color: 'var(--ink)',
+          }}
+        />
+          <span style={{ fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'Geist Mono, monospace' }}>×</span>
+      </div>
+      <span style={{ fontSize: 10, color: 'var(--ink-mute)', lineHeight: 1.4 }}>{hint}</span>
+    </div>
+  )
+}
+
+// ScoringMatrix renders the per-node × per-workload score grid. Shown
+// below the management table so the page reads as: glance (cards) →
+// dispatch (table) → scheduler diagnostics (matrix).
+//
+// The tier picker at the top drives the preview — operators ask "if
+// I provisioned a medium VM, where would it land?" and the matrix
+// answers across all four workload types simultaneously. Cells show
+// the score as a percent, ramped green/amber/red, with a hover
+// tooltip rendering the components map breakdown.
+//
+// Cheap to compute: one cluster snapshot reused across all
+// (node, workload) combinations server-side.
+function ScoringMatrix() {
+  const [tier, setTier] = useState<TierName>('medium')
+  const [data, setData] = useState<NodeViewWithScores[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    listNodesWithScores(tier)
+      .then((rows) => { setData(rows); setError(null) })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'failed'))
+      .finally(() => setLoading(false))
+  }, [tier])
+
+  const sorted = useMemo(() => {
+    if (!data) return []
+    // Highest score first — operators want to see the best fit at the top.
+    return [...data].sort((a, b) => (b.score?.score ?? 0) - (a.score?.score ?? 0))
+  }, [data])
+
+  return (
+    <div className="glass" style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Placement scores</span>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            Where would a fresh VM at the preview tier land? Higher = more headroom after placement. Hover a score for the components breakdown.
+          </p>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(20,18,28,0.03)' }}>
+          {TIER_PREVIEW_ORDER.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTier(t)}
+              style={{
+                fontSize: 11, padding: '4px 10px', borderRadius: 5,
+                border: 'none', cursor: 'pointer',
+                background: tier === t ? 'var(--ink)' : 'transparent',
+                color: tier === t ? 'white' : 'var(--ink-2)',
+                fontFamily: 'Geist Mono, monospace',
+                textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 500,
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {error && <p style={{ margin: 0, fontSize: 12, color: 'var(--err)' }}>{error}</p>}
+      {loading && !data && (
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--ink-mute)' }}>Computing scores…</p>
+      )}
+      {sorted.length > 0 && (
+        <div style={{ overflowX: 'auto', margin: '0 -8px' }}>
+          <table className="w-full text-left" style={{ fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: 'var(--ink-mute)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Node</th>
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Spec</th>
+                <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tags</th>
+                <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((n) => (
+                <tr key={n.name} style={{ borderTop: '1px solid var(--line)', opacity: n.status === 'online' ? 1 : 0.55 }}>
+                  <td style={{ padding: '8px 8px', fontWeight: 500, color: 'var(--ink)' }}>{n.name}</td>
+                  <td style={{ padding: '8px 8px' }}>
+                    <SpecChip spec={inferSpec(n)} />
+                  </td>
+                  <td style={{ padding: '8px 8px', color: 'var(--ink-body)' }}>
+                    <TagsCell tags={n.tags} autoTags={n.auto_tags} chips />
+                  </td>
+                  <td
+                    style={{ padding: '8px 8px', textAlign: 'right', fontFamily: 'Geist Mono, monospace' }}
+                    title={cellTooltip(tier, n.score)}
+                  >
+                    <ScoreCell breakdown={n.score} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// inferSpec falls back to deriving the specialization from the node's
+// resource shape when the backend payload didn't include it (e.g. older
+// API responses). Mirrors nodescore.DetectSpecialization's thresholds.
+function inferSpec(n: NodeViewWithScores): Specialization {
+  if (n.score?.spec) return n.score.spec
+  if (n.max_cpu <= 0 || n.mem_total === 0) return 'balanced'
+  const gibPerCore = n.mem_total / (1 << 30) / n.max_cpu
+  if (gibPerCore < 4) return 'cpu'
+  if (gibPerCore > 8) return 'memory'
+  return 'balanced'
+}
+
+function SpecChip({ spec }: { spec: Specialization }) {
+  const palette: Record<Specialization, { color: string; bg: string; border: string; label: string }> = {
+    cpu:      { color: '#9a5c2e', bg: 'rgba(248,175,130,0.15)', border: 'rgba(248,175,130,0.4)', label: 'cpu-opt' },
+    memory:   { color: '#3b6e9c', bg: 'rgba(130,175,248,0.15)', border: 'rgba(130,175,248,0.4)', label: 'mem-opt' },
+    balanced: { color: 'var(--ink-mute)', bg: 'rgba(20,18,28,0.05)', border: 'var(--line)', label: 'balanced' },
+  }
+  const p = palette[spec]
+  return (
+    <span
+      className="font-mono"
+      style={{
+        fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 3,
+        textTransform: 'uppercase', letterSpacing: '0.06em',
+        color: p.color, background: p.bg, border: `1px solid ${p.border}`,
+      }}
+    >{p.label}</span>
+  )
+}
+
+function ScoreCell({ breakdown }: { breakdown?: import('@/types').ScoreBreakdown }) {
+  if (!breakdown) return <span style={{ color: 'var(--ink-mute)' }}>—</span>
+  if (breakdown.score === 0) {
+    return (
+      <span style={{ color: 'var(--err)' }} title={breakdown.reasons?.join(', ')}>
+        rejected
+      </span>
+    )
+  }
+  const pct = breakdown.score * 100
+  const color = pct > 70 ? 'var(--ok)' : pct > 40 ? '#9a5c2e' : 'var(--err)'
+  return <span style={{ color }}>{pct.toFixed(0)}%</span>
+}
+
+function cellTooltip(tier: TierName, b?: import('@/types').ScoreBreakdown): string | undefined {
+  if (!b) return undefined
+  if (b.score === 0) {
+    return `${tier}: rejected — ${b.reasons?.join(', ') || 'no eligible reasons reported'}`
+  }
+  if (!b.components) return `${tier}: score ${(b.score * 100).toFixed(0)}%`
+  const c = b.components
+  const fmt = (k: string, label: string) => {
+    const headK = `${k}_headroom`
+    const wK = `${k}_weighted`
+    if (c[wK] === undefined) return ''
+    return `${label}(${(c[headK] ?? 0).toFixed(2)})=${(c[wK] ?? 0).toFixed(3)}`
+  }
+  const parts = [fmt('mem', 'mem'), fmt('cpu', 'cpu'), fmt('disk', 'disk')].filter(Boolean)
+  return `${tier}: ${parts.join(' + ')} = ${(c.total ?? b.score).toFixed(3)}`
 }

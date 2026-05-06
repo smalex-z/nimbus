@@ -6,6 +6,7 @@ import {
   getBootstrapStatus,
   bootstrapTemplates,
   listKeys,
+  listNodes,
   getTunnelInfo,
   getGPUInference,
   type BootstrapResult,
@@ -18,7 +19,6 @@ import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Textarea from '@/components/ui/Textarea'
 import TierCard from '@/components/ui/TierCard'
-import RadioCard from '@/components/ui/RadioCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
@@ -42,6 +42,17 @@ const TIER_ORDER: TierName[] = ['small', 'medium', 'large', 'xl']
 interface FormState {
   hostname: string
   tier: TierName
+  // requiredTags is the host-aggregate constraint as a CSV string
+  // (e.g. "fast-cpu,nvme"). Empty = no constraint. Free-form text;
+  // the cluster's existing operator-defined tags surface as quick-pick
+  // chips in the AffinityPicker below.
+  //
+  // Defaults to "x86" because every cloud-init template Nimbus ships
+  // (ubuntu-22.04 / ubuntu-24.04 / debian-11 / debian-12) is x86_64 —
+  // KVM can't cross-arch, so landing one of those images on an ARM
+  // host fails at boot. Operators with ARM hardware + ARM templates
+  // remove the chip and add `arm` instead.
+  requiredTags: string
   os: OSTemplate
   keyMode: KeyMode
   savedKeyId: number | null
@@ -54,6 +65,7 @@ interface FormState {
 const DEFAULT_FORM: FormState = {
   hostname: '',
   tier: 'medium',
+  requiredTags: 'x86',
   os: 'ubuntu-24.04',
   keyMode: 'gen',
   savedKeyId: null,
@@ -213,6 +225,9 @@ export default function Provision() {
         {
           hostname: form.hostname,
           tier: form.tier,
+          // Empty required-tags omitted so the JSON stays clean.
+          // Server normalizes empty CSV to "no constraint" either way.
+          required_tags: form.requiredTags.trim() || undefined,
           os_template: form.os,
           ssh_key_id:
             form.keyMode === 'saved' && form.savedKeyId !== null
@@ -521,32 +536,12 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
 
       <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">SSH key</label>
-        <div className="grid gap-2">
-          {savedKeys.length > 0 && (
-            <RadioCard
-              title="Use a saved key"
-              description={
-                savedKeys.find((k) => k.is_default)
-                  ? "Your default key is selected. You can pick a different one."
-                  : "Pick from the keys you've already added."
-              }
-              selected={form.keyMode === 'saved'}
-              onClick={() => updateForm('keyMode', 'saved')}
-            />
-          )}
-          <RadioCard
-            title="Generate one for me"
-            description="We'll mint an Ed25519 keypair, vault it, and show the private key once."
-            selected={form.keyMode === 'gen'}
-            onClick={() => updateForm('keyMode', 'gen')}
-          />
-          <RadioCard
-            title="Bring your own key"
-            description="Paste or upload a public key. Optionally store the private half so you can download it later."
-            selected={form.keyMode === 'byo'}
-            onClick={() => updateForm('keyMode', 'byo')}
-          />
-        </div>
+        <KeyModeButtons
+          mode={form.keyMode}
+          onChange={(m) => updateForm('keyMode', m)}
+          hasSavedKeys={savedKeys.length > 0}
+        />
+        <p className="text-[11px] text-ink-3 leading-relaxed mt-1">{keyModeBlurb(form.keyMode, savedKeys)}</p>
         {form.keyMode === 'saved' && savedKeys.length > 0 && (
           <div className="mt-3 flex flex-col gap-2">
             <select
@@ -676,28 +671,34 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
         )}
       </div>
 
-      {gpuInfo?.enabled && (
-        <div className="flex flex-col gap-2">
-          <label className="text-[13px] font-medium text-ink">GPU access</label>
-          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
-            <input
-              type="checkbox"
-              checked={form.enableGPU}
-              onChange={(e) => updateForm('enableGPU', e.target.checked)}
-              className="mt-0.5 w-4 h-4 accent-ink"
-            />
-            <div className="flex-1">
-              <div className="text-sm font-medium">Include GX10 access</div>
-              <div className="text-xs text-ink-3 mt-0.5">
-                Injects <span className="font-mono">OPENAI_BASE_URL</span> and a{' '}
-                <span className="font-mono">gx10</span> CLI helper so this VM can
-                hit the inference server and submit GPU jobs. Off by default —
-                only enable for VMs that actually need it.
+      <AdvancedSection>
+        <AffinityPicker
+          value={form.requiredTags}
+          onChange={(v) => updateForm('requiredTags', v)}
+        />
+        {gpuInfo?.enabled && (
+          <div className="flex flex-col gap-2">
+            <label className="text-[13px] font-medium text-ink">GPU access</label>
+            <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+              <input
+                type="checkbox"
+                checked={form.enableGPU}
+                onChange={(e) => updateForm('enableGPU', e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-ink"
+              />
+              <div className="flex-1">
+                <div className="text-sm font-medium">Include GX10 access</div>
+                <div className="text-xs text-ink-3 mt-0.5">
+                  Injects <span className="font-mono">OPENAI_BASE_URL</span> and a{' '}
+                  <span className="font-mono">gx10</span> CLI helper so this VM can
+                  hit the inference server and submit GPU jobs. Off by default —
+                  only enable for VMs that actually need it.
+                </div>
               </div>
-            </div>
-          </label>
-        </div>
-      )}
+            </label>
+          </div>
+        )}
+      </AdvancedSection>
     </div>
   )
 }
@@ -1164,6 +1165,200 @@ function ErrorView({ error, failedStep, onRetry }: ErrorViewProps) {
           </Button>
         </div>
       </Card>
+    </div>
+  )
+}
+
+// SUGGESTED_TAGS are surfaced as quick-pick chips even when no node in
+// the cluster carries them yet. `fast-cpu` is a relative-speed marker
+// the operator opts into manually — auto-assigning it would mean
+// picking "fastest in this cluster", which is meaningless across
+// deployments. Surfacing it here keeps the vocabulary discoverable.
+const SUGGESTED_TAGS = ['fast-cpu']
+
+// AffinityPicker — comma-separated tag input for the host-aggregate
+// constraint. Operators tag nodes ("fast-cpu", "nvme", "gpu") on the
+// /nodes page; the picker offers existing cluster tags as quick-pick
+// chips and lets the user free-type custom values too.
+//
+// Three sources feed the chip row:
+//   1. operator-applied tags (db.Node.Tags),
+//   2. auto-derived system tags (arch: x86 / arm — currently the only
+//      ones; emitted by nodescore.DeriveAutoTags from cpu_model),
+//   3. SUGGESTED_TAGS — curated vocabulary that appears even when no
+//      node carries the tag yet.
+//
+// Empty value = no constraint (capacity-based scoring only). Multiple
+// tags AND together — every required tag must be on the destination
+// node or it's filtered out.
+function AffinityPicker({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [knownTags, setKnownTags] = useState<string[]>([])
+  // Lazy-load the cluster's tag inventory once on mount. The /nodes
+  // payload already carries each node's tags; we union them client-
+  // side rather than adding a dedicated endpoint.
+  useEffect(() => {
+    listNodes()
+      .then((rows) => {
+        const set = new Set<string>(SUGGESTED_TAGS)
+        for (const n of rows) {
+          for (const t of n.tags || []) set.add(t)
+          for (const t of n.auto_tags || []) set.add(t)
+        }
+        setKnownTags(Array.from(set).sort())
+      })
+      .catch(() => {
+        // Non-fatal — fall back to just the curated suggestions.
+        setKnownTags([...SUGGESTED_TAGS].sort())
+      })
+  }, [])
+
+  const selected = new Set(value.split(',').map((t) => t.trim()).filter(Boolean))
+  const toggle = (tag: string) => {
+    const next = new Set(selected)
+    if (next.has(tag)) next.delete(tag)
+    else next.add(tag)
+    onChange(Array.from(next).join(', '))
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="text-[13px] font-medium text-ink">Required hardware tags</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. fast-cpu, nvme"
+        className="w-full px-3.5 py-2.5 rounded-[10px] bg-white/85 font-mono text-sm text-ink border border-line-2 outline-none focus:border-ink focus:bg-white"
+      />
+      {knownTags.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+          <span className="text-[11px] text-ink-3 font-mono">cluster tags:</span>
+          {knownTags.map((tag) => {
+            const isSel = selected.has(tag)
+            return (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => toggle(tag)}
+                className={`font-mono text-[11px] px-2 py-0.5 rounded-[5px] border transition-colors cursor-pointer ${
+                  isSel
+                    ? 'bg-ink text-white border-ink'
+                    : 'bg-transparent border-line-2 text-ink-2 hover:border-ink-3 hover:text-ink'
+                }`}
+              >
+                {tag}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <p className="text-xs text-ink-3 mt-0.5 leading-relaxed">
+        Comma-separated. The scheduler only places this VM on nodes carrying every listed tag —
+        operators apply tags from <a href="/nodes" className="underline">/nodes</a>. Defaults to
+        <code className="font-mono mx-1">x86</code> because Nimbus's cloud-init templates are all
+        x86_64; remove it (and add <code className="font-mono mx-1">arm</code>) only when targeting
+        ARM hosts with an ARM-built template. Empty = no constraint.
+      </p>
+    </div>
+  )
+}
+
+// KeyModeButtons — horizontal segmented control replacing the previous
+// stack of three RadioCards. Two buttons when there are no saved keys
+// (Generate / Bring your own); three when at least one saved key
+// exists (Saved / Generate / BYO).
+//
+// Each button is equal-width via flex-1; the selected one inverts to
+// dark fill, matching the tier-pill convention elsewhere in the app.
+// The longer description that used to live on each card moves to a
+// single-line caption underneath the row that updates per selection
+// (see keyModeBlurb).
+function KeyModeButtons({
+  mode,
+  onChange,
+  hasSavedKeys,
+}: {
+  mode: KeyMode
+  onChange: (m: KeyMode) => void
+  hasSavedKeys: boolean
+}) {
+  const opts: { id: KeyMode; label: string }[] = []
+  if (hasSavedKeys) opts.push({ id: 'saved', label: 'Use a saved key' })
+  opts.push({ id: 'gen', label: 'Generate one for me' })
+  opts.push({ id: 'byo', label: 'Bring your own' })
+  return (
+    <div className="flex gap-1.5">
+      {opts.map((opt) => {
+        const selected = mode === opt.id
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onChange(opt.id)}
+            className={`flex-1 px-3 py-2.5 rounded-[8px] text-[13px] font-medium border transition-colors cursor-pointer ${
+              selected
+                ? 'bg-ink text-white border-ink'
+                : 'bg-white/85 text-ink border-line-2 hover:border-ink-3'
+            }`}
+          >
+            {opt.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// keyModeBlurb — one-line caption beneath the segmented control. The
+// longer descriptions that used to live on each RadioCard surface here
+// based on the current selection. Kept short so the form stays dense.
+function keyModeBlurb(mode: KeyMode, savedKeys: SSHKey[]): string {
+  switch (mode) {
+    case 'saved':
+      return savedKeys.find((k) => k.is_default)
+        ? 'Your default key is selected — pick a different one if needed.'
+        : "Pick from the keys you've already added."
+    case 'gen':
+      return "We'll mint an Ed25519 keypair, vault it, and show the private key once."
+    case 'byo':
+      return 'Paste or upload a public key. Optionally store the private half so you can download it later.'
+  }
+}
+
+// AdvancedSection — collapsible disclosure for less-frequently-touched
+// settings. Used to wrap hardware tags + GPU access at the bottom of
+// the form so the default view stays focused on the core identity
+// (hostname / OS / tier / SSH / public access). Collapsed by default;
+// chevron rotates on open.
+function AdvancedSection({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex flex-col gap-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 text-[13px] font-medium text-ink-2 hover:text-ink transition-colors cursor-pointer self-start"
+        aria-expanded={open}
+      >
+        <span
+          aria-hidden="true"
+          className="text-ink-3 transition-transform"
+          style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        >▶</span>
+        Advanced
+        <span className="text-[11px] text-ink-3 font-normal">hardware tags, GPU access</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-5 pl-1">
+          {children}
+        </div>
+      )}
     </div>
   )
 }

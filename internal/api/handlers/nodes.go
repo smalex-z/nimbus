@@ -15,6 +15,7 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
+	"nimbus/internal/db"
 	"nimbus/internal/nodemgr"
 	"nimbus/internal/proxmox"
 )
@@ -43,15 +44,25 @@ func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
 // telemetry merged with persistent fields (lock state, tags, lock context).
 // Both the Admin dashboard and the new /nodes page consume this.
 //
+// When ?include_scores=true is passed, each row is decorated with a
+// `score` breakdown for the preview tier (default `medium`; override
+// with ?preview_tier=large). The Nodes page's scoring matrix consumes
+// this; consumers that don't ask get the plain payload.
+//
 // @Summary     List cluster nodes with lock state + telemetry (admin)
 // @Description Joins Proxmox live telemetry (cpu/mem/storage) with the
 // @Description Nimbus-side lock state (none/cordoned/draining/drained) and
 // @Description operator-set tags. Powers both the Admin dashboard and the
-// @Description /nodes page.
+// @Description /nodes page. When `include_scores=true`, each row carries a
+// @Description `score` breakdown for the preview tier so the scoring matrix
+// @Description can render without a second round-trip.
 // @Tags        nodes
 // @Security    cookieAuth
 // @Produce     json
+// @Param       include_scores query    string false "set to `true` to decorate rows with score breakdowns"
+// @Param       preview_tier   query    string false "tier to score against (default `medium`); only used when include_scores=true" Enums(small, medium, large, xl)
 // @Success     200 {object} EnvelopeOK{data=[]nodemgr.View}
+// @Failure     400 {object} EnvelopeError
 // @Failure     401 {object} EnvelopeError
 // @Failure     403 {object} EnvelopeError
 // @Failure     500 {object} EnvelopeError
@@ -62,7 +73,80 @@ func (h *Nodes) List(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, err)
 		return
 	}
-	response.Success(w, view.Nodes)
+
+	if r.URL.Query().Get("include_scores") != "true" {
+		response.Success(w, view.Nodes)
+		return
+	}
+	previewTier := r.URL.Query().Get("preview_tier")
+	scoreByNode, resolvedTier, err := h.mgr.ScoreClusterAtTier(r.Context(), previewTier)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	out := make([]nodemgr.NodeWithScores, 0, len(view.Nodes))
+	for _, n := range view.Nodes {
+		row := nodemgr.NodeWithScores{View: n, PreviewTier: resolvedTier}
+		if b, ok := scoreByNode[n.Name]; ok {
+			row.Score = &b
+		}
+		out = append(out, row)
+	}
+	response.Success(w, out)
+}
+
+// Score handles GET /api/nodes/{name}/score?tier=&tags=. Single-cell
+// drill-down — full breakdown including rejection reasons under the
+// given tier and host-aggregate constraint. `tags` is a comma-separated
+// list (empty = no constraint).
+//
+// @Summary     Score a single node at a tier + host-aggregate constraint (admin)
+// @Description Drill-down view used by the Nodes-page tooltip. Returns the
+// @Description full components map plus rejection reasons (when score=0)
+// @Description for the given (tier, required_tags) cell.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Param       name path     string true "Proxmox node name"
+// @Param       tier query    string false "tier the synthetic VM is sized at (default `medium`)" Enums(small, medium, large, xl)
+// @Param       tags query    string false "comma-separated host-aggregate tags the candidate must carry (empty = no constraint)"
+// @Success     200  {object} EnvelopeOK{data=nodemgr.ScoreBreakdown}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /nodes/{name}/score [get]
+func (h *Nodes) Score(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	tierName := r.URL.Query().Get("tier")
+	if tierName == "" {
+		tierName = "medium"
+	}
+	requiredTags := parseTagsParam(r.URL.Query().Get("tags"))
+	out, err := h.mgr.ScoreNode(r.Context(), name, tierName, requiredTags)
+	if err != nil {
+		writeNodeMutationError(w, err)
+		return
+	}
+	response.Success(w, out)
+}
+
+// parseTagsParam splits a CSV query-param into a clean tag slice.
+// Whitespace trimmed; empty entries dropped.
+func parseTagsParam(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // cordonRequest is the body of POST /api/nodes/{name}/cordon. Reason is
@@ -470,6 +554,77 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		h.restart()
 	}()
+}
+
+// schedulingSettingsRequest is the body of PUT /api/scheduling. All
+// three fields are required; missing/zero values are rejected so the
+// operator can't silently strand physical capacity.
+type schedulingSettingsRequest struct {
+	CPUAllocationRatio  float64 `json:"cpu_allocation_ratio"`
+	RAMAllocationRatio  float64 `json:"ram_allocation_ratio"`
+	DiskAllocationRatio float64 `json:"disk_allocation_ratio"`
+}
+
+// GetSchedulingSettings handles GET /api/scheduling. Returns the
+// cluster-wide overcommit ratios used by the placement scorer. Defaults
+// (4.0/1.0/1.0) are seeded on first read so the SPA always renders
+// concrete values.
+//
+// @Summary     Read cluster overcommit ratios (admin)
+// @Description Returns the placement scheduler's cpu/ram/disk allocation
+// @Description ratios. Defaults are seeded on first read so the value is
+// @Description never empty.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=db.SchedulingSettings}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /scheduling [get]
+func (h *Nodes) GetSchedulingSettings(w http.ResponseWriter, r *http.Request) {
+	out, err := h.mgr.GetSchedulingSettings(r.Context())
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, out)
+}
+
+// SaveSchedulingSettings handles PUT /api/scheduling. Persists new
+// ratios; each is clamped to [1.0, 64.0] inside the service layer so a
+// negative or absurdly large value can't break placement.
+//
+// @Summary     Update cluster overcommit ratios (admin)
+// @Description Persists the placement scheduler's cpu/ram/disk allocation
+// @Description ratios. Each is clamped to [1.0, 64.0]. Takes effect on
+// @Description the next provision/drain — no restart required.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Accept      json
+// @Param       body body     schedulingSettingsRequest true "New ratios"
+// @Success     200  {object} EnvelopeOK{data=db.SchedulingSettings}
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /scheduling [put]
+func (h *Nodes) SaveSchedulingSettings(w http.ResponseWriter, r *http.Request) {
+	var req schedulingSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	out, err := h.mgr.SaveSchedulingSettings(r.Context(), db.SchedulingSettings{
+		CPUAllocationRatio:  req.CPUAllocationRatio,
+		RAMAllocationRatio:  req.RAMAllocationRatio,
+		DiskAllocationRatio: req.DiskAllocationRatio,
+	})
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, out)
 }
 
 // writeNodeMutationError maps nodemgr's typed errors to HTTP statuses.

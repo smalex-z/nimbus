@@ -235,6 +235,17 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(60*time.Minute)).
 					Post("/nodes/{name}/drain", nodes.Drain)
 				r.Delete("/nodes/{name}", nodes.Remove)
+				// Per-node score drill-down. /nodes supports
+				// ?include_scores=true for the cluster-wide matrix;
+				// this endpoint computes one cell with optional
+				// host-aggregate constraint via ?tags=.
+				r.Get("/nodes/{name}/score", nodes.Score)
+				// Cluster-wide scheduling knobs (cpu/ram/disk
+				// allocation ratios). Read+write so the Nodes page
+				// can render and update them without a restart;
+				// changes take effect on the next provision/drain.
+				r.Get("/scheduling", nodes.GetSchedulingSettings)
+				r.Put("/scheduling", nodes.SaveSchedulingSettings)
 				// Proxmox binding — read-only chip + reconfigure.
 				// PUT writes the env file with the new triple, then
 				// triggers restartSelf so a fresh process picks them

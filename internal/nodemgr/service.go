@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"nimbus/internal/db"
+	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
 )
 
@@ -42,6 +43,8 @@ type ProxmoxClient interface {
 	GetClusterVMs(ctx context.Context) ([]proxmox.ClusterVM, error)
 	GetClusterStorage(ctx context.Context) ([]proxmox.ClusterStorage, error)
 	GetNodeStatus(ctx context.Context, node string) (*proxmox.NodeStatus, error)
+	ListDisks(ctx context.Context, node string) ([]proxmox.Disk, error)
+	ListPCIDevices(ctx context.Context, node string) ([]proxmox.PCIDevice, error)
 	GetClusterStatus(ctx context.Context) ([]proxmox.ClusterStatusEntry, error)
 	NodeAddresses(ctx context.Context) (map[string]string, error)
 	ClusterName(ctx context.Context) (string, error)
@@ -116,23 +119,49 @@ func New(database *gorm.DB, px ProxmoxClient, cfg Config) *Service {
 // (lock state, tags) with live telemetry (CPU/RAM/VM count) read at
 // request time. Used by GET /api/nodes.
 type View struct {
-	Name         string     `json:"name"`
-	Status       string     `json:"status"`     // "online" / "offline" / "unknown" — from Proxmox
-	LockState    string     `json:"lock_state"` // "none"/"cordoned"/"draining"/"drained"
-	LockedAt     *time.Time `json:"locked_at,omitempty"`
-	LockedBy     *uint      `json:"locked_by,omitempty"`
-	LockReason   string     `json:"lock_reason,omitempty"`
-	Tags         []string   `json:"tags"`
-	CPU          float64    `json:"cpu"`
-	MaxCPU       int        `json:"max_cpu"`
-	MemUsed      uint64     `json:"mem_used"`
-	MemTotal     uint64     `json:"mem_total"`
-	MemAllocated uint64     `json:"mem_allocated"`
+	Name       string     `json:"name"`
+	Status     string     `json:"status"`     // "online" / "offline" / "unknown" — from Proxmox
+	LockState  string     `json:"lock_state"` // "none"/"cordoned"/"draining"/"drained"
+	LockedAt   *time.Time `json:"locked_at,omitempty"`
+	LockedBy   *uint      `json:"locked_by,omitempty"`
+	LockReason string     `json:"lock_reason,omitempty"`
+	Tags       []string   `json:"tags"`
+	// AutoTags are system-derived (currently arch: "x86" / "arm") and
+	// not editable by operators. Surfaced separately so the SPA can
+	// label them differently; the scheduler treats them identically to
+	// operator tags for RequiredTags matching.
+	AutoTags     []string `json:"auto_tags"`
+	CPU          float64  `json:"cpu"`
+	MaxCPU       int      `json:"max_cpu"`
+	MemUsed      uint64   `json:"mem_used"`
+	MemTotal     uint64   `json:"mem_total"`
+	MemAllocated uint64   `json:"mem_allocated"`
 	// SwapUsed/SwapTotal come from /nodes/{node}/status (fan-out per
 	// online node). Both 0 when the per-node call fails — single dead
 	// node never blanks the table.
 	SwapUsed  uint64 `json:"swap_used"`
 	SwapTotal uint64 `json:"swap_total"`
+	// CPUModel is the human-readable CPU string from cpuinfo.model
+	// (e.g. "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"). Empty when
+	// the per-node status call failed or Proxmox didn't return it.
+	// Used for the SPA card display AND as the input for the auto-tag
+	// arch detection (DeriveAutoTags).
+	//
+	// We deliberately do NOT surface a separate clock-speed number.
+	// Proxmox's cpuinfo.mhz reports the live throttled P-state which
+	// inverts the apparent ranking on idle vs busy nodes; the
+	// marketing GHz embedded in the model string is base clock only,
+	// which understates a chip that boosts 3-4× higher under load.
+	// The model name carries the relevant signal — operators who want
+	// a number look up the SKU.
+	CPUModel string `json:"cpu_model,omitempty"`
+	// CPUCores is the physical core count (sockets × cores-per-socket)
+	// from cpuinfo. MaxCPU above is the *thread* count (Proxmox's
+	// `maxcpu` = total logical CPUs); the SPA renders "Nc/Mt" when
+	// CPUCores is non-zero so the operator can tell a 4c/8t laptop
+	// chip apart from a real 8c desktop chip. Zero when status.CPU
+	// is unavailable (the SPA falls back to "Mt").
+	CPUCores int `json:"cpu_cores,omitempty"`
 	// DiskUsed/DiskTotal are the configured VM-disk pool's capacity
 	// on this node (from /cluster/resources?type=storage filtered by
 	// cfg.VMDiskStorage). DiskAllocated is the sum of every non-
@@ -140,15 +169,20 @@ type View struct {
 	// "what would fill if every VM grew to its declared size" number.
 	// All three zero when no pool name is configured (cfg.VMDiskStorage
 	// empty) or when this node doesn't expose the pool.
-	DiskUsed      uint64    `json:"disk_used"`
-	DiskTotal     uint64    `json:"disk_total"`
-	DiskAllocated uint64    `json:"disk_allocated"`
-	DiskPoolName  string    `json:"disk_pool_name,omitempty"`
-	VMCount       int       `json:"vm_count"`       // running, non-template
-	VMCountTotal  int       `json:"vm_count_total"` // all non-template
-	IP            string    `json:"ip,omitempty"`
-	LastSeenAt    time.Time `json:"last_seen_at"`
-	IsSelfHost    bool      `json:"is_self_host"` // true for the node Nimbus runs on
+	DiskUsed      uint64 `json:"disk_used"`
+	DiskTotal     uint64 `json:"disk_total"`
+	DiskAllocated uint64 `json:"disk_allocated"`
+	DiskPoolName  string `json:"disk_pool_name,omitempty"`
+	// DiskType is "nvme" | "ssd" | "hdd" | "" — strongest class
+	// observed via /disks/list during the background reconcile.
+	// Surfaces on the SPA card in place of the pool name so storage
+	// tier is comparable across nodes at a glance.
+	DiskType     string    `json:"disk_type,omitempty"`
+	VMCount      int       `json:"vm_count"`       // running, non-template
+	VMCountTotal int       `json:"vm_count_total"` // all non-template
+	IP           string    `json:"ip,omitempty"`
+	LastSeenAt   time.Time `json:"last_seen_at"`
+	IsSelfHost   bool      `json:"is_self_host"` // true for the node Nimbus runs on
 }
 
 // ListView is the cluster-wide view-model the SPA renders on /nodes. Lifts
@@ -208,12 +242,21 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	// node in parallel. Failures fall back to zero so a single dead node
 	// doesn't blank the rest of the table. Mirrors the original handler's
 	// behaviour so the Admin dashboard's swap UsageBars keep working.
-	swapByNode := s.fanoutSwap(ctx, nodes)
+	statusByNode := s.fanoutNodeStatus(ctx, nodes)
 
 	// Reconcile DB rows: ensure each observed node has a row, bump
 	// LastSeenAt on every observation. This piggy-backs on every List
 	// call so the row state stays current without a dedicated loop.
-	persistByName, err := s.reconcileObserved(ctx, nodes)
+	// Only refresh cpu_model here — the slower disk/PCI introspection
+	// runs in the background reconcile so we don't add 2 extra calls
+	// per node to every 15 s SPA poll.
+	hwByNode := make(map[string]hwUpdate, len(statusByNode))
+	for name, snap := range statusByNode {
+		if snap.CPU != nil {
+			hwByNode[name] = hwUpdate{CPUModel: snap.CPU.Model}
+		}
+	}
+	persistByName, err := s.reconcileObserved(ctx, nodes, hwByNode)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile node rows: %w", err)
 	}
@@ -222,9 +265,9 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	for _, n := range nodes {
 		a := perNode[n.Name]
 		row := persistByName[n.Name]
-		swap := swapByNode[n.Name]
+		status := statusByNode[n.Name]
 		disk := diskByNode[n.Name]
-		out = append(out, View{
+		view := View{
 			Name:          n.Name,
 			Status:        n.Status,
 			LockState:     lockOrNone(row.LockState),
@@ -232,23 +275,30 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 			LockedBy:      row.LockedBy,
 			LockReason:    row.LockReason,
 			Tags:          splitTags(row.Tags),
+			AutoTags:      nodescore.DeriveAutoTags(autoTagInputFor(row)),
 			CPU:           n.CPU,
 			MaxCPU:        n.MaxCPU,
 			MemUsed:       n.Mem,
 			MemTotal:      n.MaxMem,
 			MemAllocated:  a.memAllocated,
-			SwapUsed:      swap.Used,
-			SwapTotal:     swap.Total,
+			SwapUsed:      status.Swap.Used,
+			SwapTotal:     status.Swap.Total,
 			DiskUsed:      disk.Used,
 			DiskTotal:     disk.Total,
 			DiskAllocated: a.diskAllocated,
 			DiskPoolName:  s.cfg.VMDiskStorage,
+			DiskType:      row.DiskType,
 			VMCount:       a.running,
 			VMCountTotal:  a.total,
 			IP:            nodeIP[n.Name],
 			LastSeenAt:    row.LastSeenAt,
 			IsSelfHost:    s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
-		})
+		}
+		if status.CPU != nil {
+			view.CPUModel = status.CPU.Model
+			view.CPUCores = status.CPU.Sockets * status.CPU.Cores
+		}
+		out = append(out, view)
 	}
 	return &ListView{Nodes: out}, nil
 }
@@ -287,12 +337,22 @@ func (s *Service) fanoutDisk(ctx context.Context) map[string]diskCapacity {
 	return out
 }
 
-// fanoutSwap reads /nodes/{node}/status in parallel for each online node
-// and returns name→Swap. Per-node failures fall through with zeroes — the
-// caller renders empty swap bars for that node rather than erroring out
-// the whole table.
-func (s *Service) fanoutSwap(ctx context.Context, nodes []proxmox.Node) map[string]proxmox.MemPair {
-	out := make(map[string]proxmox.MemPair, len(nodes))
+// nodeStatusSnapshot is the per-node payload fanoutNodeStatus pulls back.
+// Aggregates the swap counters + CPU info so the call site doesn't have
+// to fan out twice for related fields from the same /nodes/{node}/status
+// endpoint.
+type nodeStatusSnapshot struct {
+	Swap  proxmox.MemPair
+	CPU   *proxmox.CPUInfo
+	Found bool
+}
+
+// fanoutNodeStatus reads /nodes/{node}/status in parallel for each online
+// node and returns name→snapshot. Per-node failures fall through with the
+// zero value (Found=false) — the caller renders empty bars for that node
+// rather than erroring out the whole table.
+func (s *Service) fanoutNodeStatus(ctx context.Context, nodes []proxmox.Node) map[string]nodeStatusSnapshot {
+	out := make(map[string]nodeStatusSnapshot, len(nodes))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, n := range nodes {
@@ -307,7 +367,90 @@ func (s *Service) fanoutSwap(ctx context.Context, nodes []proxmox.Node) map[stri
 				return
 			}
 			mu.Lock()
-			out[name] = st.Swap
+			out[name] = nodeStatusSnapshot{Swap: st.Swap, CPU: st.CPUInfo, Found: true}
+			mu.Unlock()
+		}(n.Name)
+	}
+	wg.Wait()
+	return out
+}
+
+// hwUpdate carries optional hardware-introspection results for one node.
+// nil pointers mean "unknown — don't update the column"; non-nil values
+// (including zero values) replace the stored field. Empty CPUModel /
+// DiskType strings behave the same way (skip update). This split lets
+// the foreground List() refresh only cpu_model (free, since /status is
+// fanned out anyway) while the slower background Reconcile() also
+// refreshes the disk + PCI signals via fanoutHardware.
+type hwUpdate struct {
+	CPUModel string
+	DiskType string // strongest class observed: "nvme" > "ssd" > "hdd" > ""
+	HasSSD   *bool
+	HasGPU   *bool
+}
+
+// fanoutHardware reads /nodes/{n}/disks/list and /nodes/{n}/hardware/pci
+// in parallel for each online node. Failures (including 403 from a
+// limited token) leave the entry as zero-value pointers — the caller
+// treats that as "unknown" and skips the update. Cheap enough to call
+// from the background reconcile loop; not called from foreground List
+// because the SPA polls every 15 s and these endpoints aren't free.
+func (s *Service) fanoutHardware(ctx context.Context, nodes []proxmox.Node) map[string]hwUpdate {
+	out := make(map[string]hwUpdate, len(nodes))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			var hu hwUpdate
+			if disks, err := s.px.ListDisks(ctx, name); err == nil {
+				// Walk all disks once; record the strongest class
+				// (nvme > ssd > hdd) for display, plus the binary
+				// has_ssd that drives the auto-tag. nvme is treated
+				// as a superset of ssd for tag-matching purposes —
+				// a `required_tags=ssd` constraint placing on an
+				// NVMe-only node should pass.
+				ssd := false
+				class := ""
+				for _, d := range disks {
+					switch d.Type {
+					case "nvme":
+						class = "nvme"
+						ssd = true
+					case "ssd":
+						if class != "nvme" {
+							class = "ssd"
+						}
+						ssd = true
+					case "hdd":
+						if class == "" {
+							class = "hdd"
+						}
+					}
+				}
+				hu.HasSSD = &ssd
+				hu.DiskType = class
+			}
+			if devs, err := s.px.ListPCIDevices(ctx, name); err == nil {
+				// NVIDIA discrete GPUs only — vendor 0x10de. AMD (1002)
+				// and Intel (8086) overlap with iGPUs in APUs and
+				// integrated graphics, so we don't auto-tag from those
+				// vendors. Operators tag those nodes manually.
+				gpu := false
+				for _, d := range devs {
+					if strings.EqualFold(d.Vendor, "0x10de") {
+						gpu = true
+						break
+					}
+				}
+				hu.HasGPU = &gpu
+			}
+			mu.Lock()
+			out[name] = hu
 			mu.Unlock()
 		}(n.Name)
 	}
@@ -316,10 +459,14 @@ func (s *Service) fanoutSwap(ctx context.Context, nodes []proxmox.Node) map[stri
 }
 
 // reconcileObserved upserts a db.Node for every node Proxmox returned and
-// bumps LastSeenAt. Returns the resulting rows keyed by name. Pruning of
-// long-missing nodes is intentionally NOT done here — it'd surprise the
-// operator mid-list-view; runs in a background loop instead.
-func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node) (map[string]db.Node, error) {
+// bumps LastSeenAt. hwByNode is optional — populated entries refresh
+// their stored hardware-introspection columns (cpu_model, has_ssd,
+// has_gpu) so the scheduler's auto-tag derivation stays current. nil or
+// missing entries leave existing column values untouched. Returns the
+// resulting rows keyed by name. Pruning of long-missing nodes is
+// intentionally NOT done here — it'd surprise the operator mid-list-
+// view; runs in a background loop instead.
+func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node, hwByNode map[string]hwUpdate) (map[string]db.Node, error) {
 	out := make(map[string]db.Node, len(observed))
 	now := time.Now().UTC()
 	for _, n := range observed {
@@ -341,6 +488,37 @@ func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node
 				return nil, fmt.Errorf("touch last_seen_at %s: %w", n.Name, err)
 			}
 			row.LastSeenAt = now
+		}
+		// Refresh hardware-introspection columns when fresh values are
+		// available. cpu_model comes from /status (cheap, populated on
+		// every List); has_ssd/has_gpu come from the slower /disks/list
+		// + /hardware/pci fanout that only the background reconcile
+		// runs. Skip writes when unchanged so SQLite stays cold under
+		// the polling loop.
+		hu := hwByNode[n.Name]
+		updates := map[string]any{}
+		if hu.CPUModel != "" && hu.CPUModel != row.CPUModel {
+			updates["cpu_model"] = hu.CPUModel
+			row.CPUModel = hu.CPUModel
+		}
+		if hu.DiskType != "" && hu.DiskType != row.DiskType {
+			updates["disk_type"] = hu.DiskType
+			row.DiskType = hu.DiskType
+		}
+		if hu.HasSSD != nil && *hu.HasSSD != row.HasSSD {
+			updates["has_ssd"] = *hu.HasSSD
+			row.HasSSD = *hu.HasSSD
+		}
+		if hu.HasGPU != nil && *hu.HasGPU != row.HasGPU {
+			updates["has_gpu"] = *hu.HasGPU
+			row.HasGPU = *hu.HasGPU
+		}
+		if len(updates) > 0 {
+			if err := s.db.WithContext(ctx).Model(&db.Node{}).
+				Where("name = ?", n.Name).
+				Updates(updates).Error; err != nil {
+				return nil, fmt.Errorf("update hardware columns %s: %w", n.Name, err)
+			}
 		}
 		out[n.Name] = row
 	}
@@ -373,7 +551,21 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 	if err != nil {
 		return 0, 0, fmt.Errorf("get nodes: %w", err)
 	}
-	if _, err := s.reconcileObserved(ctx, nodes); err != nil {
+	// Background loop also refreshes the full hardware-introspection
+	// set (cpu_model + has_ssd + has_gpu) so auto-tags stay current
+	// even when no one is hitting /api/nodes for a while. List() only
+	// refreshes cpu_model on the foreground path because /disks/list
+	// and /hardware/pci aren't free under 15 s polling.
+	statusByNode := s.fanoutNodeStatus(ctx, nodes)
+	hwByNode := s.fanoutHardware(ctx, nodes)
+	for name, snap := range statusByNode {
+		if snap.CPU != nil {
+			hu := hwByNode[name]
+			hu.CPUModel = snap.CPU.Model
+			hwByNode[name] = hu
+		}
+	}
+	if _, err := s.reconcileObserved(ctx, nodes, hwByNode); err != nil {
 		return 0, 0, err
 	}
 	pruned, err = s.PruneMissing(ctx, cycleInterval)
@@ -486,11 +678,87 @@ func (s *Service) markDrainDone(name string) {
 	delete(s.drainsInFlight, name)
 }
 
+// GetSchedulingSettings returns the cluster-wide overcommit ratios. Creates
+// a defaults row (4.0/1.0/1.0) on first call so the SPA always renders the
+// current value rather than blanks. Defaults match nodescore's fallback
+// constants — a fresh deployment behaves identically whether or not the
+// row exists yet.
+func (s *Service) GetSchedulingSettings(ctx context.Context) (*db.SchedulingSettings, error) {
+	var row db.SchedulingSettings
+	err := s.db.WithContext(ctx).
+		Where(&db.SchedulingSettings{ID: 1}).
+		Attrs(&db.SchedulingSettings{
+			ID:                  1,
+			CPUAllocationRatio:  4.0,
+			RAMAllocationRatio:  1.0,
+			DiskAllocationRatio: 1.0,
+		}).
+		FirstOrCreate(&row).Error
+	if err != nil {
+		return nil, fmt.Errorf("read scheduling settings: %w", err)
+	}
+	return &row, nil
+}
+
+// SaveSchedulingSettings persists new ratios. Each ratio is clamped to
+// [1.0, 64.0] — sub-1 silently strands physical capacity, and >64x is far
+// past anything reasonable for a homelab (Nova caps at 16x by default).
+func (s *Service) SaveSchedulingSettings(ctx context.Context, next db.SchedulingSettings) (*db.SchedulingSettings, error) {
+	clamp := func(v, lo, hi float64) float64 {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	cpuR := clamp(next.CPUAllocationRatio, 1.0, 64.0)
+	ramR := clamp(next.RAMAllocationRatio, 1.0, 64.0)
+	diskR := clamp(next.DiskAllocationRatio, 1.0, 64.0)
+	if _, err := s.GetSchedulingSettings(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&db.SchedulingSettings{}).
+		Where("id = ?", 1).
+		Updates(map[string]any{
+			"cpu_allocation_ratio":  cpuR,
+			"ram_allocation_ratio":  ramR,
+			"disk_allocation_ratio": diskR,
+		}).Error; err != nil {
+		return nil, fmt.Errorf("save scheduling settings: %w", err)
+	}
+	return &db.SchedulingSettings{ID: 1, CPUAllocationRatio: cpuR, RAMAllocationRatio: ramR, DiskAllocationRatio: diskR}, nil
+}
+
 func lockOrNone(s string) string {
 	if s == "" {
 		return "none"
 	}
 	return s
+}
+
+// scoreTags returns the union of a node row's operator tags and the
+// system-derived auto-tags (CPU architecture, SSD presence, GPU
+// presence). The scorer treats them identically for RequiredTags
+// matching, so callers building a nodescore.Node should use this
+// rather than splitTags directly — otherwise a user constraint of
+// `arm` will reject an ARM host that happens to carry no operator
+// tags.
+func scoreTags(row db.Node) []string {
+	return append(splitTags(row.Tags), nodescore.DeriveAutoTags(autoTagInputFor(row))...)
+}
+
+// autoTagInputFor projects a db.Node row into the input bundle the
+// nodescore auto-tag derivation expects. One place to update if we
+// add more hardware-introspection signals later.
+func autoTagInputFor(row db.Node) nodescore.AutoTagInput {
+	return nodescore.AutoTagInput{
+		CPUModel: row.CPUModel,
+		HasSSD:   row.HasSSD,
+		HasGPU:   row.HasGPU,
+	}
 }
 
 // splitTags + joinTags map between the CSV column and []string the SPA

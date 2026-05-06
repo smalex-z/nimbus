@@ -2566,7 +2566,7 @@
                         "cookieAuth": []
                     }
                 ],
-                "description": "Joins Proxmox live telemetry (cpu/mem/storage) with the\nNimbus-side lock state (none/cordoned/draining/drained) and\noperator-set tags. Powers both the Admin dashboard and the\n/nodes page.",
+                "description": "Joins Proxmox live telemetry (cpu/mem/storage) with the\nNimbus-side lock state (none/cordoned/draining/drained) and\noperator-set tags. Powers both the Admin dashboard and the\n/nodes page. When `include_scores=true`, each row carries a\n`score` breakdown for the preview tier so the scoring matrix\ncan render without a second round-trip.",
                 "produces": [
                     "application/json"
                 ],
@@ -2574,6 +2574,26 @@
                     "nodes"
                 ],
                 "summary": "List cluster nodes with lock state + telemetry (admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "set to `true` to decorate rows with score breakdowns",
+                        "name": "include_scores",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "small",
+                            "medium",
+                            "large",
+                            "xl"
+                        ],
+                        "type": "string",
+                        "description": "tier to score against (default `medium`); only used when include_scores=true",
+                        "name": "preview_tier",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -2594,6 +2614,12 @@
                                     }
                                 }
                             ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
                         }
                     },
                     "401": {
@@ -2876,6 +2902,100 @@
                                     }
                                 }
                             ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/nodes/{name}/score": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Drill-down view used by the Nodes-page tooltip. Returns the\nfull components map plus rejection reasons (when score=0)\nfor the given (tier, required_tags) cell.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "nodes"
+                ],
+                "summary": "Score a single node at a tier + host-aggregate constraint (admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Proxmox node name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "enum": [
+                            "small",
+                            "medium",
+                            "large",
+                            "xl"
+                        ],
+                        "type": "string",
+                        "description": "tier the synthetic VM is sized at (default `medium`)",
+                        "name": "tier",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "comma-separated host-aggregate tags the candidate must carry (empty = no constraint)",
+                        "name": "tags",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/nodemgr.ScoreBreakdown"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
                         }
                     },
                     "401": {
@@ -3547,6 +3667,131 @@
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/scheduling": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Returns the placement scheduler's cpu/ram/disk allocation\nratios. Defaults are seeded on first read so the value is\nnever empty.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "nodes"
+                ],
+                "summary": "Read cluster overcommit ratios (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/db.SchedulingSettings"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Persists the placement scheduler's cpu/ram/disk allocation\nratios. Each is clamped to [1.0, 64.0]. Takes effect on\nthe next provision/drain — no restart required.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "nodes"
+                ],
+                "summary": "Update cluster overcommit ratios (admin)",
+                "parameters": [
+                    {
+                        "description": "New ratios",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.schedulingSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/db.SchedulingSettings"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/handlers.EnvelopeError"
                         }
@@ -6520,6 +6765,23 @@
                 }
             }
         },
+        "db.SchedulingSettings": {
+            "type": "object",
+            "properties": {
+                "cpu_allocation_ratio": {
+                    "type": "number"
+                },
+                "disk_allocation_ratio": {
+                    "type": "number"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "ram_allocation_ratio": {
+                    "type": "number"
+                }
+            }
+        },
         "db.VM": {
             "type": "object",
             "properties": {
@@ -6548,6 +6810,10 @@
                 },
                 "owner_id": {
                     "type": "integer"
+                },
+                "required_tags": {
+                    "description": "RequiredTags is the host-aggregate filter the user opted into\nat provision time, as a CSV string (e.g. \"fast-cpu,nvme\"). Used\nby drain replacement to apply the same filter — a VM that\nrequired `fast-cpu` only migrates to other `fast-cpu`-tagged\nnodes. Empty = no constraint. Replaces the earlier (unmerged)\nWorkloadType experiment; column name stays `workload_type` so\nthe schema doesn't require a rename migration on systems that\nbriefly ran the prior column.",
+                    "type": "string"
                 },
                 "ssh_key_id": {
                     "description": "SSHKeyID points to the row in the ssh_keys table that owns the SSH\nmaterial for this VM. nullable: set NULL when the key is deleted, so the\nVM record outlives its key. Replaces the legacy per-VM KeyName/CT/Nonce\ncolumns going forward.",
@@ -7037,6 +7303,10 @@
                 },
                 "public_tunnel": {
                     "type": "boolean"
+                },
+                "required_tags": {
+                    "description": "RequiredTags is the host-aggregate filter as a CSV string\n(e.g. \"fast-cpu,nvme\"). Operator-defined free-form labels —\nno enum validation. Empty = no constraint.",
+                    "type": "string"
                 },
                 "ssh_key_id": {
                     "type": "integer"
@@ -7663,6 +7933,20 @@
                 }
             }
         },
+        "handlers.schedulingSettingsRequest": {
+            "type": "object",
+            "properties": {
+                "cpu_allocation_ratio": {
+                    "type": "number"
+                },
+                "disk_allocation_ratio": {
+                    "type": "number"
+                },
+                "ram_allocation_ratio": {
+                    "type": "number"
+                }
+            }
+        },
         "handlers.selfBootstrapStatusView": {
             "type": "object",
             "properties": {
@@ -8117,11 +8401,50 @@
                 }
             }
         },
+        "nodemgr.ScoreBreakdown": {
+            "type": "object",
+            "properties": {
+                "components": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number"
+                    }
+                },
+                "reasons": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "score": {
+                    "type": "number"
+                },
+                "spec": {
+                    "description": "Spec is the auto-detected node specialization (cpu/memory/balanced).\nInformational — surfaced as a chip on the dashboard so operators\nknow how to tag the node. Does NOT drive scoring.",
+                    "type": "string"
+                }
+            }
+        },
         "nodemgr.View": {
             "type": "object",
             "properties": {
+                "auto_tags": {
+                    "description": "AutoTags are system-derived (currently arch: \"x86\" / \"arm\") and\nnot editable by operators. Surfaced separately so the SPA can\nlabel them differently; the scheduler treats them identically to\noperator tags for RequiredTags matching.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "cpu": {
                     "type": "number"
+                },
+                "cpu_cores": {
+                    "description": "CPUCores is the physical core count (sockets × cores-per-socket)\nfrom cpuinfo. MaxCPU above is the *thread* count (Proxmox's\n`maxcpu` = total logical CPUs); the SPA renders \"Nc/Mt\" when\nCPUCores is non-zero so the operator can tell a 4c/8t laptop\nchip apart from a real 8c desktop chip. Zero when status.CPU\nis unavailable (the SPA falls back to \"Mt\").",
+                    "type": "integer"
+                },
+                "cpu_model": {
+                    "description": "CPUModel is the human-readable CPU string from cpuinfo.model\n(e.g. \"Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz\"). Empty when\nthe per-node status call failed or Proxmox didn't return it.\nUsed for the SPA card display AND as the input for the auto-tag\narch detection (DeriveAutoTags).\n\nWe deliberately do NOT surface a separate clock-speed number.\nProxmox's cpuinfo.mhz reports the live throttled P-state which\ninverts the apparent ranking on idle vs busy nodes; the\nmarketing GHz embedded in the model string is base clock only,\nwhich understates a chip that boosts 3-4× higher under load.\nThe model name carries the relevant signal — operators who want\na number look up the SKU.",
+                    "type": "string"
                 },
                 "disk_allocated": {
                     "type": "integer"
@@ -8131,6 +8454,10 @@
                 },
                 "disk_total": {
                     "type": "integer"
+                },
+                "disk_type": {
+                    "description": "DiskType is \"nvme\" | \"ssd\" | \"hdd\" | \"\" — strongest class\nobserved via /disks/list during the background reconcile.\nSurfaces on the SPA card in place of the pool name so storage\ntier is comparable across nodes at a glance.",
+                    "type": "string"
                 },
                 "disk_used": {
                     "description": "DiskUsed/DiskTotal are the configured VM-disk pool's capacity\non this node (from /cluster/resources?type=storage filtered by\ncfg.VMDiskStorage). DiskAllocated is the sum of every non-\ntemplate VM's configured maxdisk on this node — the pessimistic\n\"what would fill if every VM grew to its declared size\" number.\nAll three zero when no pool name is configured (cfg.VMDiskStorage\nempty) or when this node doesn't expose the pool.",

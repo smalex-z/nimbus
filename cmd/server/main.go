@@ -141,6 +141,7 @@ func main() {
 	database, err := db.New(cfg.DBPath,
 		&db.User{}, &db.Session{}, &db.LoginToken{},
 		&db.OAuthSettings{}, &db.SMTPSettings{}, &db.QuotaSettings{},
+		&db.SchedulingSettings{},
 		&db.GopherSettings{},
 		&db.GPUSettings{}, &db.GPUJob{}, &db.NetworkSettings{},
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
