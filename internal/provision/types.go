@@ -56,6 +56,14 @@ type Request struct {
 	// SSH keys: provisioning never refuses for "you have no subnets."
 	SubnetID   *uint
 	SubnetName string
+
+	// Bridge is an admin-only escape hatch: if non-empty (e.g. "vmbr0"),
+	// the VM lands on this bridge directly with the global IP pool,
+	// bypassing per-user SDN isolation entirely. Required by admins
+	// for management VMs that need to reach the cluster LAN. Members
+	// who set this get a 403 — isolation is enforced for non-admin
+	// users when SDN is enabled.
+	Bridge string
 }
 
 // Result is the value returned to the user after a successful provision.

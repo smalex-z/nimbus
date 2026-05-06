@@ -3805,6 +3805,55 @@
                 }
             }
         },
+        "/sdn/status": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Tells the Provision form whether per-user isolation is\non cluster-wide. Members see only their own subnets in\nthe picker; admins keep a `vmbr0` escape hatch.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sdn"
+                ],
+                "summary": "Public SDN enablement status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.publicSDNStatusView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/access-code": {
             "get": {
                 "security": [
@@ -7733,6 +7782,10 @@
         "handlers.createVMRequest": {
             "type": "object",
             "properties": {
+                "bridge": {
+                    "description": "Bridge is the admin-only escape hatch — attaches the VM to a\ncluster bridge directly (e.g. \"vmbr0\"), bypassing per-user SDN.\nNon-admins setting this get a 400.",
+                    "type": "string"
+                },
                 "enable_gpu": {
                     "type": "boolean"
                 },
@@ -8273,6 +8326,18 @@
             "properties": {
                 "password": {
                     "type": "string"
+                }
+            }
+        },
+        "handlers.publicSDNStatusView": {
+            "type": "object",
+            "properties": {
+                "default_bridge": {
+                    "description": "DefaultBridge names the cluster bridge non-SDN VMs land on\n(today: always \"vmbr0\"). Surfaced so the UI can label the\nadmin escape hatch with the operator-visible name rather than\nhard-coding \"vmbr0\".",
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
                 }
             }
         },

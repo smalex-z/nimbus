@@ -635,40 +635,13 @@ function SDNPanel() {
           />
         </div>
 
-        <div className="n-field">
-          <label className="n-label" htmlFor="sdn-supernet">
-            Subnet supernet (CIDR — e.g. 10.42.0.0/16)
-          </label>
-          <input
-            id="sdn-supernet"
-            className="n-input"
-            type="text"
-            value={supernet}
-            onChange={(e) => setSupernet(e.target.value)}
-            placeholder="10.42.0.0/16"
-            disabled={busy}
-          />
-          <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--ink-mute)' }}>
-            Nimbus carves a /{subnetSize} from this supernet for each user's
-            VNet. /16 supports ~256 users at /24 size.
-          </p>
-        </div>
-
-        <div className="n-field">
-          <label className="n-label" htmlFor="sdn-subnet-size">
-            Subnet size per user (/N)
-          </label>
-          <input
-            id="sdn-subnet-size"
-            className="n-input"
-            type="number"
-            min={16}
-            max={30}
-            value={subnetSize}
-            onChange={(e) => setSubnetSize(parseInt(e.target.value, 10) || 24)}
-            disabled={busy}
-          />
-        </div>
+        <SDNAddressSpace
+          pool={supernet}
+          onPoolChange={setSupernet}
+          slice={subnetSize}
+          onSliceChange={setSubnetSize}
+          disabled={busy}
+        />
 
         <div className="n-field">
           <label className="n-label" htmlFor="sdn-dns">
@@ -701,6 +674,116 @@ function SDNPanel() {
       </form>
     </div>
   )
+}
+
+// SDNAddressSpace renders the supernet + slice size as a single
+// composite control instead of two unrelated CIDR inputs. Surfaces
+// the math live so admins see the tradeoff between slice size and
+// max-user count without doing it in their head.
+//
+// The supernet is the IP address space all per-user subnets carve
+// from. The "slice" is the prefix length of each per-user subnet
+// inside that space. Together they answer "how many users can land
+// in this pool, and how many IPs does each one get?"
+function SDNAddressSpace({
+  pool,
+  onPoolChange,
+  slice,
+  onSliceChange,
+  disabled,
+}: {
+  pool: string
+  onPoolChange: (v: string) => void
+  slice: number
+  onSliceChange: (v: number) => void
+  disabled: boolean
+}) {
+  // Parse the supernet's prefix to compute the live preview. Falls
+  // through to a passive hint when the input doesn't parse yet (user
+  // still typing) instead of yelling at them.
+  const poolPrefix = parsePoolPrefix(pool)
+  const preview =
+    poolPrefix !== null && slice >= poolPrefix
+      ? describeCarving(poolPrefix, slice)
+      : null
+
+  return (
+    <div className="n-field">
+      <label className="n-label" htmlFor="sdn-supernet">
+        IP address space for user subnets
+      </label>
+      <input
+        id="sdn-supernet"
+        className="n-input"
+        type="text"
+        value={pool}
+        onChange={(e) => onPoolChange(e.target.value)}
+        placeholder="10.42.0.0/16"
+        disabled={disabled}
+      />
+      <p style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+        Private RFC1918 range Nimbus carves from. Pick something that
+        doesn't overlap with your cluster LAN — VMs in this space are
+        NAT'd to the cluster's upstream gateway.
+      </p>
+
+      <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: 'var(--ink-2)' }}>↳ Each user's subnet:</span>
+        <select
+          value={slice}
+          onChange={(e) => onSliceChange(parseInt(e.target.value, 10) || 24)}
+          disabled={disabled}
+          className="n-input"
+          style={{ width: 'auto', minWidth: 240 }}
+        >
+          {SLICE_CHOICES.map((s) => {
+            const meta = describeSlice(s)
+            return (
+              <option key={s} value={s}>
+                /{s} — {meta.hosts} usable IPs each{s === 24 ? ' (default)' : ''}
+              </option>
+            )
+          })}
+        </select>
+      </div>
+      {preview && (
+        <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--ink-mute)' }}>
+          Yields <strong>{preview.maxSubnets}</strong> subnets ·{' '}
+          <strong>{preview.hostsPerSubnet}</strong> usable IPs per subnet.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// Slice choices we surface in the dropdown. /24 is the default — 254
+// usable IPs is plenty for a typical user. Smaller (>= /25) is for
+// dense deployments; larger (<= /23) is rare and the supernet starts
+// constraining max users. Capped at /28 below — anything tighter
+// (/29..-/30) is unusable because the gateway + a few reserves eat the
+// whole space.
+const SLICE_CHOICES: number[] = [22, 23, 24, 25, 26, 27, 28]
+
+function describeSlice(prefix: number): { hosts: number } {
+  // Total addresses in the slice = 2^(32 - prefix). Subtract 2 for
+  // network + broadcast plus our own pool offsets (gateway + reserves)
+  // — see the carve math in vnetmgr/subnets.go (10..-.<broadcast-5>).
+  const total = 1 << (32 - prefix)
+  return { hosts: Math.max(0, total - 16) }
+}
+
+function parsePoolPrefix(cidr: string): number | null {
+  const match = /\/(\d{1,2})$/.exec(cidr.trim())
+  if (!match) return null
+  const n = parseInt(match[1], 10)
+  if (!Number.isFinite(n) || n < 1 || n > 32) return null
+  return n
+}
+
+function describeCarving(poolPrefix: number, slicePrefix: number): { maxSubnets: number; hostsPerSubnet: number } {
+  const maxSubnets = 1 << (slicePrefix - poolPrefix)
+  const hostsPerSubnet = describeSlice(slicePrefix).hosts
+  return { maxSubnets, hostsPerSubnet }
 }
 
 function ZoneStatusChip({ view }: { view: SDNSettingsView }) {

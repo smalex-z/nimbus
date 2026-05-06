@@ -193,6 +193,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/account", auth.Account)
 			r.Put("/account/password", auth.ChangePassword)
 
+			// Public SDN status — every verified user reads this so
+			// the Provision form's subnet picker can render the right
+			// modes (subnet picker vs. greyed Cluster LAN). Admin-only
+			// details live on /settings/sdn.
+			r.Get("/sdn/status", settings.PublicSDNStatus)
+
 			// Access-code endpoints — must be reachable WITHOUT being verified,
 			// so the unverified user can submit their code from the Verify page.
 			r.Get("/access-code/status", auth.VerifyStatus)

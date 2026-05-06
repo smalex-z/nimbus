@@ -1165,6 +1165,49 @@ type saveSDNRequest struct {
 	DNSServer  string `json:"dns_server"`
 }
 
+// publicSDNStatusView is the slim shape returned by GET
+// /api/sdn/status — accessible to every verified user (not just
+// admin). Drives the Provision form's subnet picker: when Enabled is
+// false the picker collapses to a single greyed "Cluster LAN" tile;
+// when true, members see only the subnet picker while admins keep a
+// "Cluster LAN (admin)" escape hatch.
+type publicSDNStatusView struct {
+	Enabled bool `json:"enabled"`
+	// DefaultBridge names the cluster bridge non-SDN VMs land on
+	// (today: always "vmbr0"). Surfaced so the UI can label the
+	// admin escape hatch with the operator-visible name rather than
+	// hard-coding "vmbr0".
+	DefaultBridge string `json:"default_bridge"`
+}
+
+// PublicSDNStatus handles GET /api/sdn/status — verified-user-readable.
+// Returns the bare-minimum the Provision form needs: is SDN on, and
+// what's the bridge name when it isn't. Admin-specific details
+// (zone status, vnet count, proxmox errors) live on /settings/sdn.
+//
+// @Summary     Public SDN enablement status
+// @Description Tells the Provision form whether per-user isolation is
+// @Description on cluster-wide. Members see only their own subnets in
+// @Description the picker; admins keep a `vmbr0` escape hatch.
+// @Tags        sdn
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=publicSDNStatusView}
+// @Failure     401 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /sdn/status [get]
+func (s *Settings) PublicSDNStatus(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.auth.GetNetworkSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load settings: "+err.Error())
+		return
+	}
+	response.Success(w, publicSDNStatusView{
+		Enabled:       settings.SDNEnabled,
+		DefaultBridge: "vmbr0",
+	})
+}
+
 // GetSDN handles GET /api/settings/sdn (admin only). Returns the
 // stored SDN config plus live zone status from Proxmox.
 //

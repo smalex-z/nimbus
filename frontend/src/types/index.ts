@@ -74,6 +74,10 @@ export interface ProvisionRequest {
   // SDN is disabled cluster-wide.
   subnet_id?: number
   subnet_name?: string
+  // Admin-only escape hatch: attach the VM directly to a cluster
+  // bridge (e.g. "vmbr0"), bypassing per-user SDN. Members get a
+  // 400. Sent only when the form's subnetMode is 'bridge'.
+  bridge?: string
 }
 
 export interface SSHKey {

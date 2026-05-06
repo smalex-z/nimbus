@@ -50,6 +50,10 @@ type createVMRequest struct {
 	//   - both empty → user's default (auto-create on first provision)
 	SubnetID   *uint  `json:"subnet_id,omitempty"`
 	SubnetName string `json:"subnet_name,omitempty"`
+	// Bridge is the admin-only escape hatch — attaches the VM to a
+	// cluster bridge directly (e.g. "vmbr0"), bypassing per-user SDN.
+	// Non-admins setting this get a 400.
+	Bridge string `json:"bridge,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -155,6 +159,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		RequesterIsAdmin: requesterIsAdmin,
 		SubnetID:         req.SubnetID,
 		SubnetName:       req.SubnetName,
+		Bridge:           req.Bridge,
 	}, reporter)
 	if err != nil {
 		writeLine(map[string]any{

@@ -419,13 +419,33 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 0: resolve the per-user SDN subnet (if SDN is enabled and
-	// the user has the resolver wired). Returns nil for the legacy
-	// vmbr0 path. Lazy-creates a "default" subnet on first provision
-	// when neither SubnetID nor SubnetName is specified — same UX as
-	// SSH keys, where a fresh user never gets blocked at the gate.
+	// Step 0: resolve network attachment.
+	//
+	// Bridge override (admin-only escape hatch): when req.Bridge is
+	// set, the VM lands on that bridge directly with the global IP
+	// pool, bypassing per-user SDN entirely. Used by admins for
+	// management VMs that need cluster-LAN reachability. Non-admins
+	// trying this get a 403 — isolation is enforced.
+	//
+	// Otherwise: resolve the per-user SDN subnet (when SDN is enabled
+	// and the resolver is wired). Returns nil for the legacy vmbr0
+	// path. Lazy-creates a "default" subnet on first provision when
+	// neither SubnetID nor SubnetName is specified — same UX as SSH
+	// keys, where a fresh user never gets blocked at the gate.
 	var subnet *db.UserSubnet
-	if s.subnetResolver != nil && req.OwnerID != nil {
+	bridgeOverride := ""
+	switch {
+	case req.Bridge != "":
+		if !req.RequesterIsAdmin {
+			return nil, &internalerrors.ValidationError{
+				Field:   "bridge",
+				Message: "only admins can attach a VM directly to a cluster bridge — use a subnet instead",
+			}
+		}
+		bridgeOverride = req.Bridge
+		// Admin override: skip subnet resolution. Falls through to
+		// the legacy global pool + cloud-init gateway path.
+	case s.subnetResolver != nil && req.OwnerID != nil:
 		subnet, err = s.subnetResolver.ResolveForProvision(ctx, *req.OwnerID, req.SubnetID, req.SubnetName)
 		if err != nil {
 			return nil, err
@@ -547,15 +567,21 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	report(StepCloneTpl, "Cloned golden template")
 
-	// SDN bridge override: clones inherit the template's
+	// Bridge / VNet override: clones inherit the template's
 	// `net0=virtio,bridge=vmbr0`. Switch to the user's subnet VNet
-	// before configuring cloud-init so the new IP/gateway lands on
-	// the right L2 segment. macaddr=auto avoids two cloned VMs
-	// sharing a MAC across isolated VLANs (no L2 collision but
-	// surprising during debug).
-	if subnet != nil {
+	// (or the admin's chosen bridge) before configuring cloud-init.
+	// macaddr=auto avoids two cloned VMs sharing a MAC across
+	// isolated VLANs (no L2 collision but surprising during debug).
+	// vmbr0 is what the template already has, so we only call
+	// SetVMNetwork when the target bridge actually differs.
+	switch {
+	case subnet != nil:
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet, "auto"); err != nil {
 			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
+		}
+	case bridgeOverride != "" && bridgeOverride != "vmbr0":
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", bridgeOverride, "auto"); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", bridgeOverride, err)
 		}
 	}
 

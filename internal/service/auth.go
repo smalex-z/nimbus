@@ -1403,9 +1403,32 @@ func (s *AuthService) SaveGPUSettings(next db.GPUSettings) error {
 // GetNetworkSettings returns the stored IP pool / gateway configuration.
 // Creates an empty row on first call. Empty strings on the row mean the
 // caller should fall back to env defaults (handled by main.go's seed step).
+//
+// Fresh-install defaults via Attrs (only applied on row creation):
+//   - SDNEnabled = true: per-user isolation is the safe default for new
+//     deployments. Existing deployments are unaffected — Attrs runs only
+//     when no ID=1 row exists yet, so an upgraded Nimbus that already
+//     wrote `false` keeps that value until an admin flips the toggle.
+//   - SDNZoneName / Type / Supernet / Size pre-populated so a fresh
+//     install can start provisioning without a separate Settings →
+//     Network round trip.
+//
+// If `libpve-network-perl` is missing on the cluster, the SDN-status
+// chip will surface the install hint and the first subnet provision
+// returns 503 with the same message — honest about the broken state
+// rather than silently falling back to vmbr0.
 func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
 	var settings db.NetworkSettings
-	err := s.db.FirstOrCreate(&settings, db.NetworkSettings{ID: 1}).Error
+	err := s.db.
+		Where(db.NetworkSettings{ID: 1}).
+		Attrs(db.NetworkSettings{
+			SDNEnabled:        true,
+			SDNZoneName:       "nimbus",
+			SDNZoneType:       "simple",
+			SDNSubnetSupernet: "10.42.0.0/16",
+			SDNSubnetSize:     24,
+		}).
+		FirstOrCreate(&settings).Error
 	return &settings, err
 }
 

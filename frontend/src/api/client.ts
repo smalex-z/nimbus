@@ -1288,6 +1288,21 @@ export async function setDefaultSubnet(id: number): Promise<void> {
   await api.post(`/subnets/${id}/default`)
 }
 
+// PublicSDNStatus is the verified-user-readable view of SDN
+// enablement. Drives the Provision form picker: when Enabled is
+// false the picker collapses to a single greyed "Cluster LAN" tile;
+// when true, members see only the subnet picker while admins keep a
+// "Cluster LAN (admin)" escape hatch.
+export interface PublicSDNStatus {
+  enabled: boolean
+  default_bridge: string
+}
+
+export async function getSDNStatus(): Promise<PublicSDNStatus> {
+  const { data } = await api.get<PublicSDNStatus>('/sdn/status')
+  return data
+}
+
 // SDNZoneStatus mirrors vnetmgr.StatusView.ZoneStatus. The UI uses it
 // to render the diagnostic chip (active/pending/missing-pkg/error).
 export type SDNZoneStatus =

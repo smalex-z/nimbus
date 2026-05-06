@@ -5,12 +5,14 @@ import {
   ProvisionError,
   getBootstrapStatus,
   bootstrapTemplates,
+  getSDNStatus,
   listKeys,
   listNodes,
   listSubnets,
   getTunnelInfo,
   getGPUInference,
   type BootstrapResult,
+  type PublicSDNStatus,
   type Subnet,
   type TunnelInfo,
 } from '@/api/client'
@@ -62,13 +64,16 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   enableGPU: boolean
-  // Subnet selection. Mirrors the SSH-key picker's three modes:
-  //   - 'default'  → use the user's default subnet (auto-create on first provision)
-  //   - 'existing' → pick a specific subnet by ID
-  //   - 'new'      → create a new subnet with this name inline
-  // Backend silently ignores SubnetID/SubnetName when SDN is disabled
-  // cluster-wide, so 'default' is safe even on non-SDN deployments.
-  subnetMode:    'default' | 'existing' | 'new'
+  // Network attachment. Reflects the four cases the picker can
+  // render:
+  //   - 'default'  → user's default subnet (auto-create on first provision)
+  //   - 'existing' → pick a saved subnet by ID
+  //   - 'new'      → create a new subnet inline with this name
+  //   - 'bridge'   → admin-only escape hatch; attach to vmbr0 directly
+  // The picker hides modes the user can't reach: SDN-off shows only
+  // 'bridge' (no choice); SDN-on shows subnet modes plus 'bridge' for
+  // admins only.
+  subnetMode:    'default' | 'existing' | 'new' | 'bridge'
   savedSubnetId: number | null
   newSubnetName: string
 }
@@ -116,6 +121,24 @@ export default function Provision() {
   // defaults to subnetMode='default' which the backend resolves to
   // either the user's actual default or a fresh auto-create.
   const [savedSubnets, setSavedSubnets] = useState<Subnet[]>([])
+
+  // Public SDN status. Drives the picker's mode set: when off, only
+  // 'bridge' renders (greyed, single-option); when on, members get
+  // subnet modes only, admins get subnet + bridge escape hatch.
+  const [sdnStatus, setSdnStatus] = useState<PublicSDNStatus | null>(null)
+  useEffect(() => {
+    getSDNStatus()
+      .then((s) => {
+        setSdnStatus(s)
+        // When SDN is off cluster-wide, the only meaningful option is
+        // bridge — flip the form into that mode so the picker doesn't
+        // show "Default" pre-selected against a meaningless backend.
+        if (!s.enabled) {
+          setForm((prev) => ({ ...prev, subnetMode: 'bridge' }))
+        }
+      })
+      .catch(() => setSdnStatus({ enabled: false, default_bridge: 'vmbr0' }))
+  }, [])
 
   // Tunnel availability + host preview. When tunnels are disabled (no
   // GOPHER_API_URL configured) we hide the public-access section entirely
@@ -287,6 +310,10 @@ export default function Provision() {
             form.subnetMode === 'new' && form.newSubnetName.trim() !== ''
               ? form.newSubnetName.trim()
               : undefined,
+          bridge:
+            form.subnetMode === 'bridge' && sdnStatus
+              ? sdnStatus.default_bridge
+              : undefined,
           // No subdomain — provision-time tunnels are SSH only and Gopher
           // allocates a port on the gateway. Backend defaults the tunnel
           // identifier to the VM hostname so admins don't need to think
@@ -362,6 +389,8 @@ export default function Provision() {
               updateForm={updateForm}
               savedKeys={savedKeys}
               savedSubnets={savedSubnets}
+              sdnStatus={sdnStatus}
+              isAdmin={user?.is_admin ?? false}
               tunnelInfo={tunnelInfo}
               gpuInfo={gpuInfo}
               selectedKeyHasPrivate={selectedKeyHasPrivate}
@@ -526,6 +555,8 @@ interface FormBodyProps {
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
   savedSubnets: Subnet[]
+  sdnStatus: PublicSDNStatus | null
+  isAdmin: boolean
   tunnelInfo: TunnelInfo | null
   gpuInfo: GPUInferenceStatus | null
   // Mirrors the backend rule that public SSH needs a private half — the
@@ -534,7 +565,7 @@ interface FormBodyProps {
   selectedKeyHasPrivate: boolean
 }
 
-function FormBody({ form, updateForm, savedKeys, savedSubnets, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, savedSubnets, sdnStatus, isAdmin, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-6">
       <Input
@@ -727,6 +758,8 @@ function FormBody({ form, updateForm, savedKeys, savedSubnets, tunnelInfo, gpuIn
           form={form}
           updateForm={updateForm}
           savedSubnets={savedSubnets}
+          sdnStatus={sdnStatus}
+          isAdmin={isAdmin}
         />
         <AffinityPicker
           value={form.requiredTags}
@@ -1244,25 +1277,72 @@ const SUGGESTED_TAGS = ['fast-cpu']
 //   3. SUGGESTED_TAGS — curated vocabulary that appears even when no
 //      node carries the tag yet.
 //
-// SubnetPicker is the per-VM subnet chooser. Three modes mirroring the
-// SSH-key picker:
-//   - default  → use the user's default subnet (auto-create on first
-//                provision); no field shown
-//   - existing → dropdown of the user's saved subnets
-//   - new      → text field for the new subnet's name
+// SubnetPicker is the per-VM network attachment chooser. Adapts to
+// the cluster's SDN state and the caller's role:
 //
-// When the user has zero saved subnets the "existing" radio disables
-// gracefully — the default option still works because the backend
-// lazy-creates a `default` on first provision.
+//   SDN off (cluster-wide):
+//     - Single greyed "Cluster LAN" tile, pre-selected. No choice.
+//       Note explains "isolation is off; admin can enable it."
+//
+//   SDN on, member:
+//     - Default / Existing / + New subnet (three-chip picker).
+//       No bridge option — isolation is enforced.
+//
+//   SDN on, admin:
+//     - Default / Existing / + New subnet PLUS a "Cluster LAN
+//       (admin)" escape-hatch chip. Used for management VMs that
+//       need to reach the cluster LAN directly.
+//
+// The state field `subnetMode` is the source of truth; modes the
+// caller can't reach are simply not rendered. The form initializer
+// flips `subnetMode` to 'bridge' on first load when SDN is off so
+// the submit payload sends `bridge=vmbr0` rather than meaningless
+// subnet fields.
 function SubnetPicker({
   form,
   updateForm,
   savedSubnets,
+  sdnStatus,
+  isAdmin,
 }: {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedSubnets: Subnet[]
+  sdnStatus: PublicSDNStatus | null
+  isAdmin: boolean
 }) {
+  // Status hasn't loaded yet — render a placeholder rather than
+  // flashing the wrong picker shape and rebinding the form mode.
+  if (!sdnStatus) {
+    return (
+      <div className="flex flex-col gap-2">
+        <label className="text-[13px] font-medium text-ink">Network</label>
+        <p className="text-[11px] text-ink-3">Loading…</p>
+      </div>
+    )
+  }
+
+  // SDN-off branch: the picker is informational, not interactive.
+  if (!sdnStatus.enabled) {
+    return (
+      <div className="flex flex-col gap-2">
+        <label className="text-[13px] font-medium text-ink">Network</label>
+        <ModeChip active disabled={false} onClick={() => undefined}>
+          Cluster LAN ({sdnStatus.default_bridge})
+        </ModeChip>
+        <p className="text-[11px] text-ink-3 leading-relaxed">
+          Per-user isolation is off cluster-wide. New VMs join the
+          cluster's main network alongside Proxmox itself. An admin
+          can enable isolation on the{' '}
+          <Link to="/infrastructure/network" className="underline">VM network</Link>{' '}
+          settings page.
+        </p>
+      </div>
+    )
+  }
+
+  // SDN-on branch: subnet picker for everyone, bridge escape hatch
+  // for admins only.
   const hasSaved = savedSubnets.length > 0
   return (
     <div className="flex flex-col gap-2">
@@ -1290,6 +1370,14 @@ function SubnetPicker({
         >
           + New subnet
         </ModeChip>
+        {isAdmin && (
+          <ModeChip
+            active={form.subnetMode === 'bridge'}
+            onClick={() => updateForm('subnetMode', 'bridge')}
+          >
+            Cluster LAN <span className="text-ink-3">(admin)</span>
+          </ModeChip>
+        )}
       </div>
       {form.subnetMode === 'existing' && hasSaved && (
         <select
@@ -1313,6 +1401,14 @@ function SubnetPicker({
           placeholder="web-tier"
           maxLength={32}
         />
+      )}
+      {form.subnetMode === 'bridge' && (
+        <p className="text-[11px] text-warn leading-relaxed">
+          ⚠ Admin-only escape hatch. The VM lands on{' '}
+          <span className="font-mono">{sdnStatus.default_bridge}</span>{' '}
+          alongside the cluster LAN, bypassing per-user isolation.
+          Use only for management VMs that need direct cluster access.
+        </p>
       )}
       <p className="text-[11px] text-ink-3 leading-relaxed">
         Subnets isolate VMs from the cluster LAN and from your other
