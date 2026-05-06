@@ -1067,13 +1067,14 @@ function ResultView({ result, onReset }: ResultViewProps) {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
           <CredCell label={isolated ? 'Subnet IP' : 'Local IP'} value={result.ip} />
-          <CredCell label="Username" value={result.username} />
-          {result.console_password && (
-            <CredCell
-              label="Console password (one-time)"
-              value={result.console_password}
-            />
-          )}
+          <CredCell
+            label={result.console_password ? 'Username : password (one-time)' : 'Username'}
+            value={
+              result.console_password
+                ? `${result.username}:${result.console_password}`
+                : result.username
+            }
+          />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
           <CredCell
             label={hasTunnel ? 'SSH (LAN)' : isolated ? 'SSH (from inside subnet)' : 'SSH command'}
@@ -1083,7 +1084,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
         </div>
         {result.console_password && (
           <p className="text-xs text-ink-3 mt-2 leading-relaxed">
-            🔑 Console password is a one-time fallback for the Proxmox noVNC console
+            🔑 The password is a one-time fallback for the Proxmox noVNC console
             (VMID {result.vmid} → Console). Save it now — it's not stored anywhere
             and a new one is generated on every provision.
           </p>
