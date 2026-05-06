@@ -1252,6 +1252,18 @@ func (a *Auth) MagicLinkSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSessionCookie(w, sessionID)
+	// Best-effort actor lookup so the audit row carries an email; the
+	// magic-link path doesn't have a UserView in ctx yet.
+	ctx := r.Context()
+	if u, err := a.auth.GetUserBySessionID(sessionID); err == nil && u != nil {
+		ctx = ctxutil.WithUser(ctx, u)
+	}
+	a.audit.Record(ctx, audit.Event{
+		Action:     "auth.magiclink.consume",
+		TargetType: "user",
+		TargetID:   strconv.FormatUint(uint64(userID), 10),
+		Success:    true,
+	})
 	http.Redirect(w, r, "/account?from=magic", http.StatusTemporaryRedirect)
 }
 
@@ -1668,11 +1680,18 @@ func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
 // @Success     204 "No Content"
 // @Router      /auth/logout [post]
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
-	// User may or may not be in ctx — requireAuth doesn't gate this
-	// route, so deliberate logouts of an already-expired session land
-	// here too. The audit row records what we know (actor email when
-	// available, empty otherwise).
-	a.audit.Record(r.Context(), audit.Event{Action: "auth.logout", Success: true})
+	// Logout sits OUTSIDE requireAuth so deliberate logouts of an
+	// already-expired session land here too. requireAuth would have
+	// stuffed the user into ctx for us; on this path we resolve it
+	// manually from the session cookie, BEFORE invalidating it, so
+	// the audit row carries the actor instead of an empty "—".
+	ctx := r.Context()
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		if user, err := a.auth.GetUserBySessionID(cookie.Value); err == nil && user != nil {
+			ctx = ctxutil.WithUser(ctx, user)
+		}
+	}
+	a.audit.Record(ctx, audit.Event{Action: "auth.logout", Success: true})
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = a.auth.Logout(cookie.Value)
 	}
@@ -1914,6 +1933,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/account?error=link_failed&provider=github", http.StatusTemporaryRedirect)
 			return
 		}
+		a.audit.Record(ctxutil.WithUser(r.Context(), current), audit.Event{
+			Action:      "auth.oauth.link",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(current.ID), 10),
+			TargetLabel: current.Email,
+			Details:     map[string]any{"provider": "github", "github_login": userInfo.Login},
+			Success:     true,
+		})
 		http.Redirect(w, r, "/account?linked=github", http.StatusTemporaryRedirect)
 		return
 	}
@@ -1923,6 +1950,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// new accounts are allowed (and will fall into the access code flow).
 	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID, userInfo.Orgs, nil)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.oauth.login",
+			TargetType:  "user",
+			TargetLabel: userInfo.Email,
+			Details:     map[string]any{"provider": "github"},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserSuspended) {
 			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=github", http.StatusTemporaryRedirect)
 			return
@@ -1939,6 +1974,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.oauth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Details:     map[string]any{"provider": "github", "github_login": userInfo.Login},
+		Success:     true,
+	})
 
 	q := url.Values{}
 	q.Set("provider", "github")
@@ -2072,12 +2115,28 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/account?error=link_failed&provider=google", http.StatusTemporaryRedirect)
 			return
 		}
+		a.audit.Record(ctxutil.WithUser(r.Context(), current), audit.Event{
+			Action:      "auth.oauth.link",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(current.ID), 10),
+			TargetLabel: current.Email,
+			Details:     map[string]any{"provider": "google"},
+			Success:     true,
+		})
 		http.Redirect(w, r, "/account?linked=google", http.StatusTemporaryRedirect)
 		return
 	}
 
 	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.oauth.login",
+			TargetType:  "user",
+			TargetLabel: userInfo.Email,
+			Details:     map[string]any{"provider": "google"},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserSuspended) {
 			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=google", http.StatusTemporaryRedirect)
 			return
@@ -2107,6 +2166,14 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.oauth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Details:     map[string]any{"provider": "google"},
+		Success:     true,
+	})
 
 	q := url.Values{}
 	q.Set("provider", "google")
