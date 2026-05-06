@@ -1041,22 +1041,6 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        {result.console_password && (
-          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
-            <span className="text-base">🔑</span>
-            <div className="flex-1">
-              <strong>One-time console password.</strong>{' '}
-              Use this to log in via the Proxmox noVNC console (VMID{' '}
-              <span className="font-mono text-ink">{result.vmid}</span> → Console)
-              if you need to reach the VM before SSH/qga is up. Save it now —
-              it's not stored anywhere.
-              <div className="mt-2 font-mono text-ink bg-white/70 px-2.5 py-1.5 rounded border border-[rgba(45,125,90,0.2)] select-all">
-                {result.username}:{result.console_password}
-              </div>
-            </div>
-          </div>
-        )}
-
         {isolated && !hasTunnel && (
           <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,77,125,0.06)] border border-[rgba(45,77,125,0.2)] text-ink-2 text-[13px] leading-relaxed flex items-start gap-2.5">
             <span className="text-base">🔒</span>
@@ -1084,6 +1068,12 @@ function ResultView({ result, onReset }: ResultViewProps) {
           <CredCell label="Hostname" value={result.hostname} />
           <CredCell label={isolated ? 'Subnet IP' : 'Local IP'} value={result.ip} />
           <CredCell label="Username" value={result.username} />
+          {result.console_password && (
+            <CredCell
+              label="Console password (one-time)"
+              value={result.console_password}
+            />
+          )}
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
           <CredCell
             label={hasTunnel ? 'SSH (LAN)' : isolated ? 'SSH (from inside subnet)' : 'SSH command'}
@@ -1091,6 +1081,13 @@ function ResultView({ result, onReset }: ResultViewProps) {
             fullWidth
           />
         </div>
+        {result.console_password && (
+          <p className="text-xs text-ink-3 mt-2 leading-relaxed">
+            🔑 Console password is a one-time fallback for the Proxmox noVNC console
+            (VMID {result.vmid} → Console). Save it now — it's not stored anywhere
+            and a new one is generated on every provision.
+          </p>
+        )}
 
         {publicSSHCommand && tunnel && (
           <GopherTunnelBox

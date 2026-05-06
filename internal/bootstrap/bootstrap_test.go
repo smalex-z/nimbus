@@ -26,7 +26,6 @@ type fakePX struct {
 	downloadStorageURL   func(context.Context, string, string, string, string, string) (string, error)
 	waitForTask          func(context.Context, string, string, time.Duration) error
 	createVMWithImport   func(context.Context, string, int, proxmox.CreateVMOpts) (string, error)
-	setCloudInitDrive    func(context.Context, string, int, string) error
 	convertToTemplate    func(context.Context, string, int) error
 
 	nextVMIDSeq   atomic.Int32 // for default sequential VMID assignment
@@ -61,9 +60,6 @@ func (f *fakePX) CreateVMWithImport(ctx context.Context, n string, vmid int, opt
 	f.createCalls.Add(1)
 	return f.createVMWithImport(ctx, n, vmid, opts)
 }
-func (f *fakePX) SetCloudInitDrive(ctx context.Context, n string, vmid int, s string) error {
-	return f.setCloudInitDrive(ctx, n, vmid, s)
-}
 func (f *fakePX) ConvertToTemplate(ctx context.Context, n string, vmid int) error {
 	f.convertCalls.Add(1)
 	return f.convertToTemplate(ctx, n, vmid)
@@ -90,7 +86,6 @@ func happyPX() *fakePX {
 		createVMWithImport: func(_ context.Context, _ string, _ int, _ proxmox.CreateVMOpts) (string, error) {
 			return "UPID:create", nil
 		},
-		setCloudInitDrive: func(_ context.Context, _ string, _ int, _ string) error { return nil },
 		convertToTemplate: func(_ context.Context, _ string, _ int) error { return nil },
 	}
 	f.nextVMIDFrom = func(_ context.Context, min int) (int, error) {

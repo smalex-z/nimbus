@@ -52,7 +52,6 @@ type ProxmoxClient interface {
 	DownloadStorageURL(ctx context.Context, node, storage, contentType, url, filename string) (string, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	CreateVMWithImport(ctx context.Context, node string, vmid int, opts proxmox.CreateVMOpts) (string, error)
-	SetCloudInitDrive(ctx context.Context, node string, vmid int, storage string) error
 	ConvertToTemplate(ctx context.Context, node string, vmid int) error
 }
 
