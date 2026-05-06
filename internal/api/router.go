@@ -25,6 +25,7 @@ import (
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/vnetmgr"
 )
 
 // Deps bundles the dependencies the router needs.
@@ -44,6 +45,7 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
+	VNetMgr       *vnetmgr.Service // P1: SDN bootstrap; P2: per-user VNet allocation
 	Config        *config.Config
 	Restart       func()
 }
@@ -80,11 +82,15 @@ func NewRouter(d Deps) http.Handler {
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
 		WithPoolReseeder(d.Pool)
+	if d.VNetMgr != nil {
+		settingsBuilder = settingsBuilder.WithSDNBootstrapper(d.VNetMgr)
+	}
 	if d.SelfBootstrap != nil {
 		settingsBuilder = settingsBuilder.WithSelfBootstrap(d.SelfBootstrap)
 	}
 	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
+	subnets := handlers.NewSubnets(d.VNetMgr)
 	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU
@@ -186,6 +192,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/users", auth.ListUsers)
 			r.Get("/account", auth.Account)
 			r.Put("/account/password", auth.ChangePassword)
+
+			// Public SDN status — every verified user reads this so
+			// the Provision form's subnet picker can render the right
+			// modes (subnet picker vs. greyed Cluster LAN). Admin-only
+			// details live on /settings/sdn.
+			r.Get("/sdn/status", settings.PublicSDNStatus)
 
 			// Access-code endpoints — must be reachable WITHOUT being verified,
 			// so the unverified user can submit their code from the Verify page.
@@ -308,6 +320,13 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
 				r.Get("/settings/network", settings.GetNetwork)
 				r.Put("/settings/network", settings.SaveNetwork)
+				// Per-user SDN VNet isolation. Read returns the live
+				// status (zone exists / pending / missing-pkg); Save
+				// persists + bootstraps in one shot. P1 scope: zone
+				// reconcile only — per-VM provisioning still uses
+				// vmbr0 until P2 lands.
+				r.Get("/settings/sdn", settings.GetSDN)
+				r.Put("/settings/sdn", settings.SaveSDN)
 				// Disruptive batch ops — generous timeout because each VM
 				// reboot waits on a Proxmox task.
 				r.With(middleware.Timeout(15*time.Minute)).
@@ -378,6 +397,17 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}/private-key", keys.PrivateKey)
 					r.Post("/{id}/private-key", keys.AttachPrivateKey)
 					r.Post("/{id}/default", keys.SetDefault)
+				})
+
+				// Per-user SDN subnets — OCI-style: each user manages
+				// their own list of subnets, picks one (or creates new
+				// inline) at provision time. Same shape as /keys.
+				r.Route("/subnets", func(r chi.Router) {
+					r.Get("/", subnets.List)
+					r.Post("/", subnets.Create)
+					r.Get("/{id}", subnets.Get)
+					r.Delete("/{id}", subnets.Delete)
+					r.Post("/{id}/default", subnets.SetDefault)
 				})
 
 				// User-owned buckets on the shared MinIO host. Each user has

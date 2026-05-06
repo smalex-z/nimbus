@@ -109,6 +109,15 @@ definitions:
         type: string
       status:
         type: string
+      subnet_id:
+        description: |-
+          SubnetID points to the user_subnets row this VM lives on. Nullable:
+          legacy VMs provisioned before SDN landed have NULL here and stay on
+          vmbr0 with the global IP pool; new SDN-provisioned VMs carry their
+          owning subnet's id. Cleared on subnet delete via FK rules in the
+          service layer (subnet delete refuses while any VM still references
+          it, so this stays non-NULL across the VM's life by construction).
+        type: integer
       tier:
         type: string
       tunnel_error:
@@ -415,6 +424,13 @@ definitions:
       updated_at:
         type: string
     type: object
+  handlers.createSubnetRequest:
+    properties:
+      name:
+        type: string
+      set_default:
+        type: boolean
+    type: object
   handlers.createTunnelRequest:
     properties:
       bot_protection_allow_ip:
@@ -438,6 +454,12 @@ definitions:
     type: object
   handlers.createVMRequest:
     properties:
+      bridge:
+        description: |-
+          Bridge is the admin-only escape hatch — attaches the VM to a
+          cluster bridge directly (e.g. "vmbr0"), bypassing per-user SDN.
+          Non-admins setting this get a 400.
+        type: string
       enable_gpu:
         type: boolean
       generate_key:
@@ -461,6 +483,15 @@ definitions:
       ssh_pubkey:
         type: string
       subdomain:
+        type: string
+      subnet_id:
+        description: |-
+          SDN subnet selection. At most one set:
+            - SubnetID  → existing subnet (owner-gated)
+            - SubnetName → create a new subnet inline
+            - both empty → user's default (auto-create on first provision)
+        type: integer
+      subnet_name:
         type: string
       tier:
         type: string
@@ -812,6 +843,18 @@ definitions:
       password:
         type: string
     type: object
+  handlers.publicSDNStatusView:
+    properties:
+      default_bridge:
+        description: |-
+          DefaultBridge names the cluster bridge non-SDN VMs land on
+          (today: always "vmbr0"). Surfaced so the UI can label the
+          admin escape hatch with the operator-visible name rather than
+          hard-coding "vmbr0".
+        type: string
+      enabled:
+        type: boolean
+    type: object
   handlers.registerRequest:
     properties:
       email:
@@ -886,6 +929,21 @@ definitions:
       google_client_secret:
         type: string
     type: object
+  handlers.saveSDNRequest:
+    properties:
+      dns_server:
+        type: string
+      enabled:
+        type: boolean
+      subnet_size:
+        type: integer
+      supernet:
+        type: string
+      zone_name:
+        type: string
+      zone_type:
+        type: string
+    type: object
   handlers.schedulingSettingsRequest:
     properties:
       cpu_allocation_ratio:
@@ -894,6 +952,27 @@ definitions:
         type: number
       ram_allocation_ratio:
         type: number
+    type: object
+  handlers.sdnSettingsView:
+    properties:
+      dns_server:
+        type: string
+      enabled:
+        type: boolean
+      proxmox_error:
+        type: string
+      subnet_size:
+        type: integer
+      supernet:
+        type: string
+      vnet_count:
+        type: integer
+      zone_name:
+        type: string
+      zone_status:
+        type: string
+      zone_type:
+        type: string
     type: object
   handlers.selfBootstrapStatusView:
     properties:
@@ -949,6 +1028,31 @@ definitions:
         type: string
       vm_id:
         type: integer
+    type: object
+  handlers.subnetView:
+    properties:
+      created_at:
+        type: string
+      gateway:
+        type: string
+      id:
+        type: integer
+      is_default:
+        type: boolean
+      name:
+        type: string
+      pool_end:
+        type: string
+      pool_start:
+        type: string
+      status:
+        type: string
+      subnet:
+        type: string
+      updated_at:
+        type: string
+      vnet:
+        type: string
     type: object
   handlers.suspendRequest:
     properties:
@@ -1050,6 +1154,8 @@ definitions:
         type: string
       vmid:
         type: integer
+      vnet:
+        type: string
     type: object
   ippool.Report:
     properties:
@@ -4032,6 +4138,37 @@ paths:
       summary: Update cluster overcommit ratios (admin)
       tags:
       - nodes
+  /sdn/status:
+    get:
+      description: |-
+        Tells the Provision form whether per-user isolation is
+        on cluster-wide. Members see only their own subnets in
+        the picker; admins keep a `vmbr0` escape hatch.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.publicSDNStatusView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Public SDN enablement status
+      tags:
+      - sdn
   /settings/access-code:
     get:
       produces:
@@ -4907,6 +5044,94 @@ paths:
       summary: Update workspace quota defaults (admin)
       tags:
       - auth
+  /settings/sdn:
+    get:
+      description: |-
+        Combines the stored config with a Proxmox round-trip
+        that reports whether the zone exists and is applied.
+        ProxmoxError is populated (non-fatal) when the SDN
+        package isn't installed cluster-wide.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.sdnSettingsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read SDN settings + live zone status (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Persists config and runs zone bootstrap on enable.
+        Returns the live status view with the post-save state
+        so the admin UI can confirm "zone is active" in one
+        round trip.
+      parameters:
+      - description: SDN settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveSDNRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.sdnSettingsView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update SDN settings (admin)
+      tags:
+      - settings
   /settings/smtp:
     get:
       description: |-
@@ -5100,6 +5325,195 @@ paths:
       summary: First-run setup status
       tags:
       - setup
+  /subnets:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.subnetView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the caller's SDN subnets
+      tags:
+      - subnets
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Carves a fresh /N from the configured supernet, creates
+        the Proxmox VNet + Subnet, seeds the per-subnet IP pool.
+        Set `set_default: true` to make it the user's default
+        in one round trip.
+      parameters:
+      - description: Subnet to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createSubnetRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.subnetView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a new SDN subnet
+      tags:
+      - subnets
+  /subnets/{id}:
+    delete:
+      description: |-
+        Refused while any VM still references the subnet, and
+        for an only-default subnet (no fallback to land new
+        VMs on). Tears down the Proxmox VNet + Subnet + IP pool.
+      parameters:
+      - description: Subnet ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a subnet
+      tags:
+      - subnets
+    get:
+      parameters:
+      - description: Subnet ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.subnetView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get a single subnet
+      tags:
+      - subnets
+  /subnets/{id}/default:
+    post:
+      description: |-
+        New VMs without an explicit subnet pick land on the
+        default. Idempotent — calling on an already-default
+        subnet is a no-op.
+      parameters:
+      - description: Subnet ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Mark this subnet as the caller's default
+      tags:
+      - subnets
   /tunnels:
     get:
       description: |-

@@ -577,28 +577,6 @@ func TestClient_CreateVMWithImport(t *testing.T) {
 	}
 }
 
-func TestClient_SetCloudInitDrive(t *testing.T) {
-	t.Parallel()
-	var capturedBody, capturedPath string
-	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
-		capturedBody = string(body)
-		writeEnvelope(w, nil)
-	})
-
-	if err := c.SetCloudInitDrive(context.Background(), "hppve", 9000, "local-lvm"); err != nil {
-		t.Fatalf("SetCloudInitDrive: %v", err)
-	}
-	if capturedPath != "/api2/json/nodes/hppve/qemu/9000/config" {
-		t.Errorf("path = %s", capturedPath)
-	}
-	parsed, _ := url.ParseQuery(capturedBody)
-	if parsed.Get("ide2") != "local-lvm:cloudinit" {
-		t.Errorf("ide2 = %q, want local-lvm:cloudinit", parsed.Get("ide2"))
-	}
-}
-
 func TestClient_ConvertToTemplate(t *testing.T) {
 	t.Parallel()
 	var capturedPath, capturedMethod string

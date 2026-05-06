@@ -31,6 +31,7 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/vnetmgr"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -81,7 +82,23 @@ type ProxmoxClient interface {
 	RebootVM(ctx context.Context, node string, vmid int) (string, error)
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
+	UploadFile(ctx context.Context, node, storage, contentType, filename string, content []byte) error
+	DeleteStorageVolume(ctx context.Context, node, volid string) error
+	AttachCDROM(ctx context.Context, node string, vmid int, slot, volid string) error
+	DetachDrive(ctx context.Context, node string, vmid int, slot string) error
+	// AgentRun submits a command to the in-guest qemu-guest-agent and
+	// blocks until it exits (or ctx expires). The data path is
+	// virtio-serial via the host hypervisor — no L3 reach to the VM
+	// is required, which is what lets bootstrap paths work on
+	// isolated SDN subnets.
+	AgentRun(ctx context.Context, node string, vmid int, command []string, inputData string, pollInterval time.Duration) (*proxmox.AgentExecStatus, error)
 	MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error)
+	// SetVMNetwork rewrites net0's bridge on a cloned VM. Used to
+	// switch from the template's inherited `bridge=vmbr0` to the
+	// user's per-subnet SDN VNet at provision time. Proxmox
+	// auto-generates a fresh MAC when net0 is rewritten without
+	// macaddr=, which is what we want.
+	SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge string) error
 }
 
 // Config holds the deployment-specific knobs the Service needs at construction
@@ -137,6 +154,17 @@ type Config struct {
 	// will consume on average — used by the soft-score CPU projection.
 	// Default 0.5. Range typically [0.25, 1.0].
 	CPULoadFactor float64
+
+	// CIDataStorage names the Proxmox storage Nimbus uploads per-VM
+	// cloud-init ISOs to. We attach the ISO at ide2,media=cdrom on
+	// every clone — cloud-init's NoCloud datasource finds it via the
+	// `cidata` label and runs our user-data (including the qga
+	// install). The storage must accept `iso` content (every default
+	// PVE storage does). Empty string falls back to attaching no
+	// ISO; clones get only Proxmox's auto cloud-init drive (which
+	// doesn't install qga, so WaitForIP times out — set this in
+	// production).
+	CIDataStorage string
 }
 
 // Service runs the orchestrated provision flow.
@@ -182,6 +210,27 @@ type Service struct {
 	// constant MemberMaxVMs — preserves the path tests use without
 	// booting auth.
 	quota QuotaResolver
+
+	// subnetResolver resolves the user's SDN subnet at provision time.
+	// nil = SDN is disabled cluster-wide; provision falls through to
+	// the legacy global vmbr0 pool path. *vnetmgr.Service satisfies it.
+	subnetResolver SubnetResolver
+}
+
+// SubnetResolver is the small interface vnetmgr.Service satisfies for
+// the provision flow. Resolves a user's chosen subnet (existing /
+// inline-create / default) into a UserSubnet row whose VNet, Subnet,
+// Gateway are used to build cloud-init + the post-clone bridge override.
+// Returning (nil, nil) means SDN is disabled — caller uses the legacy
+// global vmbr0 pool.
+type SubnetResolver interface {
+	ResolveForProvision(ctx context.Context, ownerID uint, subnetID *uint, subnetName string) (*db.UserSubnet, error)
+}
+
+// SetSubnetResolver wires the resolver onto the Service. Idempotent;
+// pass nil to disable per-subnet provision (every VM lands on vmbr0).
+func (s *Service) SetSubnetResolver(r SubnetResolver) {
+	s.subnetResolver = r
 }
 
 // SetQuotaResolver wires a QuotaResolver onto the Service so the
@@ -312,10 +361,12 @@ func (s *Service) gpuBootstrapConfig() GPUBootstrapConfig {
 
 // Provision executes the 9-step flow from design doc §5.2.
 //
-// On any failure after the IP is reserved, we release the IP back to the pool
-// before returning. The Proxmox-side artifact (a half-cloned VM) is *not*
-// cleaned up automatically in Phase 1 — that's a follow-up. We do persist a
-// VM row with status=failed for visibility.
+// On any failure after the IP is reserved, we release the IP back to
+// the pool before returning. Once the clone task settles the VM exists
+// in Proxmox; any later failure also runs a deferred best-effort
+// stop+destroy so we don't leave a hung shell on the cluster.
+// Soft-success (WaitForIP deadline) commits the VM with a warning —
+// the credentials are valid, just unreachable from Nimbus's vantage.
 //
 // progress is optional; when non-nil it receives a ProgressEvent each time a
 // user-visible phase boundary closes. The handler uses it to drive the
@@ -374,26 +425,48 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	keyName := sshKey.Name
 	sshPubKey := sshKey.PublicKey
 
-	// Public-SSH gate: the Gopher bootstrap step needs a private half to SSH
-	// into the VM after first boot, so reject the request now rather than
-	// register a Gopher machine and leave it stranded in `pending` with no
-	// way for the user to finish it. sshPrivateKey is non-empty when
-	// resolveSSHKey just generated the keypair (always succeeds); otherwise
-	// the vault row must carry a private half.
+	// Step 0: resolve network attachment.
 	//
-	// Skipped when tunnels integration is disabled cluster-wide (s.tunnels
-	// == nil) — in that mode req.PublicTunnel is already a silent no-op
-	// (machine is never registered), so there's nothing to strand and no
-	// reason to reject an otherwise-valid request.
-	if req.PublicTunnel && s.tunnels != nil && sshPrivateKey == "" && !sshKey.HasPrivateKey() {
-		return nil, &internalerrors.ValidationError{
-			Field:   "ssh",
-			Message: "public SSH requires the private half of the SSH key — pick a key that has it vaulted, generate a new one, or paste a private key.",
+	// Bridge override (admin-only escape hatch): when req.Bridge is
+	// set, the VM lands on that bridge directly with the global IP
+	// pool, bypassing per-user SDN entirely. Used by admins for
+	// management VMs that need cluster-LAN reachability. Non-admins
+	// trying this get a 403 — isolation is enforced.
+	//
+	// Otherwise: resolve the per-user SDN subnet (when SDN is enabled
+	// and the resolver is wired). Returns nil for the legacy vmbr0
+	// path. Lazy-creates a "default" subnet on first provision when
+	// neither SubnetID nor SubnetName is specified — same UX as SSH
+	// keys, where a fresh user never gets blocked at the gate.
+	var subnet *db.UserSubnet
+	bridgeOverride := ""
+	switch {
+	case req.Bridge != "":
+		if !req.RequesterIsAdmin {
+			return nil, &internalerrors.ValidationError{
+				Field:   "bridge",
+				Message: "only admins can attach a VM directly to a cluster bridge — use a subnet instead",
+			}
+		}
+		bridgeOverride = req.Bridge
+		// Admin override: skip subnet resolution. Falls through to
+		// the legacy global pool + cloud-init gateway path.
+	case s.subnetResolver != nil && req.OwnerID != nil:
+		subnet, err = s.subnetResolver.ResolveForProvision(ctx, *req.OwnerID, req.SubnetID, req.SubnetName)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	// Step 1: reserve IP. defer release on any later failure.
-	ip, err := s.pool.Reserve(ctx, req.Hostname)
+	// Step 1: reserve IP. SDN path uses the per-subnet pool (scoped
+	// to one user-subnet's CIDR); legacy path uses the global pool.
+	// defer release on any later failure — same shape both paths.
+	var ip string
+	if subnet != nil {
+		ip, err = s.pool.ReserveInSubnet(ctx, subnet.VNet, req.Hostname)
+	} else {
+		ip, err = s.pool.Reserve(ctx, req.Hostname)
+	}
 	if err != nil {
 		if errors.Is(err, ippool.ErrPoolExhausted) {
 			return nil, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
@@ -403,7 +476,11 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	released := false
 	defer func() {
 		if !released {
-			_ = s.pool.Release(context.Background(), ip)
+			if subnet != nil {
+				_ = s.pool.ReleaseInSubnet(context.Background(), subnet.VNet, ip)
+			} else {
+				_ = s.pool.Release(context.Background(), ip)
+			}
 		}
 	}()
 
@@ -412,9 +489,16 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// each picked the same lowest-free IP from their independent SQLite caches).
 	// On race-loss, releases the local reservation and tries the next free IP,
 	// up to maxVerifyAttempts.
-	ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
-	if err != nil {
-		return nil, err
+	//
+	// Skipped for SDN VMs — per-subnet pools are scoped per user and
+	// drawn from a non-overlapping carve of the supernet, so the
+	// cross-Nimbus-instance race verifyAndRetryReserve guards against
+	// can't fire there.
+	if subnet == nil {
+		ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 1c: register a Gopher machine BEFORE the clone. Provision-time
@@ -489,12 +573,84 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	report(StepCloneTpl, "Cloned golden template")
 
-	// Step 4: cloud-init.
+	// Defer destroy on any later failure. Once the clone task settles
+	// the VM exists in Proxmox; bailing out at any subsequent step
+	// (cloud-init, disk resize, start, etc.) would otherwise leave a
+	// half-configured ghost VM that operators have to clean up by hand.
+	// Mirrors the machineToCleanup pattern above.
+	cleanupVMID := newVMID
+	defer func() {
+		if cleanupVMID == 0 {
+			return
+		}
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if upid, err := s.px.StopVM(cleanCtx, target, cleanupVMID); err == nil {
+			_ = s.px.WaitForTask(cleanCtx, target, upid, s.cfg.PollInterval)
+		}
+		if upid, err := s.px.DestroyVM(cleanCtx, target, cleanupVMID); err != nil {
+			if !isAlreadyGone(err) {
+				log.Printf("provision cleanup: destroy vmid=%d on %s failed: %v", cleanupVMID, target, err)
+			}
+		} else {
+			_ = s.px.WaitForTask(cleanCtx, target, upid, s.cfg.PollInterval)
+		}
+	}()
+
+	// Bridge / VNet override: clones inherit the template's
+	// `net0=virtio,bridge=vmbr0`. Switch to the user's subnet VNet
+	// (or the admin's chosen bridge) before configuring cloud-init.
+	// vmbr0 is what the template already has, so we only call
+	// SetVMNetwork when the target bridge actually differs. Proxmox
+	// auto-generates a fresh MAC when net0 is rewritten without a
+	// macaddr= component, so two cloned VMs never share a MAC across
+	// isolated VLANs (no L2 collision, but surprising during debug).
+	switch {
+	case subnet != nil:
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
+		}
+	case bridgeOverride != "" && bridgeOverride != "vmbr0":
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", bridgeOverride); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", bridgeOverride, err)
+		}
+	}
+
+	// Step 4: cloud-init. Per-subnet path uses the subnet's gateway +
+	// CIDR prefix; legacy path uses the cluster-wide values from
+	// NetworkSettings.
+	gatewayIP, prefixLen := s.GatewayIP(), s.PrefixLen()
+	if subnet != nil {
+		gatewayIP = subnet.Gateway
+		prefixLen = vnetmgr.PrefixLenOf(subnet)
+	}
 	username := proxmox.TemplateUsername(req.OSTemplate)
+
+	// Per-VM cloud-init ISO. Built in Go, uploaded as content=iso,
+	// attached at ide2 as a CD-ROM. cloud-init's NoCloud datasource
+	// finds it on /dev/sr0 (label `cidata`) and processes the
+	// user-data — including the qemu-guest-agent install that
+	// makes WaitForIP's agent path actually work.
+	//
+	// Replaces the entire Proxmox-auto-cloud-init flow. The
+	// SetCloudInit call below populates the same fields decoratively
+	// for visibility in PVE's Cloud-Init tab; the actual delivery is
+	// our ISO. SetVMDescription warns admins not to edit the tab.
+	cidata := s.installCIDataISO(ctx, target, newVMID, CIDataInput{
+		Hostname:        req.Hostname,
+		Username:        username,
+		SSHPublicKey:    sshPubKey,
+		ConsolePassword: generateConsolePassword(),
+		IP:              ip,
+		PrefixLen:       prefixLen,
+		Gateway:         gatewayIP,
+		Nameservers:     splitNameservers(s.cfg.Nameserver),
+	})
+
 	cloudInit := proxmox.CloudInitConfig{
 		CIUser:       username,
 		SSHKeys:      sshPubKey,
-		IPConfig0:    fmt.Sprintf("ip=%s/%d,gw=%s", ip, s.PrefixLen(), s.GatewayIP()),
+		IPConfig0:    fmt.Sprintf("ip=%s/%d,gw=%s", ip, prefixLen, gatewayIP),
 		Nameserver:   s.cfg.Nameserver,
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
@@ -514,7 +670,11 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	if err := s.px.SetVMTags(ctx, target, newVMID, proxmox.EncodeNimbusTags()); err != nil {
 		log.Printf("set tags vmid=%d: %v (continuing)", newVMID, err)
 	}
-	if err := s.px.SetVMDescription(ctx, target, newVMID, proxmox.EncodeNimbusDescription(req.Tier, req.OSTemplate)); err != nil {
+	desc := proxmox.EncodeNimbusDescription(req.Tier, req.OSTemplate)
+	if cidata.Attached {
+		desc = pveCloudInitTabWarning + "\n\n" + desc
+	}
+	if err := s.px.SetVMDescription(ctx, target, newVMID, desc); err != nil {
 		log.Printf("set description vmid=%d: %v (continuing)", newVMID, err)
 	}
 
@@ -554,46 +714,60 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	//     allocation, populate Result.Warning so the user knows reachability
 	//     wasn't confirmed. They can SSH from a machine on the cluster LAN.
 	//   - any other error (Proxmox API failure, agent crash) → hard failure:
-	//     release the IP and return 500.
+	//     return error; the deferred cleanup destroys the half-built
+	//     Proxmox VM so we don't leave a hung shell behind.
 	var warning string
 	waitCtx, cancel := context.WithTimeout(ctx, s.cfg.IPReadyTimeout)
 	defer cancel()
-	if err := WaitForIP(waitCtx, s.px, target, newVMID, ip, s.cfg.PollInterval); err != nil {
+	diag, err := WaitForIP(waitCtx, s.px, target, newVMID, ip, s.cfg.PollInterval)
+	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
+			// Post-mortem: fetch the VM config under a fresh ctx so we
+			// can verify what's actually configured. Most informative
+			// when the agent never responded — surfaces "is `agent`
+			// even enabled on this clone?" without operator grep.
+			cfgCtx, cfgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if cfg, cerr := s.px.GetVMConfig(cfgCtx, target, newVMID); cerr == nil {
+				if v, ok := cfg["agent"].(string); ok {
+					diag.AgentConfig = v
+				}
+			}
+			cfgCancel()
+			// Server-side log the full diagnostic so an operator grep
+			// can see exactly what we observed. User-facing warning
+			// gets the one-line summary.
+			log.Printf("WaitForIP timeout vmid=%d node=%s expected=%s elapsed=%s agent_seen=%t agent_ips=%v first_err=%q agent_config=%q tcp_reachable=%t",
+				newVMID, target, ip, diag.Elapsed, diag.AgentSeen, diag.AgentIPs, diag.FirstAgentErr, diag.AgentConfig, diag.TCPReachable)
 			warning = fmt.Sprintf(
-				"VM was created and configured, but Nimbus could not confirm reachability on %s within %s. "+
-					"This usually means Nimbus is running outside the cluster's LAN. "+
-					"The credentials are valid — try SSHing from a machine on the cluster network.",
-				ip, s.cfg.IPReadyTimeout)
+				"VM is up but the readiness check timed out after %s: %s. "+
+					"Credentials are valid — re-check from the VM's page in a minute or two.",
+				s.cfg.IPReadyTimeout, diag.Summary())
 			// fall through to the success path
 		} else {
-			s.persistFailedVM(ctx, req, ip, target, newVMID, err)
 			return nil, fmt.Errorf("wait for ready: %w", err)
 		}
 	}
 	report(StepWaitAgent, "Guest agent ready")
 
-	// Step 7b: Gopher tunnel bootstrap. If we successfully registered a tunnel
-	// AND WaitForIP confirmed reachability (no warning), SSH in and run the
-	// one-line bootstrap, then poll Gopher for active. Skipped on soft-success
-	// because Nimbus can't reach the VM to bootstrap from there. All failures
-	// are recorded as tunnel_error — the VM provision never fails for tunnel
-	// reasons (design §10).
+	// Step 7b: Gopher tunnel bootstrap. We run it via qemu-guest-agent,
+	// not SSH — the data path is virtio-serial through the hypervisor,
+	// so isolation-subnet VMs bootstrap identically to vmbr0 ones. The
+	// "warning" branch (WaitForIP soft-success) used to skip bootstrap
+	// because we couldn't SSH; agent/exec doesn't care about L3, so
+	// the only thing the warning gates now is whether the agent was
+	// healthy enough for WaitForIP to confirm — which it wasn't. Stay
+	// conservative: skip with a recovery note when warning is set.
+	// All failures are recorded as tunnel_error — VM provision never
+	// fails for tunnel reasons (design §10).
 	tunnelURL := ""
 	if machineObj != nil {
 		switch {
 		case warning != "":
-			tunnelError = "VM unreachable from Nimbus, can't bootstrap tunnel — " +
-				"machine registered but inactive. Run the bootstrap manually:" +
-				"\n  curl " + machineObj.BootstrapURL + " | sh"
-			// Keep the registered machine — user can finish bootstrap manually.
+			tunnelError = "Guest agent did not confirm readiness — bootstrap skipped." +
+				" Re-run manually once the VM is up:\n  curl " + machineObj.BootstrapURL + " | sh"
 		default:
-			privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
-			if perr != nil {
-				log.Printf("tunnel: cannot bootstrap (no private key available): %v", perr)
-				tunnelError = "tunnel bootstrap skipped: " + perr.Error()
-			} else if berr := runTunnelBootstrap(ctx, ip, username, privKey, machineObj.BootstrapURL, req.Hostname); berr != nil {
-				log.Printf("tunnel: bootstrap ssh failed: %v", berr)
+			if berr := runTunnelBootstrap(ctx, s.px, target, newVMID, machineObj.BootstrapURL, req.Hostname); berr != nil {
+				log.Printf("tunnel: bootstrap failed: %v", berr)
 				tunnelError = "tunnel bootstrap failed: " + berr.Error()
 			} else {
 				active, perr := s.waitMachineActive(ctx, machineObj.ID)
@@ -612,22 +786,29 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 
 	// Step 7c: GPU env bootstrap. Opt-in — only fires when the caller asked
 	// for it AND the GPU plane is configured cluster-wide. Failures are
-	// logged, never block provisioning.
+	// logged, never block provisioning. Same agent/exec data path as the
+	// tunnel bootstrap.
 	gpuCfg := s.gpuBootstrapConfig()
 	if req.EnableGPU && gpuCfg.BaseURL != "" && warning == "" {
-		privKey, perr := s.privateKeyForBootstrap(ctx, sshKey, sshPrivateKey)
-		if perr != nil {
-			log.Printf("gpu bootstrap: cannot bootstrap (no private key available): %v", perr)
-		} else if berr := runGPUBootstrap(ctx, ip, username, privKey, gpuCfg); berr != nil {
+		if berr := runGPUBootstrap(ctx, s.px, target, newVMID, username, gpuCfg); berr != nil {
 			log.Printf("gpu bootstrap vmid=%d: %v (continuing)", newVMID, berr)
 		}
 	}
 
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
-	if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
-		return nil, fmt.Errorf("mark allocated: %w", err)
+	// SDN path uses the per-subnet pool variant; legacy path uses the
+	// global one. Either way, mark-allocated semantics are identical.
+	if subnet != nil {
+		if err := s.pool.MarkAllocatedInSubnet(ctx, subnet.VNet, ip, newVMID); err != nil {
+			return nil, fmt.Errorf("mark allocated: %w", err)
+		}
+	} else {
+		if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
+			return nil, fmt.Errorf("mark allocated: %w", err)
+		}
 	}
 	released = true // success path — do NOT run the deferred release
+	cleanupVMID = 0 // success path — keep the Proxmox VM
 
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
@@ -647,6 +828,10 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		SSHPubKey:    sshPubKey,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
 	}
+	if subnet != nil {
+		sid := subnet.ID
+		vm.SubnetID = &sid
+	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
 	}
@@ -659,7 +844,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	machineToCleanup = "" // success — keep the machine
 
-	return &Result{
+	res := &Result{
 		ID:            vm.ID,
 		VMID:          newVMID,
 		Hostname:      req.Hostname,
@@ -673,7 +858,14 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		Warning:       warning,
 		TunnelURL:     tunnelURL,
 		TunnelError:   tunnelError,
-	}, nil
+	}
+	if subnet != nil {
+		res.SubnetName = subnet.Name
+		res.SubnetCIDR = subnet.Subnet
+	}
+	res.ConsolePassword = cidata.ConsolePassword
+	res.CloudInitError = cidata.Error
+	return res, nil
 }
 
 // BackfillNimbusMetadata walks every persisted VM row and ensures the Proxmox
@@ -685,6 +877,19 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 // Idempotent: a VM whose tags and description are already correct is skipped
 // without any API writes. Returns the number of VMs whose Proxmox config was
 // touched. Per-VM failures are logged but do not abort the walk.
+// CountVMsOnSubnet reports how many active VMs reference a given user
+// subnet by ID. Powers vnetmgr's "refuse-delete-while-VMs-attached"
+// gate. Soft-deleted VMs are excluded by gorm's default scope.
+func (s *Service) CountVMsOnSubnet(ctx context.Context, subnetID uint) (int, error) {
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).
+		Where("subnet_id = ?", subnetID).
+		Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("count vms on subnet %d: %w", subnetID, err)
+	}
+	return int(n), nil
+}
+
 func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
 	var vms []db.VM
 	if err := s.db.WithContext(ctx).Find(&vms).Error; err != nil {
@@ -1145,15 +1350,39 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	}
 
 	if vm.IP != "" {
-		if err := s.pool.Release(ctx, vm.IP); err != nil {
+		if err := s.releaseVMIP(ctx, vm); err != nil {
 			log.Printf("delete vm %d: release ip %s: %v", vm.VMID, vm.IP, err)
 		}
 	}
+
+	// Clean up the per-VM cloud-init ISO. Best-effort — leftover
+	// ISOs are harmless (~few KB each), but cleanup keeps the
+	// storage list tidy in the PVE UI.
+	s.deleteCIDataISO(ctx, vm.Node, vm.VMID)
 
 	if err := s.db.WithContext(ctx).Unscoped().Delete(vm).Error; err != nil {
 		return fmt.Errorf("delete vm row %d: %w", vm.ID, err)
 	}
 	return nil
+}
+
+// releaseVMIP returns the VM's IP to the right pool — per-subnet for
+// SDN VMs (vm.SubnetID set), global for legacy vmbr0 VMs. Looking up
+// the subnet by id gives us the VNet name needed by ReleaseInSubnet.
+// Soft-failure (logged, not propagated) on a missing subnet — the row
+// might have been deleted concurrently and the IP still needs freeing.
+func (s *Service) releaseVMIP(ctx context.Context, vm *db.VM) error {
+	if vm.SubnetID != nil {
+		var sub db.UserSubnet
+		if err := s.db.WithContext(ctx).First(&sub, *vm.SubnetID).Error; err == nil {
+			return s.pool.ReleaseInSubnet(ctx, sub.VNet, vm.IP)
+		}
+		// Subnet row gone — fall through to global release as a
+		// last-ditch attempt. Doesn't free the per-subnet row but
+		// keeps "delete is idempotent" the contract.
+		log.Printf("delete vm %d: subnet %d missing during release; falling back to global pool", vm.VMID, *vm.SubnetID)
+	}
+	return s.pool.Release(ctx, vm.IP)
 }
 
 // isAlreadyGone reports whether a Proxmox error means the VM no longer exists
@@ -1575,20 +1804,6 @@ func formatDecisions(all []nodescore.Decision) string {
 		parts[i] = fmt.Sprintf("%s=0(%s)", d.Node.Name, strings.Join(reasons, ","))
 	}
 	return strings.Join(parts, " ")
-}
-
-func (s *Service) persistFailedVM(ctx context.Context, req Request, ip, node string, vmid int, cause error) {
-	_ = s.db.WithContext(ctx).Create(&db.VM{
-		VMID:       vmid,
-		Hostname:   req.Hostname,
-		IP:         ip,
-		Node:       node,
-		Tier:       req.Tier,
-		OSTemplate: req.OSTemplate,
-		Status:     "failed",
-		OwnerID:    req.OwnerID,
-		ErrorMsg:   cause.Error(),
-	}).Error
 }
 
 // remapKeyFields rewrites a ValidationError's Field from the keys-service

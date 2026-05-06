@@ -1403,9 +1403,33 @@ func (s *AuthService) SaveGPUSettings(next db.GPUSettings) error {
 // GetNetworkSettings returns the stored IP pool / gateway configuration.
 // Creates an empty row on first call. Empty strings on the row mean the
 // caller should fall back to env defaults (handled by main.go's seed step).
+//
+// Fresh-install defaults via Attrs (only applied on row creation):
+//   - SDNEnabled defaults to *false*. Per-user isolation needs a working
+//     reachability story (Gopher tunnel, browser console, or operator
+//     SSH route) before VMs on private subnets are usable; many homelab
+//     Proxmox installs don't have `libpve-network-perl` either. Make
+//     admins opt in explicitly rather than discovering broken VM access
+//     after the first provision.
+//   - Zone/supernet/subnet-size pre-populated so an admin who flips the
+//     toggle on doesn't have to type defaults — the values just sit
+//     dormant until SDNEnabled goes true.
+//
+// If `libpve-network-perl` is missing on the cluster, the SDN-status
+// chip surfaces the install hint and the first subnet provision returns
+// 503 with the same message — honest about the broken state rather than
+// silently falling back to vmbr0.
 func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
 	var settings db.NetworkSettings
-	err := s.db.FirstOrCreate(&settings, db.NetworkSettings{ID: 1}).Error
+	err := s.db.
+		Where(db.NetworkSettings{ID: 1}).
+		Attrs(db.NetworkSettings{
+			SDNZoneName:       "nimbus",
+			SDNZoneType:       "simple",
+			SDNSubnetSupernet: "10.42.0.0/16",
+			SDNSubnetSize:     24,
+		}).
+		FirstOrCreate(&settings).Error
 	return &settings, err
 }
 
@@ -1414,6 +1438,10 @@ func (s *AuthService) GetNetworkSettings() (*db.NetworkSettings, error) {
 // rotate one knob without re-sending the others. No validation here — the
 // handler checks that strings parse as valid IPv4 addresses before invoking
 // this and that PrefixLen is in the legal /1..32 range.
+//
+// SDN columns are not touched here — SaveSDNSettings is the dedicated path
+// for those, so an admin updating the IP pool can't accidentally clobber
+// the SDN config (or vice versa).
 func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 	existing, err := s.GetNetworkSettings()
 	if err != nil {
@@ -1436,6 +1464,42 @@ func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 		"ip_pool_end":   next.IPPoolEnd,
 		"gateway_ip":    next.GatewayIP,
 		"prefix_len":    next.PrefixLen,
+	}).Error
+}
+
+// SaveSDNSettings persists the SDN-specific columns of NetworkSettings.
+// Separate from SaveNetworkSettings so the IP-pool admin path and the
+// SDN admin path can each save their own slice without round-tripping
+// the other's values. SDNZoneName / SDNZoneType / SDNSubnetSupernet
+// preserve-existing on empty (so the toggle can flip without re-sending
+// the rest); SDNEnabled is always written from the request because a
+// "set this to false" save must persist.
+func (s *AuthService) SaveSDNSettings(next db.NetworkSettings) error {
+	existing, err := s.GetNetworkSettings()
+	if err != nil {
+		return err
+	}
+	if next.SDNZoneName == "" {
+		next.SDNZoneName = existing.SDNZoneName
+	}
+	if next.SDNZoneType == "" {
+		next.SDNZoneType = existing.SDNZoneType
+	}
+	if next.SDNSubnetSupernet == "" {
+		next.SDNSubnetSupernet = existing.SDNSubnetSupernet
+	}
+	if next.SDNSubnetSize == 0 {
+		next.SDNSubnetSize = existing.SDNSubnetSize
+	}
+	// SDNDNSServer empty-means-clear is intentional — admin can wipe
+	// the DNS by saving an empty string.
+	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"sdn_enabled":         next.SDNEnabled,
+		"sdn_zone_name":       next.SDNZoneName,
+		"sdn_zone_type":       next.SDNZoneType,
+		"sdn_subnet_supernet": next.SDNSubnetSupernet,
+		"sdn_subnet_size":     next.SDNSubnetSize,
+		"sdn_dns_server":      next.SDNDNSServer,
 	}).Error
 }
 

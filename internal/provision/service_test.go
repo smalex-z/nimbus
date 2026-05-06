@@ -59,6 +59,12 @@ type fakePVE struct {
 	destroyVM         func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 	migrateVM         func(context.Context, string, int, string, bool) (string, error)
+	setVMNetwork      func(context.Context, string, int, string, string) error
+	agentRun          func(context.Context, string, int, []string, string, time.Duration) (*proxmox.AgentExecStatus, error)
+	uploadFile        func(context.Context, string, string, string, string, []byte) error
+	deleteVolume      func(context.Context, string, string) error
+	attachCDROM       func(context.Context, string, int, string, string) error
+	detachDrive       func(context.Context, string, int, string) error
 
 	cloneCalls     atomic.Int32
 	cloudInitCalls atomic.Int32
@@ -149,6 +155,42 @@ func (f *fakePVE) MigrateVM(ctx context.Context, src string, vmid int, target st
 		return "task:migrate", nil
 	}
 	return f.migrateVM(ctx, src, vmid, target, online)
+}
+func (f *fakePVE) SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge string) error {
+	if f.setVMNetwork == nil {
+		return nil
+	}
+	return f.setVMNetwork(ctx, node, vmid, dev, bridge)
+}
+func (f *fakePVE) AgentRun(ctx context.Context, node string, vmid int, command []string, inputData string, pollInterval time.Duration) (*proxmox.AgentExecStatus, error) {
+	if f.agentRun == nil {
+		return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0}, nil
+	}
+	return f.agentRun(ctx, node, vmid, command, inputData, pollInterval)
+}
+func (f *fakePVE) UploadFile(ctx context.Context, node, storage, contentType, filename string, content []byte) error {
+	if f.uploadFile == nil {
+		return nil
+	}
+	return f.uploadFile(ctx, node, storage, contentType, filename, content)
+}
+func (f *fakePVE) DeleteStorageVolume(ctx context.Context, node, volid string) error {
+	if f.deleteVolume == nil {
+		return nil
+	}
+	return f.deleteVolume(ctx, node, volid)
+}
+func (f *fakePVE) AttachCDROM(ctx context.Context, node string, vmid int, slot, volid string) error {
+	if f.attachCDROM == nil {
+		return nil
+	}
+	return f.attachCDROM(ctx, node, vmid, slot, volid)
+}
+func (f *fakePVE) DetachDrive(ctx context.Context, node string, vmid int, slot string) error {
+	if f.detachDrive == nil {
+		return nil
+	}
+	return f.detachDrive(ctx, node, vmid, slot)
 }
 
 // happyFakePVE returns a fakePVE wired so that Provision() succeeds with
@@ -336,8 +378,8 @@ func TestProvision_WaitForIPTimeout_SoftSuccess(t *testing.T) {
 	if res.Warning == "" {
 		t.Errorf("expected non-empty Warning on soft success")
 	}
-	if !strings.Contains(res.Warning, "could not confirm reachability") {
-		t.Errorf("warning text doesn't explain reachability issue: %q", res.Warning)
+	if !strings.Contains(res.Warning, "qemu-guest-agent") {
+		t.Errorf("warning text doesn't explain agent timeout: %q", res.Warning)
 	}
 	if res.VMID != 200 {
 		t.Errorf("VMID = %d, want 200", res.VMID)
@@ -609,39 +651,6 @@ func TestProvision_BYO_PubKeyOnly_NoVaultEntry(t *testing.T) {
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("expected NotFound from GetPrivateKey, got %v", err)
-	}
-}
-
-// PublicTunnel with a pubkey-only key must be rejected upfront — without
-// the private half Nimbus can't SSH into the VM to run the Gopher bootstrap
-// script, and registering the machine anyway leaves it stranded in
-// `pending` with no UI path to finish it. Validated only when tunnels
-// integration is wired (see TestProvision_TunnelDisabled_IgnoresFlag for
-// the no-Gopher case).
-func TestProvision_PublicTunnel_RequiresPrivateKey(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t, happyFakePVE(t))
-	// Only a tunnels client makes the gate fire; without one the field is a
-	// silent no-op.
-	tc, _ := newGopherStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		t.Errorf("Gopher should not have been called when validation rejects")
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-	svc.SetTunnelClient(tc)
-
-	_, err := svc.Provision(context.Background(), provision.Request{
-		Hostname:     "no-priv",
-		Tier:         "small",
-		OSTemplate:   "ubuntu-24.04",
-		SSHPubKey:    realPubKey(t),
-		PublicTunnel: true,
-	}, nil)
-	var ve *internalerrors.ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("expected ValidationError, got %v", err)
-	}
-	if ve.Field != "ssh" {
-		t.Errorf("ValidationError.Field = %q, want ssh", ve.Field)
 	}
 }
 

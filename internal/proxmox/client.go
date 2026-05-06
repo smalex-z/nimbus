@@ -1090,23 +1090,6 @@ func (c *Client) CreateVMWithImport(
 	return taskID, nil
 }
 
-// SetCloudInitDrive attaches a cloud-init drive to an existing VM. This is
-// required before the VM can accept cloud-init config (ciuser, sshkeys, etc.)
-// at clone time — without the drive, cloud-init has nowhere to read its config
-// and the SetCloudInit values are silently ignored at boot.
-//
-// `ide2=<storage>:cloudinit` is the canonical attachment form, matching what
-// `qm set <vmid> --ide2 <storage>:cloudinit` produces.
-func (c *Client) SetCloudInitDrive(
-	ctx context.Context,
-	node string, vmid int, storage string,
-) error {
-	params := url.Values{}
-	params.Set("ide2", fmt.Sprintf("%s:cloudinit", storage))
-	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
-	return c.do(ctx, http.MethodPost, path, params, nil)
-}
-
 // ConvertToTemplate marks a VM as a Proxmox template. Templates are immutable
 // — they cannot be booted, only cloned. This is the final step of bootstrap.
 func (c *Client) ConvertToTemplate(ctx context.Context, node string, vmid int) error {
