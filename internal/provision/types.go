@@ -43,6 +43,14 @@ type Request struct {
 	// queue, so we don't bake `OPENAI_BASE_URL` and the `gx10` CLI into
 	// every guest. Ignored when the GPU plane isn't configured cluster-wide.
 	EnableGPU bool
+
+	// HAEnabled asks the provision flow to register the new VM with
+	// Proxmox's HA Manager once it's up. Failure here is *soft* — the
+	// VM is the load-bearing artifact; HA registration is a sidecar.
+	// On reject (local storage, sub-quorum cluster, ha-manager error)
+	// the VM still ships and db.VM.HAError records the reason so the
+	// SPA can surface "VM up; HA registration failed."
+	HAEnabled bool
 }
 
 // Result is the value returned to the user after a successful provision.

@@ -304,6 +304,17 @@ export async function deleteVM(id: number): Promise<void> {
   await api.delete(`/vms/${id}`)
 }
 
+// setVMHA toggles HA enrollment for one of the caller's VMs. Server-side
+// gates (≥3 nodes for stable quorum, shared storage on the VM's disk
+// pool) re-validate when enabling; rejection returns a 400 with a
+// human-readable reason that surfaces as the wrapped Error's message.
+// Returns the updated VM row so callers can refresh their local copy
+// without an extra fetch.
+export async function setVMHA(id: number, enabled: boolean): Promise<VM> {
+  const { data } = await api.post<VM>(`/vms/${id}/ha`, { enabled })
+  return data
+}
+
 export async function adminDeleteVM(id: number): Promise<void> {
   await api.delete(`/cluster/vms/${id}`)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -72,6 +73,12 @@ type clusterVMView struct {
 	// tunnel. Set only for local-source VMs; surfaced so the admin SSH
 	// modal can render the public ssh command alongside the LAN one.
 	TunnelURL string `json:"tunnel_url,omitempty"`
+
+	// HAState is Proxmox's HA Manager view of this VM — typically
+	// "started" / "stopped" / "error" / "fence" / "disabled". Empty when
+	// the VM isn't enrolled with HA at all (the common case). Joined
+	// from a single /cluster/ha/resources walk per request.
+	HAState string `json:"ha_state,omitempty"`
 
 	// OS detail block — best-effort agent osinfo, surfaced to the frontend
 	// so it can render an icon, version label, and a hover popover with
@@ -167,6 +174,26 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 		byVMID[v.VMID] = v
 	}
 
+	// HA state for any VM the cluster's ha-manager is watching. One
+	// cluster-wide call; failures collapse to "no HA state available"
+	// rather than failing the whole list (HA is observability here,
+	// not load-bearing for the listing itself).
+	haByVMID := make(map[int]string)
+	if rows, hErr := h.px.ListHAResources(r.Context()); hErr == nil {
+		for _, ha := range rows {
+			if ha.Type != "vm" {
+				continue
+			}
+			// SID is "vm:<vmid>"; strip the prefix once.
+			rest := strings.TrimPrefix(ha.SID, "vm:")
+			vmid, perr := strconv.Atoi(rest)
+			if perr != nil {
+				continue
+			}
+			haByVMID[vmid] = ha.State
+		}
+	}
+
 	out := make([]clusterVMView, 0, len(details))
 	for _, d := range details {
 		view := clusterVMView{
@@ -176,6 +203,7 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 			Status:   d.Status,
 			IP:       d.IP,
 			IPSource: d.IPSource,
+			HAState:  haByVMID[d.VMID],
 		}
 		if d.OS != nil {
 			view.OSID = d.OS.ID

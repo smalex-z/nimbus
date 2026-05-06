@@ -173,6 +173,11 @@ type View struct {
 	DiskTotal     uint64 `json:"disk_total"`
 	DiskAllocated uint64 `json:"disk_allocated"`
 	DiskPoolName  string `json:"disk_pool_name,omitempty"`
+	// DiskPoolShared mirrors proxmox.ClusterStorage.Shared for the
+	// configured VM-disk pool. The Provision form's "Enable HA"
+	// checkbox uses this as a client-side hint (HA requires shared
+	// storage); the backend re-validates regardless.
+	DiskPoolShared bool `json:"disk_pool_shared"`
 	// DiskType is "nvme" | "ssd" | "hdd" | "" — strongest class
 	// observed via /disks/list during the background reconcile.
 	// Surfaces on the SPA card in place of the pool name so storage
@@ -268,31 +273,32 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 		status := statusByNode[n.Name]
 		disk := diskByNode[n.Name]
 		view := View{
-			Name:          n.Name,
-			Status:        n.Status,
-			LockState:     lockOrNone(row.LockState),
-			LockedAt:      row.LockedAt,
-			LockedBy:      row.LockedBy,
-			LockReason:    row.LockReason,
-			Tags:          splitTags(row.Tags),
-			AutoTags:      nodescore.DeriveAutoTags(autoTagInputFor(row)),
-			CPU:           n.CPU,
-			MaxCPU:        n.MaxCPU,
-			MemUsed:       n.Mem,
-			MemTotal:      n.MaxMem,
-			MemAllocated:  a.memAllocated,
-			SwapUsed:      status.Swap.Used,
-			SwapTotal:     status.Swap.Total,
-			DiskUsed:      disk.Used,
-			DiskTotal:     disk.Total,
-			DiskAllocated: a.diskAllocated,
-			DiskPoolName:  s.cfg.VMDiskStorage,
-			DiskType:      row.DiskType,
-			VMCount:       a.running,
-			VMCountTotal:  a.total,
-			IP:            nodeIP[n.Name],
-			LastSeenAt:    row.LastSeenAt,
-			IsSelfHost:    s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
+			Name:           n.Name,
+			Status:         n.Status,
+			LockState:      lockOrNone(row.LockState),
+			LockedAt:       row.LockedAt,
+			LockedBy:       row.LockedBy,
+			LockReason:     row.LockReason,
+			Tags:           splitTags(row.Tags),
+			AutoTags:       nodescore.DeriveAutoTags(autoTagInputFor(row)),
+			CPU:            n.CPU,
+			MaxCPU:         n.MaxCPU,
+			MemUsed:        n.Mem,
+			MemTotal:       n.MaxMem,
+			MemAllocated:   a.memAllocated,
+			SwapUsed:       status.Swap.Used,
+			SwapTotal:      status.Swap.Total,
+			DiskUsed:       disk.Used,
+			DiskTotal:      disk.Total,
+			DiskAllocated:  a.diskAllocated,
+			DiskPoolName:   s.cfg.VMDiskStorage,
+			DiskPoolShared: disk.Shared,
+			DiskType:       row.DiskType,
+			VMCount:        a.running,
+			VMCountTotal:   a.total,
+			IP:             nodeIP[n.Name],
+			LastSeenAt:     row.LastSeenAt,
+			IsSelfHost:     s.cfg.SelfHostName != "" && n.Name == s.cfg.SelfHostName,
 		}
 		if status.CPU != nil {
 			view.CPUModel = status.CPU.Model
@@ -306,9 +312,13 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 // diskCapacity is a stripped-down storage projection per node. Total +
 // Used in bytes for the configured VM-disk pool. Both zero when the
 // pool isn't visible on this node (different storage tier, mis-config).
+// Shared mirrors proxmox.ClusterStorage.Shared — used by the HA-toggle
+// gate (HA requires shared storage; refusing local-only at toggle time
+// avoids the operator only finding out at 3 AM during a real failover).
 type diskCapacity struct {
-	Used  uint64
-	Total uint64
+	Used   uint64
+	Total  uint64
+	Shared bool
 }
 
 // fanoutDisk returns name → diskCapacity for the configured VMDiskStorage
@@ -332,7 +342,7 @@ func (s *Service) fanoutDisk(ctx context.Context) map[string]diskCapacity {
 		if st.Storage != s.cfg.VMDiskStorage {
 			continue
 		}
-		out[st.Node] = diskCapacity{Used: st.Used, Total: st.Total}
+		out[st.Node] = diskCapacity{Used: st.Used, Total: st.Total, Shared: st.Shared == 1}
 	}
 	return out
 }

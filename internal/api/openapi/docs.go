@@ -6359,6 +6359,85 @@ const docTemplate = `{
                 }
             }
         },
+        "/vms/{id}/ha": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Enabling registers the VM with Proxmox's HA Manager\n(` + "`" + `POST /cluster/ha/resources` + "`" + `); disabling removes it.\nEnable-path runs cluster gates (≥3 nodes for stable\nquorum, shared storage on the VM's disk pool); a\nrejection returns 400 with the reason. Owner-only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vms"
+                ],
+                "summary": "Enable or disable HA enrollment on a VM",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "VM DB id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "{enabled: bool}",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.setHARequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/db.VM"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/vms/{id}/private-key": {
             "get": {
                 "security": [
@@ -6795,6 +6874,13 @@ const docTemplate = `{
                 "error_msg": {
                     "type": "string"
                 },
+                "ha_enabled": {
+                    "description": "HAEnabled tracks whether *Nimbus* registered this VM with Proxmox's\nHA Manager. Empty / false means either \"not enrolled\" or \"enrolled\noutside Nimbus\" — Proxmox HA state is the source of truth at runtime\n(surfaced via GET /cluster/ha/resources). HAError carries the most\nrecent registration failure, e.g. \"shared storage required\" or a\ntransient ha-manager rejection; cleared on a successful toggle.",
+                    "type": "boolean"
+                },
+                "ha_error": {
+                    "type": "string"
+                },
                 "hostname": {
                     "type": "string"
                 },
@@ -7069,6 +7155,10 @@ const docTemplate = `{
                 "created_at": {
                     "type": "string"
                 },
+                "ha_state": {
+                    "description": "HAState is Proxmox's HA Manager view of this VM — typically\n\"started\" / \"stopped\" / \"error\" / \"fence\" / \"disabled\". Empty when\nthe VM isn't enrolled with HA at all (the common case). Joined\nfrom a single /cluster/ha/resources walk per request.",
+                    "type": "string"
+                },
                 "hostname": {
                     "description": "local-only Nimbus hostname",
                     "type": "string"
@@ -7300,6 +7390,10 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "generate_key": {
+                    "type": "boolean"
+                },
+                "ha_enabled": {
+                    "description": "HAEnabled requests the provision flow register the new VM with\nProxmox's HA Manager once it boots. Failures are soft — the VM\nstill ships; db.VM.HAError surfaces the reason on the SPA.",
                     "type": "boolean"
                 },
                 "hostname": {
@@ -7968,6 +8062,14 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.setHARequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
         "handlers.setTagsRequest": {
             "type": "object",
             "properties": {
@@ -8458,6 +8560,10 @@ const docTemplate = `{
                 },
                 "disk_pool_name": {
                     "type": "string"
+                },
+                "disk_pool_shared": {
+                    "description": "DiskPoolShared mirrors proxmox.ClusterStorage.Shared for the\nconfigured VM-disk pool. The Provision form's \"Enable HA\"\ncheckbox uses this as a client-side hint (HA requires shared\nstorage); the backend re-validates regardless.",
+                    "type": "boolean"
                 },
                 "disk_total": {
                     "type": "integer"

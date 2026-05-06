@@ -363,6 +363,10 @@ func NewRouter(d Deps) http.Handler {
 					// waits on a Proxmox task — give it some room.
 					r.With(middleware.Timeout(2*time.Minute)).
 						Post("/{id}/{op:start|shutdown|stop|reboot}", vms.Lifecycle)
+					// HA toggle — register/unregister the VM with
+					// Proxmox's HA Manager. Server-side gates re-validate
+					// quorum + shared-storage prerequisites.
+					r.Post("/{id}/ha", vms.SetHA)
 					// Per-port tunnels on top of the VM's Gopher machine —
 					// the post-provision Networks surface.
 					r.Get("/{id}/tunnels", vms.ListTunnels)

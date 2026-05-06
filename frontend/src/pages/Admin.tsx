@@ -573,6 +573,31 @@ const sourceTooltip: Record<VMSource, string> = {
     'Not provisioned by any nimbus instance — a regular Proxmox VM. You can power-cycle it like any other, but nimbus refuses to remove it as a separation-of-powers guard.',
 }
 
+// HAStateChip surfaces Proxmox HA Manager's view of a VM. Empty state
+// renders a muted dash so the column doesn't look broken on the
+// (common) VMs that aren't HA-enrolled at all.
+//
+// State vocabulary follows ha-manager's own status: started / stopped /
+// disabled / error / fence / migrate / relocate / freeze. We map
+// "started" → green (healthy), "error"/"fence" → red, anything else
+// (transitional) → muted amber. Tooltip carries the raw state string
+// for operators who need the exact word.
+function HAStateChip({ state }: { state?: string }) {
+  if (!state) return <span className="text-ink-3">—</span>
+  let cls = 'text-ink-mute'
+  if (state === 'started') cls = 'text-good'
+  else if (state === 'error' || state === 'fence') cls = 'text-bad'
+  else cls = 'text-warn'
+  return (
+    <span
+      className={`font-mono text-[11px] uppercase tracking-wider ${cls}`}
+      title={`Proxmox HA Manager state: ${state}`}
+    >
+      {state}
+    </span>
+  )
+}
+
 function SourceLabel({ source }: { source: VMSource }) {
   // Three states: local (this Nimbus), foreign (another Nimbus on the same
   // cluster), external (not Nimbus-provisioned). Foreign and local share the
@@ -769,7 +794,7 @@ function VMTable({
                     </span>
                   </button>
                 </th>
-                {['Node', 'IP', 'Tier', 'OS', 'Status', 'Source', 'Actions'].map((col) => (
+                {['Node', 'IP', 'Tier', 'OS', 'Status', 'HA', 'Source', 'Actions'].map((col) => (
                   <th key={col} className={headerCellClass}>{col}</th>
                 ))}
               </tr>
@@ -822,6 +847,9 @@ function VMTable({
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <StatusBadge status={vm.status} />
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <HAStateChip state={vm.ha_state} />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <SourceLabel source={vm.source} />

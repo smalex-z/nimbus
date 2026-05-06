@@ -44,6 +44,10 @@ type createVMRequest struct {
 	Subdomain    string `json:"subdomain,omitempty"`
 	TunnelPort   int    `json:"tunnel_port,omitempty"`
 	EnableGPU    bool   `json:"enable_gpu,omitempty"`
+	// HAEnabled requests the provision flow register the new VM with
+	// Proxmox's HA Manager once it boots. Failures are soft — the VM
+	// still ships; db.VM.HAError surfaces the reason on the SPA.
+	HAEnabled bool `json:"ha_enabled,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -145,6 +149,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Subdomain:        subdomain,
 		TunnelPort:       req.TunnelPort,
 		EnableGPU:        req.EnableGPU,
+		HAEnabled:        req.HAEnabled,
 		OwnerID:          ownerID,
 		RequesterIsAdmin: requesterIsAdmin,
 	}, reporter)
@@ -285,6 +290,63 @@ func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// setHARequest is the body of POST /api/vms/{id}/ha. enabled=true
+// registers the VM with Proxmox's HA Manager (rejected when the
+// cluster has <3 nodes or the VM lives on local storage); enabled=false
+// removes it (always succeeds — DELETE is idempotent).
+type setHARequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetHA handles POST /api/vms/{id}/ha — toggle HA enrollment for one of
+// the caller's VMs. Owner-gated (returns 404 for non-owners so existence
+// isn't disclosed). When enabling, server-side gates re-validate the
+// shared-storage and quorum prerequisites and return 400 with a
+// human-readable reason on rejection.
+//
+// @Summary     Enable or disable HA enrollment on a VM
+// @Description Enabling registers the VM with Proxmox's HA Manager
+// @Description (`POST /cluster/ha/resources`); disabling removes it.
+// @Description Enable-path runs cluster gates (≥3 nodes for stable
+// @Description quorum, shared storage on the VM's disk pool); a
+// @Description rejection returns 400 with the reason. Owner-only.
+// @Tags        vms
+// @Security    cookieAuth
+// @Accept      json
+// @Param       id   path int           true "VM DB id"
+// @Param       body body setHARequest  true "{enabled: bool}"
+// @Success     200  {object} EnvelopeOK{data=db.VM}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /vms/{id}/ha [post]
+func (h *VMs) SetHA(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var req setHARequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON body")
+		return
+	}
+	requesterID := user.ID
+	vm, err := h.svc.SetHA(r.Context(), uint(id), &requesterID, req.Enabled)
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	response.Success(w, vm)
 }
 
 // GetPrivateKey handles GET /api/vms/{id}/private-key. Returns

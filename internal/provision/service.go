@@ -82,6 +82,8 @@ type ProxmoxClient interface {
 	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	GetAgentInterfaces(ctx context.Context, node string, vmid int) ([]proxmox.NetworkInterface, error)
 	MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error)
+	RegisterHA(ctx context.Context, vmid int, group string) error
+	UnregisterHA(ctx context.Context, vmid int) error
 }
 
 // Config holds the deployment-specific knobs the Service needs at construction
@@ -629,6 +631,25 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	released = true // success path — do NOT run the deferred release
 
+	// HA registration is a sidecar step: the VM is the load-bearing
+	// artifact, so any failure here is logged + persisted to db.VM.HAError
+	// rather than aborting provisioning. The gates (shared storage,
+	// quorum) run before the API call so the operator gets a clear
+	// reason instead of a generic "ha-manager rejected" message.
+	haEnabled := false
+	haError := ""
+	if req.HAEnabled {
+		if reason := s.checkHAPrereqs(ctx, target); reason != "" {
+			haError = reason
+			log.Printf("provision: ha skipped vmid=%d: %s", newVMID, reason)
+		} else if err := s.px.RegisterHA(ctx, newVMID, ""); err != nil {
+			haError = fmt.Sprintf("ha-manager rejected: %v", err)
+			log.Printf("provision: ha register failed vmid=%d: %v", newVMID, err)
+		} else {
+			haEnabled = true
+		}
+	}
+
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
 	vm := &db.VM{
@@ -646,6 +667,8 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		KeyName:      keyName,
 		SSHPubKey:    sshPubKey,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
+		HAEnabled:    haEnabled,
+		HAError:      haError,
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -879,6 +902,55 @@ func (s *Service) Get(ctx context.Context, id uint, requesterID *uint) (*db.VM, 
 	if requesterID != nil && (vm.OwnerID == nil || *vm.OwnerID != *requesterID) {
 		return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
 	}
+	return &vm, nil
+}
+
+// SetHA toggles a VM's enrollment with Proxmox's HA Manager. enabled=true
+// runs the prerequisite gates (≥3 nodes, shared storage on the VM's pool)
+// and calls /cluster/ha/resources POST; enabled=false calls DELETE
+// (idempotent — a 404 from Proxmox collapses to nil). Persists the new
+// state + any error string onto db.VM so the SPA's HA chip reflects the
+// authoritative outcome.
+//
+// Authorization mirrors Get/Delete: owner-only, returns NotFound for
+// non-owners so existence isn't disclosed.
+//
+// Unlike provision-time HA registration (soft-fail), the standalone
+// toggle returns the rejection as a ValidationError so the operator
+// immediately sees why their click didn't take.
+func (s *Service) SetHA(ctx context.Context, id uint, requesterID *uint, enabled bool) (*db.VM, error) {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+		}
+		return nil, fmt.Errorf("get vm %d: %w", id, err)
+	}
+	if requesterID != nil && (vm.OwnerID == nil || *vm.OwnerID != *requesterID) {
+		return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("%d", id)}
+	}
+	updates := map[string]any{}
+	if enabled {
+		if reason := s.checkHAPrereqs(ctx, vm.Node); reason != "" {
+			return nil, &internalerrors.ValidationError{Field: "ha_enabled", Message: reason}
+		}
+		if err := s.px.RegisterHA(ctx, vm.VMID, ""); err != nil {
+			return nil, fmt.Errorf("register ha vmid=%d: %w", vm.VMID, err)
+		}
+		updates["ha_enabled"] = true
+		updates["ha_error"] = ""
+	} else {
+		if err := s.px.UnregisterHA(ctx, vm.VMID); err != nil {
+			return nil, fmt.Errorf("unregister ha vmid=%d: %w", vm.VMID, err)
+		}
+		updates["ha_enabled"] = false
+		updates["ha_error"] = ""
+	}
+	if err := s.db.WithContext(ctx).Model(&db.VM{}).Where("id = ?", vm.ID).Updates(updates).Error; err != nil {
+		return nil, fmt.Errorf("persist ha state: %w", err)
+	}
+	vm.HAEnabled = enabled
+	vm.HAError = ""
 	return &vm, nil
 }
 
@@ -1483,6 +1555,52 @@ func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, erro
 		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: tags}
 	}
 	return out, nil
+}
+
+// checkHAPrereqs runs the two cluster-level gates HA registration
+// requires: shared storage on the chosen node's VM-disk pool, and
+// ≥3 nodes for stable quorum (Proxmox documents 2-node HA as
+// notoriously prone to split-brain). Returns an empty string when
+// the gates pass; otherwise a human-readable reason that's persisted
+// onto db.VM.HAError so the SPA can surface it. Best-effort: a fetch
+// failure is treated as "unknown" and skips registration with an
+// explanatory error rather than registering blindly.
+//
+// The storage gate is keyed off s.cfg.VMDiskStorage (the cluster-wide
+// pool name); v1 only checks the root disk against this single pool.
+// Multi-disk VMs and per-disk pool overrides are deferred.
+func (s *Service) checkHAPrereqs(ctx context.Context, target string) string {
+	nodes, err := s.px.GetNodes(ctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify cluster size: %v", err)
+	}
+	if len(nodes) < 3 {
+		return fmt.Sprintf("HA requires ≥3 nodes for stable quorum (current: %d)", len(nodes))
+	}
+	if s.cfg.VMDiskStorage == "" {
+		return "no VM-disk pool configured (NIMBUS_VM_DISK_STORAGE)"
+	}
+	rows, err := s.px.GetClusterStorage(ctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify storage: %v", err)
+	}
+	for _, st := range rows {
+		if st.Storage != s.cfg.VMDiskStorage {
+			continue
+		}
+		// Shared storage rows repeat per node; the first one we hit
+		// answers the question for the whole cluster. Local pools have
+		// Shared=0 even when the row matches the target node — that's
+		// the rejection path.
+		if st.Shared == 1 {
+			return ""
+		}
+		if st.Node != target {
+			continue
+		}
+		return fmt.Sprintf("HA requires shared storage; pool %q on %q is local. Move disks to a shared pool (Ceph/NFS/iSCSI/ZFS-over-iSCSI) before enabling HA.", s.cfg.VMDiskStorage, target)
+	}
+	return fmt.Sprintf("VM-disk pool %q not visible at the cluster level — cannot verify shared status", s.cfg.VMDiskStorage)
 }
 
 // splitCSVTags decodes the CSV string we store for db.Node.Tags +

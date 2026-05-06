@@ -5,6 +5,7 @@ import {
   getTunnelInfo,
   listVMTunnels,
   listVMs,
+  setVMHA,
   vmLifecycle,
   type VMTunnel,
 } from '@/api/client'
@@ -126,6 +127,8 @@ function VMRow({
   const [tunnelsOpen, setTunnelsOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [tunnels, setTunnels] = useState<VMTunnel[] | null>(null)
+  const [haBusy, setHaBusy] = useState(false)
+  const [haError, setHaError] = useState<string | null>(null)
   const hasTunnel = Boolean(vm.tunnel_url)
   // Only show Delete on VMs the current user provisioned. Legacy rows
   // (owner_id null, pre-ownership) and VMs created by other users render
@@ -214,7 +217,10 @@ function VMRow({
         <span className="font-mono text-[11px] px-2.5 py-1 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider justify-self-start sm:justify-self-auto">
           {vm.tier}
         </span>
-        <StatusBadge status={vm.status} />
+        <div className="flex flex-col items-start gap-1">
+          <StatusBadge status={vm.status} />
+          <HAChip vm={vm} />
+        </div>
         <div className="flex gap-1.5">
           {hasTunnel && (
             <button
@@ -236,6 +242,31 @@ function VMRow({
           >
             <TerminalIcon />
           </button>
+          <button
+            type="button"
+            disabled={haBusy}
+            onClick={async () => {
+              setHaBusy(true)
+              setHaError(null)
+              try {
+                await setVMHA(vm.ID, !vm.ha_enabled)
+                onChanged()
+              } catch (e) {
+                setHaError(e instanceof Error ? e.message : 'failed')
+              } finally {
+                setHaBusy(false)
+              }
+            }}
+            className={`inline-flex items-center justify-center px-2 h-7 rounded-md border bg-white/85 text-[11px] font-mono uppercase tracking-wider transition-colors ${
+              vm.ha_enabled
+                ? 'border-good text-good hover:border-good/70'
+                : 'border-line-2 text-ink hover:border-ink'
+            } ${haBusy ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}
+            title={vm.ha_enabled ? `Disable HA for ${vm.hostname}` : `Enable HA for ${vm.hostname}`}
+            aria-label={vm.ha_enabled ? `Disable HA for ${vm.hostname}` : `Enable HA for ${vm.hostname}`}
+          >
+            {haBusy ? '…' : vm.ha_enabled ? 'HA off' : 'HA on'}
+          </button>
           <VMActions
             hostname={vm.hostname}
             status={vm.status as 'running' | 'stopped' | 'paused' | 'unknown'}
@@ -248,6 +279,11 @@ function VMRow({
           />
         </div>
       </div>
+      {(haError || vm.ha_error) && (
+        <div className="mt-3 text-[11px] text-bad font-mono">
+          HA: {haError || vm.ha_error}
+        </div>
+      )}
       {sshOpen && (
         <SSHDetailsModal
           target={{
@@ -288,5 +324,41 @@ function VMRow({
         />
       )}
     </Card>
+  )
+}
+
+// HAChip surfaces this VM's HA-enrollment status as a tiny pill next
+// to the live status badge. ha_enabled tracks "did Nimbus register
+// this VM with the HA Manager" — the runtime state (started/error/
+// fence) lives on the cluster-VMs admin table instead, since the
+// cluster-wide /cluster/ha/resources walk is too heavy for this
+// per-row card. ha_error overrides "enabled" since a failed
+// registration leaves the row claiming HA but nothing's actually
+// watching the VM.
+function HAChip({ vm }: { vm: VM }) {
+  if (vm.ha_error) {
+    return (
+      <span
+        className="font-mono text-[10px] uppercase tracking-wider text-bad"
+        title={`HA registration failed: ${vm.ha_error}`}
+      >
+        HA: error
+      </span>
+    )
+  }
+  if (vm.ha_enabled) {
+    return (
+      <span
+        className="font-mono text-[10px] uppercase tracking-wider text-good"
+        title="Registered with Proxmox HA Manager — auto-restarts on a surviving node when the host fails."
+      >
+        HA: on
+      </span>
+    )
+  }
+  return (
+    <span className="font-mono text-[10px] uppercase tracking-wider text-ink-3">
+      HA: off
+    </span>
   )
 }

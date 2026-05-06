@@ -863,6 +863,52 @@ func (c *Client) NodeAddresses(ctx context.Context) (map[string]string, error) {
 	return out, nil
 }
 
+// ListHAResources returns every HA-managed resource (VMs, containers) the
+// Proxmox cluster's ha-manager is watching. Used to surface per-VM HA
+// state in the SPA. Cheap (one call cluster-wide); callers join by VMID
+// against the parsed-from-SID prefix.
+func (c *Client) ListHAResources(ctx context.Context) ([]HAResource, error) {
+	var out []HAResource
+	if err := c.do(ctx, http.MethodGet, "/cluster/ha/resources", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RegisterHA enrolls a VM with the HA manager. State defaults to "started"
+// — i.e. ha-manager will keep the VM running, including restarting it on
+// a surviving node when its current host fails. Group, when non-empty,
+// pins the VM to a named HA group (member-node priority list); empty
+// uses the cluster-default group.
+//
+// Idempotent at the SID level: re-registering an already-managed VM
+// returns 400 with "<sid> already exists" — callers can either pre-check
+// via ListHAResources or treat that body as success. We don't filter
+// here; the caller decides.
+func (c *Client) RegisterHA(ctx context.Context, vmid int, group string) error {
+	params := url.Values{}
+	params.Set("sid", fmt.Sprintf("vm:%d", vmid))
+	params.Set("type", "vm")
+	params.Set("state", "started")
+	if group != "" {
+		params.Set("group", group)
+	}
+	return c.do(ctx, http.MethodPost, "/cluster/ha/resources", params, nil)
+}
+
+// UnregisterHA removes a VM from the HA manager. 404 (VM never registered)
+// is collapsed to nil — DELETE is idempotent from the operator's POV.
+func (c *Client) UnregisterHA(ctx context.Context, vmid int) error {
+	path := fmt.Sprintf("/cluster/ha/resources/%s", url.PathEscape(fmt.Sprintf("vm:%d", vmid)))
+	if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // GetClusterStorage returns every storage entry visible at the cluster level.
 // Shared storage appears once per node; callers must dedupe by Storage name.
 func (c *Client) GetClusterStorage(ctx context.Context) ([]ClusterStorage, error) {

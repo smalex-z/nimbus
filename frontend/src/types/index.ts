@@ -52,6 +52,14 @@ export interface VM {
   tunnel_id?: string
   tunnel_url?: string
   tunnel_error?: string
+  // ha_enabled tracks whether *Nimbus* registered this VM with Proxmox's
+  // HA Manager. Empty / false means either "not enrolled" or "enrolled
+  // outside Nimbus" — Proxmox is source-of-truth for live HA state.
+  ha_enabled?: boolean
+  // ha_error carries the most recent registration failure (e.g. "shared
+  // storage required" or a transient ha-manager rejection). Cleared on
+  // a successful toggle.
+  ha_error?: string
 }
 
 export interface ProvisionRequest {
@@ -68,6 +76,10 @@ export interface ProvisionRequest {
   generate_key?: boolean
   public_tunnel?: boolean
   enable_gpu?: boolean
+  // Opt the new VM into Proxmox's HA Manager once it boots. Failures
+  // are soft — the VM still ships; ha_error on the resulting row
+  // surfaces the reason (e.g. "shared storage required").
+  ha_enabled?: boolean
 }
 
 export interface SSHKey {
@@ -221,6 +233,11 @@ export interface NodeView {
   // so operators can compare storage tier across nodes at a glance;
   // the pool name moves to the row's title tooltip.
   disk_type?: 'nvme' | 'ssd' | 'hdd'
+  // disk_pool_shared mirrors proxmox.ClusterStorage.Shared for the
+  // configured VM-disk pool. The Provision form's "Enable HA"
+  // checkbox uses this as a client-side hint (HA requires shared
+  // storage); the backend re-validates regardless.
+  disk_pool_shared?: boolean
   vm_count: number
   vm_count_total: number
   // Corosync ring address for this node, when available. The IP-pool table
@@ -271,6 +288,10 @@ export interface ClusterVM {
   // tunnel_url is "host:port" when the VM has an established Gopher SSH
   // tunnel. Present only for local-source VMs.
   tunnel_url?: string
+  // ha_state is Proxmox's HA Manager view of the VM — "started" /
+  // "stopped" / "error" / "fence" / "disabled" / etc. Empty when the
+  // VM isn't enrolled with HA at all (the common case).
+  ha_state?: string
   hostname?: string
   ip?: string
   // ip_source identifies how the IP was discovered: "ipconfig0" (cloud-init)

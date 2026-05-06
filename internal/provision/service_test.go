@@ -59,6 +59,8 @@ type fakePVE struct {
 	destroyVM         func(context.Context, string, int) (string, error)
 	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
 	migrateVM         func(context.Context, string, int, string, bool) (string, error)
+	registerHA        func(context.Context, int, string) error
+	unregisterHA      func(context.Context, int) error
 
 	cloneCalls     atomic.Int32
 	cloudInitCalls atomic.Int32
@@ -149,6 +151,18 @@ func (f *fakePVE) MigrateVM(ctx context.Context, src string, vmid int, target st
 		return "task:migrate", nil
 	}
 	return f.migrateVM(ctx, src, vmid, target, online)
+}
+func (f *fakePVE) RegisterHA(ctx context.Context, vmid int, group string) error {
+	if f.registerHA == nil {
+		return nil
+	}
+	return f.registerHA(ctx, vmid, group)
+}
+func (f *fakePVE) UnregisterHA(ctx context.Context, vmid int) error {
+	if f.unregisterHA == nil {
+		return nil
+	}
+	return f.unregisterHA(ctx, vmid)
 }
 
 // happyFakePVE returns a fakePVE wired so that Provision() succeeds with
@@ -1687,5 +1701,225 @@ func TestAdminDelete_NotFound(t *testing.T) {
 	var nf *internalerrors.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Errorf("AdminDelete error: got %T (%v), want *NotFoundError", err, err)
+	}
+}
+
+// TestProvision_HASoftFailsOnSubQuorumCluster — single-node happy path
+// with HAEnabled set. The cluster-size gate rejects (only 1 node), so
+// the provision still ships but the resulting db.VM row records
+// HAEnabled=false + a quorum-shaped error string. RegisterHA must
+// never be called.
+func TestProvision_HASoftFailsOnSubQuorumCluster(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	var registered atomic.Int32
+	fake.registerHA = func(_ context.Context, _ int, _ string) error {
+		registered.Add(1)
+		return nil
+	}
+	svc, _, database := newTestService(t, fake)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "ha-quorum-fail",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+		HAEnabled:  true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if registered.Load() != 0 {
+		t.Errorf("RegisterHA called %d times, want 0 (quorum gate should reject before RPC)", registered.Load())
+	}
+	var row db.VM
+	if err := database.WithContext(context.Background()).First(&row, res.ID).Error; err != nil {
+		t.Fatalf("load vm: %v", err)
+	}
+	if row.HAEnabled {
+		t.Errorf("HAEnabled = true, want false on soft-fail")
+	}
+	if !strings.Contains(row.HAError, "quorum") {
+		t.Errorf("HAError = %q, want a quorum-shaped reason", row.HAError)
+	}
+}
+
+// TestProvision_HASoftFailsOnLocalStorage — 3-node cluster (passes the
+// quorum gate) but the configured VM-disk pool is local-only. The
+// storage gate rejects; HA registration is skipped + persisted as a
+// soft-fail. VM still ships.
+func TestProvision_HASoftFailsOnLocalStorage(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+			{Name: "bravo", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+			{Name: "charlie", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+		}, nil
+	}
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		return []proxmox.ClusterStorage{
+			{Storage: "local-lvm", Node: "alpha", Shared: 0, Total: 100 << 30, Used: 10 << 30},
+			{Storage: "local-lvm", Node: "bravo", Shared: 0, Total: 100 << 30, Used: 10 << 30},
+			{Storage: "local-lvm", Node: "charlie", Shared: 0, Total: 100 << 30, Used: 10 << 30},
+		}, nil
+	}
+	var registered atomic.Int32
+	fake.registerHA = func(_ context.Context, _ int, _ string) error {
+		registered.Add(1)
+		return nil
+	}
+	// Build the service manually so we can pass VMDiskStorage="local-lvm"
+	// (newTestService doesn't set it) and seed templates across all 3
+	// nodes the storage-gate test needs.
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.Node{})
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	pool := ippool.New(database.DB)
+	if err := pool.Seed(context.Background(), "10.0.0.1", "10.0.0.5"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	// Seed templates across all 3 nodes. Track vmid across loops — the
+	// schema's UNIQUE INDEX is on vmid alone, so per-node re-use trips it.
+	vmid := 9000
+	for _, node := range []string{"alpha", "bravo", "charlie"} {
+		for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+			if err := database.Create(&db.NodeTemplate{Node: node, OS: os, VMID: vmid}).Error; err != nil {
+				t.Fatalf("seed templates: %v", err)
+			}
+			vmid++
+		}
+	}
+
+	cfg := provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "local-lvm",
+	}
+	cipher, _ := secrets.New(make([]byte, secrets.KeyLen))
+	keysSvc := sshkeys.New(database.DB, cipher)
+	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, cfg)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "ha-storage-fail",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+		HAEnabled:  true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if registered.Load() != 0 {
+		t.Errorf("RegisterHA called %d times, want 0 (storage gate should reject)", registered.Load())
+	}
+	var row db.VM
+	if err := database.WithContext(context.Background()).First(&row, res.ID).Error; err != nil {
+		t.Fatalf("load vm: %v", err)
+	}
+	if row.HAEnabled {
+		t.Errorf("HAEnabled = true, want false on local-storage soft-fail")
+	}
+	if !strings.Contains(row.HAError, "shared storage") {
+		t.Errorf("HAError = %q, want shared-storage explanation", row.HAError)
+	}
+}
+
+// TestProvision_HARegistersWhenAllPrereqsMet — 3-node cluster + shared
+// pool. RegisterHA fires with the expected sid; row reflects HAEnabled
+// = true with no error.
+func TestProvision_HARegistersWhenAllPrereqsMet(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	fake.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{
+			{Name: "alpha", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+			{Name: "bravo", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+			{Name: "charlie", Status: "online", Mem: 1 << 30, MaxMem: 16 << 30, CPU: 0.1, MaxCPU: 8},
+		}, nil
+	}
+	fake.getClusterStorage = func(_ context.Context) ([]proxmox.ClusterStorage, error) {
+		// Shared pool — one row repeated per node, all marked Shared=1.
+		return []proxmox.ClusterStorage{
+			{Storage: "ceph-pool", Node: "alpha", Shared: 1, Total: 1 << 40, Used: 100 << 30},
+			{Storage: "ceph-pool", Node: "bravo", Shared: 1, Total: 1 << 40, Used: 100 << 30},
+			{Storage: "ceph-pool", Node: "charlie", Shared: 1, Total: 1 << 40, Used: 100 << 30},
+		}, nil
+	}
+	type registerCall struct {
+		vmid  int
+		group string
+	}
+	var registered atomic.Pointer[registerCall]
+	fake.registerHA = func(_ context.Context, vmid int, group string) error {
+		registered.Store(&registerCall{vmid: vmid, group: group})
+		return nil
+	}
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.New(path, ippool.Model(), &db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.Node{})
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	pool := ippool.New(database.DB)
+	if err := pool.Seed(context.Background(), "10.0.0.1", "10.0.0.5"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	vmid := 9000
+	for _, node := range []string{"alpha", "bravo", "charlie"} {
+		for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+			if err := database.Create(&db.NodeTemplate{Node: node, OS: os, VMID: vmid}).Error; err != nil {
+				t.Fatalf("seed templates: %v", err)
+			}
+			vmid++
+		}
+	}
+	cipher, _ := secrets.New(make([]byte, secrets.KeyLen))
+	keysSvc := sshkeys.New(database.DB, cipher)
+	cfg := provision.Config{
+		TemplateBaseVMID: 9000,
+		GatewayIP:        "10.0.0.1",
+		Nameserver:       "1.1.1.1",
+		SearchDomain:     "local",
+		IPReadyTimeout:   1 * time.Second,
+		PollInterval:     5 * time.Millisecond,
+		CPUType:          "x86-64-v3",
+		VMDiskStorage:    "ceph-pool",
+	}
+	svc := provision.New(fake, pool, database.DB, cipher, keysSvc, cfg)
+
+	res, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "ha-happy",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+		HAEnabled:  true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	call := registered.Load()
+	if call == nil {
+		t.Fatal("RegisterHA was never called")
+	}
+	if call.vmid != res.VMID {
+		t.Errorf("RegisterHA vmid = %d, want %d", call.vmid, res.VMID)
+	}
+	var row db.VM
+	if err := database.WithContext(context.Background()).First(&row, res.ID).Error; err != nil {
+		t.Fatalf("load vm: %v", err)
+	}
+	if !row.HAEnabled {
+		t.Errorf("HAEnabled = false, want true")
+	}
+	if row.HAError != "" {
+		t.Errorf("HAError = %q, want empty on success", row.HAError)
 	}
 }

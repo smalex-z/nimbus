@@ -60,6 +60,11 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   enableGPU: boolean
+  // haEnabled opts the new VM into Proxmox's HA Manager once it boots.
+  // Disabled by default — HA requires shared storage, and most homelab
+  // clusters run on local-LVM. The checkbox is gated client-side on
+  // the cluster's disk-pool sharedness; backend re-validates regardless.
+  haEnabled: boolean
 }
 
 const DEFAULT_FORM: FormState = {
@@ -73,6 +78,7 @@ const DEFAULT_FORM: FormState = {
   privKey: '',
   publicTunnel: false,
   enableGPU: false,
+  haEnabled: false,
 }
 
 export default function Provision() {
@@ -238,6 +244,7 @@ export default function Provision() {
           generate_key: form.keyMode === 'gen' ? true : undefined,
           public_tunnel: form.publicTunnel ? true : undefined,
           enable_gpu: form.enableGPU ? true : undefined,
+          ha_enabled: form.haEnabled ? true : undefined,
           // No subdomain — provision-time tunnels are SSH only and Gopher
           // allocates a port on the gateway. Backend defaults the tunnel
           // identifier to the VM hostname so admins don't need to think
@@ -698,6 +705,10 @@ function FormBody({ form, updateForm, savedKeys, tunnelInfo, gpuInfo, selectedKe
             </label>
           </div>
         )}
+        <HAToggle
+          checked={form.haEnabled}
+          onChange={(v) => updateForm('haEnabled', v)}
+        />
       </AdvancedSection>
     </div>
   )
@@ -1265,6 +1276,86 @@ function AffinityPicker({
         x86_64; remove it (and add <code className="font-mono mx-1">arm</code>) only when targeting
         ARM hosts with an ARM-built template. Empty = no constraint.
       </p>
+    </div>
+  )
+}
+
+// HAToggle — Provision-form checkbox for "register this VM with Proxmox's
+// HA Manager once it boots." Disabled with an explanatory tooltip when
+// the cluster's configured VM-disk pool is local — HA requires shared
+// storage (Ceph/NFS/iSCSI/ZFS-over-iSCSI) since the disk has to be
+// reachable from a surviving node when the original host fails.
+//
+// Reads `disk_pool_shared` from the existing /api/nodes payload (any
+// node having a shared pool flips the checkbox to enabled — heterogeneous
+// clusters sometimes run mixed local + shared and HA is fine for the
+// shared subset). Backend re-validates per VM at provision time.
+function HAToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  const [shared, setShared] = useState<boolean | null>(null)
+  const [poolHint, setPoolHint] = useState<string>('')
+  useEffect(() => {
+    listNodes()
+      .then((rows) => {
+        const anyShared = rows.some((n) => n.disk_pool_shared === true)
+        setShared(anyShared)
+        // Surface the pool name so the disabled tooltip names the
+        // thing operators need to fix.
+        const firstPool = rows.find((n) => n.disk_pool_name)?.disk_pool_name ?? ''
+        setPoolHint(firstPool)
+      })
+      .catch(() => {
+        // Non-fatal — leave shared=null so the checkbox renders enabled
+        // but the backend gate will catch the prerequisite issue if any.
+        setShared(null)
+      })
+  }, [])
+  // While the fetch is in-flight (shared===null) we render enabled so
+  // the operator isn't blocked on the first-paint network round-trip;
+  // backend validation backstops the bet.
+  const disabled = shared === false
+  // If user toggled this on but cluster turned out to be local-only,
+  // flip it back so submit can't smuggle a doomed setting through.
+  useEffect(() => {
+    if (disabled && checked) onChange(false)
+  }, [disabled, checked, onChange])
+  const tip = disabled
+    ? `Shared storage required. The configured VM-disk pool${poolHint ? ` (${poolHint})` : ''} is local; HA needs Ceph/NFS/iSCSI/ZFS-over-iSCSI before it can fail a VM over to a surviving node.`
+    : 'Register the VM with Proxmox\'s HA Manager. On host failure it auto-restarts on a surviving node within ~1-2 minutes. Requires ≥3 nodes for stable quorum.'
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="text-[13px] font-medium text-ink">High availability</label>
+      <label
+        title={tip}
+        className={`flex items-start gap-3 p-3.5 rounded-[10px] border bg-white/85 transition-colors ${
+          disabled
+            ? 'border-line cursor-not-allowed opacity-60'
+            : 'border-line-2 cursor-pointer hover:border-ink/40'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={checked && !disabled}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 w-4 h-4 accent-ink"
+        />
+        <div className="flex-1">
+          <div className="text-sm font-medium">Enable HA failover</div>
+          <div className="text-xs text-ink-3 mt-0.5">
+            {disabled ? (
+              <>
+                Disabled — VM-disk pool{poolHint ? ` <span className="font-mono">{poolHint}</span>` : ''} is local. HA requires
+                shared storage so the VM can resume on another node when its current host dies.
+              </>
+            ) : (
+              <>
+                Auto-restart this VM on a surviving node when its current host fails. Needs ≥3 nodes; backend
+                rechecks both gates at submit time.
+              </>
+            )}
+          </div>
+        </div>
+      </label>
     </div>
   )
 }

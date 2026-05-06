@@ -112,6 +112,28 @@ type LXCStatus struct {
 	Template int    `json:"template"`
 }
 
+// HAResource mirrors one row from /cluster/ha/resources. Proxmox's HA Manager
+// owns the runtime — corosync heartbeats, watchdog fencing, automatic restart
+// on a surviving node — and this struct is just the read-model Nimbus exposes
+// in the cluster-VM list and the per-VM HA chip.
+//
+// SID is the resource identifier in the form "type:vmid" (e.g. "vm:100");
+// State is one of started/stopped/disabled/error/migrate/relocate (plus a
+// few transitional values the manager emits during failover). Group is the
+// HA group name when one was assigned at register time; empty falls back to
+// the cluster-default group. MaxRestart and MaxRelocate are restart-flap
+// counters Proxmox enforces; we expose them so a future settings UI can
+// show what's configured without re-querying.
+type HAResource struct {
+	SID         string `json:"sid"`
+	Type        string `json:"type"`
+	State       string `json:"state"`
+	Group       string `json:"group,omitempty"`
+	Comment     string `json:"comment,omitempty"`
+	MaxRestart  int    `json:"max_restart,omitempty"`
+	MaxRelocate int    `json:"max_relocate,omitempty"`
+}
+
 // ClusterStorage is one row from /cluster/resources?type=storage. A shared
 // storage pool appears once per node; callers should dedupe by Storage name
 // when Shared==1 to avoid double-counting.

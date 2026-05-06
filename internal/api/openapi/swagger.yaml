@@ -62,6 +62,17 @@ definitions:
     properties:
       error_msg:
         type: string
+      ha_enabled:
+        description: |-
+          HAEnabled tracks whether *Nimbus* registered this VM with Proxmox's
+          HA Manager. Empty / false means either "not enrolled" or "enrolled
+          outside Nimbus" — Proxmox HA state is the source of truth at runtime
+          (surfaced via GET /cluster/ha/resources). HAError carries the most
+          recent registration failure, e.g. "shared storage required" or a
+          transient ha-manager rejection; cleared on a successful toggle.
+        type: boolean
+      ha_error:
+        type: string
       hostname:
         type: string
       ip:
@@ -270,6 +281,13 @@ definitions:
     properties:
       created_at:
         type: string
+      ha_state:
+        description: |-
+          HAState is Proxmox's HA Manager view of this VM — typically
+          "started" / "stopped" / "error" / "fence" / "disabled". Empty when
+          the VM isn't enrolled with HA at all (the common case). Joined
+          from a single /cluster/ha/resources walk per request.
+        type: string
       hostname:
         description: local-only Nimbus hostname
         type: string
@@ -441,6 +459,12 @@ definitions:
       enable_gpu:
         type: boolean
       generate_key:
+        type: boolean
+      ha_enabled:
+        description: |-
+          HAEnabled requests the provision flow register the new VM with
+          Proxmox's HA Manager once it boots. Failures are soft — the VM
+          still ships; db.VM.HAError surfaces the reason on the SPA.
         type: boolean
       hostname:
         type: string
@@ -904,6 +928,11 @@ definitions:
       tunnel_url:
         type: string
     type: object
+  handlers.setHARequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
   handlers.setTagsRequest:
     properties:
       tags:
@@ -1270,6 +1299,13 @@ definitions:
         type: integer
       disk_pool_name:
         type: string
+      disk_pool_shared:
+        description: |-
+          DiskPoolShared mirrors proxmox.ClusterStorage.Shared for the
+          configured VM-disk pool. The Provision form's "Enable HA"
+          checkbox uses this as a client-side hint (HA requires shared
+          storage); the backend re-validates regardless.
+        type: boolean
       disk_total:
         type: integer
       disk_type:
@@ -5648,6 +5684,59 @@ paths:
       security:
       - cookieAuth: []
       summary: Run a power op on the caller's VM
+      tags:
+      - vms
+  /vms/{id}/ha:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Enabling registers the VM with Proxmox's HA Manager
+        (`POST /cluster/ha/resources`); disabling removes it.
+        Enable-path runs cluster gates (≥3 nodes for stable
+        quorum, shared storage on the VM's disk pool); a
+        rejection returns 400 with the reason. Owner-only.
+      parameters:
+      - description: VM DB id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: '{enabled: bool}'
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.setHARequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/db.VM'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Enable or disable HA enrollment on a VM
       tags:
       - vms
   /vms/{id}/private-key:

@@ -367,6 +367,14 @@ type VM struct {
 	// is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
 	// Default 0 — pre-existing rows behave correctly without backfill.
 	MissedCycles int `gorm:"column:missed_cycles;default:0"          json:"missed_cycles,omitempty"`
+	// HAEnabled tracks whether *Nimbus* registered this VM with Proxmox's
+	// HA Manager. Empty / false means either "not enrolled" or "enrolled
+	// outside Nimbus" — Proxmox HA state is the source of truth at runtime
+	// (surfaced via GET /cluster/ha/resources). HAError carries the most
+	// recent registration failure, e.g. "shared storage required" or a
+	// transient ha-manager rejection; cleared on a successful toggle.
+	HAEnabled bool   `gorm:"column:ha_enabled;default:false"         json:"ha_enabled"`
+	HAError   string `gorm:"column:ha_error;default:''"              json:"ha_error,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.

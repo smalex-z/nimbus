@@ -952,3 +952,83 @@ func TestClient_ResizeDisk_NonRetriableErrorFailsFast(t *testing.T) {
 		t.Errorf("attempts = %d, want 1 (no retry on non-matching 500)", got)
 	}
 }
+
+func TestClient_ListHAResources(t *testing.T) {
+	t.Parallel()
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/cluster/ha/resources" {
+			t.Errorf("path = %q, want /api2/json/cluster/ha/resources", r.URL.Path)
+		}
+		writeEnvelope(w, []proxmox.HAResource{
+			{SID: "vm:100", Type: "vm", State: "started", Group: ""},
+			{SID: "vm:200", Type: "vm", State: "error", Group: "fast"},
+		})
+	})
+
+	out, err := c.ListHAResources(context.Background())
+	if err != nil {
+		t.Fatalf("ListHAResources: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("got %d rows, want 2", len(out))
+	}
+	if out[0].SID != "vm:100" || out[0].State != "started" {
+		t.Errorf("row 0 = %+v", out[0])
+	}
+	if out[1].State != "error" || out[1].Group != "fast" {
+		t.Errorf("row 1 = %+v", out[1])
+	}
+}
+
+// TestClient_RegisterHA_FormEncoded asserts the wire format Proxmox
+// requires — sid/type/state must arrive as form fields, not JSON.
+func TestClient_RegisterHA_FormEncoded(t *testing.T) {
+	t.Parallel()
+	var capturedMethod, capturedPath, capturedCT, capturedBody string
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		capturedCT = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = string(body)
+		writeEnvelope(w, nil)
+	})
+
+	if err := c.RegisterHA(context.Background(), 100, "fast"); err != nil {
+		t.Fatalf("RegisterHA: %v", err)
+	}
+	if capturedMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", capturedMethod)
+	}
+	if capturedPath != "/api2/json/cluster/ha/resources" {
+		t.Errorf("path = %q", capturedPath)
+	}
+	if !strings.HasPrefix(capturedCT, "application/x-www-form-urlencoded") {
+		t.Errorf("content-type = %q", capturedCT)
+	}
+	for _, want := range []string{"sid=vm%3A100", "type=vm", "state=started", "group=fast"} {
+		if !strings.Contains(capturedBody, want) {
+			t.Errorf("body %q missing %q", capturedBody, want)
+		}
+	}
+}
+
+// TestClient_UnregisterHA_404Tolerant verifies DELETE is idempotent —
+// re-disabling an already-unregistered VM (or one Nimbus never enrolled)
+// returns nil instead of bubbling ErrNotFound.
+func TestClient_UnregisterHA_404Tolerant(t *testing.T) {
+	t.Parallel()
+	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %q, want DELETE", r.Method)
+		}
+		if r.URL.Path != "/api2/json/cluster/ha/resources/vm:100" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	if err := c.UnregisterHA(context.Background(), 100); err != nil {
+		t.Errorf("UnregisterHA on missing resource: want nil, got %v", err)
+	}
+}
