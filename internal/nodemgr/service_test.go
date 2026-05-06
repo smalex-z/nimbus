@@ -514,18 +514,22 @@ func TestComputePlan_DiskGateFires(t *testing.T) {
 	row := plan.Migrations[0]
 	// beta should be present in Eligible but flagged disabled with the
 	// insufficient-disk reason — this is the "still shows them, dimmed,
-	// with a hover tooltip" behaviour the spec calls for.
-	var betaOpt *nodemgr.EligibleTarget
+	// with a hover tooltip" behaviour the spec calls for. Use an index
+	// sentinel rather than a pointer so staticcheck's SA5011 doesn't
+	// flag the post-check dereference (it doesn't always trust t.Fatalf
+	// as a terminating call across heap-pointer flows).
+	betaIdx := -1
 	for i := range row.Eligible {
 		if row.Eligible[i].Node == "beta" {
-			betaOpt = &row.Eligible[i]
+			betaIdx = i
 			break
 		}
 	}
-	if betaOpt == nil {
+	if betaIdx < 0 {
 		t.Fatalf("beta missing from Eligible options")
 	}
-	if !betaOpt.Disabled {
+	beta := row.Eligible[betaIdx]
+	if !beta.Disabled {
 		t.Errorf("beta.Disabled = false; want true (only 5GB free, need 30GB)")
 	}
 	// AutoPick should NOT be beta — the planner picked nothing
