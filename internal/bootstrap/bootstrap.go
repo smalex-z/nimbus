@@ -319,10 +319,12 @@ func (s *Service) bootstrapOne(
 		return finish(vmid, fmt.Sprintf("vm create task: %v", err))
 	}
 
-	// Step 5: attach cloud-init drive (required, see provision gotcha #4)
-	if err := s.px.SetCloudInitDrive(ctx, node, vmid, s.cfg.DiskStorage); err != nil {
-		return finish(vmid, fmt.Sprintf("attach cloud-init drive: %v", err))
-	}
+	// Templates intentionally do NOT get a Proxmox cloud-init drive.
+	// Nimbus delivers cloud-init via a per-VM ISO uploaded at
+	// provision time and attached at ide2 (see installCIDataISO).
+	// A Proxmox-managed cloud-init drive on the template would
+	// either compete with our ISO at the same slot (ide2) or sit
+	// unused — neither is useful. Templates stay minimal.
 
 	// Step 6: convert to immutable template
 	if err := s.px.ConvertToTemplate(ctx, node, vmid); err != nil {

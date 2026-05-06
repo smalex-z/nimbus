@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // Proxmox SDN endpoints surface as `/cluster/sdn/{zones,vnets,subnets}` —
@@ -85,10 +86,23 @@ func (c *Client) ListSDNZones(ctx context.Context) ([]SDNZone, error) {
 
 // GetSDNZone fetches one zone by name. Returns ErrNotFound when the
 // zone doesn't exist; callers can errors.Is-test for "needs creating".
+//
+// Proxmox returns 500 (not 404) for missing SDN zones with the body
+// `{"data":null,"message":"sdn 'X' does not exist\n"}` — same quirk
+// GetVMConfig + GetLXCConfig already normalize. Map both 404 and the
+// 500-with-"does not exist" body to ErrNotFound so callers don't have
+// to know about the inconsistency.
 func (c *Client) GetSDNZone(ctx context.Context, zone string) (*SDNZone, error) {
 	var out SDNZone
 	path := "/cluster/sdn/zones/" + url.PathEscape(zone)
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && strings.Contains(httpErr.Body, "does not exist") {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	return &out, nil
@@ -192,29 +206,24 @@ func (c *Client) ApplySDN(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/cluster/sdn", nil, nil)
 }
 
-// SetVMNetwork rewrites the bridge (and optionally MAC) on a VM's
-// network device after clone. Used by Nimbus to override the inherited
-// `bridge=vmbr0` from the template, pointing the VM at its owner's
-// SDN VNet instead.
+// SetVMNetwork rewrites the bridge on a VM's network device after
+// clone. Used by Nimbus to override the inherited `bridge=vmbr0` from
+// the template, pointing the VM at its owner's SDN VNet instead.
 //
-// Pass empty mac to leave the cloned MAC alone; pass "auto" to ask
-// Proxmox to assign a fresh one (avoids same-MAC-across-isolated-VLANs
-// surprises during debug — they're not L2-colliding because the VLANs
-// are isolated, but human eyes assume otherwise).
-func (c *Client) SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge, mac string) error {
+// The MAC is intentionally omitted from the wire value: Proxmox
+// auto-generates a fresh MAC when `net0=` is rewritten without a
+// `macaddr=...` component, which avoids same-MAC-across-isolated-VLANs
+// surprises during debug. (No L2 collision because the VLANs are
+// isolated, but human eyes assume otherwise.)
+func (c *Client) SetVMNetwork(ctx context.Context, node string, vmid int, dev, bridge string) error {
 	if dev == "" {
 		dev = "net0"
 	}
 	if bridge == "" {
 		return errors.New("bridge is required")
 	}
-	model := "virtio"
-	val := fmt.Sprintf("%s,bridge=%s", model, bridge)
-	if mac != "" {
-		val = fmt.Sprintf("%s=%s,bridge=%s", model, mac, bridge)
-	}
 	params := url.Values{}
-	params.Set(dev, val)
+	params.Set(dev, fmt.Sprintf("virtio,bridge=%s", bridge))
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }

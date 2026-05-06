@@ -98,6 +98,27 @@ type Result struct {
 	// when registration or bootstrap fails but the VM is fine.
 	TunnelURL   string `json:"tunnel_url,omitempty"`
 	TunnelError string `json:"tunnel_error,omitempty"`
+
+	// SubnetName is non-empty when the VM landed on a per-user SDN
+	// subnet (i.e. isolation is on for this VM). Drives the result
+	// page's "this IP is only reachable from inside the subnet"
+	// framing — the SSH command shown is correct *for someone already
+	// inside the subnet*, not from the user's laptop.
+	SubnetName string `json:"subnet_name,omitempty"`
+	SubnetCIDR string `json:"subnet_cidr,omitempty"`
+
+	// ConsolePassword is a one-time random password set on the VM's
+	// default user (via cloud-init `chpasswd`) so the operator can
+	// log in via the Proxmox noVNC console — useful for debugging
+	// when SSH isn't reachable (e.g. isolated subnets without a
+	// tunnel). Shown ONCE on the result page; not persisted.
+	ConsolePassword string `json:"console_password,omitempty"`
+
+	// CloudInitError is non-empty when Nimbus tried but failed to
+	// upload + attach the per-VM cloud-init ISO (the channel that
+	// installs qemu-guest-agent). Surfacing the reason on the result
+	// page beats forcing operators to grep server logs.
+	CloudInitError string `json:"cloud_init_error,omitempty"`
 }
 
 // String returns a log-safe representation of the Result that omits the

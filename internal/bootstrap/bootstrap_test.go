@@ -424,12 +424,6 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		mu.Unlock()
 		return "UPID:create", nil
 	}
-	px.setCloudInitDrive = func(_ context.Context, _ string, _ int, _ string) error {
-		mu.Lock()
-		sequence = append(sequence, "ci-drive")
-		mu.Unlock()
-		return nil
-	}
 	px.convertToTemplate = func(_ context.Context, _ string, _ int) error {
 		mu.Lock()
 		sequence = append(sequence, "template")
@@ -443,9 +437,12 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		OS: []string{"ubuntu-24.04"},
 	})
 
-	// New flow: DB-first idempotency (no Proxmox call when DB is empty), then
-	// has-file → download → nextid → create → ci-drive → template.
-	want := []string{"has-file", "download", "nextid", "create", "ci-drive", "template"}
+	// Templates intentionally don't get a Proxmox cloud-init drive
+	// anymore — Nimbus delivers cloud-init via per-VM ISOs at
+	// provision time (see provision.installCIDataISO). So the
+	// expected sequence is shorter than before:
+	// has-file → download → nextid → create → template.
+	want := []string{"has-file", "download", "nextid", "create", "template"}
 	if len(sequence) != len(want) {
 		t.Fatalf("got %d steps, want %d: %v", len(sequence), len(want), sequence)
 	}

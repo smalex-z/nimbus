@@ -48,6 +48,25 @@ func TestClient_GetSDNZone_NotFound(t *testing.T) {
 	}
 }
 
+// TestClient_GetSDNZone_PVE500QuirkNormalized covers Proxmox's
+// inconsistent missing-resource shape: GET /cluster/sdn/zones/missing
+// returns 500 (not 404) with body `sdn 'missing' does not exist`.
+// Same quirk GetVMConfig + GetLXCConfig already normalize. Without
+// this normalization, vnetmgr.Bootstrap would fail "create zone"
+// because it dispatches off ErrNotFound and would never see it.
+func TestClient_GetSDNZone_PVE500QuirkNormalized(t *testing.T) {
+	t.Parallel()
+	_, c := newMockPVE(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":null,"message":"sdn 'nimbus' does not exist\n"}`))
+	})
+	_, err := c.GetSDNZone(context.Background(), "nimbus")
+	if !errors.Is(err, proxmox.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound (500-with-does-not-exist normalized), got %T %v", err, err)
+	}
+}
+
 // TestClient_CreateSDNZone_FormEncoded asserts the zone-create wire
 // shape Proxmox expects: form-encoded POST with type + zone params.
 // Same hard rule as cloud-init — JSON body silently fails.
@@ -172,7 +191,7 @@ func TestClient_SetVMNetwork_BridgeOnly(t *testing.T) {
 		writeEnvelope(w, nil)
 	})
 
-	if err := c.SetVMNetwork(context.Background(), "alpha", 200, "net0", "nbu1", ""); err != nil {
+	if err := c.SetVMNetwork(context.Background(), "alpha", 200, "net0", "nbu1"); err != nil {
 		t.Fatalf("SetVMNetwork: %v", err)
 	}
 	if !strings.HasSuffix(capturedPath, "/qemu/200/config") {
@@ -196,7 +215,7 @@ func TestClient_SetVMNetwork_RejectEmptyBridge(t *testing.T) {
 		writeEnvelope(w, nil)
 	})
 
-	err := c.SetVMNetwork(context.Background(), "alpha", 200, "net0", "", "")
+	err := c.SetVMNetwork(context.Background(), "alpha", 200, "net0", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

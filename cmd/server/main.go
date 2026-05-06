@@ -372,9 +372,11 @@ func main() {
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
 		VMDiskStorage:    cfg.VMDiskStorage,
+		CIDataStorage:    cfg.CIDataStorage,
 		MemBufferMiB:     cfg.MemBufferMiB,
 		CPULoadFactor:    cfg.CPULoadFactor,
 	})
+
 	// Chain verifier: Proxmox cluster snapshot first (fast, cached), then a
 	// single-IP netscan probe (~800ms worst case). Either failure rejects
 	// the candidate IP and verifyAndRetryReserve leapfrogs to the next free

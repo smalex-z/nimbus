@@ -567,7 +567,7 @@ interface FormBodyProps {
 
 function FormBody({ form, updateForm, savedKeys, savedSubnets, sdnStatus, isAdmin, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
       <Input
         label="Hostname"
         placeholder="my-project"
@@ -625,24 +625,19 @@ function FormBody({ form, updateForm, savedKeys, savedSubnets, sdnStatus, isAdmi
         />
         <p className="text-[11px] text-ink-3 leading-relaxed mt-1">{keyModeBlurb(form.keyMode, savedKeys)}</p>
         {form.keyMode === 'saved' && savedKeys.length > 0 && (
-          <div className="mt-3 flex flex-col gap-2">
-            <select
-              value={form.savedKeyId ?? ''}
-              onChange={(e) => updateForm('savedKeyId', Number(e.target.value))}
-              className="w-full px-3.5 py-3 rounded-[10px] bg-white/85 font-sans text-sm text-ink border border-line-2 outline-none focus:border-ink focus:bg-white"
-            >
-              {savedKeys.map((k) => (
-                <option key={k.id} value={k.id}>
-                  {k.name}
-                  {k.is_default ? ' · default' : ''}
-                  {k.label ? ` — ${k.label}` : ''}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-ink-3">
-              Manage saved keys on the <Link to="/keys" className="underline">Keys page</Link>.
-            </p>
-          </div>
+          <select
+            value={form.savedKeyId ?? ''}
+            onChange={(e) => updateForm('savedKeyId', Number(e.target.value))}
+            className="mt-2 w-full px-3.5 py-3 rounded-[10px] bg-white/85 font-sans text-sm text-ink border border-line-2 outline-none focus:border-ink focus:bg-white"
+          >
+            {savedKeys.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.name}
+                {k.is_default ? ' · default' : ''}
+                {k.label ? ` — ${k.label}` : ''}
+              </option>
+            ))}
+          </select>
         )}
         {form.keyMode === 'byo' && (
           <div className="mt-4 flex flex-col gap-5">
@@ -701,10 +696,18 @@ function FormBody({ form, updateForm, savedKeys, savedSubnets, sdnStatus, isAdmi
         )}
       </div>
 
+      <SubnetPicker
+        form={form}
+        updateForm={updateForm}
+        savedSubnets={savedSubnets}
+        sdnStatus={sdnStatus}
+        isAdmin={isAdmin}
+      />
+
       <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">Public access</label>
         <label
-          className={`flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
+          className={`flex items-start gap-3 p-3 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
             tunnelInfo?.enabled && selectedKeyHasPrivate
               ? 'cursor-pointer hover:border-ink/40'
               : 'cursor-not-allowed opacity-60'
@@ -720,47 +723,30 @@ function FormBody({ form, updateForm, savedKeys, savedSubnets, sdnStatus, isAdmi
           <div className="flex-1">
             <div className="text-sm font-medium">Expose SSH publicly</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Bootstraps a Gopher reverse tunnel to this VM's port 22. Gopher
-              allocates a public port at the gateway — SSH lands at{' '}
+              Reverse-tunnel SSH via Gopher to{' '}
               <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
-              Subdomains are an HTTP-tunnel concept and don't apply here;
-              expose web services later from the machine page.
+              Expose web services later from the machine page.
             </div>
             {!tunnelInfo?.enabled && (
-              <div className="text-xs text-warn mt-1.5">
-                Tunnel integration not configured. An admin can wire it up
-                from{' '}
-                <Link to="/infrastructure/gopher" className="underline">Infrastructure → Gopher tunnels</Link>.
+              <div className="text-xs text-warn mt-1">
+                Tunnel integration not configured —{' '}
+                <Link to="/infrastructure/gopher" className="underline">admin setup</Link>.
               </div>
             )}
             {tunnelInfo?.enabled && !selectedKeyHasPrivate && (
-              <div className="text-xs text-warn mt-1.5">
+              <div className="text-xs text-warn mt-1">
                 {form.keyMode === 'byo'
-                  ? 'Paste the private half above — Nimbus needs it to SSH into the VM and run the Gopher bootstrap.'
+                  ? 'Paste the private half above — Nimbus needs it to bootstrap the tunnel.'
                   : form.keyMode === 'saved'
-                    ? <>This saved key has no private half on file. Pick another key or upload its private key from{' '}<Link to="/keys" className="underline">SSH keys</Link>.</>
-                    : 'Pick a key with a private half or generate a new one — the Gopher bootstrap needs to SSH into the VM.'}
+                    ? <>Selected key has no private half. Pick another or upload it on <Link to="/keys" className="underline">SSH keys</Link>.</>
+                    : 'Pick a key with a private half — the bootstrap needs to SSH into the VM.'}
               </div>
             )}
           </div>
         </label>
-        {form.publicTunnel && tunnelInfo?.enabled && tunnelInfo.host && (
-          <div className="text-xs text-ink-3 mt-1.5 leading-relaxed">
-            After the VM boots, SSH will be reachable at{' '}
-            <span className="font-mono text-ink">{tunnelInfo.host}:&lt;port&gt;</span>.
-            Gopher assigns the port — it'll show on the result screen.
-          </div>
-        )}
       </div>
 
       <AdvancedSection>
-        <SubnetPicker
-          form={form}
-          updateForm={updateForm}
-          savedSubnets={savedSubnets}
-          sdnStatus={sdnStatus}
-          isAdmin={isAdmin}
-        />
         <AffinityPicker
           value={form.requiredTags}
           onChange={(v) => updateForm('requiredTags', v)}
@@ -996,6 +982,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
     : undefined
   const hasWarning = Boolean(result.warning)
   const hasTunnel = Boolean(publicSSHCommand)
+  const isolated = Boolean(result.subnet_name)
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
@@ -1024,7 +1011,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
           <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
             <span className="text-base">⚠</span>
             <div>
-              <strong>Reachability not confirmed.</strong> {result.warning}
+              <strong>Guest agent did not confirm.</strong> {result.warning}
             </div>
           </div>
         )}
@@ -1039,13 +1026,67 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
+        {result.cloud_init_error && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(184,101,15,0.08)] border border-[rgba(184,101,15,0.2)] text-warn text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">⚠</span>
+            <div>
+              <strong>Cloud-init ISO not delivered.</strong>{' '}
+              The per-VM cloud-init ISO (which installs the qemu-guest-agent so
+              readiness checks succeed) couldn't be uploaded or attached. Check that
+              the configured storage accepts <span className="font-mono text-ink">iso</span>{' '}
+              content and that the API token has{' '}
+              <span className="font-mono text-ink">Datastore.AllocateTemplate</span>{' '}
+              on it. Reason: <span className="font-mono text-ink whitespace-pre-line">{result.cloud_init_error}</span>
+            </div>
+          </div>
+        )}
+
+        {result.console_password && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,125,90,0.08)] border border-[rgba(45,125,90,0.2)] text-good text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">🔑</span>
+            <div className="flex-1">
+              <strong>One-time console password.</strong>{' '}
+              Use this to log in via the Proxmox noVNC console (VMID{' '}
+              <span className="font-mono text-ink">{result.vmid}</span> → Console)
+              if you need to reach the VM before SSH/qga is up. Save it now —
+              it's not stored anywhere.
+              <div className="mt-2 font-mono text-ink bg-white/70 px-2.5 py-1.5 rounded border border-[rgba(45,125,90,0.2)] select-all">
+                {result.username}:{result.console_password}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isolated && !hasTunnel && (
+          <div className="mt-5 p-4 rounded-[10px] bg-[rgba(45,77,125,0.06)] border border-[rgba(45,77,125,0.2)] text-ink-2 text-[13px] leading-relaxed flex items-start gap-2.5">
+            <span className="text-base">🔒</span>
+            <div>
+              <strong>Isolated subnet.</strong>{' '}
+              This VM lives on{' '}
+              <span className="font-mono text-ink">{result.subnet_name}</span>
+              {result.subnet_cidr && (
+                <>
+                  {' '}(<span className="font-mono text-ink">{result.subnet_cidr}</span>)
+                </>
+              )}
+              . The IP below isn't reachable from the public internet or the
+              cluster's main LAN — it's only reachable from another VM in the
+              same subnet, the Proxmox host, or via a tunnel. To connect now:
+              open the Proxmox console for VMID{' '}
+              <span className="font-mono text-ink">{result.vmid}</span> on node{' '}
+              <span className="font-mono text-ink">{result.node}</span>, or
+              re-provision with the public-SSH toggle for a Gopher tunnel.
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
-          <CredCell label="Local IP" value={result.ip} />
+          <CredCell label={isolated ? 'Subnet IP' : 'Local IP'} value={result.ip} />
           <CredCell label="Username" value={result.username} />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
           <CredCell
-            label={hasTunnel ? 'SSH (LAN)' : 'SSH command'}
+            label={hasTunnel ? 'SSH (LAN)' : isolated ? 'SSH (from inside subnet)' : 'SSH command'}
             value={sshCommand}
             fullWidth
           />
@@ -1330,12 +1371,9 @@ function SubnetPicker({
         <ModeChip active disabled={false} onClick={() => undefined}>
           Cluster LAN ({sdnStatus.default_bridge})
         </ModeChip>
-        <p className="text-[11px] text-ink-3 leading-relaxed">
-          Per-user isolation is off cluster-wide. New VMs join the
-          cluster's main network alongside Proxmox itself. An admin
-          can enable isolation on the{' '}
-          <Link to="/infrastructure/network" className="underline">VM network</Link>{' '}
-          settings page.
+        <p className="text-[11px] text-ink-3">
+          Per-user isolation is off — admins can enable it on{' '}
+          <Link to="/infrastructure/network" className="underline">VM network</Link>.
         </p>
       </div>
     )
@@ -1364,12 +1402,6 @@ function SubnetPicker({
         >
           Existing
         </ModeChip>
-        <ModeChip
-          active={form.subnetMode === 'new'}
-          onClick={() => updateForm('subnetMode', 'new')}
-        >
-          + New subnet
-        </ModeChip>
         {isAdmin && (
           <ModeChip
             active={form.subnetMode === 'bridge'}
@@ -1378,6 +1410,12 @@ function SubnetPicker({
             Cluster LAN <span className="text-ink-3">(admin)</span>
           </ModeChip>
         )}
+        <ModeChip
+          active={form.subnetMode === 'new'}
+          onClick={() => updateForm('subnetMode', 'new')}
+        >
+          + New subnet
+        </ModeChip>
       </div>
       {form.subnetMode === 'existing' && hasSaved && (
         <select
@@ -1404,16 +1442,14 @@ function SubnetPicker({
       )}
       {form.subnetMode === 'bridge' && (
         <p className="text-[11px] text-warn leading-relaxed">
-          ⚠ Admin-only escape hatch. The VM lands on{' '}
-          <span className="font-mono">{sdnStatus.default_bridge}</span>{' '}
-          alongside the cluster LAN, bypassing per-user isolation.
-          Use only for management VMs that need direct cluster access.
+          ⚠ Admin-only. VM lands on{' '}
+          <span className="font-mono">{sdnStatus.default_bridge}</span>,
+          bypassing isolation.
         </p>
       )}
-      <p className="text-[11px] text-ink-3 leading-relaxed">
-        Subnets isolate VMs from the cluster LAN and from your other
-        subnets. Manage them on the{' '}
-        <Link to="/subnets" className="underline">Subnets</Link> page.
+      <p className="text-[11px] text-ink-3">
+        Subnets isolate VMs from the cluster LAN and each other —{' '}
+        <Link to="/subnets" className="underline">manage</Link>.
       </p>
     </div>
   )
