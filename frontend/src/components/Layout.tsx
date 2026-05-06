@@ -115,7 +115,7 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                     <ServerIcon /><span>Infrastructure</span>
                   </NavLink>
                   <NavLink to="/s3" className={dropdownItemClass}>
-                    <DatabaseIcon /><span>S3</span><AlphaPill />
+                    <DatabaseIcon /><span>S3</span>
                   </NavLink>
                   <NavLink to="/gpu" className={dropdownItemClass}>
                     <CpuIcon /><span>GPU</span><AlphaPill />
@@ -126,6 +126,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <SectionLabel>Account</SectionLabel>
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
+                  </NavLink>
+                  <NavLink to="/buckets" className={dropdownItemClass}>
+                    <DatabaseIcon /><span>Buckets</span>
                   </NavLink>
                   <NavLink to="/account" className={dropdownItemClass}>
                     <UserIcon /><span>Account</span>
@@ -149,6 +152,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <SectionLabel>Account</SectionLabel>
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
+                  </NavLink>
+                  <NavLink to="/buckets" className={dropdownItemClass}>
+                    <DatabaseIcon /><span>Buckets</span>
                   </NavLink>
                   <NavLink to="/account" className={dropdownItemClass}>
                     <UserIcon /><span>Account</span>

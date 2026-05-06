@@ -74,9 +74,12 @@ Supported: Linux amd64, Linux arm64.
 For development builds or unreleased changes:
 
 ```bash
-./scripts/build.sh        # cross-compiles for the host arch
-sudo ./nimbus install     # writes systemd unit + sudoers rule, starts the service
+./scripts/install-deps.sh   # first-time only: installs Node.js + Go via apt if missing
+./scripts/build.sh          # cross-compiles for the host arch
+sudo ./nimbus install       # writes systemd unit + sudoers rule, starts the service
 ```
+
+`install-deps.sh` is apt-only (Ubuntu/Debian); on other distros install Node.js 18+ and Go 1.25+ manually.
 
 The wizard auto-detects when run on a Proxmox host and defaults `PROXMOX_HOST=https://localhost:8006`. On a guest VM, the web wizard prompts for the cluster's address.
 
@@ -88,10 +91,9 @@ After install, open `http://<host-ip>:8080` and complete the **web setup wizard*
 git clone https://github.com/smalex-z/nimbus.git
 cd nimbus
 
-# Installs Go (per go.mod), Node 20, golangci-lint, jq, curl. Idempotent.
+# Installs Node.js + Go via apt if missing or below minimum. Idempotent.
+# Apt-based distros only (Ubuntu/Debian).
 ./scripts/install-deps.sh
-# --check    print what's missing without installing
-# --dev-only skip jq/curl (the wizard prereqs)
 
 cp .env.example .env
 $EDITOR .env
@@ -101,7 +103,7 @@ make dev
 # Backend API:          http://localhost:8080
 ```
 
-Requirements: Go 1.25+, Node.js 18+ (the install script provisions versions matching `go.mod` and CI).
+Requirements: Go 1.25+ (matches `go.mod`), Node.js 18+. `install-deps.sh` only handles those two — install `golangci-lint` separately if you want to run `make lint` (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4`).
 
 ### Other commands
 

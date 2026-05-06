@@ -110,12 +110,28 @@ func (s *Service) Deploy(ctx context.Context, prov Provisioner, p DeployParams, 
 	// Persist the real VMID/Node/IP now that the VM exists. The row has
 	// to hold these so DELETE /api/s3/storage can find the VM to tear
 	// down (and release its IP).
-	if err := s.db.Model(&db.S3Storage{}).Where("id = ?", row.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"vm_row_id": res.ID,
 		"vmid":      res.VMID,
 		"node":      res.Node,
 		"ip":        res.IP,
-	}).Error; err != nil {
+	}
+	// Look up the VM's auto-generated SSH key id so the storage row can
+	// pin it. Marking the key system-generated lets the Keys UI hide it
+	// by default and lets Service.Delete garbage-collect it on teardown.
+	var sshKeyID *uint
+	var vm db.VM
+	if vmErr := s.db.First(&vm, res.ID).Error; vmErr == nil && vm.SSHKeyID != nil {
+		sshKeyID = vm.SSHKeyID
+		updates["ssh_key_id"] = *sshKeyID
+		if mkErr := s.db.Model(&db.SSHKey{}).Where("id = ?", *sshKeyID).
+			Update("system_generated", true).Error; mkErr != nil {
+			log.Printf("s3 deploy: mark key %d system-generated: %v", *sshKeyID, mkErr)
+		}
+	} else if vmErr != nil {
+		log.Printf("s3 deploy: lookup vm %d for ssh-key cleanup pin: %v", res.ID, vmErr)
+	}
+	if err := s.db.Model(&db.S3Storage{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
 		// Best-effort tear-down: we created a VM we can't book-keep.
 		// AdminDelete needs the Nimbus-side row ID; res.ID carries it.
 		_ = prov.AdminDelete(context.Background(), res.ID)

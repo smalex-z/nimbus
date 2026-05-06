@@ -337,14 +337,16 @@ definitions:
       password:
         type: string
     type: object
-  handlers.createBucketRequest:
+  handlers.createBucketBody:
     properties:
       name:
+        example: uploads
         type: string
     type: object
-  handlers.createBucketResponse:
+  handlers.createBucketResp:
     properties:
       name:
+        example: kevin-u3-uploads
         type: string
     type: object
   handlers.createKeyRequest:
@@ -386,6 +388,8 @@ definitions:
         type: string
       source:
         type: string
+      system_generated:
+        type: boolean
       updated_at:
         type: string
     type: object
@@ -434,6 +438,23 @@ definitions:
         type: string
       tunnel_port:
         type: integer
+    type: object
+  handlers.credentialsView:
+    properties:
+      access_key:
+        type: string
+      endpoint:
+        type: string
+      prefix:
+        type: string
+      secret_key:
+        type: string
+    type: object
+  handlers.deleteBucketResp:
+    properties:
+      message:
+        example: bucket deleted
+        type: string
     type: object
   handlers.deleteBucketResponse:
     properties:
@@ -623,6 +644,8 @@ definitions:
         type: string
       source:
         type: string
+      system_generated:
+        type: boolean
       updated_at:
         type: string
     type: object
@@ -908,6 +931,17 @@ definitions:
         type: integer
       cleanup_cmd:
         type: string
+    type: object
+  handlers.userBucketView:
+    properties:
+      created_at:
+        type: string
+      name:
+        type: string
+      object_count:
+        type: integer
+      total_size_bytes:
+        type: integer
     type: object
   handlers.userQuotaRequest:
     type: object
@@ -1287,7 +1321,7 @@ definitions:
       snapshot_at:
         type: string
     type: object
-  s3storage.BucketStat:
+  s3storage.AdminBucketStat:
     properties:
       created_at:
         type: string
@@ -1295,6 +1329,12 @@ definitions:
         type: string
       object_count:
         type: integer
+      owner_email:
+        type: string
+      owner_id:
+        type: integer
+      owner_name:
+        type: string
       total_size_bytes:
         type: integer
     type: object
@@ -1864,6 +1904,186 @@ paths:
       summary: Register a new user account (public)
       tags:
       - auth
+  /buckets:
+    get:
+      description: |-
+        Bucket name, creation time, object count, and total size for
+        each bucket owned by the caller. Returns 503 with a stable
+        substring ("no s3 storage deployed" / "not ready") when the
+        shared storage host hasn't been deployed by an admin yet —
+        the SPA distinguishes these from real errors and renders an
+        empty-state card.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.userBucketView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the calling user's MinIO buckets
+      tags:
+      - buckets
+    post:
+      consumes:
+      - application/json
+      description: |-
+        The user supplies only the suffix half of the bucket name
+        (3-30 chars, lowercase alnum + hyphen, no leading/trailing
+        hyphen). Server composes the full name as
+        `<owner-prefix>-<suffix>` so cross-user collisions are
+        impossible. Service account is auto-minted on first call
+        if the user doesn't already have one.
+      parameters:
+      - description: Bucket suffix
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createBucketBody'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.createBucketResp'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a bucket owned by the calling user
+      tags:
+      - buckets
+  /buckets/{name}:
+    delete:
+      description: |-
+        404 if the bucket isn't owned by the caller (existence is not
+        disclosed across ownership boundaries). 409 if the bucket is
+        not empty — the user must empty it first; Nimbus does not
+        force-delete object data.
+      parameters:
+      - description: Bucket name (full composed form)
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.deleteBucketResp'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a bucket owned by the calling user
+      tags:
+      - buckets
+  /buckets/credentials:
+    get:
+      description: |-
+        Endpoint + access key + secret key + bucket name prefix the
+        user's policy allows. The secret is returned every time;
+        treat it as the primary share surface, not a one-time view.
+        Auto-mints the service account on first call if needed.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.credentialsView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read the calling user's MinIO service-account credentials
+      tags:
+      - buckets
   /cluster/stats:
     get:
       description: |-
@@ -3352,9 +3572,9 @@ paths:
   /s3/buckets:
     get:
       description: |-
-        503 when storage is absent or not yet ready (deploy in flight,
-        or VM still booting). The reconciler converges status; the
-        SPA polls until ready.
+        Joins MinIO state with the s3_buckets DB rows so the admin
+        can see who owns what. 503 when storage is absent or not
+        ready yet — the SPA polls until ready.
       produces:
       - application/json
       responses:
@@ -3366,7 +3586,7 @@ paths:
             - properties:
                 data:
                   items:
-                    $ref: '#/definitions/s3storage.BucketStat'
+                    $ref: '#/definitions/s3storage.AdminBucketStat'
                   type: array
               type: object
         "401":
@@ -3387,69 +3607,18 @@ paths:
             $ref: '#/definitions/handlers.EnvelopeError'
       security:
       - cookieAuth: []
-      summary: List MinIO buckets (admin)
-      tags:
-      - s3
-    post:
-      consumes:
-      - application/json
-      description: |-
-        Bucket name must match the AWS S3 stricter ruleset: 3-63
-        chars, lowercase letters/digits/hyphens, no leading/trailing
-        hyphen.
-      parameters:
-      - description: Bucket spec
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.createBucketRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            allOf:
-            - $ref: '#/definitions/handlers.EnvelopeOK'
-            - properties:
-                data:
-                  $ref: '#/definitions/handlers.createBucketResponse'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "403":
-          description: Forbidden
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "503":
-          description: Service Unavailable
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Create a MinIO bucket (admin)
+      summary: List every bucket on the storage VM with owner info (admin)
       tags:
       - s3
   /s3/buckets/{name}:
     delete:
-      description: 409 when the bucket isn't empty — empty it first.
+      description: |-
+        Empties + removes the bucket regardless of owner or contents.
+        This is the admin "delete on behalf" path; the user-scoped
+        /api/buckets/{name} refuses non-empty buckets so users
+        can't accidentally nuke their own data.
       parameters:
-      - description: Bucket name
+      - description: Bucket name (full composed form)
         in: path
         name: name
         required: true
@@ -3478,8 +3647,8 @@ paths:
           description: Forbidden
           schema:
             $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
+        "404":
+          description: Not Found
           schema:
             $ref: '#/definitions/handlers.EnvelopeError'
         "500":
@@ -3492,7 +3661,7 @@ paths:
             $ref: '#/definitions/handlers.EnvelopeError'
       security:
       - cookieAuth: []
-      summary: Delete a MinIO bucket (admin)
+      summary: Force-delete any bucket on the storage VM (admin)
       tags:
       - s3
   /s3/storage:

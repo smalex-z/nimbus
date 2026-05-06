@@ -8,6 +8,7 @@ import (
 	"regexp"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -212,91 +213,33 @@ func (h *S3) DeleteStorage(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, deleteStorageResponse{Message: "s3 storage deleted"})
 }
 
-// ListBuckets handles GET /api/s3/buckets.
+// ListBuckets handles GET /api/s3/buckets — admin-only cluster-wide view
+// with owner identity attached. The user-scoped /api/buckets surface is
+// intentionally narrower (only own buckets, no owner fields).
 //
-// @Summary     List MinIO buckets (admin)
-// @Description 503 when storage is absent or not yet ready (deploy in flight,
-// @Description or VM still booting). The reconciler converges status; the
-// @Description SPA polls until ready.
+// @Summary     List every bucket on the storage VM with owner info (admin)
+// @Description Joins MinIO state with the s3_buckets DB rows so the admin
+// @Description can see who owns what. 503 when storage is absent or not
+// @Description ready yet — the SPA polls until ready.
 // @Tags        s3
 // @Security    cookieAuth
 // @Produce     json
-// @Success     200 {object} EnvelopeOK{data=[]s3storage.BucketStat}
+// @Success     200 {object} EnvelopeOK{data=[]s3storage.AdminBucketStat}
 // @Failure     401 {object} EnvelopeError
 // @Failure     403 {object} EnvelopeError
 // @Failure     500 {object} EnvelopeError
 // @Failure     503 {object} EnvelopeError
 // @Router      /s3/buckets [get]
 func (h *S3) ListBuckets(w http.ResponseWriter, r *http.Request) {
-	bc, err := h.svc.Buckets()
+	stats, err := h.svc.ListAllBuckets(r.Context())
 	if err != nil {
 		writeBucketsError(w, err)
-		return
-	}
-	stats, err := bc.ListBuckets(r.Context())
-	if err != nil {
-		response.InternalError(w, "list buckets: "+err.Error())
 		return
 	}
 	if stats == nil {
-		stats = []s3storage.BucketStat{}
+		stats = []s3storage.AdminBucketStat{}
 	}
 	response.Success(w, stats)
-}
-
-// createBucketRequest is the body of POST /api/s3/buckets.
-type createBucketRequest struct {
-	Name string `json:"name"`
-}
-
-// createBucketResponse is the body of POST /api/s3/buckets.
-type createBucketResponse struct {
-	Name string `json:"name"`
-}
-
-// CreateBucket handles POST /api/s3/buckets.
-//
-// @Summary     Create a MinIO bucket (admin)
-// @Description Bucket name must match the AWS S3 stricter ruleset: 3-63
-// @Description chars, lowercase letters/digits/hyphens, no leading/trailing
-// @Description hyphen.
-// @Tags        s3
-// @Security    cookieAuth
-// @Accept      json
-// @Produce     json
-// @Param       body body     createBucketRequest true "Bucket spec"
-// @Success     201  {object} EnvelopeOK{data=createBucketResponse}
-// @Failure     400  {object} EnvelopeError
-// @Failure     401  {object} EnvelopeError
-// @Failure     403  {object} EnvelopeError
-// @Failure     409  {object} EnvelopeError
-// @Failure     500  {object} EnvelopeError
-// @Failure     503  {object} EnvelopeError
-// @Router      /s3/buckets [post]
-func (h *S3) CreateBucket(w http.ResponseWriter, r *http.Request) {
-	var req createBucketRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.BadRequest(w, "invalid JSON body")
-		return
-	}
-	if !bucketNameRE.MatchString(req.Name) {
-		response.BadRequest(w, "bucket name must be 3-63 chars, lowercase letters/digits/hyphens, not starting or ending with a hyphen")
-		return
-	}
-	bc, err := h.svc.Buckets()
-	if err != nil {
-		writeBucketsError(w, err)
-		return
-	}
-	if err := bc.CreateBucket(r.Context(), req.Name); err != nil {
-		if errors.Is(err, s3storage.ErrBucketAlreadyExists) {
-			response.Conflict(w, fmt.Sprintf("bucket %q already exists", req.Name))
-			return
-		}
-		response.InternalError(w, "create bucket: "+err.Error())
-		return
-	}
-	response.Created(w, createBucketResponse(req))
 }
 
 // deleteBucketResponse is the body of DELETE /api/s3/buckets/{name}.
@@ -304,19 +247,22 @@ type deleteBucketResponse struct {
 	Message string `json:"message" example:"bucket deleted"`
 }
 
-// DeleteBucket handles DELETE /api/s3/buckets/{name}.
+// DeleteBucket handles DELETE /api/s3/buckets/{name} — admin force-delete.
 //
-// @Summary     Delete a MinIO bucket (admin)
-// @Description 409 when the bucket isn't empty — empty it first.
+// @Summary     Force-delete any bucket on the storage VM (admin)
+// @Description Empties + removes the bucket regardless of owner or contents.
+// @Description This is the admin "delete on behalf" path; the user-scoped
+// @Description /api/buckets/{name} refuses non-empty buckets so users
+// @Description can't accidentally nuke their own data.
 // @Tags        s3
 // @Security    cookieAuth
 // @Produce     json
-// @Param       name path     string true "Bucket name"
+// @Param       name path     string true "Bucket name (full composed form)"
 // @Success     200  {object} EnvelopeOK{data=deleteBucketResponse}
 // @Failure     400  {object} EnvelopeError
 // @Failure     401  {object} EnvelopeError
 // @Failure     403  {object} EnvelopeError
-// @Failure     409  {object} EnvelopeError
+// @Failure     404  {object} EnvelopeError
 // @Failure     500  {object} EnvelopeError
 // @Failure     503  {object} EnvelopeError
 // @Router      /s3/buckets/{name} [delete]
@@ -326,24 +272,20 @@ func (h *S3) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid bucket name")
 		return
 	}
-	bc, err := h.svc.Buckets()
-	if err != nil {
-		writeBucketsError(w, err)
-		return
-	}
-	if err := bc.DeleteBucket(r.Context(), name); err != nil {
-		if errors.Is(err, s3storage.ErrBucketNotEmpty) {
-			response.Conflict(w, fmt.Sprintf("bucket %q is not empty — empty it first", name))
+	if err := h.svc.AdminDeleteBucket(r.Context(), name); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.NotFound(w, fmt.Sprintf("bucket %q not found", name))
 			return
 		}
-		response.InternalError(w, "delete bucket: "+err.Error())
+		writeBucketsError(w, err)
 		return
 	}
 	response.Success(w, deleteBucketResponse{Message: "bucket deleted"})
 }
 
 // writeBucketsError converts s3storage sentinels to appropriate HTTP
-// status codes for any handler that called Service.Buckets().
+// status codes for any handler that called Service.Buckets() or one of
+// the admin list/delete paths.
 func writeBucketsError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, s3storage.ErrNotDeployed):
@@ -351,6 +293,6 @@ func writeBucketsError(w http.ResponseWriter, err error) {
 	case errors.Is(err, s3storage.ErrNotReady):
 		response.ServiceUnavailable(w, "s3 storage is not ready yet")
 	default:
-		response.InternalError(w, "minio client unavailable: "+err.Error())
+		response.InternalError(w, "minio: "+err.Error())
 	}
 }

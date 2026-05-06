@@ -26,6 +26,7 @@ export default function Keys() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [showSystem, setShowSystem] = useState(false)
   const [justCreated, setJustCreated] = useState<{ name: string; privateKey: string } | null>(null)
 
   const refresh = () => {
@@ -38,20 +39,37 @@ export default function Keys() {
 
   useEffect(refresh, [])
 
+  // System keys are auto-minted by Nimbus for internal VMs (S3 storage,
+  // future internal services). Hidden by default — the toggle below
+  // surfaces them for debugging or manual cleanup.
+  const systemKeyCount = keys.filter((k) => k.system_generated).length
+  const visibleKeys = showSystem ? keys : keys.filter((k) => !k.system_generated)
+
   return (
     <div>
       <div className="flex items-end justify-between flex-wrap gap-4 mb-2">
         <div>
-          <div className="eyebrow">{keys.length} key{keys.length === 1 ? '' : 's'}</div>
+          <div className="eyebrow">{visibleKeys.length} key{visibleKeys.length === 1 ? '' : 's'}</div>
           <h2 className="text-3xl">SSH keys</h2>
           <p className="text-base text-ink-2 mt-2 leading-relaxed">
             Store keys once, use them on every VM. The default key is picked
             automatically at provision time.
           </p>
         </div>
-        <Button onClick={() => setShowAdd((v) => !v)}>
-          {showAdd ? '← Cancel' : '+ Add key'}
-        </Button>
+        <div className="flex items-center gap-2">
+          {systemKeyCount > 0 && (
+            <Button
+              variant="ghost"
+              onClick={() => setShowSystem((v) => !v)}
+              title="System keys are auto-minted by Nimbus for internal VMs (e.g. the S3 storage bootstrap). Hidden from the list by default."
+            >
+              {showSystem ? '✕ Hide system keys' : `⚙ Show system keys (${systemKeyCount})`}
+            </Button>
+          )}
+          <Button onClick={() => setShowAdd((v) => !v)}>
+            {showAdd ? '← Cancel' : '+ Add key'}
+          </Button>
+        </div>
       </div>
 
       {showAdd && (
@@ -78,7 +96,7 @@ export default function Keys() {
         <Card className="mt-8 p-6 text-bad text-sm">Failed to load: {error}</Card>
       )}
 
-      {!loading && !error && keys.length === 0 && !showAdd && (
+      {!loading && !error && visibleKeys.length === 0 && !showAdd && (
         <Card className="mt-8 p-12 text-center">
           <div className="eyebrow">No keys yet</div>
           <h3 className="text-xl mt-2">Add your first SSH key.</h3>
@@ -90,7 +108,7 @@ export default function Keys() {
       )}
 
       <div className="grid gap-3 mt-7">
-        {keys.map((k) => (
+        {visibleKeys.map((k) => (
           <KeyRow
             key={k.id}
             sshKey={k}
@@ -395,6 +413,14 @@ function KeyRow({ sshKey, currentUserId, onChanged, onPromoted, onError }: KeyRo
             {sshKey.source === 'vm-auto' && (
               <span className="font-mono text-[10px] px-2 py-0.5 rounded-md bg-[rgba(27,23,38,0.05)] text-ink-2 uppercase tracking-wider">
                 vm-auto
+              </span>
+            )}
+            {sshKey.system_generated && (
+              <span
+                className="font-mono text-[10px] px-2 py-0.5 rounded-md bg-[rgba(124,86,246,0.1)] text-[#7c56f6] uppercase tracking-wider"
+                title="Auto-minted by Nimbus for an internal VM (e.g. S3 storage). Deleting it disables Nimbus's SSH access to that VM."
+              >
+                system
               </span>
             )}
             {!sshKey.has_private_key && (

@@ -11,6 +11,7 @@ package s3storage
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"gorm.io/gorm"
@@ -151,12 +152,46 @@ func (s *Service) MarkDeleting() error {
 	return nil
 }
 
-// Delete removes the storage row. The caller is responsible for tearing
-// down the underlying Proxmox VM (and releasing its IP) before or after
-// calling this — the row is just the database bookkeeping.
+// Delete removes the storage row and cascades to user-side bucket and
+// service-account rows in the same SQLite transaction. The caller is
+// responsible for tearing down the underlying Proxmox VM (and releasing its
+// IP) before or after calling this — the row is just the database
+// bookkeeping.
+//
+// The cascade is hard-delete (Unscoped) so a redeploy starts from a clean
+// slate. Bucket data on the destroyed VM's disk is gone with the VM, so
+// retaining the rows would lie to the UI.
+//
+// Also cascades the auto-generated SSH key (s3_storage.ssh_key_id) so
+// failed/successful redeploys don't leak nimbus-nimbus-s3-* entries
+// into the user's vault. Best-effort — a missing key row doesn't fail
+// the cascade.
 func (s *Service) Delete() error {
-	if err := s.db.Unscoped().Where("1 = 1").Delete(&db.S3Storage{}).Error; err != nil {
-		return fmt.Errorf("delete s3 storage: %w", err)
+	// Capture the SSH key id before we delete the storage row inside the
+	// transaction; the row body is gone after the txn commits.
+	var sshKeyID *uint
+	if row, err := s.Get(); err == nil {
+		sshKeyID = row.SSHKeyID
+	}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Where("1 = 1").Delete(&db.S3Bucket{}).Error; err != nil {
+			return fmt.Errorf("cascade delete s3 buckets: %w", err)
+		}
+		if err := tx.Unscoped().Where("1 = 1").Delete(&db.S3ServiceAccount{}).Error; err != nil {
+			return fmt.Errorf("cascade delete s3 service accounts: %w", err)
+		}
+		if err := tx.Unscoped().Where("1 = 1").Delete(&db.S3Storage{}).Error; err != nil {
+			return fmt.Errorf("delete s3 storage: %w", err)
+		}
+		if sshKeyID != nil {
+			if err := tx.Unscoped().Delete(&db.SSHKey{}, *sshKeyID).Error; err != nil {
+				log.Printf("s3 delete: cascade ssh key %d: %v", *sshKeyID, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	s.invalidateBuckets()
 	return nil

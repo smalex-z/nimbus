@@ -76,6 +76,10 @@ export interface SSHKey {
   owner_id?: number | null
   source?: 'imported' | 'generated' | 'vm-auto' | string
   has_private_key: boolean
+  // system_generated keys are auto-minted by Nimbus for internal VMs
+  // (e.g. the S3 storage bootstrap). Hidden from the Keys list by
+  // default; the page exposes a toggle to reveal them for debugging.
+  system_generated?: boolean
   created_at: string
   updated_at: string
 }

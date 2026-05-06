@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
-  createS3Bucket,
-  deleteS3Bucket,
+  adminDeleteBucket,
   deleteS3Storage,
   deployS3Storage,
   getS3Storage,
-  listS3Buckets,
+  listAdminBuckets,
 } from '@/api/client'
-import type { S3Bucket, S3DeployProgress, S3StorageView } from '@/api/client'
+import type { AdminBucketStat, S3DeployProgress, S3StorageView } from '@/api/client'
+import DeleteBucketConfirm from '@/components/ui/DeleteBucketConfirm'
 import DeleteS3Confirm from '@/components/ui/DeleteS3Confirm'
 
 // Phase-3 admin page. The page has two states:
@@ -25,18 +26,6 @@ const PROGRESS_LABELS: Record<string, string> = {
   configure_vm: 'Configured cloud-init',
   start_vm: 'Started VM',
   wait_guest_agent: 'Guest agent reachable',
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
 }
 
 function StatusPill({ status }: { status: S3StorageView['status'] }) {
@@ -298,19 +287,34 @@ function Row({
   )
 }
 
-function BucketsPanel({ disabled }: { disabled: boolean }) {
-  const [buckets, setBuckets] = useState<S3Bucket[]>([])
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+// AdminBucketsPanel is the cross-user view of every bucket on the storage
+// VM. The admin sees who owns what and can force-delete any bucket
+// (regardless of contents). Per-user creation still happens at /buckets —
+// this page is read + delete only.
+function AdminBucketsPanel({ disabled }: { disabled: boolean }) {
+  const [buckets, setBuckets] = useState<AdminBucketStat[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [newName, setNewName] = useState('')
-  const [creating, setCreating] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<AdminBucketStat | null>(null)
 
   const refresh = async () => {
-    setError(null)
     try {
-      setBuckets(await listS3Buckets())
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load buckets')
+      setErr(null)
+      setBuckets(await listAdminBuckets())
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to load buckets')
     } finally {
       setLoading(false)
     }
@@ -321,121 +325,119 @@ function BucketsPanel({ disabled }: { disabled: boolean }) {
       setLoading(false)
       return
     }
-    refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void refresh()
   }, [disabled])
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    const name = newName.trim().toLowerCase()
-    if (!name) return
-    setCreating(true)
-    try {
-      await createS3Bucket(name)
-      setNewName('')
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Create failed')
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const handleDelete = async (name: string) => {
-    if (!confirm(`Delete bucket "${name}"? This is permanent.`)) return
-    setError(null)
-    try {
-      await deleteS3Bucket(name)
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed')
-    }
-  }
 
   return (
     <div
       className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
+      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>Buckets</span>
-        <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-          {buckets.length} {buckets.length === 1 ? 'bucket' : 'buckets'}
+        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+          All buckets {buckets.length > 0 && <span style={{ color: 'var(--ink-mute)', fontWeight: 400 }}>· {buckets.length}</span>}
         </span>
+        <Link
+          to="/buckets"
+          className="n-btn n-btn-ghost"
+          style={{ fontSize: 12 }}
+          title="Manage your own buckets via the user surface"
+        >
+          My buckets →
+        </Link>
       </div>
 
       {disabled ? (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
           MinIO is not ready yet. Buckets become manageable once status flips to “ready”.
         </p>
+      ) : loading ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
+      ) : err ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{err}</p>
+      ) : buckets.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
+          No buckets yet — users create them at <Link to="/buckets">/buckets</Link>.
+        </p>
       ) : (
-        <>
-          <form onSubmit={handleCreate} style={{ display: 'flex', gap: 8 }}>
-            <input
-              className="n-input"
-              type="text"
-              placeholder="bucket-name (lowercase, 3-63 chars)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              disabled={creating}
-              style={{ flex: 1 }}
-            />
-            <button
-              type="submit"
-              className="n-btn n-btn-primary"
-              disabled={creating || !newName.trim()}
-            >
-              {creating ? 'Creating…' : 'Create'}
-            </button>
-          </form>
-
-          {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-
-          {loading ? (
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>Loading…</p>
-          ) : buckets.length === 0 ? (
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
-              No buckets yet. Create one above.
-            </p>
-          ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead>
-                <tr style={{ textAlign: 'left', color: 'var(--ink-mute)' }}>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Name</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Objects</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Size</th>
-                  <th style={{ padding: '6px 0', fontWeight: 500 }}>Created</th>
-                  <th />
+        <div style={{ overflowX: 'auto', margin: '0 -28px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: 'var(--ink-mute)', borderBottom: '1px solid var(--line)' }}>
+                <th style={{ padding: '10px 28px', fontWeight: 500 }}>Bucket</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500 }}>Owner</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500, textAlign: 'right' }}>Objects</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500, textAlign: 'right' }}>Size</th>
+                <th style={{ padding: '10px 16px', fontWeight: 500 }}>Created</th>
+                <th style={{ padding: '10px 28px' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {buckets.map((b) => (
+                <tr key={b.name} style={{ borderTop: '1px solid var(--line)' }}>
+                  <td
+                    style={{
+                      padding: '10px 28px',
+                      color: 'var(--ink)',
+                      fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {b.name}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span>{b.owner_name || <em style={{ color: 'var(--ink-mute)' }}>&lt;unknown&gt;</em>}</span>
+                      {b.owner_email && (
+                        <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{b.owner_email}</span>
+                      )}
+                    </div>
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {b.object_count}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-body)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {formatBytes(b.total_size_bytes)}
+                  </td>
+                  <td style={{ padding: '10px 16px', color: 'var(--ink-mute)' }}>
+                    {new Date(b.created_at).toLocaleDateString()}
+                  </td>
+                  <td style={{ padding: '10px 28px', textAlign: 'right' }}>
+                    <button
+                      type="button"
+                      className="n-btn n-btn-ghost"
+                      onClick={() => setConfirming(b)}
+                      style={{ color: 'var(--err)' }}
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {buckets.map((b) => (
-                  <tr key={b.name} style={{ borderTop: '1px solid var(--line)' }}>
-                    <td style={{ padding: '8px 0', color: 'var(--ink)' }}>{b.name}</td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-body)' }}>{b.object_count}</td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-body)' }}>
-                      {formatBytes(b.total_size_bytes)}
-                    </td>
-                    <td style={{ padding: '8px 0', color: 'var(--ink-mute)' }}>
-                      {new Date(b.created_at).toLocaleDateString()}
-                    </td>
-                    <td style={{ padding: '8px 0', textAlign: 'right' }}>
-                      <button
-                        type="button"
-                        className="n-btn n-btn-ghost"
-                        onClick={() => handleDelete(b.name)}
-                        style={{ color: 'var(--err)' }}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {confirming && (
+        <DeleteBucketConfirm
+          forceDelete
+          bucket={{
+            name: confirming.name,
+            objectCount: confirming.object_count,
+            totalSizeBytes: confirming.total_size_bytes,
+            ownerName: confirming.owner_name,
+            ownerEmail: confirming.owner_email,
+            createdAt: confirming.created_at,
+          }}
+          onConfirm={() => adminDeleteBucket(confirming.name)}
+          onDeleted={() => {
+            const name = confirming.name
+            setConfirming(null)
+            setBuckets((prev) => prev.filter((x) => x.name !== name))
+          }}
+          onCancel={() => setConfirming(null)}
+        />
       )}
     </div>
   )
@@ -463,11 +465,8 @@ export default function S3() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       <div>
-        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px', display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
           S3 storage
-          <span className="font-mono text-[9px] uppercase tracking-widest text-warn bg-[rgba(184,101,15,0.12)] border border-[rgba(184,101,15,0.25)] px-1.5 py-0.5 rounded">
-            Alpha
-          </span>
         </h1>
         <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
           A self-hosted MinIO server, S3-API compatible. Deploy once; create
@@ -489,7 +488,7 @@ export default function S3() {
           ) : storage ? (
             <>
               <StatusPanel storage={storage} onDelete={() => setStorage(null)} />
-              <BucketsPanel disabled={storage.status !== 'ready'} />
+              <AdminBucketsPanel disabled={storage.status !== 'ready'} />
             </>
           ) : (
             <DeployPanel onDeployed={(s) => setStorage(s)} />

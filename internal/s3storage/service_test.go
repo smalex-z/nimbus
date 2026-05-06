@@ -15,7 +15,7 @@ import (
 func newTestService(t *testing.T) *s3storage.Service {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.New(path, &db.S3Storage{})
+	database, err := db.New(path, &db.S3Storage{}, &db.S3Bucket{}, &db.S3ServiceAccount{})
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}

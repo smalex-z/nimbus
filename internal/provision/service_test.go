@@ -296,6 +296,7 @@ func TestProvision_GenerateKey_ReturnsPrivateKey(t *testing.T) {
 	cfg := fake.cloudInitArgs.Load()
 	if cfg == nil {
 		t.Fatalf("SetCloudInit was never called")
+		return // unreachable; placates staticcheck SA5011 false-positive
 	}
 	if !strings.HasPrefix(cfg.SSHKeys, "ssh-ed25519 ") {
 		t.Errorf("SetCloudInit got non-ed25519 public key: %q", cfg.SSHKeys)

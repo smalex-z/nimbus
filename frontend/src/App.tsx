@@ -20,6 +20,7 @@ import Nodes from '@/pages/Nodes'
 import Provision from '@/pages/Provision'
 import MyVMs from '@/pages/MyVMs'
 import Quotas from '@/pages/Quotas'
+import Buckets from '@/pages/Buckets'
 import S3 from '@/pages/S3'
 import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
@@ -91,6 +92,12 @@ export default function App() {
                       <Route path="/" element={<Provision />} />
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
+                      {/* /buckets is the per-user S3 surface — every
+                          verified user (admin or member) lands here to
+                          manage their own prefixed buckets and copy
+                          MinIO service-account creds. The admin /s3
+                          page handles storage-VM lifecycle only. */}
+                      <Route path="/buckets" element={<Buckets />} />
                       <Route path="/quotas" element={<RequireAdmin><Quotas /></RequireAdmin>} />
                       <Route path="/account" element={<Account />} />
                       {/* /authentication owns user table + sign-in providers
