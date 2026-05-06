@@ -67,6 +67,7 @@ func TestForceGatewayUpdate_PushesNewGatewayKeepsIP(t *testing.T) {
 	got := fake.cloudInitArgs.Load()
 	if got == nil {
 		t.Fatal("no SetCloudInit call recorded")
+		return // unreachable; placates staticcheck SA5011 false-positive
 	}
 	if !strings.Contains(got.IPConfig0, "gw=10.0.0.99") {
 		t.Errorf("ipconfig0 = %q, want gw=10.0.0.99", got.IPConfig0)
