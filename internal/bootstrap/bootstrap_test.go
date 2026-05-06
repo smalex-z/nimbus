@@ -26,7 +26,6 @@ type fakePX struct {
 	downloadStorageURL   func(context.Context, string, string, string, string, string) (string, error)
 	waitForTask          func(context.Context, string, string, time.Duration) error
 	createVMWithImport   func(context.Context, string, int, proxmox.CreateVMOpts) (string, error)
-	setCloudInitDrive    func(context.Context, string, int, string) error
 	convertToTemplate    func(context.Context, string, int) error
 
 	nextVMIDSeq   atomic.Int32 // for default sequential VMID assignment
@@ -61,9 +60,6 @@ func (f *fakePX) CreateVMWithImport(ctx context.Context, n string, vmid int, opt
 	f.createCalls.Add(1)
 	return f.createVMWithImport(ctx, n, vmid, opts)
 }
-func (f *fakePX) SetCloudInitDrive(ctx context.Context, n string, vmid int, s string) error {
-	return f.setCloudInitDrive(ctx, n, vmid, s)
-}
 func (f *fakePX) ConvertToTemplate(ctx context.Context, n string, vmid int) error {
 	f.convertCalls.Add(1)
 	return f.convertToTemplate(ctx, n, vmid)
@@ -90,7 +86,6 @@ func happyPX() *fakePX {
 		createVMWithImport: func(_ context.Context, _ string, _ int, _ proxmox.CreateVMOpts) (string, error) {
 			return "UPID:create", nil
 		},
-		setCloudInitDrive: func(_ context.Context, _ string, _ int, _ string) error { return nil },
 		convertToTemplate: func(_ context.Context, _ string, _ int) error { return nil },
 	}
 	f.nextVMIDFrom = func(_ context.Context, min int) (int, error) {
@@ -424,12 +419,6 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		mu.Unlock()
 		return "UPID:create", nil
 	}
-	px.setCloudInitDrive = func(_ context.Context, _ string, _ int, _ string) error {
-		mu.Lock()
-		sequence = append(sequence, "ci-drive")
-		mu.Unlock()
-		return nil
-	}
 	px.convertToTemplate = func(_ context.Context, _ string, _ int) error {
 		mu.Lock()
 		sequence = append(sequence, "template")
@@ -443,9 +432,12 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		OS: []string{"ubuntu-24.04"},
 	})
 
-	// New flow: DB-first idempotency (no Proxmox call when DB is empty), then
-	// has-file → download → nextid → create → ci-drive → template.
-	want := []string{"has-file", "download", "nextid", "create", "ci-drive", "template"}
+	// Templates intentionally don't get a Proxmox cloud-init drive
+	// anymore — Nimbus delivers cloud-init via per-VM ISOs at
+	// provision time (see provision.installCIDataISO). So the
+	// expected sequence is shorter than before:
+	// has-file → download → nextid → create → template.
+	want := []string{"has-file", "download", "nextid", "create", "template"}
 	if len(sequence) != len(want) {
 		t.Fatalf("got %d steps, want %d: %v", len(sequence), len(want), sequence)
 	}

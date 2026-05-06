@@ -85,6 +85,10 @@ type Config struct {
 	// zero. CPULoadFactor (K) is the share of a fresh VM's vCPUs the soft
 	// score assumes consumed (0.5 ≈ "half-busy on average").
 	VMDiskStorage string
+	// CIDataStorage is the Proxmox storage Nimbus uploads per-VM
+	// cloud-init ISOs to. Defaults to "local". Must accept `iso`
+	// content (every default PVE storage does).
+	CIDataStorage string
 	MemBufferMiB  uint64
 	CPULoadFactor float64
 
@@ -138,6 +142,7 @@ func Load() (*Config, error) {
 		NetscanConcurrency:  getEnvInt("NIMBUS_NETSCAN_CONCURRENCY", 50),
 
 		VMDiskStorage: getEnv("NIMBUS_VM_DISK_STORAGE", "local-lvm"),
+		CIDataStorage: getEnv("NIMBUS_CIDATA_STORAGE", "local"),
 		MemBufferMiB:  uint64(getEnvInt("NIMBUS_MEM_BUFFER_MIB", 256)),
 		CPULoadFactor: getEnvFloat("NIMBUS_CPU_LOAD_FACTOR", 0.5),
 

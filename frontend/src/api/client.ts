@@ -1265,6 +1265,117 @@ export async function saveNetworkSettings(
   return data
 }
 
+// Subnet — one user-owned SDN subnet (= Proxmox VNet + carved CIDR).
+// Multiple per user, OCI-style. Mirrors db.UserSubnet's wire shape.
+export interface Subnet {
+  id: number
+  name: string
+  vnet: string
+  subnet: string
+  gateway: string
+  pool_start: string
+  pool_end: string
+  is_default: boolean
+  status: 'active' | 'error'
+  created_at: string
+  updated_at: string
+}
+
+export async function listSubnets(): Promise<Subnet[]> {
+  const { data } = await api.get<Subnet[]>('/subnets')
+  return data
+}
+
+export async function getSubnet(id: number): Promise<Subnet> {
+  const { data } = await api.get<Subnet>(`/subnets/${id}`)
+  return data
+}
+
+// createSubnet provisions a fresh user subnet end-to-end (Proxmox
+// VNet + Subnet + per-subnet IP pool + DB row). Long-running compared
+// to other CRUD — Proxmox apply takes ~1-2s per cluster node — so we
+// give it a 30s budget.
+export async function createSubnet(req: { name: string; set_default?: boolean }): Promise<Subnet> {
+  const { data } = await api.post<Subnet>('/subnets', req, { timeout: 30_000 })
+  return data
+}
+
+export async function deleteSubnet(id: number): Promise<void> {
+  await api.delete(`/subnets/${id}`, { timeout: 30_000 })
+}
+
+export async function setDefaultSubnet(id: number): Promise<void> {
+  await api.post(`/subnets/${id}/default`)
+}
+
+// PublicSDNStatus is the verified-user-readable view of SDN
+// enablement. Drives the Provision form picker: when Enabled is
+// false the picker collapses to a single greyed "Cluster LAN" tile;
+// when true, members see only the subnet picker while admins keep a
+// "Cluster LAN (admin)" escape hatch.
+export interface PublicSDNStatus {
+  enabled: boolean
+  default_bridge: string
+}
+
+export async function getSDNStatus(): Promise<PublicSDNStatus> {
+  const { data } = await api.get<PublicSDNStatus>('/sdn/status')
+  return data
+}
+
+// SDNZoneStatus mirrors vnetmgr.StatusView.ZoneStatus. The UI uses it
+// to render the diagnostic chip (active/pending/missing-pkg/error).
+export type SDNZoneStatus =
+  | 'disabled'
+  | 'unconfigured'
+  | 'pending'
+  | 'active'
+  | 'missing-pkg'
+  | 'error'
+
+// SDNSettingsView is the read shape returned by /api/settings/sdn —
+// stored config + live zone status from one round trip.
+export interface SDNSettingsView {
+  enabled: boolean
+  zone_name: string
+  zone_type: string
+  supernet: string
+  subnet_size: number
+  dns_server?: string
+  zone_status: SDNZoneStatus
+  vnet_count: number
+  proxmox_error?: string
+}
+
+// SaveSDNSettingsRequest mirrors saveSDNRequest. SubnetSize=0 / empty
+// strings preserve existing values. dns_server="" clears.
+export interface SaveSDNSettingsRequest {
+  enabled: boolean
+  zone_name?: string
+  zone_type?: string
+  supernet?: string
+  subnet_size?: number
+  dns_server: string
+}
+
+export async function getSDNSettings(): Promise<SDNSettingsView> {
+  const { data } = await api.get<SDNSettingsView>('/settings/sdn')
+  return data
+}
+
+// saveSDNSettings persists the config + (when enabled=true) kicks a
+// fresh zone bootstrap on the backend. The 35s timeout covers the
+// worst-case PVE reload across a multi-node cluster — `apply` is the
+// expensive call.
+export async function saveSDNSettings(
+  req: SaveSDNSettingsRequest,
+): Promise<SDNSettingsView> {
+  const { data } = await api.put<SDNSettingsView>('/settings/sdn', req, {
+    timeout: 35_000,
+  })
+  return data
+}
+
 export interface NetworkOpFailure {
   vm_row_id: number
   vmid: number

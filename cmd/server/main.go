@@ -57,6 +57,7 @@ import (
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/vnetmgr"
 )
 
 //go:embed all:frontend/dist
@@ -149,6 +150,7 @@ func main() {
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
 		&db.AuditEvent{},
+		&db.UserSubnet{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -372,9 +374,11 @@ func main() {
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
 		VMDiskStorage:    cfg.VMDiskStorage,
+		CIDataStorage:    cfg.CIDataStorage,
 		MemBufferMiB:     cfg.MemBufferMiB,
 		CPULoadFactor:    cfg.CPULoadFactor,
 	})
+
 	// Chain verifier: Proxmox cluster snapshot first (fast, cached), then a
 	// single-IP netscan probe (~800ms worst case). Either failure rejects
 	// the candidate IP and verifyAndRetryReserve leapfrogs to the next free
@@ -595,6 +599,28 @@ func main() {
 		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 	}
 
+	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
+	// the With* builders wire the DB + pool + VM-ref counter for the
+	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
+	// etc.). VMRefCounter is the provision service — it knows how to
+	// count VMs by SubnetID without vnetmgr pulling in the gorm.DB
+	// directly. Bootstrap surfaces SDN-package-missing as a logged
+	// warning rather than fatal so the rest of Nimbus runs on vmbr0
+	// when SDN isn't installed cluster-wide.
+	vnetMgr := vnetmgr.New(pveClient, authSvc).
+		WithDB(database.DB).
+		WithPool(pool).
+		WithVMRefCounter(provSvc)
+	// Wire vnetmgr into provision so the per-user subnet path
+	// (ResolveForProvision → CreateSubnet/EnsureDefault) fires
+	// whenever SDN is enabled. nil here = SDN-disabled fallback.
+	provSvc.SetSubnetResolver(vnetMgr)
+	bootstrapSDNCtx, bootstrapSDNCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := vnetMgr.Bootstrap(bootstrapSDNCtx); err != nil {
+		log.Printf("warning: SDN bootstrap: %v", err)
+	}
+	bootstrapSDNCancel()
+
 	router := api.NewRouter(api.Deps{
 		Auth:          authSvc,
 		Provision:     provSvc,
@@ -612,6 +638,7 @@ func main() {
 		GX10Assets:    gx10AssetsFS,
 		NodeMgr:       nodeMgrSvc,
 		Audit:         auditSvc,
+		VNetMgr:       vnetMgr,
 		Config:        cfg,
 		Restart:       restartSelf,
 	})

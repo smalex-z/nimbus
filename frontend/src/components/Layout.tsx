@@ -127,6 +127,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
                   </NavLink>
+                  <NavLink to="/subnets" className={dropdownItemClass}>
+                    <NetworkIcon /><span>Subnets</span>
+                  </NavLink>
                   <NavLink to="/buckets" className={dropdownItemClass}>
                     <DatabaseIcon /><span>Buckets</span>
                   </NavLink>
@@ -152,6 +155,9 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <SectionLabel>Account</SectionLabel>
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
+                  </NavLink>
+                  <NavLink to="/subnets" className={dropdownItemClass}>
+                    <NetworkIcon /><span>Subnets</span>
                   </NavLink>
                   <NavLink to="/buckets" className={dropdownItemClass}>
                     <DatabaseIcon /><span>Buckets</span>
@@ -297,6 +303,17 @@ function KeyIcon() {
       <path d="M10.5 12.5L20 3" />
       <path d="M16 7l3 3" />
       <path d="M18 5l2 2" />
+    </svg>
+  )
+}
+
+function NetworkIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="12" cy="5" r="2.5" />
+      <circle cx="5" cy="19" r="2.5" />
+      <circle cx="19" cy="19" r="2.5" />
+      <path d="M12 7.5v4M12 11.5l-7 5.5M12 11.5l7 5.5" />
     </svg>
   )
 }

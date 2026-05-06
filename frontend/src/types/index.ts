@@ -68,6 +68,16 @@ export interface ProvisionRequest {
   generate_key?: boolean
   public_tunnel?: boolean
   enable_gpu?: boolean
+  // SDN subnet selection — at most one of (subnet_id, subnet_name)
+  // set. Both omitted means "use the user's default subnet (auto-
+  // create on first provision)." Backend silently ignores both when
+  // SDN is disabled cluster-wide.
+  subnet_id?: number
+  subnet_name?: string
+  // Admin-only escape hatch: attach the VM directly to a cluster
+  // bridge (e.g. "vmbr0"), bypassing per-user SDN. Members get a
+  // 400. Sent only when the form's subnetMode is 'bridge'.
+  bridge?: string
 }
 
 export interface SSHKey {
@@ -125,6 +135,17 @@ export interface ProvisionResult {
   // success is independent of either.
   tunnel_url?: string
   tunnel_error?: string
+  // Set when the VM landed on a per-user SDN subnet. Drives the result
+  // page's "isolated subnet — IP only reachable from inside" framing.
+  subnet_name?: string
+  subnet_cidr?: string
+  // One-time console password for the cloud-init default user.
+  // Surfaced once on the result page; not persisted.
+  console_password?: string
+  // Set when Nimbus tried but failed to upload + attach the per-VM
+  // cloud-init ISO (qga won't auto-install — surfaced so operators
+  // see why the readiness check timed out).
+  cloud_init_error?: string
 }
 
 // Backend-emitted phase IDs streamed during a provision call. Keep in sync

@@ -4,39 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
-	"nimbus/internal/db"
-	internalerrors "nimbus/internal/errors"
+	"nimbus/internal/proxmox"
 	"nimbus/internal/tunnel"
-)
 
-// tunnelBootstrapDialTimeout bounds the SSH dial + handshake. The VM's sshd
-// is up within seconds of WaitForIP returning; if it takes longer than this,
-// it's a real connectivity problem, not a slow boot.
-const tunnelBootstrapDialTimeout = 30 * time.Second
+	internalerrors "nimbus/internal/errors"
+)
 
 // tunnelBootstrapExecTimeout bounds the bootstrap command itself. The script
 // downloads the rathole binary, may wait on dpkg locks (cloud-init holds
 // /var/lib/dpkg/lock-frontend during early boot), retries apt installs, and
 // installs/starts a systemd unit. Five minutes covers the realistic upper
-// bound including a couple of dpkg-lock retry cycles. Tighter than this and
-// we kill the SSH session mid-bootstrap, leaving the machine in a stuck
-// pending state on Gopher.
+// bound including a couple of dpkg-lock retry cycles.
 const tunnelBootstrapExecTimeout = 5 * time.Minute
 
-// tunnelBootstrapMaxAttempts caps how many times we'll retry the connect.
-// WaitForIP confirms the agent reports an IP; sshd may still be a couple of
-// seconds behind, so a small retry budget catches the common race without
-// stretching provisioning.
-const (
-	tunnelBootstrapMaxAttempts = 3
-	tunnelBootstrapRetryDelay  = 5 * time.Second
-)
+// tunnelBootstrapPollInterval paces agent/exec-status polling. Tighter than
+// WaitForIP's interval — the bootstrap finishes on the order of seconds when
+// dpkg isn't blocked.
+const tunnelBootstrapPollInterval = 2 * time.Second
 
 // maxBootstrapOutputBytes caps the bootstrap stdout/stderr we keep in the
 // VM's tunnel_error column. Real failures fit comfortably; runaway loops
@@ -52,136 +39,65 @@ const (
 	tunnelPollInterval  = 3 * time.Second
 )
 
-// privateKeyForBootstrap returns the plaintext SSH private key Nimbus should
-// use to log into the freshly provisioned VM. Three sources, in priority:
-//
-//  1. The plaintext we already have in memory (when GenerateKey was true,
-//     resolveSSHKey returned the freshly minted private half).
-//  2. The vault — when the user attached or imported a private half on the
-//     SSHKey row.
-//  3. Otherwise: error. The user gave us only a public key, so we can't SSH.
-func (s *Service) privateKeyForBootstrap(ctx context.Context, key *db.SSHKey, justGenerated string) (string, error) {
-	if justGenerated != "" {
-		return justGenerated, nil
-	}
-	if key == nil {
-		return "", errors.New("no ssh key resolved")
-	}
-	if !key.HasPrivateKey() {
-		return "", errors.New("private half not available — vault has only the public key")
-	}
-	// Trusted internal flow: tunnel bootstrap runs as part of provisioning,
-	// already authorized at the entry handler. Bypass the ownership gate.
-	_, plain, err := s.keys.GetPrivateKey(ctx, key.ID, nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypt key %d: %w", key.ID, err)
-	}
-	return plain, nil
-}
-
-// runTunnelBootstrap dials the VM, executes `curl <bootstrap_url> | sh`, and
-// returns nil on success. The dial+handshake is retried — sshd may not be
-// listening immediately after WaitForIP returns. The remote command itself
-// is NOT retried; a failure there is a real script error, not a race.
+// runTunnelBootstrap runs the Gopher one-line bootstrap inside the VM via
+// the qemu-guest-agent — no SSH, no L3 reach to the VM required. The data
+// path is virtio-serial through the host hypervisor, so this works
+// identically on vmbr0 and on isolated SDN subnets.
 //
 // machineName is exported as GOPHER_MACHINE_NAME so the bootstrap script
-// skips its interactive prompt — without a PTY, the script's `/dev/tty`
-// fallback isn't usable.
-func runTunnelBootstrap(ctx context.Context, ip, user, privatePEM, bootstrapURL, machineName string) error {
+// skips its interactive `/dev/tty` prompt — there's no PTY here.
+//
+// Returns nil on success; any non-zero exit + the captured stdout/stderr
+// is wrapped into the error so the caller can record it on tunnel_error.
+func runTunnelBootstrap(ctx context.Context, px AgentRunner, node string, vmid int, bootstrapURL, machineName string) error {
 	if bootstrapURL == "" {
 		return errors.New("empty bootstrap URL")
 	}
-	signer, err := ssh.ParsePrivateKey([]byte(privatePEM))
+
+	// Single-quote URL + machine name so the shell doesn't interpret
+	// special characters from Gopher's path (tokens) or the hostname.
+	// Set GOPHER_MACHINE_NAME on the receiving shell — the script reads
+	// it before it would otherwise prompt over /dev/tty.
+	//
+	// Download then exec, instead of `curl ... | sh`. The pipe form was
+	// silently masking curl failures: if curl exits non-zero (4xx, DNS
+	// blip, expired URL) the `| sh` still runs on empty input, exits
+	// 0, and the SSH session reports success — leaving the machine
+	// permanently `pending` on Gopher with no log on either side. POSIX
+	// pipefail isn't available on dash (which is /bin/sh on Ubuntu),
+	// so we split the pipeline. After the install, sanity-check the
+	// systemd unit actually came up and surface its journal if not.
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	script := strings.Join([]string{
+		"set -e",
+		"_T=$(mktemp)",
+		fmt.Sprintf("curl -fsSL %s -o \"$_T\"", quote(bootstrapURL)),
+		fmt.Sprintf("GOPHER_MACHINE_NAME=%s sh \"$_T\"", quote(machineName)),
+		"_RC=$?",
+		"rm -f \"$_T\"",
+		// Verify the rathole client unit came up. Without this the
+		// caller has no signal — the install script is one-shot, and
+		// a failure to fetch / start the binary leaves no trace on
+		// Gopher's side until the 60s poll timeout fires.
+		"if ! systemctl is-active --quiet rathole-client; then",
+		"  echo 'gopher bootstrap completed but rathole-client is not active:' >&2",
+		"  journalctl -u rathole-client --no-pager -n 30 >&2 || true",
+		"  exit 1",
+		"fi",
+		"exit $_RC",
+	}, "\n")
+
+	execCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapExecTimeout)
+	defer cancel()
+	status, err := px.AgentRun(execCtx, node, vmid, []string{"/bin/sh"}, script, tunnelBootstrapPollInterval)
 	if err != nil {
-		return fmt.Errorf("parse private key: %w", err)
+		return fmt.Errorf("agent exec: %w", err)
 	}
-	cfg := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		// The VM was just created — we have no host-key history to compare
-		// against. This is one-time provisioning over the cluster LAN, not a
-		// long-lived SSH client; trust-on-first-use is acceptable here.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
-		Timeout:         tunnelBootstrapDialTimeout,
+	if status.ExitCode != 0 {
+		out := truncateOutput(strings.TrimRight(status.OutData+status.ErrData, "\n"), maxBootstrapOutputBytes)
+		return fmt.Errorf("bootstrap exit %d (output: %s)", status.ExitCode, out)
 	}
-
-	var lastErr error
-	for attempt := 1; attempt <= tunnelBootstrapMaxAttempts; attempt++ {
-		client, err := dialSSH(ctx, ip, cfg)
-		if err != nil {
-			lastErr = err
-			if attempt == tunnelBootstrapMaxAttempts {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(tunnelBootstrapRetryDelay):
-			}
-			continue
-		}
-		defer client.Close() //nolint:errcheck
-
-		session, err := client.NewSession()
-		if err != nil {
-			return fmt.Errorf("new session: %w", err)
-		}
-		defer session.Close() //nolint:errcheck
-
-		// Single-quote URL + machine name so the shell doesn't interpret
-		// special characters from Gopher's path (tokens) or the hostname.
-		// Set GOPHER_MACHINE_NAME on the receiving shell — the script reads
-		// it before it would otherwise prompt over /dev/tty (which doesn't
-		// exist on a non-PTY SSH session).
-		//
-		// Download then exec, instead of `curl ... | sh`. The pipe form was
-		// silently masking curl failures: if curl exits non-zero (4xx, DNS
-		// blip, expired URL) the `| sh` still runs on empty input, exits
-		// 0, and the SSH session reports success — leaving the machine
-		// permanently `pending` on Gopher with no log on either side. POSIX
-		// pipefail isn't available on dash (which is /bin/sh on Ubuntu),
-		// so we split the pipeline. After the install, sanity-check the
-		// systemd unit actually came up and surface its journal if not, so
-		// future failures land in tunnel_error instead of disappearing.
-		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-		// Newline-separated, NOT "; "-joined — bash rejects `then; echo` as a
-		// syntax error because `then` expects a command before any separator.
-		// Plain newlines work in both bash and dash and keep the script
-		// readable in the journal when it does fail.
-		cmd := strings.Join([]string{
-			"set -e",
-			"_T=$(mktemp)",
-			fmt.Sprintf("curl -fsSL %s -o \"$_T\"", quote(bootstrapURL)),
-			fmt.Sprintf("GOPHER_MACHINE_NAME=%s sh \"$_T\"", quote(machineName)),
-			"_RC=$?",
-			"rm -f \"$_T\"",
-			// Verify the rathole client unit came up. Without this the
-			// caller has no signal — the install script is one-shot, and
-			// a failure to fetch / start the binary leaves no trace on
-			// Gopher's side until the 60s poll timeout fires.
-			"if ! systemctl is-active --quiet rathole-client; then",
-			"  echo 'gopher bootstrap completed but rathole-client is not active:' >&2",
-			"  journalctl -u rathole-client --no-pager -n 30 >&2 || true",
-			"  exit 1",
-			"fi",
-			"exit $_RC",
-		}, "\n")
-
-		// Bound the exec separately from the dial. If the bootstrap genuinely
-		// runs longer than tunnelBootstrapExecTimeout, close the session to
-		// unblock CombinedOutput; the subsequent runErr will surface as
-		// "session closed" with whatever output we captured up to that point.
-		execTimer := time.AfterFunc(tunnelBootstrapExecTimeout, func() {
-			_ = session.Close()
-		})
-		out, runErr := session.CombinedOutput(cmd)
-		execTimer.Stop()
-		if runErr != nil {
-			return fmt.Errorf("bootstrap command failed: %w (output: %s)", runErr, truncateOutput(string(out), maxBootstrapOutputBytes))
-		}
-		return nil
-	}
-	return fmt.Errorf("ssh connect failed after %d attempts: %w", tunnelBootstrapMaxAttempts, lastErr)
+	return nil
 }
 
 // ── Per-port tunnel CRUD (post-provision "Networks" surface) ────────────────
@@ -298,6 +214,13 @@ func (s *Service) DeleteVMTunnel(ctx context.Context, vmID uint, tunnelID string
 	return &internalerrors.NotFoundError{Resource: "tunnel", ID: tunnelID}
 }
 
+// AgentRunner is the slice of *proxmox.Client the bootstrap paths need —
+// "accept interfaces" so tests can inject a fake without standing up the
+// whole Proxmox client surface.
+type AgentRunner interface {
+	AgentRun(ctx context.Context, node string, vmid int, command []string, inputData string, pollInterval time.Duration) (*proxmox.AgentExecStatus, error)
+}
+
 // truncateOutput keeps the first half + last half of s when it exceeds max,
 // joined by an elision marker. Trims surrounding whitespace first so the
 // return is tidy when the input fits. Used to keep bootstrap stderr from
@@ -309,36 +232,6 @@ func truncateOutput(s string, max int) string {
 	}
 	half := max / 2
 	return s[:half] + "\n…[truncated " + fmt.Sprintf("%d", len(s)-max) + " bytes]…\n" + s[len(s)-half:]
-}
-
-// dialSSH opens a single SSH session to ip:22 with the supplied config,
-// honoring ctx cancellation. Returns a usable *ssh.Client; caller must Close.
-//
-// The connection deadline is only set across dial+handshake, not the full
-// session lifetime — a hard deadline on the underlying conn would kill long
-// command runs (the bootstrap can take minutes once dpkg-lock retries kick
-// in). Once the handshake is done, the deadline is cleared and command-level
-// bounding is the caller's responsibility (see runTunnelBootstrap).
-func dialSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapDialTimeout)
-	defer cancel()
-
-	dialer := &net.Dialer{Timeout: tunnelBootstrapDialTimeout}
-	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(ip, "22"))
-	if err != nil {
-		return nil, fmt.Errorf("dial %s:22: %w", ip, err)
-	}
-	_ = conn.SetDeadline(time.Now().Add(tunnelBootstrapDialTimeout))
-
-	clientConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(ip, "22"), cfg)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("ssh handshake: %w", err)
-	}
-	// Clear the dial-time deadline so the subsequent command exec isn't
-	// killed mid-run.
-	_ = conn.SetDeadline(time.Time{})
-	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
 // waitMachineActive polls Gopher until the machine reports connected or the
