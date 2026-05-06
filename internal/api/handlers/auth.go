@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/ippool"
@@ -68,6 +69,7 @@ type Auth struct {
 	reconciler  loginReconciler
 	vms         userVMActor      // optional; when nil, /api/users/:id DELETE returns 503
 	userBuckets userBucketPurger // optional; when nil, s3 cleanup on user delete is a no-op
+	audit       *audit.Service   // optional audit-log sink; nil-safe (Record no-ops)
 }
 
 // NewAuth creates a new Auth handler. appURL is the env-configured fallback
@@ -77,6 +79,11 @@ type Auth struct {
 func NewAuth(auth *service.AuthService, appURL string, reconciler loginReconciler) *Auth {
 	return &Auth{auth: auth, appURL: appURL, reconciler: reconciler}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil, production wires d.Audit. Returns the receiver so it
+// chains after NewAuth/WithVMActor/WithBucketPurger.
+func (h *Auth) WithAudit(a *audit.Service) *Auth { h.audit = a; return h }
 
 // WithVMActor injects the dependency the user-deletion endpoint needs to
 // either destroy or reassign a deleted user's VMs. Setter rather than a
@@ -305,15 +312,29 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 		Email:    req.Email,
 		Password: req.Password,
 	})
-	if errors.Is(err, service.ErrEmailTaken) {
-		response.Conflict(w, "An account with that email already exists")
-		return
-	}
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.register",
+			TargetType:  "user",
+			TargetLabel: req.Email,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
+		if errors.Is(err, service.ErrEmailTaken) {
+			response.Conflict(w, "An account with that email already exists")
+			return
+		}
 		response.InternalError(w, "Failed to create account")
 		return
 	}
 
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "auth.register",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Success:     true,
+	})
 	response.Created(w, user)
 }
 
@@ -350,21 +371,38 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID, user, err := a.auth.Login(req.Email, req.Password)
-	if errors.Is(err, service.ErrInvalidCredentials) {
-		response.Error(w, http.StatusUnauthorized, "Invalid email or password")
-		return
-	}
-	if errors.Is(err, service.ErrUserSuspended) {
-		response.Error(w, http.StatusForbidden, "Account suspended. Contact your admin.")
-		return
-	}
 	if err != nil {
-		response.InternalError(w, "Failed to sign in")
+		// Failed login is the highest-signal audit event in the
+		// whole system (brute-force detection, leaked-password
+		// detection). Record actor by email since there's no user
+		// row in ctx yet for failed attempts.
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.login",
+			TargetType:  "user",
+			TargetLabel: req.Email,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
+		switch {
+		case errors.Is(err, service.ErrInvalidCredentials):
+			response.Error(w, http.StatusUnauthorized, "Invalid email or password")
+		case errors.Is(err, service.ErrUserSuspended):
+			response.Error(w, http.StatusForbidden, "Account suspended. Contact your admin.")
+		default:
+			response.InternalError(w, "Failed to sign in")
+		}
 		return
 	}
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Success:     true,
+	})
 	response.Success(w, user)
 }
 
@@ -476,7 +514,16 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "verification failed")
 		return
 	}
+	targetEmail := a.lookupUserEmail(targetID)
 	if err := a.auth.PromoteToAdmin(targetID); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "user.promote",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
 			return
@@ -485,6 +532,13 @@ func (a *Auth) PromoteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "promote failed")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "user.promote",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Success:     true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "is_admin": true})
 }
 
@@ -574,6 +628,7 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	// 1. VM disposition.
 	ctx := r.Context()
+	targetEmail := a.lookupUserEmail(targetID)
 	owned, err := a.vms.List(ctx, &targetID)
 	if err != nil {
 		log.Printf("delete user: list vms: %v", err)
@@ -621,6 +676,15 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	// 4. User row.
 	if err := a.auth.DeleteUserRecord(targetID); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "user.delete",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Details:     map[string]any{"vm_action": body.VMAction},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserNotFound) {
 			response.NotFound(w, "user not found")
 			return
@@ -629,6 +693,14 @@ func (a *Auth) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to delete user record")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "user.delete",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Details:     map[string]any{"vm_action": body.VMAction, "vm_count": len(owned)},
+		Success:     true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "vm_action": body.VMAction, "vms_handled": len(owned)})
 }
 
@@ -726,6 +798,11 @@ func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.auth.ChangePassword(user.ID, req.CurrentPassword, req.NewPassword); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:   "auth.password.change",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		if errors.Is(err, service.ErrInvalidCredentials) {
 			response.Error(w, http.StatusUnauthorized, "Current password is incorrect")
 			return
@@ -733,6 +810,10 @@ func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "Failed to change password")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:  "auth.password.change",
+		Success: true,
+	})
 	response.Success(w, map[string]bool{"ok": true})
 }
 
@@ -870,7 +951,17 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
+	targetEmail := a.lookupUserEmail(targetID)
 	if err := a.auth.SetUserSuspended(targetID, requester.ID, body.Suspended); err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "user.suspend",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(targetID), 10),
+			TargetLabel: targetEmail,
+			Details:     map[string]any{"suspended": body.Suspended},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		switch {
 		case errors.Is(err, service.ErrUserNotFound):
 			response.NotFound(w, "user not found")
@@ -882,6 +973,14 @@ func (a *Auth) SetSuspended(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "user.suspend",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: targetEmail,
+		Details:     map[string]any{"suspended": body.Suspended},
+		Success:     true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "suspended": body.Suspended})
 }
 
@@ -995,6 +1094,13 @@ func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := a.auth.SaveSMTPSettings(body)
 	if err != nil {
+		// Don't include the request body — would leak SMTP password
+		// ciphertext into the audit row.
+		a.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.smtp.update",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		if errors.Is(err, service.ErrCipherUnavailable) {
 			response.Error(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -1003,6 +1109,16 @@ func (a *Auth) SaveSMTP(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, "failed to save SMTP settings")
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action: "settings.smtp.update",
+		Details: map[string]any{
+			"host":         view.Host,
+			"port":         view.Port,
+			"username":     view.Username,
+			"from_address": view.FromAddress,
+		},
+		Success: true,
+	})
 	response.Success(w, view)
 }
 
@@ -1145,6 +1261,18 @@ func (a *Auth) MagicLinkSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSessionCookie(w, sessionID)
+	// Best-effort actor lookup so the audit row carries an email; the
+	// magic-link path doesn't have a UserView in ctx yet.
+	ctx := r.Context()
+	if u, err := a.auth.GetUserBySessionID(sessionID); err == nil && u != nil {
+		ctx = ctxutil.WithUser(ctx, u)
+	}
+	a.audit.Record(ctx, audit.Event{
+		Action:     "auth.magiclink.consume",
+		TargetType: "user",
+		TargetID:   strconv.FormatUint(uint64(userID), 10),
+		Success:    true,
+	})
 	http.Redirect(w, r, "/account?from=magic", http.StatusTemporaryRedirect)
 }
 
@@ -1363,9 +1491,26 @@ func (a *Auth) SaveQuotas(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := a.auth.SaveQuotaSettings(maxVMs, maxJobs)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action: "settings.quotas.update",
+			Details: map[string]any{
+				"member_max_vms":         maxVMs,
+				"member_max_active_jobs": maxJobs,
+			},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.BadRequest(w, err.Error())
 		return
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action: "settings.quotas.update",
+		Details: map[string]any{
+			"member_max_vms":         updated.MemberMaxVMs,
+			"member_max_active_jobs": updated.MemberMaxActiveJobs,
+		},
+		Success: true,
+	})
 	response.Success(w, QuotaSettingsView{
 		MemberMaxVMs:        updated.MemberMaxVMs,
 		MemberMaxActiveJobs: updated.MemberMaxActiveJobs,
@@ -1463,6 +1608,21 @@ func (a *Auth) SetUserQuota(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.audit.Record(r.Context(), audit.Event{
+		Action:      "user.quota.update",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(targetID), 10),
+		TargetLabel: a.lookupUserEmail(targetID),
+		Details: map[string]any{
+			"vm_set":    setVM,
+			"vm_clear":  clearVM,
+			"vm_value":  vmVal,
+			"gpu_set":   setGPU,
+			"gpu_clear": clearGPU,
+			"gpu_value": gpuVal,
+		},
+		Success: true,
+	})
 	response.Success(w, map[string]any{"id": targetID, "ok": true})
 }
 
@@ -1561,6 +1721,18 @@ func (a *Auth) VerifyAccessCode(w http.ResponseWriter, r *http.Request) {
 // @Success     204 "No Content"
 // @Router      /auth/logout [post]
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
+	// Logout sits OUTSIDE requireAuth so deliberate logouts of an
+	// already-expired session land here too. requireAuth would have
+	// stuffed the user into ctx for us; on this path we resolve it
+	// manually from the session cookie, BEFORE invalidating it, so
+	// the audit row carries the actor instead of an empty "—".
+	ctx := r.Context()
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		if user, err := a.auth.GetUserBySessionID(cookie.Value); err == nil && user != nil {
+			ctx = ctxutil.WithUser(ctx, user)
+		}
+	}
+	a.audit.Record(ctx, audit.Event{Action: "auth.logout", Success: true})
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = a.auth.Logout(cookie.Value)
 	}
@@ -1610,6 +1782,18 @@ func (a *Auth) oauthStart(provider oauth.Provider, intent string) http.HandlerFu
 // OAuth callback routes are public (sign-in mode runs them with no
 // pre-existing session), so this lookup happens inside the handler
 // rather than via requireAuth middleware.
+// lookupUserEmail resolves a user ID to their email for audit-event
+// labelling. Best-effort: returns "" on lookup failure (deleted user,
+// transient DB error). Audit emit sites that label by user fall back
+// to TargetID alone in that case.
+func (a *Auth) lookupUserEmail(userID uint) string {
+	row, err := a.auth.GetUserByID(userID)
+	if err != nil || row == nil {
+		return ""
+	}
+	return row.Email
+}
+
 func (a *Auth) currentSessionUser(r *http.Request) *service.UserView {
 	c, err := r.Cookie(sessionCookieName)
 	if err != nil || c.Value == "" {
@@ -1802,6 +1986,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/account?error=link_failed&provider=github", http.StatusTemporaryRedirect)
 			return
 		}
+		a.audit.Record(ctxutil.WithUser(r.Context(), current), audit.Event{
+			Action:      "auth.oauth.link",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(current.ID), 10),
+			TargetLabel: current.Email,
+			Details:     map[string]any{"provider": "github", "github_login": userInfo.Login},
+			Success:     true,
+		})
 		http.Redirect(w, r, "/account?linked=github", http.StatusTemporaryRedirect)
 		return
 	}
@@ -1811,6 +2003,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// new accounts are allowed (and will fall into the access code flow).
 	user, _, err := a.auth.UpsertGitHubOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID, userInfo.Orgs, nil)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.oauth.login",
+			TargetType:  "user",
+			TargetLabel: userInfo.Email,
+			Details:     map[string]any{"provider": "github"},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserSuspended) {
 			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=github", http.StatusTemporaryRedirect)
 			return
@@ -1827,6 +2027,14 @@ func (a *Auth) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.oauth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Details:     map[string]any{"provider": "github", "github_login": userInfo.Login},
+		Success:     true,
+	})
 
 	q := url.Values{}
 	q.Set("provider", "github")
@@ -1960,12 +2168,28 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/account?error=link_failed&provider=google", http.StatusTemporaryRedirect)
 			return
 		}
+		a.audit.Record(ctxutil.WithUser(r.Context(), current), audit.Event{
+			Action:      "auth.oauth.link",
+			TargetType:  "user",
+			TargetID:    strconv.FormatUint(uint64(current.ID), 10),
+			TargetLabel: current.Email,
+			Details:     map[string]any{"provider": "google"},
+			Success:     true,
+		})
 		http.Redirect(w, r, "/account?linked=google", http.StatusTemporaryRedirect)
 		return
 	}
 
 	user, err := a.auth.UpsertOAuthUser(userInfo.Name, userInfo.Email, userInfo.ProviderID)
 	if err != nil {
+		a.audit.Record(r.Context(), audit.Event{
+			Action:      "auth.oauth.login",
+			TargetType:  "user",
+			TargetLabel: userInfo.Email,
+			Details:     map[string]any{"provider": "google"},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		if errors.Is(err, service.ErrUserSuspended) {
 			http.Redirect(w, r, "/auth/callback?error=account_suspended&provider=google", http.StatusTemporaryRedirect)
 			return
@@ -1995,6 +2219,14 @@ func (a *Auth) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, sessionID)
 	a.kickReconcile()
+	a.audit.Record(ctxutil.WithUser(r.Context(), user), audit.Event{
+		Action:      "auth.oauth.login",
+		TargetType:  "user",
+		TargetID:    strconv.FormatUint(uint64(user.ID), 10),
+		TargetLabel: user.Email,
+		Details:     map[string]any{"provider": "google"},
+		Success:     true,
+	})
 
 	q := url.Values{}
 	q.Set("provider", "google")

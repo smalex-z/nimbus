@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/sshkeys"
@@ -15,10 +16,14 @@ import (
 
 // Keys wraps the sshkeys.Service.
 type Keys struct {
-	svc *sshkeys.Service
+	svc   *sshkeys.Service
+	audit *audit.Service
 }
 
 func NewKeys(svc *sshkeys.Service) *Keys { return &Keys{svc: svc} }
+
+// WithAudit installs the audit-log sink. Nil disables emission.
+func (h *Keys) WithAudit(a *audit.Service) *Keys { h.audit = a; return h }
 
 // keyView is the JSON projection of a stored key. We need a wrapper because
 // the DB struct hides the encrypted blobs (json:"-") and the frontend wants a
@@ -133,9 +138,25 @@ func (h *Keys) Create(w http.ResponseWriter, r *http.Request) {
 		OwnerID:    &uid,
 	})
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "key.create",
+			TargetType:  "key",
+			TargetLabel: req.Name,
+			Details:     map[string]any{"generate": req.Generate, "set_default": req.SetDefault},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "key.create",
+		TargetType:  "key",
+		TargetID:    strconv.FormatUint(uint64(row.ID), 10),
+		TargetLabel: row.Name,
+		Details:     map[string]any{"generate": req.Generate, "set_default": req.SetDefault, "fingerprint": row.Fingerprint},
+		Success:     true,
+	})
 
 	body := createKeyResponse{keyView: toKeyView(row)}
 
@@ -277,9 +298,22 @@ func (h *Keys) AttachPrivateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.AttachPrivateKey(r.Context(), id, req.PrivateKey, &uid); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "key.attach_private",
+			TargetType: "key",
+			TargetID:   strconv.FormatUint(uint64(id), 10),
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "key.attach_private",
+		TargetType: "key",
+		TargetID:   strconv.FormatUint(uint64(id), 10),
+		Success:    true,
+	})
 	response.NoContent(w)
 }
 
@@ -306,9 +340,22 @@ func (h *Keys) SetDefault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.SetDefault(r.Context(), id, &uid); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:     "key.set_default",
+			TargetType: "key",
+			TargetID:   strconv.FormatUint(uint64(id), 10),
+			Success:    false,
+			ErrorMsg:   err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:     "key.set_default",
+		TargetType: "key",
+		TargetID:   strconv.FormatUint(uint64(id), 10),
+		Success:    true,
+	})
 	response.NoContent(w)
 }
 
@@ -332,10 +379,31 @@ func (h *Keys) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Pre-lookup for hostname-style label so the audit row carries
+	// the key's name, not just its DB row id. Best-effort.
+	var keyName string
+	if row, err := h.svc.Get(r.Context(), id, &uid); err == nil && row != nil {
+		keyName = row.Name
+	}
 	if err := h.svc.Delete(r.Context(), id, &uid); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "key.delete",
+			TargetType:  "key",
+			TargetID:    strconv.FormatUint(uint64(id), 10),
+			TargetLabel: keyName,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "key.delete",
+		TargetType:  "key",
+		TargetID:    strconv.FormatUint(uint64(id), 10),
+		TargetLabel: keyName,
+		Success:     true,
+	})
 	response.NoContent(w)
 }
 

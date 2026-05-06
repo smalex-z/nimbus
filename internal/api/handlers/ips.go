@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ippool"
 )
 
@@ -20,6 +21,7 @@ type reconcileRunner interface {
 type IPs struct {
 	pool       *ippool.Pool
 	reconciler reconcileRunner
+	audit      *audit.Service
 }
 
 // NewIPs constructs the handler. reconciler may be nil — in that case the
@@ -28,6 +30,9 @@ type IPs struct {
 func NewIPs(pool *ippool.Pool, reconciler reconcileRunner) *IPs {
 	return &IPs{pool: pool, reconciler: reconciler}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission.
+func (h *IPs) WithAudit(a *audit.Service) *IPs { h.audit = a; return h }
 
 // List handles GET /api/ips.
 //
@@ -78,6 +83,11 @@ func (h *IPs) Reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	rep, err := h.reconciler.Reconcile(r.Context())
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:   "ips.reconcile",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		// The Report is still useful even when some per-row updates failed;
 		// surface it alongside the error so the client gets visibility into
 		// what worked.
@@ -87,5 +97,9 @@ func (h *IPs) Reconcile(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:  "ips.reconcile",
+		Success: true,
+	})
 	response.Success(w, rep)
 }

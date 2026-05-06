@@ -33,6 +33,7 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
     { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
     { label: 'VM network', to: '/infrastructure/network' },
     { label: 'API docs', to: '/infrastructure/api-docs' },
+    { label: 'Audit log', to: '/infrastructure/audit' },
   ]
 
   return (

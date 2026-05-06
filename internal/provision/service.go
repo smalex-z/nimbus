@@ -1073,6 +1073,22 @@ func (s *Service) GetPrivateKey(ctx context.Context, id uint, requesterID *uint)
 // NotFound is returned (no info leak about other users' VMs). Pass nil for
 // trusted internal callers; handlers always pass the signed-in user. Mirrors
 // GetPrivateKey's gating semantics.
+// FindByVMID looks up a VM by its Proxmox VMID (not the Nimbus DB
+// row id). Used by audit emit sites that have the VMID from the URL
+// (e.g. /cluster/vms/{node}/{vmid}/{op}) and want to enrich the
+// audit row with hostname. Returns NotFoundError when no row matches —
+// foreign or external VMs are legitimately absent here.
+func (s *Service) FindByVMID(ctx context.Context, vmid int) (*db.VM, error) {
+	var vm db.VM
+	if err := s.db.WithContext(ctx).Where("vmid = ?", vmid).First(&vm).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, &internalerrors.NotFoundError{Resource: "vm", ID: fmt.Sprintf("vmid=%d", vmid)}
+		}
+		return nil, fmt.Errorf("get vm vmid=%d: %w", vmid, err)
+	}
+	return &vm, nil
+}
+
 func (s *Service) Get(ctx context.Context, id uint, requesterID *uint) (*db.VM, error) {
 	var vm db.VM
 	if err := s.db.WithContext(ctx).First(&vm, id).Error; err != nil {

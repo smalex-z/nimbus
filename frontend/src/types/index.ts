@@ -349,6 +349,51 @@ export interface ApiError {
   error: string
 }
 
+// Audit log ────────────────────────────────────────────────────────────
+//
+// AuditEvent mirrors db.AuditEvent's wire shape exactly. The action
+// field is a stable dotted identifier ("vm.provision", "node.cordon",
+// "settings.smtp.update"); the SPA renders unknown values verbatim so
+// new actions land without a frontend change. Failures are recorded
+// with success=false + error_msg populated.
+export interface AuditEvent {
+  id: number
+  created_at: string
+  actor_id?: number
+  actor_email?: string
+  actor_admin: boolean
+  action: string
+  target_type?: string
+  target_id?: string
+  target_label?: string
+  ip_address?: string
+  request_id?: string
+  success: boolean
+  error_msg?: string
+  details_json?: string
+}
+
+export interface AuditListResponse {
+  events: AuditEvent[]
+  total: number
+}
+
+export interface AuditListParams {
+  actor_id?: number
+  action_prefix?: string
+  // severity is a coarse outcome filter mapped to the backend's
+  // success bool: "ok" matches success=true, "failed" matches
+  // success=false, undefined leaves results unconstrained.
+  severity?: 'ok' | 'failed'
+  // search does a case-insensitive substring match across action,
+  // target_label, actor_email, and error_msg.
+  search?: string
+  since?: string // RFC3339
+  until?: string
+  limit?: number
+  offset?: number
+}
+
 // GPU plane (Phase 4) types ───────────────────────────────────────────
 
 export type GPUJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'

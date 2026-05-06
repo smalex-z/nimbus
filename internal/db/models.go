@@ -564,6 +564,48 @@ type Node struct {
 // fine — explicit just to match the rest of the file's pattern.
 func (Node) TableName() string { return "nodes" }
 
+// AuditEvent is one write-side action recorded for the Infrastructure →
+// Audit log surface. Append-only: rows are inserted by every service
+// that mutates state (provision, nodemgr, auth, settings) and pruned by
+// a background reaper after NIMBUS_AUDIT_RETENTION_DAYS.
+//
+// Field meanings:
+//   - Action is a dotted identifier ("vm.provision", "node.cordon",
+//     "settings.smtp.update") so the SPA can group/filter by category.
+//     Stable strings — operators write filter rules against them.
+//   - ActorEmail is denormalized so a row survives user deletion. The
+//     ActorID FK is also kept for joins when the user still exists.
+//   - TargetType / TargetID / TargetLabel describe what was acted on.
+//     TargetLabel is a human-readable name (hostname, node name, etc.)
+//     so the table doesn't need to chase joins on every render.
+//   - DetailsJSON is action-specific structured data: the request body
+//     of a settings update, the migration plan of a drain, etc.
+//     Always valid JSON or empty; readers tolerate either.
+//   - Success + ErrorMsg let failed mutations be audited (a denied
+//     login is more interesting than a successful one).
+//   - IPAddress + RequestID make events traceable back to logs.
+type AuditEvent struct {
+	ID          uint      `gorm:"primaryKey"                              json:"id"`
+	CreatedAt   time.Time `gorm:"column:created_at;index"                 json:"created_at"`
+	ActorID     *uint     `gorm:"column:actor_id;index"                   json:"actor_id,omitempty"`
+	ActorEmail  string    `gorm:"column:actor_email;default:''"           json:"actor_email,omitempty"`
+	ActorAdmin  bool      `gorm:"column:actor_admin;default:false"        json:"actor_admin"`
+	Action      string    `gorm:"column:action;index;not null"            json:"action"`
+	TargetType  string    `gorm:"column:target_type;default:''"           json:"target_type,omitempty"`
+	TargetID    string    `gorm:"column:target_id;default:''"             json:"target_id,omitempty"`
+	TargetLabel string    `gorm:"column:target_label;default:''"          json:"target_label,omitempty"`
+	IPAddress   string    `gorm:"column:ip_address;default:''"            json:"ip_address,omitempty"`
+	RequestID   string    `gorm:"column:request_id;default:''"            json:"request_id,omitempty"`
+	Success     bool      `gorm:"column:success"                          json:"success"`
+	ErrorMsg    string    `gorm:"column:error_msg;default:''"             json:"error_msg,omitempty"`
+	DetailsJSON string    `gorm:"column:details_json;default:''"          json:"details_json,omitempty"`
+}
+
+// TableName pins the GORM table to "audit_events". Without this GORM's
+// pluralizer would produce "audit_events" anyway, but explicit is safer
+// — readers query the table name directly during incident triage.
+func (AuditEvent) TableName() string { return "audit_events" }
+
 // NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
 // single row (ID=1) is used. The columns mirror the env vars they replace
 // (IP_POOL_START / IP_POOL_END / GATEWAY_IP / VM_PREFIX_LEN) — env vars now

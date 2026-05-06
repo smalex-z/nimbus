@@ -333,6 +333,121 @@ const docTemplate = `{
                 }
             }
         },
+        "/audit": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Read-only inspection of the cluster audit log. Newest\nfirst; filterable by actor, action prefix, severity, free-\ntext search, and time range. Use the prefix form to scope\nby domain — e.g. ` + "`" + `action_prefix=vm.` + "`" + ` matches every VM\nevent; ` + "`" + `action_prefix=settings.` + "`" + ` matches all settings\nupdates. The search filter does a case-insensitive\nsubstring match across action, target_label, actor_email,\nand error_msg.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "audit"
+                ],
+                "summary": "List audit events (admin)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "filter by actor user id",
+                        "name": "actor_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by action prefix (e.g. ` + "`" + `vm.` + "`" + `, ` + "`" + `settings.` + "`" + `)",
+                        "name": "action_prefix",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "ok",
+                            "failed"
+                        ],
+                        "type": "string",
+                        "description": "filter by outcome",
+                        "name": "severity",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "case-insensitive substring match across action/target/actor/error",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "RFC3339 lower bound on created_at",
+                        "name": "since",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "RFC3339 upper bound on created_at",
+                        "name": "until",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (1-500, default 100)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "row offset for pagination",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.auditListResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/auth/github": {
             "get": {
                 "description": "Sets short-lived state + intent cookies, then redirects to\nGitHub's authorization URL.",
@@ -7447,6 +7562,67 @@ const docTemplate = `{
             "properties": {
                 "private_key": {
                     "type": "string"
+                }
+            }
+        },
+        "handlers.auditEventView": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "actor_admin": {
+                    "type": "boolean"
+                },
+                "actor_email": {
+                    "type": "string"
+                },
+                "actor_id": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "details_json": {
+                    "type": "string"
+                },
+                "error_msg": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "ip_address": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "success": {
+                    "type": "boolean"
+                },
+                "target_id": {
+                    "type": "string"
+                },
+                "target_label": {
+                    "type": "string"
+                },
+                "target_type": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.auditListResponse": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.auditEventView"
+                    }
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },

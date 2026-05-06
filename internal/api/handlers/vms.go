@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/ctxutil"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
@@ -23,10 +25,16 @@ var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // VMs wraps the provision Service.
 type VMs struct {
-	svc *provision.Service
+	svc   *provision.Service
+	audit *audit.Service
 }
 
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil and production wires d.Audit. Returns the receiver so it
+// chains after NewVMs.
+func (h *VMs) WithAudit(a *audit.Service) *VMs { h.audit = a; return h }
 
 type createVMRequest struct {
 	Hostname string `json:"hostname"`
@@ -162,6 +170,19 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Bridge:           req.Bridge,
 	}, reporter)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.provision",
+			TargetType:  "vm",
+			TargetLabel: req.Hostname,
+			Details: map[string]any{
+				"tier":       req.Tier,
+				"os":         req.OSTemplate,
+				"public_ssh": req.PublicTunnel,
+				"gpu":        req.EnableGPU,
+			},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		writeLine(map[string]any{
 			"type":    "error",
 			"code":    classifyProvisionError(err),
@@ -169,6 +190,20 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.provision",
+		TargetType:  "vm",
+		TargetID:    strconv.Itoa(res.VMID), // Proxmox VMID — what operators recognize
+		TargetLabel: res.Hostname,
+		Details: map[string]any{
+			"db_id": res.ID,
+			"node":  res.Node,
+			"tier":  res.Tier,
+			"os":    res.OS,
+			"ip":    res.IP,
+		},
+		Success: true,
+	})
 	writeLine(map[string]any{
 		"type": "result",
 		"data": res,
@@ -258,10 +293,32 @@ func (h *VMs) Delete(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
+	// Pre-lookup so the audit row carries Proxmox VMID + hostname,
+	// not the Nimbus DB row id from the URL. Best-effort: a missing
+	// row falls back to URL-id and lets svc.Delete return the same
+	// NotFound the operator gets.
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, uint(id), &user.ID)
 	if err := h.svc.Delete(r.Context(), uint(id), user.ID); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.delete",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.delete",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details:     map[string]any{"db_id": dbID},
+		Success:     true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -293,10 +350,28 @@ func (h *VMs) Lifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := provision.VMLifecycleOp(chi.URLParam(r, "op"))
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, uint(id), &user.ID)
 	if err := h.svc.LifecycleOp(r.Context(), uint(id), user.ID, op); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm." + string(op),
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm." + string(op),
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details:     map[string]any{"db_id": dbID},
+		Success:     true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -458,6 +533,7 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, &user.ID)
 	t, err := h.svc.CreateVMTunnel(r.Context(), id, provision.VMTunnelRequest{
 		TargetPort:           req.TargetPort,
 		Subdomain:            req.Subdomain,
@@ -470,9 +546,26 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		TLSSkipVerify:        req.TLSSkipVerify,
 	}, &user.ID)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.tunnel.create",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID, "target_port": req.TargetPort, "subdomain": req.Subdomain},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.tunnel.create",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details:     map[string]any{"db_id": dbID, "target_port": req.TargetPort, "subdomain": req.Subdomain, "tunnel_id": t.ID},
+		Success:     true,
+	})
 	response.Created(w, t)
 }
 
@@ -509,15 +602,52 @@ func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, &user.ID)
 	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID, &user.ID); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.tunnel.delete",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID, "tunnel_id": tunnelID},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.tunnel.delete",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details:     map[string]any{"db_id": dbID, "tunnel_id": tunnelID},
+		Success:     true,
+	})
 	response.Success(w, deleteTunnelResponse{Message: "tunnel deleted"})
 }
 
 // parseVMID extracts and validates the {id} URL param common to the
 // per-VM endpoints. Writes a 400 and returns ok=false on failure.
+// resolveVMTarget enriches an audit event with the Proxmox VMID +
+// hostname so operators see "vm: my-test-vm (vmid 145)" instead of
+// the meaningless "vm: 35" (the Nimbus DB row id from the URL).
+//
+// Best-effort: a missing row falls back to empty strings + the URL's
+// row id, which lets the surrounding mutation's own NotFound error
+// surface to the operator. requesterID is forwarded as the owner
+// gate; nil bypasses (admin paths). Returns (vmid, hostname, db_id).
+func resolveVMTarget(ctx context.Context, svc *provision.Service, dbID uint, requesterID *uint) (string, string, uint) {
+	if svc == nil {
+		return "", "", dbID
+	}
+	vm, err := svc.Get(ctx, dbID, requesterID)
+	if err != nil || vm == nil {
+		return "", "", dbID
+	}
+	return strconv.Itoa(vm.VMID), vm.Hostname, dbID
+}
+
 func parseVMID(w http.ResponseWriter, r *http.Request) (uint, bool) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -605,8 +735,17 @@ func validateCreate(req createVMRequest) error {
 func (h *VMs) Reconcile(w http.ResponseWriter, r *http.Request) {
 	rep, err := h.svc.ReconcileVMs(r.Context())
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:   "vms.reconcile",
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.BadRequest(w, err.Error())
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:  "vms.reconcile",
+		Success: true,
+	})
 	response.Success(w, rep)
 }
