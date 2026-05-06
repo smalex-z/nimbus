@@ -66,7 +66,7 @@ func NewRouter(d Deps) http.Handler {
 	keys := handlers.NewKeys(d.Keys)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler)
-	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr)
+	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit)
 	bs := handlers.NewBootstrap(d.Bootstrap)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)

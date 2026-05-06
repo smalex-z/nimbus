@@ -1,42 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
-import { GithubIcon, GoogleIcon, CheckIcon } from '@/components/nimbus'
+import { GithubIcon, GoogleIcon } from '@/components/nimbus'
 
-interface Step {
-  title: string
-  detail: string
-}
+// OAuthCallback is the post-redirect landing page for /api/auth/{github,
+// google}/callback. By the time this React route renders, the backend
+// has already finished the OAuth dance and set the session cookie — so
+// the success path is just a redirect, no work to display.
+//
+// Earlier this page staggered a fake 4-step checklist ("Verifying…",
+// "Exchanging code…", "Resolving identity…", "Issuing session cookie")
+// over ~2 s of setTimeouts. None of those steps were actually
+// happening; they were UI theater for work that had completed before
+// the redirect. Removed.
+//
+// The error path stays — when the backend redirects with ?error=…,
+// surfacing the human-readable message + a "Back to sign in" button is
+// the only useful thing this route can do.
 
 type ProviderName = 'github' | 'google'
 
-interface ProviderConfig {
-  label: string
-  icon: JSX.Element
-  steps: (login: string) => Step[]
-}
-
-const PROVIDERS: Record<ProviderName, ProviderConfig> = {
-  github: {
-    label: 'GitHub',
-    icon: <GithubIcon size={28} />,
-    steps: (login) => [
-      { title: 'Verifying GitHub authorization',   detail: 'GET /api/auth/github/callback?code=…' },
-      { title: 'Exchanging code for access token', detail: 'POST /login/oauth/access_token' },
-      { title: 'Resolving user identity',          detail: `GET /user → @${login}` },
-      { title: 'Issuing session cookie',           detail: 'Set-Cookie: nimbus_sid=…' },
-    ],
-  },
-  google: {
-    label: 'Google',
-    icon: <GoogleIcon size={26} />,
-    steps: (login) => [
-      { title: 'Verifying Google authorization',   detail: 'GET /api/auth/google/callback?code=…' },
-      { title: 'Exchanging code for access token', detail: 'POST /oauth2.googleapis.com/token' },
-      { title: 'Resolving user identity',          detail: `GET /userinfo → ${login}` },
-      { title: 'Issuing session cookie',           detail: 'Set-Cookie: nimbus_sid=…' },
-    ],
-  },
+const PROVIDER_LABEL: Record<ProviderName, string> = {
+  github: 'GitHub',
+  google: 'Google',
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -48,6 +34,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   missing_code:          'Authorization code was missing from the callback.',
   domain_not_authorized: 'Your email domain is not authorized for sign-up. Contact your administrator to request access.',
   org_not_authorized:    'Your GitHub account is not a member of an authorized organization. Contact your administrator to request access.',
+  account_suspended:     'Your account is suspended. Contact your administrator.',
 }
 
 export default function OAuthCallback() {
@@ -56,135 +43,65 @@ export default function OAuthCallback() {
   const { user } = useAuth()
 
   const error = params.get('error')
-  const login = params.get('login') ?? 'you'
   const providerKey = (params.get('provider') ?? 'github') as ProviderName
-  const provider = PROVIDERS[providerKey] ?? PROVIDERS.github
-  const steps = provider.steps(login)
+  const providerLabel = PROVIDER_LABEL[providerKey] ?? PROVIDER_LABEL.github
 
-  const [visibleCount, setVisibleCount] = useState(0)
-
+  // Success path: redirect immediately. Admin lands on /admin, regular
+  // user lands on / (their VMs / provision form). No animation, no
+  // pretend-progress — the backend already did the work.
   useEffect(() => {
     if (error) return
-    const timers: ReturnType<typeof setTimeout>[] = []
-    steps.forEach((_, i) => {
-      timers.push(setTimeout(() => setVisibleCount(i + 1), 350 + i * 420))
-    })
-    timers.push(
-      setTimeout(
-        () => navigate(user?.is_admin ? '/admin' : '/', { replace: true }),
-        350 + steps.length * 420 + 600,
-      ),
-    )
-    return () => timers.forEach(clearTimeout)
-  }, [error, user]) // eslint-disable-line react-hooks/exhaustive-deps
+    navigate(user?.is_admin ? '/admin' : '/', { replace: true })
+  }, [error, user, navigate])
 
-  const iconBg = providerKey === 'google'
-    ? { background: '#fff', border: '1px solid rgba(20,18,28,0.1)', color: 'inherit' }
-    : { background: 'var(--ink)', color: '#fff' }
+  // Render nothing while the success-path redirect runs — it's
+  // synchronous on next tick, so a flash of empty content is preferable
+  // to a flash of "Signing you in…" copy that's stale by the time the
+  // user reads it.
+  if (!error) return null
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', padding: '20px 24px' }}>
-      {/* Top bar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'auto' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div className="brand-mark" />
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, color: 'var(--ink)', letterSpacing: '-0.02em' }}>
-            Nimbus
-          </span>
-        </div>
-
-        {!error && (
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 7,
-            padding: '5px 12px', borderRadius: 999,
-            background: 'rgba(248,175,130,0.12)', border: '1px solid rgba(248,175,130,0.35)',
-            fontSize: 12, fontWeight: 500, color: '#9a5c2e',
-          }}>
-            <span style={{
-              width: 7, height: 7, borderRadius: '50%', background: '#F8AF82',
-              animation: 'blink 1.2s ease-in-out infinite', display: 'inline-block',
-            }} />
-            signing you in
-          </span>
-        )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="brand-mark" />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, color: 'var(--ink)', letterSpacing: '-0.02em' }}>
+          Nimbus
+        </span>
       </div>
 
-      {/* Card */}
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div className="glass" style={{ width: '100%', maxWidth: 440, padding: '36px 40px' }}>
-          {/* Icon + heading */}
-          <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', marginBottom: 32 }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: 14,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, ...iconBg,
-            }}>
-              {provider.icon}
+          <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', marginBottom: 24 }}>
+            <div
+              style={{
+                width: 56, height: 56, borderRadius: 14,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+                background: providerKey === 'google' ? '#fff' : 'var(--ink)',
+                border: providerKey === 'google' ? '1px solid rgba(20,18,28,0.1)' : 'none',
+                color: providerKey === 'google' ? 'inherit' : '#fff',
+              }}
+            >
+              {providerKey === 'google' ? <GoogleIcon size={26} /> : <GithubIcon size={28} />}
             </div>
             <div>
               <h1 className="n-display" style={{ fontSize: 22, margin: '0 0 4px', lineHeight: 1.2 }}>
-                {error ? 'Something went wrong' : `Returning from ${provider.label}`}
+                Sign-in failed
               </h1>
               <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
-                {error
-                  ? (ERROR_MESSAGES[error] ?? 'An unexpected error occurred.')
-                  : 'Hold on a second — finishing handshake.'}
+                {ERROR_MESSAGES[error] ?? `${providerLabel} sign-in could not complete.`}
               </p>
             </div>
           </div>
 
-          {/* Steps */}
-          {!error && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {steps.map((step, i) => (
-                <div key={i} style={{
-                  display: 'flex', gap: 14, alignItems: 'flex-start',
-                  opacity: visibleCount > i ? 1 : 0,
-                  transform: visibleCount > i ? 'translateY(0)' : 'translateY(6px)',
-                  transition: 'opacity 0.35s ease, transform 0.35s ease',
-                }}>
-                  <div style={{
-                    width: 22, height: 22, borderRadius: '50%',
-                    background: 'rgba(31,122,77,0.12)', border: '1px solid rgba(31,122,77,0.25)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexShrink: 0, color: 'var(--ok)', marginTop: 1,
-                  }}>
-                    <CheckIcon size={12} />
-                  </div>
-                  <div>
-                    <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>
-                      {step.title}
-                    </p>
-                    <p style={{ margin: 0, fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                      {step.detail}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {error && (
-            <Link to="/login" className="n-btn n-btn-primary n-btn-block"
-              style={{ display: 'flex', textDecoration: 'none', marginTop: 8 }}>
-              Back to sign in
-            </Link>
-          )}
+          <Link
+            to="/login"
+            className="n-btn n-btn-primary n-btn-block"
+            style={{ display: 'flex', textDecoration: 'none' }}
+          >
+            Back to sign in
+          </Link>
         </div>
-      </div>
-
-      {/* Footer */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginTop: 'auto', paddingTop: 20,
-        fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'var(--font-mono)',
-      }}>
-        <span>handshake · ed25519 · TLS 1.3</span>
-        <Link to="/login" style={{ color: 'var(--ink-mute)', textDecoration: 'none' }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--ink)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--ink-mute)')}>
-          cancel
-        </Link>
       </div>
     </div>
   )
