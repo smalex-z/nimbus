@@ -541,6 +541,7 @@ function SDNPanel() {
   const [view, setView] = useState<SDNSettingsView | null>(null)
   const [enabled, setEnabled] = useState(false)
   const [zoneName, setZoneName] = useState('nimbus')
+  const [zoneType, setZoneType] = useState<'simple' | 'vxlan'>('simple')
   const [supernet, setSupernet] = useState('')
   const [subnetSize, setSubnetSize] = useState(24)
   const [dnsServer, setDNSServer] = useState('')
@@ -555,6 +556,7 @@ function SDNPanel() {
         setView(v)
         setEnabled(v.enabled)
         setZoneName(v.zone_name || 'nimbus')
+        setZoneType((v.zone_type === 'vxlan' ? 'vxlan' : 'simple'))
         setSupernet(v.supernet)
         setSubnetSize(v.subnet_size > 0 ? v.subnet_size : 24)
         setDNSServer(v.dns_server || '')
@@ -580,7 +582,7 @@ function SDNPanel() {
       const next = await saveSDNSettings({
         enabled,
         zone_name: zoneName,
-        zone_type: 'simple',
+        zone_type: zoneType,
         supernet,
         subnet_size: subnetSize,
         dns_server: dnsServer,
@@ -606,9 +608,9 @@ function SDNPanel() {
       <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
         Each Nimbus user gets a dedicated Proxmox SDN VNet — VMs can talk
         within a user's own subnets but can't reach other users' VMs or the
-        cluster's main LAN. Outbound internet works via NAT (simple zone).
-        Bootstrap (Gopher tunnel, GPU env) runs through the qemu-guest-agent,
-        so isolated VMs provision identically to flat-LAN ones.
+        cluster's main LAN. Outbound internet works via NAT. Bootstrap
+        (Gopher tunnel, GPU env) runs through the qemu-guest-agent, so
+        isolated VMs provision identically to flat-LAN ones.
       </p>
 
       {view && <ZoneStatusChip view={view} />}
@@ -635,11 +637,56 @@ function SDNPanel() {
             className="n-input"
             type="text"
             value={zoneName}
-            onChange={(e) => setZoneName(e.target.value)}
+            onChange={(e) => setZoneName(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
             placeholder="nimbus"
             disabled={busy}
             maxLength={8}
+            pattern="^[a-z][a-z0-9]{0,7}$"
           />
+          <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            1–8 lowercase letters and digits, must start with a letter.
+            Proxmox rejects hyphens, underscores, dots, and uppercase.
+          </p>
+        </div>
+
+        <div className="n-field">
+          <label className="n-label">Zone type</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <ZoneTypeChip
+              active={zoneType === 'simple'}
+              disabled={busy}
+              onClick={() => setZoneType('simple')}
+              label="Simple"
+              hint="Per-host NAT bridge"
+            />
+            <ZoneTypeChip
+              active={zoneType === 'vxlan'}
+              disabled={busy}
+              onClick={() => setZoneType('vxlan')}
+              label="VXLAN"
+              hint="Cross-node L2 overlay"
+            />
+          </div>
+          <p style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+            {zoneType === 'simple' ? (
+              <>
+                Single-host friendly. Each PVE node has its own bridge — VMs
+                on the same subnet but <em>different nodes</em> can&apos;t
+                talk to each other.
+              </>
+            ) : (
+              <>
+                Cross-node L2: VMs on the same subnet reach each other across
+                nodes via VXLAN tunnels. <strong>Requires UDP 4789 between
+                nodes</strong> and an MTU 50 bytes lower than the underlay.
+                Nimbus fills <code>peers=</code> from the cluster&apos;s online
+                nodes; outbound internet uses the per-subnet SNAT flag (same
+                as simple zone) — each node MASQUERADEs egress traffic to its
+                vmbr0 IP, so VMs reach the internet through whichever PVE
+                host they land on.
+              </>
+            )}
+          </p>
         </div>
 
         <SDNAddressSpace
@@ -853,6 +900,54 @@ function describeCarving(poolPrefix: number, slicePrefix: number): { maxSubnets:
   const maxSubnets = 1 << (slicePrefix - poolPrefix)
   const hostsPerSubnet = describeSlice(slicePrefix).hosts
   return { maxSubnets, hostsPerSubnet }
+}
+
+// ZoneTypeChip is a two-line button used in the zone-type selector.
+// Plain HTML to fit the existing form styling; doesn't depend on any
+// of the chip primitives elsewhere in the codebase.
+function ZoneTypeChip({
+  active,
+  disabled,
+  onClick,
+  label,
+  hint,
+}: {
+  active: boolean
+  disabled: boolean
+  onClick: () => void
+  label: string
+  hint: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        flex: 1,
+        textAlign: 'left',
+        padding: '8px 12px',
+        borderRadius: 8,
+        border: active ? '1px solid var(--ink)' : '1px solid var(--line)',
+        background: active ? 'var(--ink)' : 'transparent',
+        color: active ? 'white' : 'var(--ink)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        transition: 'background-color 120ms, border-color 120ms',
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600 }}>{label}</div>
+      <div
+        style={{
+          fontSize: 11,
+          color: active ? 'rgba(255,255,255,0.75)' : 'var(--ink-mute)',
+          marginTop: 2,
+        }}
+      >
+        {hint}
+      </div>
+    </button>
+  )
 }
 
 function ZoneStatusChip({ view }: { view: SDNSettingsView }) {

@@ -1300,10 +1300,20 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if zoneType != "" && zoneType != "simple" {
-		// VXLAN lands in P4. Hard-reject anything else for now so an
-		// admin doesn't silently misconfigure.
-		response.BadRequest(w, "zone_type must be 'simple' (VXLAN support is planned)")
+	if zoneType != "" && zoneType != "simple" && zoneType != "vxlan" {
+		// `vlan` and `qinq` aren't supported yet — they require switch
+		// trunking config Nimbus can't drive from the API. Hard-reject
+		// so an admin doesn't silently misconfigure.
+		response.BadRequest(w, "zone_type must be 'simple' or 'vxlan'")
+		return
+	}
+	if zone != "" && !validSDNZoneName(zone) {
+		// Proxmox is strict: zone IDs are 1–8 chars, lowercase
+		// alphanumeric, must start with a letter. Hyphens, dots,
+		// underscores, uppercase all rejected. Fail fast with a clear
+		// message instead of letting Proxmox surface the cryptic
+		// "invalid format" 400 in the bootstrap path.
+		response.BadRequest(w, "zone_name must be 1–8 lowercase alphanumeric characters starting with a letter (no hyphens, underscores, or dots)")
 		return
 	}
 	if supernet != "" {
@@ -1361,4 +1371,26 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 		VNetCount:    st.VNetCount,
 		ProxmoxError: st.ProxmoxError,
 	})
+}
+
+// validSDNZoneName mirrors Proxmox's zone ID rule: 1-8 chars,
+// must start with a lowercase letter, lowercase alphanumeric only.
+// Catches hyphens / underscores / dots / uppercase before they reach
+// the create endpoint and surface as a cryptic "invalid format"
+// upstream error.
+func validSDNZoneName(s string) bool {
+	if len(s) < 1 || len(s) > 8 {
+		return false
+	}
+	if s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }

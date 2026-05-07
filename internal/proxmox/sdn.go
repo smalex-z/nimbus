@@ -50,6 +50,11 @@ type SDNZone struct {
 	// the zone cluster-wide matches the per-host-bridge auto-create
 	// behavior of simple zones.
 	Nodes string `json:"nodes,omitempty"`
+	// Exitnodes designates which node(s) handle outbound NAT for the
+	// zone. Required for VXLAN zones that need internet egress (without
+	// it, VMs can talk to each other across nodes but can't reach the
+	// outside world). Comma-separated PVE node hostnames.
+	Exitnodes string `json:"exitnodes,omitempty"`
 }
 
 // SDNVNet is one VLAN-segment definition under /cluster/sdn/vnets.
@@ -125,6 +130,9 @@ func (c *Client) CreateSDNZone(ctx context.Context, z SDNZone) error {
 	}
 	if z.Nodes != "" {
 		params.Set("nodes", z.Nodes)
+	}
+	if z.Exitnodes != "" {
+		params.Set("exitnodes", z.Exitnodes)
 	}
 	return c.do(ctx, http.MethodPost, "/cluster/sdn/zones", params, nil)
 }
