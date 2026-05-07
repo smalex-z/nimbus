@@ -1356,6 +1356,29 @@ export async function saveSDNSettings(
   return data
 }
 
+// SDNResetReport is what /settings/sdn/reset returns: per-step
+// counts so the UI shows what was torn down. Errors don't fail the
+// overall reset — they're surfaced for visibility.
+export interface SDNResetReport {
+  subnets_deleted: number
+  orphans_scrubbed: number
+  subnet_failures?: string[]
+  zone_deleted?: string
+  zone_error?: string
+  apply_error?: string
+}
+
+// resetSDN tears down every Nimbus-managed subnet + the configured
+// zone in Proxmox, leaving the platform in a fresh state. Refused
+// (409) if any VMs are still attached to Nimbus subnets — operator
+// must delete those first via the normal VM lifecycle.
+export async function resetSDN(): Promise<SDNResetReport> {
+  const { data } = await api.post<SDNResetReport>('/settings/sdn/reset', null, {
+    timeout: 90_000,
+  })
+  return data
+}
+
 export interface NetworkOpFailure {
   vm_row_id: number
   vmid: number

@@ -30,7 +30,12 @@ type subnetCRUDClient interface {
 	DeleteSDNVNet(ctx context.Context, vnet string) error
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnet string) error
+	DeleteSDNZone(ctx context.Context, zone string) error
 	ApplySDN(ctx context.Context) error
+	// Reset uses these to wipe orphan PVE vnets/subnets that Nimbus's
+	// DB no longer tracks (e.g. residue from earlier failed deletes).
+	ListSDNVNets(ctx context.Context) ([]proxmox.SDNVNet, error)
+	ListSDNSubnets(ctx context.Context, vnet string) ([]proxmox.SDNSubnet, error)
 }
 
 // IPPoolWriter is the slice of *ippool.Pool subnet ops need. Defined
@@ -228,22 +233,12 @@ func (s *Service) DeleteSubnet(ctx context.Context, id, ownerID uint) error {
 		}
 	}
 
-	if row.IsDefault {
-		// Allow delete only if there's another active subnet to fall
-		// back on; otherwise refuse. EnsureDefault will pick another
-		// at next provision.
-		var others int64
-		if err := s.dbWriter().WithContext(ctx).Model(&db.UserSubnet{}).
-			Where("owner_id = ? AND id != ?", ownerID, id).
-			Count(&others).Error; err != nil {
-			return fmt.Errorf("count other subnets: %w", err)
-		}
-		if others == 0 {
-			return &internalerrors.ConflictError{
-				Message: "cannot delete your only subnet — provisions need at least one to land on",
-			}
-		}
-	}
+	// If this was the user's default subnet, the IsDefault flag goes
+	// away with the row. EnsureDefault auto-creates a fresh default
+	// on the next provision attempt, so a user with zero subnets is a
+	// recoverable state — no need to refuse the delete here. The
+	// vmRefs check above is the real safety net (refuses while VMs
+	// still depend on this subnet).
 
 	settings, err := s.settings.GetNetworkSettings()
 	if err != nil {
@@ -254,9 +249,13 @@ func (s *Service) DeleteSubnet(ctx context.Context, id, ownerID uint) error {
 	// while subnets reference it), then VNet, then ApplySDN. We tolerate
 	// "already gone" 404s — the caller may be retrying after a partial
 	// failure and we want delete to be idempotent.
+	//
+	// Subnet ID is the zone-prefixed dash form: "<zone>-<ip>-<prefix>"
+	// (PVE quirk; see proxmox.FormatSDNSubnetID for the why).
 	if s.subnetCRUD != nil {
-		if err := s.subnetCRUD.DeleteSDNSubnet(ctx, row.VNet, row.Subnet); err != nil && !errors.Is(err, proxmox.ErrNotFound) {
-			return fmt.Errorf("delete proxmox subnet %s/%s: %w", row.VNet, row.Subnet, err)
+		subnetID := proxmox.FormatSDNSubnetID(settings.SDNZoneName, row.Subnet)
+		if err := s.subnetCRUD.DeleteSDNSubnet(ctx, row.VNet, subnetID); err != nil && !errors.Is(err, proxmox.ErrNotFound) {
+			return fmt.Errorf("delete proxmox subnet %s/%s: %w", row.VNet, subnetID, err)
 		}
 		if err := s.subnetCRUD.DeleteSDNVNet(ctx, row.VNet); err != nil && !errors.Is(err, proxmox.ErrNotFound) {
 			return fmt.Errorf("delete proxmox vnet %s: %w", row.VNet, err)
@@ -265,7 +264,6 @@ func (s *Service) DeleteSubnet(ctx context.Context, id, ownerID uint) error {
 			return fmt.Errorf("apply sdn after delete: %w", err)
 		}
 	}
-	_ = settings // settings reserved for future zone-name lookups
 
 	// IP pool drop. Already-empty is fine; a non-empty pool here means
 	// VMs were tracked in the pool but not in db.VM — surface the error

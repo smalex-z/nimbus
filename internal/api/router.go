@@ -327,6 +327,11 @@ func NewRouter(d Deps) http.Handler {
 				// vmbr0 until P2 lands.
 				r.Get("/settings/sdn", settings.GetSDN)
 				r.Put("/settings/sdn", settings.SaveSDN)
+				// Reset SDN: tears down every Nimbus-managed subnet and
+				// the configured zone in PVE, leaving Nimbus in a Clean
+				// state. Refuses if any VMs are still attached.
+				r.With(middleware.Timeout(2*time.Minute)).
+					Post("/settings/sdn/reset", settings.ResetSDN)
 				// Disruptive batch ops — generous timeout because each VM
 				// reboot waits on a Proxmox task.
 				r.With(middleware.Timeout(15*time.Minute)).

@@ -23,6 +23,7 @@ type fakeSDN struct {
 	deleteVNet       func(ctx context.Context, vnet string) error
 	createSubnet     func(ctx context.Context, s proxmox.SDNSubnet) error
 	deleteSubnet     func(ctx context.Context, vnet, subnet string) error
+	deleteZone       func(ctx context.Context, zone string) error
 	getClusterStatus func(ctx context.Context) ([]proxmox.ClusterStatusEntry, error)
 	createCalls      atomic.Int32
 	applyCalls       atomic.Int32
@@ -67,6 +68,17 @@ func (f *fakeSDN) GetClusterStatus(ctx context.Context) ([]proxmox.ClusterStatus
 		return nil, nil
 	}
 	return f.getClusterStatus(ctx)
+}
+
+func (f *fakeSDN) DeleteSDNZone(ctx context.Context, zone string) error {
+	if f.deleteZone == nil {
+		return nil
+	}
+	return f.deleteZone(ctx, zone)
+}
+
+func (f *fakeSDN) ListSDNSubnets(_ context.Context, _ string) ([]proxmox.SDNSubnet, error) {
+	return nil, nil
 }
 
 func (f *fakeSDN) CreateSDNVNet(ctx context.Context, v proxmox.SDNVNet) error {

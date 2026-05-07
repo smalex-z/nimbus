@@ -1654,6 +1654,21 @@ definitions:
       tunnel_url:
         type: string
     type: object
+  vnetmgr.ResetReport:
+    properties:
+      apply_error:
+        type: string
+      subnet_failures:
+        items:
+          type: string
+        type: array
+      subnets_deleted:
+        type: integer
+      zone_deleted:
+        type: string
+      zone_error:
+        type: string
+    type: object
 info:
   contact: {}
   description: |-
@@ -5132,6 +5147,40 @@ paths:
       summary: Update SDN settings (admin)
       tags:
       - settings
+  /settings/sdn/reset:
+    post:
+      description: |-
+        Tears down every Nimbus-managed subnet and the
+        configured zone in Proxmox. Refuses with 409 if any
+        VMs are still attached to Nimbus subnets — operator
+        must delete those via the normal VM lifecycle first.
+        On success returns a per-step report so the admin UI
+        shows exactly what was torn down.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/vnetmgr.ResetReport'
+              type: object
+        "409":
+          description: VMs still attached
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Reset SDN state in Proxmox
+      tags:
+      - admin
   /settings/smtp:
     get:
       description: |-
@@ -5409,9 +5458,10 @@ paths:
   /subnets/{id}:
     delete:
       description: |-
-        Refused while any VM still references the subnet, and
-        for an only-default subnet (no fallback to land new
-        VMs on). Tears down the Proxmox VNet + Subnet + IP pool.
+        Refused while any VM still references the subnet.
+        Tears down the Proxmox VNet + Subnet + IP pool. If
+        this was the user's only subnet, EnsureDefault
+        auto-creates a fresh default on the next provision.
       parameters:
       - description: Subnet ID
         in: path

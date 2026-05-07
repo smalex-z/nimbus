@@ -172,12 +172,13 @@ func (h *Subnets) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete handles DELETE /api/subnets/{id}. Refused while VMs are
-// attached or while it's the only subnet for the user.
+// attached.
 //
 // @Summary     Delete a subnet
-// @Description Refused while any VM still references the subnet, and
-// @Description for an only-default subnet (no fallback to land new
-// @Description VMs on). Tears down the Proxmox VNet + Subnet + IP pool.
+// @Description Refused while any VM still references the subnet.
+// @Description Tears down the Proxmox VNet + Subnet + IP pool. If
+// @Description this was the user's only subnet, EnsureDefault
+// @Description auto-creates a fresh default on the next provision.
 // @Tags        subnets
 // @Security    cookieAuth
 // @Param       id  path int true "Subnet ID"

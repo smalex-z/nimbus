@@ -3,11 +3,15 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	internalerrors "nimbus/internal/errors"
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
@@ -68,6 +72,8 @@ type PoolReseeder interface {
 type SDNBootstrapper interface {
 	Bootstrap(ctx context.Context) error
 	Status(ctx context.Context) (*vnetmgr.StatusView, error)
+	Reset(ctx context.Context) (*vnetmgr.ResetReport, error)
+	CountUserSubnets(ctx context.Context) (int64, error)
 }
 
 // SelfBootstrap is implemented by selftunnel.Service. SaveGopher fires
@@ -1327,6 +1333,43 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-check zone-changing saves: if there are existing subnets
+	// pointing at the current zone, refuse the save up front instead
+	// of letting it persist and surface as a confusing
+	// ZoneTypeMismatchError downstream from Bootstrap. The operator
+	// has to either delete the subnets manually or run "Reset SDN"
+	// (admin button), which is the explicit unblock for this state.
+	if req.Enabled {
+		existing, err := s.auth.GetNetworkSettings()
+		if err != nil {
+			response.InternalError(w, "load existing settings: "+err.Error())
+			return
+		}
+		nameChanging := zone != "" && existing.SDNZoneName != "" && zone != existing.SDNZoneName
+		typeChanging := zoneType != "" && existing.SDNZoneType != "" && zoneType != existing.SDNZoneType
+		if nameChanging || typeChanging {
+			subnetCount, cerr := s.sdn.CountUserSubnets(r.Context())
+			if cerr != nil {
+				response.InternalError(w, "count subnets: "+cerr.Error())
+				return
+			}
+			if subnetCount > 0 {
+				what := "zone name"
+				if typeChanging && !nameChanging {
+					what = "zone type"
+				} else if typeChanging && nameChanging {
+					what = "zone name and type"
+				}
+				response.BadRequest(w, fmt.Sprintf(
+					"cannot change %s while %d subnet(s) exist under the current zone %q (type=%s) — "+
+						"either delete each subnet on the Subnets page first, or click \"Reset SDN\" "+
+						"to wipe Nimbus's SDN state cleanly. Reset refuses if any VMs are still attached.",
+					what, subnetCount, existing.SDNZoneName, existing.SDNZoneType))
+				return
+			}
+		}
+	}
+
 	if err := s.auth.SaveSDNSettings(db.NetworkSettings{
 		SDNEnabled:        req.Enabled,
 		SDNZoneName:       zone,
@@ -1393,4 +1436,45 @@ func validSDNZoneName(s string) bool {
 		return false
 	}
 	return true
+}
+
+// ResetSDN tears down Nimbus's SDN state in Proxmox: every
+// user_subnets row, plus the configured zone, plus the apply.
+// Refuses if any VMs are still attached to Nimbus subnets — Reset
+// never destroys VM data. Used to recover from "stuck" states (e.g.
+// operator changed zone type/name in settings but PVE still holds
+// the old zone) without manual pvesh surgery.
+//
+// @Summary     Reset SDN state in Proxmox
+// @Description Tears down every Nimbus-managed subnet and the
+// @Description configured zone in Proxmox. Refuses with 409 if any
+// @Description VMs are still attached to Nimbus subnets — operator
+// @Description must delete those via the normal VM lifecycle first.
+// @Description On success returns a per-step report so the admin UI
+// @Description shows exactly what was torn down.
+// @Tags        admin
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=vnetmgr.ResetReport}
+// @Failure     409 {object} EnvelopeError "VMs still attached"
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/sdn/reset [post]
+func (s *Settings) ResetSDN(w http.ResponseWriter, r *http.Request) {
+	if s.sdn == nil {
+		response.InternalError(w, "SDN bootstrapper not wired")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	report, err := s.sdn.Reset(ctx)
+	if err != nil {
+		var conflict *internalerrors.ConflictError
+		if errors.As(err, &conflict) {
+			response.Error(w, http.StatusConflict, conflict.Message)
+			return
+		}
+		response.InternalError(w, "reset sdn: "+err.Error())
+		return
+	}
+	response.Success(w, report)
 }

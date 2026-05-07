@@ -47,6 +47,8 @@ type SDNClient interface {
 	DeleteSDNVNet(ctx context.Context, vnet string) error
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnet string) error
+	DeleteSDNZone(ctx context.Context, zone string) error
+	ListSDNSubnets(ctx context.Context, vnet string) ([]proxmox.SDNSubnet, error)
 }
 
 // SettingsReader is the slice of internal/service.AuthService this

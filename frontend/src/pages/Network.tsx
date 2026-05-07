@@ -7,12 +7,14 @@ import {
   getTunnelInfo,
   reconcileVMs,
   renumberAllVMs,
+  resetSDN,
   saveNetworkSettings,
   saveSDNSettings,
 } from '@/api/client'
 import type {
   NetworkOpReport,
   NetworkSettingsView,
+  SDNResetReport,
   SDNSettingsView,
   TunnelInfo,
   VMReconcileReport,
@@ -715,7 +717,7 @@ function SDNPanel() {
         {error && <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>}
         {saved && <p style={{ margin: 0, fontSize: 13, color: 'var(--good)' }}>Saved.</p>}
 
-        <div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
             type="submit"
             className="n-btn n-btn-primary"
@@ -724,9 +726,177 @@ function SDNPanel() {
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
+          <SDNResetButton onAfterReset={load} disabled={busy} />
         </div>
       </form>
     </div>
+  )
+}
+
+// SDNResetButton tears down every Nimbus-managed subnet + the
+// configured zone in PVE. Used to recover from "stuck" states (zone
+// type/name changed in settings but PVE still holds the old zone).
+// Refuses on the backend if any VMs are still attached.
+function SDNResetButton({
+  onAfterReset,
+  disabled,
+}: {
+  onAfterReset: () => void
+  disabled: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [report, setReport] = useState<SDNResetReport | null>(null)
+
+  const run = async () => {
+    setErr(null)
+    setRunning(true)
+    try {
+      const r = await resetSDN()
+      setReport(r)
+      onAfterReset()
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'reset failed')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true)
+          setReport(null)
+          setErr(null)
+        }}
+        disabled={disabled}
+        style={{
+          marginLeft: 'auto',
+          padding: '8px 14px',
+          borderRadius: 8,
+          border: '1px solid var(--err)',
+          background: 'transparent',
+          color: 'var(--err)',
+          fontSize: 13,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+        }}
+      >
+        Reset SDN
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 50,
+          }}
+          onClick={() => !running && setOpen(false)}
+        >
+          <div
+            className="glass"
+            style={{ maxWidth: 540, padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600 }}>Reset SDN state</div>
+            {!report && (
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, color: 'var(--ink-body)' }}>
+                This deletes <strong>every Nimbus-managed subnet</strong> and the
+                <strong> configured zone</strong> from Proxmox. Use this when you&apos;re
+                changing zone type/name and the existing subnets are blocking the change.
+                <br />
+                <br />
+                <strong>VM data is safe</strong> — Reset refuses with a 409 if any VM is
+                still attached to a Nimbus subnet. Delete or migrate attached VMs first
+                via the normal VM lifecycle.
+                <br />
+                <br />
+                After Reset succeeds, the SDN settings panel is in a fresh state — save
+                your new zone config to bootstrap it.
+              </p>
+            )}
+            {report && (
+              <div style={{ fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+                <div>
+                  Deleted <strong>{report.subnets_deleted}</strong> subnet
+                  {report.subnets_deleted === 1 ? '' : 's'}.
+                </div>
+                {report.orphans_scrubbed > 0 && (
+                  <div>
+                    Scrubbed <strong>{report.orphans_scrubbed}</strong> orphan vnet
+                    {report.orphans_scrubbed === 1 ? '' : 's'} from PVE that weren&apos;t
+                    tracked in Nimbus&apos;s DB.
+                  </div>
+                )}
+                {report.zone_deleted && (
+                  <div>
+                    Deleted zone <span className="font-mono">{report.zone_deleted}</span>.
+                  </div>
+                )}
+                {report.subnet_failures && report.subnet_failures.length > 0 && (
+                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
+                    <div>{report.subnet_failures.length} subnet failure(s):</div>
+                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                      {report.subnet_failures.map((f, i) => (
+                        <li key={i} style={{ fontSize: 12 }}>{f}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {report.zone_error && (
+                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
+                    Zone delete error: {report.zone_error}
+                  </div>
+                )}
+                {report.apply_error && (
+                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
+                    ApplySDN error: {report.apply_error}
+                  </div>
+                )}
+              </div>
+            )}
+            {err && <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{err}</p>}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="n-btn"
+                onClick={() => setOpen(false)}
+                disabled={running}
+              >
+                {report ? 'Close' : 'Cancel'}
+              </button>
+              {!report && (
+                <button
+                  type="button"
+                  onClick={run}
+                  disabled={running}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 8,
+                    border: 'none',
+                    background: 'var(--err)',
+                    color: 'white',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: running ? 'not-allowed' : 'pointer',
+                    opacity: running ? 0.6 : 1,
+                  }}
+                >
+                  {running ? 'Resetting…' : 'Yes, reset'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

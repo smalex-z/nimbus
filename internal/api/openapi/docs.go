@@ -5417,6 +5417,55 @@ const docTemplate = `{
                 }
             }
         },
+        "/settings/sdn/reset": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Tears down every Nimbus-managed subnet and the\nconfigured zone in Proxmox. Refuses with 409 if any\nVMs are still attached to Nimbus subnets — operator\nmust delete those via the normal VM lifecycle first.\nOn success returns a per-step report so the admin UI\nshows exactly what was torn down.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Reset SDN state in Proxmox",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/vnetmgr.ResetReport"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "409": {
+                        "description": "VMs still attached",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/smtp": {
             "get": {
                 "security": [
@@ -5917,7 +5966,7 @@ const docTemplate = `{
                         "cookieAuth": []
                     }
                 ],
-                "description": "Refused while any VM still references the subnet, and\nfor an only-default subnet (no fallback to land new\nVMs on). Tears down the Proxmox VNet + Subnet + IP pool.",
+                "description": "Refused while any VM still references the subnet.\nTears down the Proxmox VNet + Subnet + IP pool. If\nthis was the user's only subnet, EnsureDefault\nauto-creates a fresh default on the next provision.",
                 "tags": [
                     "subnets"
                 ],
@@ -9451,6 +9500,29 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "tunnel_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "vnetmgr.ResetReport": {
+            "type": "object",
+            "properties": {
+                "apply_error": {
+                    "type": "string"
+                },
+                "subnet_failures": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "subnets_deleted": {
+                    "type": "integer"
+                },
+                "zone_deleted": {
+                    "type": "string"
+                },
+                "zone_error": {
                     "type": "string"
                 }
             }
