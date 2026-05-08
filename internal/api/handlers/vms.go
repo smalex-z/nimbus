@@ -17,6 +17,7 @@ import (
 	"nimbus/internal/nodescore"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/service"
 )
 
 // hostnameRE matches RFC 1123 single-label hostnames in lowercase. Restricting
@@ -479,12 +480,25 @@ func (h *VMs) ListTunnels(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	tunnels, err := h.svc.ListVMTunnels(r.Context(), id, &user.ID)
+	// Admins can manage tunnels on any VM (e.g. when opening the Networks
+	// modal from /admin's cluster table). Members are scoped to their own.
+	requesterID := tunnelRequesterID(user)
+	tunnels, err := h.svc.ListVMTunnels(r.Context(), id, requesterID)
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
 	response.Success(w, tunnels)
+}
+
+// tunnelRequesterID returns nil when the caller is an admin (so the service
+// skips ownership enforcement) and &user.ID otherwise. Centralised so the
+// list/create/delete handlers can't drift apart on this rule.
+func tunnelRequesterID(user *service.UserView) *uint {
+	if user == nil || user.IsAdmin {
+		return nil
+	}
+	return &user.ID
 }
 
 type createTunnelRequest struct {
@@ -533,7 +547,8 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
-	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, &user.ID)
+	requesterID := tunnelRequesterID(user)
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, requesterID)
 	t, err := h.svc.CreateVMTunnel(r.Context(), id, provision.VMTunnelRequest{
 		TargetPort:           req.TargetPort,
 		Subdomain:            req.Subdomain,
@@ -544,7 +559,7 @@ func (h *VMs) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		BotProtectionTTL:     req.BotProtectionTTL,
 		BotProtectionAllowIP: req.BotProtectionAllowIP,
 		TLSSkipVerify:        req.TLSSkipVerify,
-	}, &user.ID)
+	}, requesterID)
 	if err != nil {
 		h.audit.Record(r.Context(), audit.Event{
 			Action:      "vm.tunnel.create",
@@ -602,8 +617,9 @@ func (h *VMs) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, &user.ID)
-	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID, &user.ID); err != nil {
+	requesterID := tunnelRequesterID(user)
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, id, requesterID)
+	if err := h.svc.DeleteVMTunnel(r.Context(), id, tunnelID, requesterID); err != nil {
 		h.audit.Record(r.Context(), audit.Event{
 			Action:      "vm.tunnel.delete",
 			TargetType:  "vm",
