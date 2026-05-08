@@ -78,6 +78,7 @@ func (f *fakeSDN) ApplySDN(_ context.Context) error {
 	f.mu.Unlock()
 	return f.applyErr
 }
+func (f *fakeSDN) ReloadNodeNetwork(_ context.Context, _ string) error { return nil }
 
 func newTestSvc(t *testing.T, fake *fakeSDN) *standalonenet.Service {
 	t.Helper()

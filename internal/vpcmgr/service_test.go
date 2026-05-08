@@ -83,6 +83,7 @@ func (f *fakeSDN) ApplySDN(_ context.Context) error {
 	}
 	return nil
 }
+func (f *fakeSDN) ReloadNodeNetwork(_ context.Context, _ string) error { return nil }
 
 // fakeGateway is a no-op GatewayProvisioner — returns canned vmid+node
 // or a configured error. Most tests don't care about what the gateway

@@ -25,6 +25,14 @@ func TestClient_UploadFile_Wire(t *testing.T) {
 	var capturedFile, capturedFileName string
 
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+		// UploadFile is async on PVE — POST returns a UPID, then we
+		// poll /tasks/{upid}/status. The mock dispatches on path so
+		// the same test exercises both stages.
+		if strings.Contains(r.URL.Path, "/tasks/") {
+			writeEnvelope(w, map[string]string{"status": "stopped", "exitstatus": "OK"})
+			return
+		}
+
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
 		capturedCT = r.Header.Get("Content-Type")

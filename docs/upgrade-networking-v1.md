@@ -13,6 +13,34 @@ This is a **clean break**: there is no automatic migration. Existing VMs on the
 legacy per-user-subnet model continue to run on their old NICs; new networks
 are created under the new model.
 
+## Per-node setup: enable IPv4 forwarding
+
+**This is required and PVE will not do it for you.** Proxmox does not
+enable `net.ipv4.ip_forward` on any version (per Proxmox staff
+guidance — "it should be an active choice by the administrator to
+enable it"). Without it, every Nimbus network primitive that needs
+egress NAT silently fails: VMs come up but can't reach the internet,
+cloud-init hangs trying to install qemu-guest-agent, and the
+readiness probe times out.
+
+On every PVE node in the cluster (existing AND newly added), drop in:
+
+```bash
+cat > /etc/sysctl.d/99-nimbus-forward.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+sysctl --system | grep -E 'ip_forward|forwarding'
+```
+
+Verify with `sysctl net.ipv4.ip_forward` — should print `1`.
+
+If you skip this on a fresh node, the symptom is: VM provisions
+successfully, the result page shows the "Guest agent did not confirm"
+warning, the per-VM bridge exists on the host, but `iptables -t nat
+-L POSTROUTING -nv | grep <subnet>` shows the SNAT rule with `pkts=0`
+(kernel never forwarded anything to that rule).
+
 ## Pre-upgrade
 
 1. **Drain or accept stranded legacy state.** Read the rest of this doc first

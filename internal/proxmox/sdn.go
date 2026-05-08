@@ -273,8 +273,33 @@ func (c *Client) DeleteSDNSubnet(ctx context.Context, vnet, subnetID string) err
 // Expensive (~1-2 s per node) — call after a batch of changes, not per
 // individual create. Without this call, every Create/Delete above is
 // invisible to running VMs.
+//
+// IMPORTANT: ApplySDN commits /etc/pve/sdn/* and writes
+// /etc/network/interfaces.d/sdn on every node, but it does NOT reliably
+// trigger `ifreload -a` on freshly-added cluster nodes — pveproxy on
+// those nodes may not have re-resolved the cluster topology yet, so
+// the file lands but the bridge never comes up. Callers that
+// provisioned a per-node bridge (Standalone) or a per-cluster overlay
+// (VPC) should follow up with ReloadNodeNetwork on the affected
+// node(s) to force the local reload.
 func (c *Client) ApplySDN(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/cluster/sdn", nil, nil)
+}
+
+// ReloadNodeNetwork triggers `ifreload -a` on a single node via PVE's
+// PUT /nodes/{node}/network endpoint. Mirrors what the web UI's
+// "Apply" button does on the per-node Network tab — the missing piece
+// after ApplySDN when a cluster member hasn't been kicked since
+// joining.
+//
+// Idempotent at the network layer (ifreload already-up bridges is a
+// no-op). Returns nil on success; transport errors propagate.
+func (c *Client) ReloadNodeNetwork(ctx context.Context, node string) error {
+	if node == "" {
+		return errors.New("reload node network: node required")
+	}
+	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
+	return c.do(ctx, http.MethodPut, path, nil, nil)
 }
 
 // SetVMNetwork rewrites the bridge on a VM's network device after

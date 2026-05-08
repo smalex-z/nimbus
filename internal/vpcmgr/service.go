@@ -48,6 +48,7 @@ type SDNClient interface {
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnetID string) error
 	ApplySDN(ctx context.Context) error
+	ReloadNodeNetwork(ctx context.Context, node string) error
 }
 
 // PeerResolver returns the comma-joined list of online cluster node
@@ -432,7 +433,53 @@ func (s *Service) bootstrapPVE(ctx context.Context, row *db.VPC, peers string) e
 	if err := s.px.ApplySDN(ctx); err != nil {
 		return fmt.Errorf("apply sdn: %w", err)
 	}
+	// VXLAN zones span every peer, so every member that might host a
+	// VPC VM needs to ifreload locally. ApplySDN writes the config
+	// cluster-wide but doesn't reliably reload on freshly-joined
+	// nodes; force it via the per-node API. peers is the same
+	// comma-joined IP list we used for the zone — convert IP → node
+	// name via the cluster snapshot we just resolved.
+	for _, node := range nodesFromPeers(ctx, s, peers) {
+		if err := s.px.ReloadNodeNetwork(ctx, node); err != nil {
+			log.Printf("vpcmgr: reload network on %s after apply failed: %v (run `ifreload -a` on the node if the VXLAN bridge is missing)", node, err)
+		}
+	}
 	return nil
+}
+
+// nodesFromPeers maps the comma-joined peer-IP list back to node
+// names so we can call ReloadNodeNetwork(node, ...). The peer IPs
+// were resolved from /cluster/status moments earlier; we re-resolve
+// here to keep this function self-contained, accepting the small
+// extra GET (already cached on the Proxmox side).
+func nodesFromPeers(ctx context.Context, s *Service, peerCSV string) []string {
+	if peerCSV == "" {
+		return nil
+	}
+	want := make(map[string]bool, 8)
+	for _, ip := range strings.Split(peerCSV, ",") {
+		if ip = strings.TrimSpace(ip); ip != "" {
+			want[ip] = true
+		}
+	}
+	// Only the proxmox.Client provides cluster status; if SDNClient is
+	// a test stub we have no way to recover names. Fall back to
+	// reloading nothing — the test fakes don't need a reload anyway.
+	pveClient, ok := s.px.(*proxmox.Client)
+	if !ok {
+		return nil
+	}
+	entries, err := pveClient.GetClusterStatus(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(want))
+	for _, e := range entries {
+		if e.Type == "node" && want[e.IP] {
+			out = append(out, e.Name)
+		}
+	}
+	return out
 }
 
 // tearDownPVE reverses bootstrapPVE. Tolerates "already gone" 404s.
