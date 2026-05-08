@@ -149,6 +149,13 @@ func main() {
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
 		&db.UserSubnet{},
+		// Networking v1: Standalone VMs and VPCs. UserSubnet stays
+		// in the migrate list during the v1.0 deprecation window so
+		// upgrades from pre-v1 don't drop it; v1.1 removes it.
+		&db.StandaloneVMNetwork{},
+		&db.VPC{},
+		&db.VPCMembership{},
+		&db.GatewayLXCIP{},
 		ippool.Model(),
 	)
 	if err != nil {
