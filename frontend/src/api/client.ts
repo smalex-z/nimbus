@@ -1224,6 +1224,7 @@ export interface NetworkSettingsView {
   ip_pool_end: string
   gateway_ip: string
   prefix_len: number
+  cluster_lan_for_members: boolean
 }
 
 export interface SaveNetworkSettingsRequest {
@@ -1231,6 +1232,7 @@ export interface SaveNetworkSettingsRequest {
   ip_pool_end?: string
   gateway_ip?: string
   prefix_len?: number
+  cluster_lan_for_members?: boolean
 }
 
 export async function getNetworkSettings(): Promise<NetworkSettingsView> {
@@ -1243,49 +1245,6 @@ export async function saveNetworkSettings(
 ): Promise<NetworkSettingsView> {
   const { data } = await api.put<NetworkSettingsView>('/settings/network', req)
   return data
-}
-
-// Subnet — one user-owned SDN subnet (= Proxmox VNet + carved CIDR).
-// Multiple per user, OCI-style. Mirrors db.UserSubnet's wire shape.
-export interface Subnet {
-  id: number
-  name: string
-  vnet: string
-  subnet: string
-  gateway: string
-  pool_start: string
-  pool_end: string
-  is_default: boolean
-  status: 'active' | 'error'
-  created_at: string
-  updated_at: string
-}
-
-export async function listSubnets(): Promise<Subnet[]> {
-  const { data } = await api.get<Subnet[]>('/subnets')
-  return data
-}
-
-export async function getSubnet(id: number): Promise<Subnet> {
-  const { data } = await api.get<Subnet>(`/subnets/${id}`)
-  return data
-}
-
-// createSubnet provisions a fresh user subnet end-to-end (Proxmox
-// VNet + Subnet + per-subnet IP pool + DB row). Long-running compared
-// to other CRUD — Proxmox apply takes ~1-2s per cluster node — so we
-// give it a 30s budget.
-export async function createSubnet(req: { name: string; set_default?: boolean }): Promise<Subnet> {
-  const { data } = await api.post<Subnet>('/subnets', req, { timeout: 30_000 })
-  return data
-}
-
-export async function deleteSubnet(id: number): Promise<void> {
-  await api.delete(`/subnets/${id}`, { timeout: 30_000 })
-}
-
-export async function setDefaultSubnet(id: number): Promise<void> {
-  await api.post(`/subnets/${id}/default`)
 }
 
 // VPC — Networking-v1 primitive. VXLAN zone shared across nodes plus
@@ -1319,6 +1278,21 @@ export async function createVPC(req: { name: string }): Promise<VPC> {
 
 export async function deleteVPC(id: number): Promise<void> {
   await api.delete(`/vpcs/${id}`, { timeout: 60_000 })
+}
+
+// NetworkingInfo is the snapshot the Provision page reads to render
+// its picker. Each flag gates one chip (Standalone / VPC / Cluster
+// LAN), with reasons attached when a primitive is disabled.
+export interface NetworkingInfo {
+  standalone_enabled: boolean
+  vpc_enabled: boolean
+  vpc_reason?: string
+  cluster_lan_for_members: boolean
+}
+
+export async function getNetworkingInfo(): Promise<NetworkingInfo> {
+  const { data } = await api.get<NetworkingInfo>('/networking/info')
+  return data
 }
 
 // PublicSDNStatus is the verified-user-readable view of SDN

@@ -649,29 +649,22 @@ func main() {
 		log.Printf("VPCs disabled — set NIMBUS_NETWORK_NODE + NIMBUS_GATEWAY_LXC_IP_POOL + NIMBUS_GATEWAY_LXC_TEMPLATE to enable")
 	}
 
-	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
-	// the With* builders wire the DB + pool + VM-ref counter for the
-	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
-	// etc.). VMRefCounter is the provision service — it knows how to
-	// count VMs by SubnetID without vnetmgr pulling in the gorm.DB
-	// directly. Bootstrap surfaces SDN-package-missing as a logged
-	// warning rather than fatal so the rest of Nimbus runs on vmbr0
-	// when SDN isn't installed cluster-wide.
+	// Legacy SDN manager. Networking-v1 doesn't dispatch through
+	// vnetmgr at provision time anymore — Standalone + VPC primitives
+	// own that surface — but vnetmgr stays wired so admins can run
+	// "Reset SDN" from Settings → Network to clean up legacy
+	// per-user-subnet PVE state inherited from pre-v1 deployments.
+	// v1.1 will drop the package entirely.
 	vnetMgr := vnetmgr.New(pveClient, authSvc).
 		WithDB(database.DB).
 		WithPool(pool).
 		WithVMRefCounter(provSvc)
-	// Wire vnetmgr into provision so legacy callers that explicitly
-	// pass SubnetID / SubnetName / Bridge keep working during the
-	// deprecation window. nil here = SDN-disabled fallback (and the
-	// dispatcher uses standalonenet — or legacy global pool if neither
-	// is wired).
-	provSvc.SetSubnetResolver(vnetMgr)
-	bootstrapSDNCtx, bootstrapSDNCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := vnetMgr.Bootstrap(bootstrapSDNCtx); err != nil {
-		log.Printf("warning: SDN bootstrap: %v", err)
-	}
-	bootstrapSDNCancel()
+
+	// Cluster LAN admin toggle: live-loaded from the cluster-LAN
+	// setting in db.NetworkSettings (Settings → Network). Default
+	// false — non-admin members can't pick "Cluster LAN" on the
+	// Provision page. Admins always can.
+	provSvc.SetClusterLANForMembers(netSettings.ClusterLANForMembers)
 
 	router := api.NewRouter(api.Deps{
 		Auth:          authSvc,

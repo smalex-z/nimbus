@@ -92,11 +92,16 @@ func NewRouter(d Deps) http.Handler {
 	}
 	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
-	subnets := handlers.NewSubnets(d.VNetMgr)
-	var vpcs *handlers.VPCs
+	// VPCs handler is always mounted; nil service → 503 with a clear
+	// "VPCs not configured" message. Lets the frontend reflect
+	// availability via /api/vpcs/status without 404 surprises.
+	vpcs := handlers.NewVPCs(d.VPCMgr)
+	// Unified Networking-v1 status surface for the Provision picker.
+	var vpcSource handlers.NetworkingVPCSource
 	if d.VPCMgr != nil {
-		vpcs = handlers.NewVPCs(d.VPCMgr)
+		vpcSource = d.VPCMgr
 	}
+	networking := handlers.NewNetworking(vpcSource, d.Provision)
 	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU
@@ -410,30 +415,23 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{id}/default", keys.SetDefault)
 				})
 
-				// Per-user SDN subnets — legacy. Kept during the
-				// Networking-v1 deprecation window so existing
-				// callers can read their old subnets; new networks
-				// land on the Standalone primitive or VPCs below.
-				r.Route("/subnets", func(r chi.Router) {
-					r.Get("/", subnets.List)
-					r.Post("/", subnets.Create)
-					r.Get("/{id}", subnets.Get)
-					r.Delete("/{id}", subnets.Delete)
-					r.Post("/{id}/default", subnets.SetDefault)
-				})
+				// Networking-v1 unified availability snapshot — drives
+				// the Provision page picker (which chips are
+				// available, with reasons when disabled).
+				r.Get("/networking/info", networking.GetInfo)
 
-				// Networking-v1 VPCs. Each VPC is a VXLAN zone
-				// shared across nodes plus a dedicated gateway LXC
-				// for NAT egress. Gated behind d.VPCMgr — disabled
-				// when standalonenet/vpcmgr aren't wired.
-				if vpcs != nil {
-					r.Route("/vpcs", func(r chi.Router) {
-						r.Get("/", vpcs.List)
-						r.Post("/", vpcs.Create)
-						r.Get("/{id}", vpcs.Get)
-						r.Delete("/{id}", vpcs.Delete)
-					})
-				}
+				// Networking-v1 VPCs. Always mounted — when the
+				// admin hasn't configured the gateway-LXC env, every
+				// non-status endpoint returns 503 with a clear
+				// "VPCs not configured" body so the frontend can
+				// surface the reason.
+				r.Route("/vpcs", func(r chi.Router) {
+					r.Get("/status", vpcs.GetStatus)
+					r.Get("/", vpcs.List)
+					r.Post("/", vpcs.Create)
+					r.Get("/{id}", vpcs.Get)
+					r.Delete("/{id}", vpcs.Delete)
+				})
 
 				// User-owned buckets on the shared MinIO host. Each user has
 				// a stable name prefix (`<sanitized-name>-u<id>`); composed

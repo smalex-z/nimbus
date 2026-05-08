@@ -26,7 +26,6 @@ import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
 import Setup from '@/pages/Setup'
-import Subnets from '@/pages/Subnets'
 import VPCs from '@/pages/VPCs'
 import Verify from '@/pages/Verify'
 import { useAuth } from '@/hooks/useAuth'
@@ -94,11 +93,6 @@ export default function App() {
                       <Route path="/" element={<Provision />} />
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
-                      {/* /subnets is the legacy per-user SDN subnet
-                          manager. Kept during the Networking-v1
-                          deprecation window; new networks land on
-                          Standalone (per-VM Simple zone) or VPCs. */}
-                      <Route path="/subnets" element={<Subnets />} />
                       {/* /vpcs is the Networking-v1 VPC manager —
                           private networks shared across nodes, each
                           backed by a per-VPC gateway LXC for NAT. */}

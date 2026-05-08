@@ -1460,10 +1460,11 @@ func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 		next.PrefixLen = existing.PrefixLen
 	}
 	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
-		"ip_pool_start": next.IPPoolStart,
-		"ip_pool_end":   next.IPPoolEnd,
-		"gateway_ip":    next.GatewayIP,
-		"prefix_len":    next.PrefixLen,
+		"ip_pool_start":           next.IPPoolStart,
+		"ip_pool_end":             next.IPPoolEnd,
+		"gateway_ip":              next.GatewayIP,
+		"prefix_len":              next.PrefixLen,
+		"cluster_lan_for_members": next.ClusterLANForMembers,
 	}).Error
 }
 

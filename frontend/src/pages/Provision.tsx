@@ -5,16 +5,14 @@ import {
   ProvisionError,
   getBootstrapStatus,
   bootstrapTemplates,
-  getSDNStatus,
+  getNetworkingInfo,
   listKeys,
   listNodes,
-  listSubnets,
   listVPCs,
   getTunnelInfo,
   getGPUInference,
   type BootstrapResult,
-  type PublicSDNStatus,
-  type Subnet,
+  type NetworkingInfo,
   type TunnelInfo,
   type VPC,
 } from '@/api/client'
@@ -66,19 +64,12 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   enableGPU: boolean
-  // Network attachment. Networking-v1 has two top-level primitives
-  // (Standalone, VPC); the legacy 'default'/'existing'/'new' modes
-  // map to the per-user-subnet path kept during the deprecation
-  // window, and 'bridge' is the admin-only escape hatch.
-  subnetMode:
-    | 'standalone'
-    | 'vpc'
-    | 'default'
-    | 'existing'
-    | 'new'
-    | 'bridge'
-  savedSubnetId: number | null
-  newSubnetName: string
+  // Network attachment. Networking-v1 primitives:
+  //   - 'standalone': per-VM Simple zone (default)
+  //   - 'vpc':        join an existing VPC
+  //   - 'bridge':     Cluster LAN escape hatch (admin always allowed;
+  //                   members gated by admin toggle)
+  subnetMode: 'standalone' | 'vpc' | 'bridge'
   selectedVPCId: number | null
 }
 
@@ -94,8 +85,6 @@ const DEFAULT_FORM: FormState = {
   publicTunnel: false,
   enableGPU: false,
   subnetMode:    'standalone',
-  savedSubnetId: null,
-  newSubnetName: '',
   selectedVPCId: null,
 }
 
@@ -121,32 +110,24 @@ export default function Provision() {
   // key when the page loads with at least one saved key.
   const [savedKeys, setSavedKeys] = useState<SSHKey[]>([])
 
-  // Saved subnets. Same shape as savedKeys: lazy-load, leave empty if
-  // SDN is disabled cluster-wide (the API returns []) — the form
-  // defaults to subnetMode='default' which the backend resolves to
-  // either the user's actual default or a fresh auto-create.
-  const [savedSubnets, setSavedSubnets] = useState<Subnet[]>([])
-  // Saved VPCs. Like savedSubnets — when the array is non-empty the
-  // VPC chip becomes selectable; otherwise the chip stays disabled
-  // and points the user to /vpcs to create one first.
+  // Saved VPCs — when the array is non-empty the VPC chip becomes
+  // selectable; otherwise the chip stays disabled and points the
+  // user to /vpcs to create one first.
   const [savedVPCs, setSavedVPCs] = useState<VPC[]>([])
 
-  // Public SDN status. Drives the picker's mode set: when off, only
-  // 'bridge' renders (greyed, single-option); when on, members get
-  // subnet modes only, admins get subnet + bridge escape hatch.
-  const [sdnStatus, setSdnStatus] = useState<PublicSDNStatus | null>(null)
+  // Networking-v1 availability snapshot — drives the picker chips.
+  const [netInfo, setNetInfo] = useState<NetworkingInfo | null>(null)
   useEffect(() => {
-    getSDNStatus()
-      .then((s) => {
-        setSdnStatus(s)
-        // When SDN is off cluster-wide, the only meaningful option is
-        // bridge — flip the form into that mode so the picker doesn't
-        // show "Default" pre-selected against a meaningless backend.
-        if (!s.enabled) {
-          setForm((prev) => ({ ...prev, subnetMode: 'bridge' }))
-        }
-      })
-      .catch(() => setSdnStatus({ enabled: false, default_bridge: 'vmbr0' }))
+    getNetworkingInfo()
+      .then(setNetInfo)
+      .catch(() =>
+        // Fall back to "Standalone only" if the endpoint is gone.
+        setNetInfo({
+          standalone_enabled: true,
+          vpc_enabled: false,
+          cluster_lan_for_members: false,
+        }),
+      )
   }, [])
 
   // Tunnel availability + host preview. When tunnels are disabled (no
@@ -189,27 +170,6 @@ export default function Provision() {
       })
       .catch(() => {
         // Non-fatal — the form still works with BYO/Generate.
-      })
-  }, [])
-
-  useEffect(() => {
-    listSubnets()
-      .then((rows) => {
-        setSavedSubnets(rows)
-        // Pre-select the user's default subnet so the picker UI
-        // shows it immediately when they switch to "existing" mode.
-        const def = rows.find((s) => s.is_default) ?? rows[0]
-        if (def) {
-          setForm((prev) =>
-            prev.savedSubnetId === null
-              ? { ...prev, savedSubnetId: def.id }
-              : prev,
-          )
-        }
-      })
-      .catch(() => {
-        // Non-fatal — SDN may be disabled cluster-wide; form still
-        // works with subnetMode='default' which the backend resolves.
       })
   }, [])
 
@@ -329,18 +289,7 @@ export default function Provision() {
           generate_key: form.keyMode === 'gen' ? true : undefined,
           public_tunnel: form.publicTunnel ? true : undefined,
           enable_gpu: form.enableGPU ? true : undefined,
-          subnet_id:
-            form.subnetMode === 'existing' && form.savedSubnetId !== null
-              ? form.savedSubnetId
-              : undefined,
-          subnet_name:
-            form.subnetMode === 'new' && form.newSubnetName.trim() !== ''
-              ? form.newSubnetName.trim()
-              : undefined,
-          bridge:
-            form.subnetMode === 'bridge' && sdnStatus
-              ? sdnStatus.default_bridge
-              : undefined,
+          bridge: form.subnetMode === 'bridge' ? 'vmbr0' : undefined,
           network_mode:
             form.subnetMode === 'standalone'
               ? 'standalone'
@@ -425,9 +374,8 @@ export default function Provision() {
               form={form}
               updateForm={updateForm}
               savedKeys={savedKeys}
-              savedSubnets={savedSubnets}
               savedVPCs={savedVPCs}
-              sdnStatus={sdnStatus}
+              netInfo={netInfo}
               isAdmin={user?.is_admin ?? false}
               tunnelInfo={tunnelInfo}
               gpuInfo={gpuInfo}
@@ -592,9 +540,8 @@ interface FormBodyProps {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
   savedKeys: SSHKey[]
-  savedSubnets: Subnet[]
   savedVPCs: VPC[]
-  sdnStatus: PublicSDNStatus | null
+  netInfo: NetworkingInfo | null
   isAdmin: boolean
   tunnelInfo: TunnelInfo | null
   gpuInfo: GPUInferenceStatus | null
@@ -604,7 +551,7 @@ interface FormBodyProps {
   selectedKeyHasPrivate: boolean
 }
 
-function FormBody({ form, updateForm, savedKeys, savedSubnets, savedVPCs, sdnStatus, isAdmin, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
+function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tunnelInfo, gpuInfo, selectedKeyHasPrivate }: FormBodyProps) {
   return (
     <div className="flex flex-col gap-5">
       <Input
@@ -738,9 +685,8 @@ function FormBody({ form, updateForm, savedKeys, savedSubnets, savedVPCs, sdnSta
       <SubnetPicker
         form={form}
         updateForm={updateForm}
-        savedSubnets={savedSubnets}
         savedVPCs={savedVPCs}
-        sdnStatus={sdnStatus}
+        netInfo={netInfo}
         isAdmin={isAdmin}
       />
 
@@ -1380,21 +1326,18 @@ const SUGGESTED_TAGS = ['fast-cpu']
 function SubnetPicker({
   form,
   updateForm,
-  savedSubnets,
   savedVPCs,
-  sdnStatus,
+  netInfo,
   isAdmin,
 }: {
   form: FormState
   updateForm: <K extends keyof FormState>(key: K, value: FormState[K]) => void
-  savedSubnets: Subnet[]
   savedVPCs: VPC[]
-  sdnStatus: PublicSDNStatus | null
+  netInfo: NetworkingInfo | null
   isAdmin: boolean
 }) {
-  // Status hasn't loaded yet — render a placeholder rather than
-  // flashing the wrong picker shape and rebinding the form mode.
-  if (!sdnStatus) {
+  // Networking-info hasn't loaded yet — render a placeholder.
+  if (!netInfo) {
     return (
       <div className="flex flex-col gap-2">
         <label className="text-[13px] font-medium text-ink">Network</label>
@@ -1403,28 +1346,9 @@ function SubnetPicker({
     )
   }
 
-  // SDN-off branch: the picker is informational, not interactive.
-  if (!sdnStatus.enabled) {
-    return (
-      <div className="flex flex-col gap-2">
-        <label className="text-[13px] font-medium text-ink">Network</label>
-        <ModeChip active disabled={false} onClick={() => undefined}>
-          Cluster LAN ({sdnStatus.default_bridge})
-        </ModeChip>
-        <p className="text-[11px] text-ink-3">
-          Per-user isolation is off — admins can enable it on{' '}
-          <Link to="/infrastructure/network" className="underline">VM network</Link>.
-        </p>
-      </div>
-    )
-  }
-
-  // SDN-on branch: Networking-v1 picker. Standalone is the default
-  // (per-VM Simple zone with PVE SNAT — works on a fresh Nimbus
-  // with no setup); VPC is opt-in for users who want cross-VM L2;
-  // legacy modes stay around during the deprecation window.
-  const hasSaved = savedSubnets.length > 0
   const hasVPCs = savedVPCs.length > 0
+  const vpcChipDisabled = !netInfo.vpc_enabled || !hasVPCs
+  const showClusterLAN = isAdmin || netInfo.cluster_lan_for_members
   return (
     <div className="flex flex-col gap-2">
       <label className="text-[13px] font-medium text-ink">Network</label>
@@ -1437,37 +1361,43 @@ function SubnetPicker({
         </ModeChip>
         <ModeChip
           active={form.subnetMode === 'vpc'}
-          disabled={!hasVPCs}
+          disabled={vpcChipDisabled}
           onClick={() => updateForm('subnetMode', 'vpc')}
         >
-          VPC{hasVPCs ? '' : <span className="text-ink-3"> (none yet)</span>}
+          VPC
+          {!netInfo.vpc_enabled ? (
+            <span className="text-ink-3"> (not configured)</span>
+          ) : !hasVPCs ? (
+            <span className="text-ink-3"> (none yet)</span>
+          ) : null}
         </ModeChip>
-        {isAdmin && (
+        {showClusterLAN && (
           <ModeChip
             active={form.subnetMode === 'bridge'}
             onClick={() => updateForm('subnetMode', 'bridge')}
           >
-            Cluster LAN <span className="text-ink-3">(admin)</span>
-          </ModeChip>
-        )}
-        {hasSaved && (
-          <ModeChip
-            active={form.subnetMode === 'existing'}
-            onClick={() => updateForm('subnetMode', 'existing')}
-          >
-            Legacy subnet
+            Cluster LAN
+            {!isAdmin ? null : <span className="text-ink-3"> (admin)</span>}
           </ModeChip>
         )}
       </div>
       {form.subnetMode === 'standalone' && (
         <p className="text-[11px] text-ink-3 leading-relaxed">
-          The VM gets its own private network with internet access.
-          No cross-VM communication — pick a VPC if you need that.
+          The VM gets its own private /24 with internet access via PVE
+          NAT. No cross-VM communication — pick a VPC if you need that.
         </p>
       )}
       {form.subnetMode === 'vpc' && (
         <>
-          {hasVPCs ? (
+          {!netInfo.vpc_enabled ? (
+            <p className="text-[11px] text-warn leading-relaxed">
+              VPCs not configured on this Nimbus. Admins: see{' '}
+              <Link to="/infrastructure/network" className="underline">
+                Settings → Network
+              </Link>{' '}
+              for the env-var checklist.
+            </p>
+          ) : hasVPCs ? (
             <select
               value={form.selectedVPCId ?? ''}
               onChange={(e) =>
@@ -1492,29 +1422,11 @@ function SubnetPicker({
           )}
         </>
       )}
-      {form.subnetMode === 'existing' && hasSaved && (
-        <select
-          value={form.savedSubnetId ?? ''}
-          onChange={(e) =>
-            updateForm(
-              'savedSubnetId',
-              e.target.value === '' ? null : Number(e.target.value),
-            )
-          }
-          className="n-input"
-        >
-          {savedSubnets.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} ({s.subnet}){s.is_default ? ' · default' : ''}
-            </option>
-          ))}
-        </select>
-      )}
       {form.subnetMode === 'bridge' && (
         <p className="text-[11px] text-warn leading-relaxed">
-          ⚠ Admin-only. VM lands on{' '}
-          <span className="font-mono">{sdnStatus.default_bridge}</span>,
-          bypassing isolation.
+          ⚠ VM lands directly on <span className="font-mono">vmbr0</span>,
+          bypassing isolation. Use only for management VMs that must
+          reach the cluster LAN.
         </p>
       )}
       <p className="text-[11px] text-ink-3">

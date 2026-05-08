@@ -594,6 +594,12 @@ type NetworkSettings struct {
 	// Subnet size carved per user (default /24, ~250 usable hosts).
 	SDNSubnetSize int    `gorm:"column:sdn_subnet_size;default:24"`
 	SDNDNSServer  string `gorm:"column:sdn_dns_server;default:''"`
+
+	// ClusterLANForMembers controls whether non-admin users can pick
+	// "Cluster LAN" at provision time (the Bridge override path).
+	// Default false — members are confined to Standalone or VPC.
+	// Admins always retain the escape hatch.
+	ClusterLANForMembers bool `gorm:"column:cluster_lan_for_members;default:false"`
 }
 
 // UserSubnet — one row per user-owned SDN subnet. Multiple subnets per

@@ -14,16 +14,118 @@ import (
 )
 
 // VPCs is the HTTP surface for the Networking-v1 VPC primitive
-// (VXLAN zone shared across nodes + per-VPC gateway LXC). User-facing
-// surface mirrors the Subnets handler shape during the deprecation
-// window so a migration to this page feels continuous.
+// (VXLAN zone shared across nodes + per-VPC gateway LXC). The handler
+// is always mounted; when the service is nil (admin hasn't configured
+// NIMBUS_NETWORK_NODE + NIMBUS_GATEWAY_LXC_IP_POOL +
+// NIMBUS_GATEWAY_LXC_TEMPLATE) every method returns 503 with a clear
+// "VPCs not configured" message instead of letting the route 404.
 type VPCs struct {
 	svc *vpcmgr.Service
 }
 
-// NewVPCs constructs the VPCs handler. The service must already be
-// wired with a GatewayProvisioner.
+// NewVPCs constructs the VPCs handler. svc may be nil — see the
+// comment on VPCs for behavior in that case.
 func NewVPCs(svc *vpcmgr.Service) *VPCs { return &VPCs{svc: svc} }
+
+// disabledMessage is what the handler returns when no vpcmgr is wired.
+const disabledMessage = "VPC networking is not configured on this Nimbus instance — set NIMBUS_NETWORK_NODE, NIMBUS_GATEWAY_LXC_IP_POOL, and NIMBUS_GATEWAY_LXC_TEMPLATE, then restart"
+
+func (h *VPCs) requireEnabled(w http.ResponseWriter) bool {
+	if h.svc == nil {
+		response.Error(w, http.StatusServiceUnavailable, disabledMessage)
+		return false
+	}
+	return true
+}
+
+// Status returns whether the VPC primitive is configured. Used by
+// the Provision page picker so the frontend can grey out the VPC
+// chip with a clear reason instead of failing on submit.
+type vpcStatusView struct {
+	Enabled bool   `json:"enabled"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// GetStatus handles GET /api/vpcs/status (public — gating logic is
+// the same for admins and members).
+//
+// @Summary     Report VPC primitive availability
+// @Tags        vpcs
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=vpcStatusView}
+// @Router      /vpcs/status [get]
+func (h *VPCs) GetStatus(w http.ResponseWriter, _ *http.Request) {
+	if h.svc == nil {
+		response.Success(w, vpcStatusView{Enabled: false, Reason: disabledMessage})
+		return
+	}
+	response.Success(w, vpcStatusView{Enabled: true})
+}
+
+// NetworkingInfo is the unified availability snapshot the Provision
+// page uses to render its picker. Each field maps 1:1 to a chip:
+//   - StandaloneEnabled gates the Standalone chip (always true in v1
+//     except when the admin disabled the primitive).
+//   - VPCEnabled gates the VPC chip; VPCReason carries the configure
+//     hint when disabled.
+//   - ClusterLANForMembers gates the Cluster LAN chip for non-admins.
+type NetworkingInfo struct {
+	StandaloneEnabled    bool   `json:"standalone_enabled"`
+	VPCEnabled           bool   `json:"vpc_enabled"`
+	VPCReason            string `json:"vpc_reason,omitempty"`
+	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
+}
+
+// NetworkingInfoSource bundles the per-toggle reads NetworkingInfo
+// needs. Implemented by *provision.Service in production; tests can
+// supply a stub.
+type NetworkingInfoSource interface {
+	ClusterLANForMembers() bool
+}
+
+// Networking is the public networking-info handler. Uses just the
+// VPC service (for VPC availability) and a cluster-LAN-for-members
+// reader (the provision service in production).
+type Networking struct {
+	vpc NetworkingVPCSource
+	src NetworkingInfoSource
+}
+
+// NetworkingVPCSource is the slice of vpcmgr.Service that the
+// networking-info handler needs — in practice "is the service wired
+// or not?" is the only signal we expose.
+type NetworkingVPCSource interface {
+	Enabled() bool
+}
+
+// NewNetworking constructs the handler. vpc may be nil (means VPC
+// primitive isn't wired); src may be nil (defaults to "cluster-LAN
+// off for members").
+func NewNetworking(vpc NetworkingVPCSource, src NetworkingInfoSource) *Networking {
+	return &Networking{vpc: vpc, src: src}
+}
+
+// GetInfo handles GET /api/networking/info.
+//
+// @Summary     Networking-v1 availability snapshot
+// @Tags        networking
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=NetworkingInfo}
+// @Router      /networking/info [get]
+func (h *Networking) GetInfo(w http.ResponseWriter, _ *http.Request) {
+	info := NetworkingInfo{StandaloneEnabled: true}
+	if h.vpc != nil && h.vpc.Enabled() {
+		info.VPCEnabled = true
+	} else {
+		info.VPCReason = disabledMessage
+	}
+	if h.src != nil {
+		info.ClusterLANForMembers = h.src.ClusterLANForMembers()
+	}
+	response.Success(w, info)
+}
 
 // vpcView is the JSON projection of a VPC row, augmented with member
 // count for the list view.
@@ -66,6 +168,9 @@ type createVPCRequest struct {
 // @Failure     500 {object} EnvelopeError
 // @Router      /vpcs [get]
 func (h *VPCs) List(w http.ResponseWriter, r *http.Request) {
+	if !h.requireEnabled(w) {
+		return
+	}
 	user := ctxutil.User(r.Context())
 	if user == nil {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
@@ -97,6 +202,9 @@ func (h *VPCs) List(w http.ResponseWriter, r *http.Request) {
 // @Failure     404 {object} EnvelopeError
 // @Router      /vpcs/{id} [get]
 func (h *VPCs) Get(w http.ResponseWriter, r *http.Request) {
+	if !h.requireEnabled(w) {
+		return
+	}
 	id, ok := parseVPCID(w, r)
 	if !ok {
 		return
@@ -132,6 +240,9 @@ func (h *VPCs) Get(w http.ResponseWriter, r *http.Request) {
 // @Failure     500  {object} EnvelopeError
 // @Router      /vpcs [post]
 func (h *VPCs) Create(w http.ResponseWriter, r *http.Request) {
+	if !h.requireEnabled(w) {
+		return
+	}
 	var req createVPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid JSON body")
@@ -165,6 +276,9 @@ func (h *VPCs) Create(w http.ResponseWriter, r *http.Request) {
 // @Failure     409 {object} EnvelopeError
 // @Router      /vpcs/{id} [delete]
 func (h *VPCs) Delete(w http.ResponseWriter, r *http.Request) {
+	if !h.requireEnabled(w) {
+		return
+	}
 	id, ok := parseVPCID(w, r)
 	if !ok {
 		return

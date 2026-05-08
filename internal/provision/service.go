@@ -32,7 +32,6 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
-	"nimbus/internal/vnetmgr"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -212,39 +211,34 @@ type Service struct {
 	// booting auth.
 	quota QuotaResolver
 
-	// subnetResolver resolves the user's SDN subnet at provision time.
-	// nil = SDN is disabled cluster-wide; provision falls through to
-	// the legacy global vmbr0 pool path. *vnetmgr.Service satisfies it.
-	subnetResolver SubnetResolver
-
 	// standaloneNet is the Networking-v1 Standalone primitive (per-VM
-	// Simple zone with PVE-native SNAT). When non-nil, new provisions
-	// default to it; legacy SubnetResolver path remains available
-	// during the deprecation window for callers that pass SubnetID /
-	// SubnetName / Bridge explicitly.
+	// Simple zone with PVE-native SNAT). nil = Standalone unavailable;
+	// in that mode every member-initiated provision is rejected (only
+	// admins with the bridge escape hatch can still provision).
 	standaloneNet StandaloneNetService
 
 	// vpcMgr is the Networking-v1 VPC primitive (VXLAN zone + per-VPC
 	// gateway LXC). nil means VPC mode is unavailable on this Nimbus
 	// instance (admin hasn't configured network node + gateway pool).
 	vpcMgr VPCMgrService
+
+	// clusterLANForMembers controls whether non-admin callers can use
+	// the bridge override (`req.Bridge`) to attach a VM directly to a
+	// cluster bridge. Default false — members are confined to
+	// Standalone or VPC. Live-rotated from Settings → Network.
+	clusterLANForMembers bool
 }
 
-// SubnetResolver is the small interface vnetmgr.Service satisfies for
-// the provision flow. Resolves a user's chosen subnet (existing /
-// inline-create / default) into a UserSubnet row whose VNet, Subnet,
-// Gateway are used to build cloud-init + the post-clone bridge override.
-// Returning (nil, nil) means SDN is disabled — caller uses the legacy
-// global vmbr0 pool.
-type SubnetResolver interface {
-	ResolveForProvision(ctx context.Context, ownerID uint, subnetID *uint, subnetName string) (*db.UserSubnet, error)
+// SetClusterLANForMembers controls whether non-admin callers can
+// attach a VM directly to a cluster bridge via req.Bridge. Default
+// off; admin toggles via Settings → Network.
+func (s *Service) SetClusterLANForMembers(allowed bool) {
+	s.clusterLANForMembers = allowed
 }
 
-// SetSubnetResolver wires the resolver onto the Service. Idempotent;
-// pass nil to disable per-subnet provision (every VM lands on vmbr0).
-func (s *Service) SetSubnetResolver(r SubnetResolver) {
-	s.subnetResolver = r
-}
+// ClusterLANForMembers reports whether non-admin callers can use
+// the bridge override.
+func (s *Service) ClusterLANForMembers() bool { return s.clusterLANForMembers }
 
 // StandaloneNetService is the slice of standalonenet.Service the
 // provision flow consumes. Defined here per the "accept interfaces"
@@ -478,23 +472,18 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 
 	// Step 0: resolve network attachment.
 	//
-	// Networking-v1 dispatch (Standalone vs VPC) replaces the old
-	// per-user-subnet resolver as the default. Three concrete paths:
+	// Networking-v1 dispatch — three concrete paths:
 	//
-	//   - Standalone (default when standaloneNet is wired): per-VM
-	//     Simple zone with PVE-native SNAT. The VM's IP/gateway/CIDR
-	//     are derived from a hash of the VMID — so the IP allocation
-	//     happens AFTER NextVMID, not here. We just record that the
-	//     standalone branch is in play; the actual provision step runs
-	//     post-clone-mu.
+	//   - Standalone (default): per-VM Simple zone with PVE-native
+	//     SNAT. IP/gateway/CIDR derive from a hash of the VMID, so
+	//     IP allocation happens AFTER NextVMID below.
 	//
-	//   - VPC (NetworkModeVPC): VXLAN zone with shared gateway LXC.
-	//     Phase 3 territory — refused with a clear error here.
+	//   - VPC (NetworkMode == "vpc"): VXLAN zone with shared gateway
+	//     LXC. Member IP allocated from the VPC's /16 after NextVMID.
 	//
-	//   - Legacy (Bridge override / SubnetID / SubnetName / no
-	//     NetworkMode + standaloneNet not wired): existing
-	//     SubnetResolver + global pool flow, kept during deprecation.
-	useStandalone := s.shouldUseStandalone(req)
+	//   - Cluster LAN (Bridge set): admin escape hatch by default;
+	//     non-admins need the cluster-LAN-for-members toggle on.
+	//     Uses the global vmbr0 IP pool.
 	useVPC := req.NetworkMode == NetworkModeVPC
 	if useVPC && s.vpcMgr == nil {
 		return nil, &internalerrors.ValidationError{
@@ -523,53 +512,34 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		vpc = v
 	}
 
-	var subnet *db.UserSubnet
 	bridgeOverride := ""
-	if !useStandalone && !useVPC {
-		// Bridge override (admin-only escape hatch): when req.Bridge is
-		// set, the VM lands on that bridge directly with the global IP
-		// pool, bypassing per-user SDN entirely. Used by admins for
-		// management VMs that need cluster-LAN reachability. Non-admins
-		// trying this get a 403 — isolation is enforced.
-		//
-		// Otherwise: resolve the per-user SDN subnet (when SDN is enabled
-		// and the resolver is wired). Returns nil for the legacy vmbr0
-		// path. Lazy-creates a "default" subnet on first provision when
-		// neither SubnetID nor SubnetName is specified — same UX as SSH
-		// keys, where a fresh user never gets blocked at the gate.
-		switch {
-		case req.Bridge != "":
-			if !req.RequesterIsAdmin {
-				return nil, &internalerrors.ValidationError{
-					Field:   "bridge",
-					Message: "only admins can attach a VM directly to a cluster bridge — use a subnet instead",
-				}
-			}
-			bridgeOverride = req.Bridge
-		case s.subnetResolver != nil && req.OwnerID != nil:
-			subnet, err = s.subnetResolver.ResolveForProvision(ctx, *req.OwnerID, req.SubnetID, req.SubnetName)
-			if err != nil {
-				return nil, err
+	if !useVPC && req.Bridge != "" {
+		if !req.RequesterIsAdmin && !s.clusterLANForMembers {
+			return nil, &internalerrors.ValidationError{
+				Field:   "bridge",
+				Message: "Cluster LAN attachment is admin-only on this Nimbus — pick Standalone or a VPC instead",
 			}
 		}
+		bridgeOverride = req.Bridge
 	}
 
-	// Step 1: reserve IP — for legacy/bridge-override only. The
-	// Standalone and VPC paths defer IP allocation until after
-	// NextVMID (Standalone derives from the VMID-hashed /24; VPC
-	// allocates from the VPC's /16 via vpcmgr).
-	//
-	// SDN legacy path uses the per-subnet pool (scoped to one
-	// user-subnet's CIDR); plain legacy uses the global pool. defer
-	// release on any later failure — same shape both paths.
+	// useStandalone fires when no explicit primitive was picked AND
+	// the Standalone service is wired. When standaloneNet is nil
+	// (admin disabled it, or the CIDR config failed to parse), we
+	// silently fall back to the Cluster LAN / global-pool path —
+	// otherwise the cluster would be unprovisionable. In production
+	// Standalone is always wired with the default 10.128.0.0/9.
+	useStandalone := !useVPC && bridgeOverride == "" && s.standaloneNet != nil
+
+	// Step 1: reserve IP — for the Cluster LAN paths (explicit
+	// Bridge override or standaloneNet-not-wired fallback). Standalone
+	// and VPC defer allocation until after NextVMID (each derives
+	// its IP deterministically from VMID/membership).
+	useGlobalPool := !useStandalone && !useVPC
 	var ip string
 	released := false
-	if !useStandalone && !useVPC {
-		if subnet != nil {
-			ip, err = s.pool.ReserveInSubnet(ctx, subnet.VNet, req.Hostname)
-		} else {
-			ip, err = s.pool.Reserve(ctx, req.Hostname)
-		}
+	if useGlobalPool {
+		ip, err = s.pool.Reserve(ctx, req.Hostname)
 		if err != nil {
 			if errors.Is(err, ippool.ErrPoolExhausted) {
 				return nil, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
@@ -578,29 +548,15 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 		defer func() {
 			if !released {
-				if subnet != nil {
-					_ = s.pool.ReleaseInSubnet(context.Background(), subnet.VNet, ip)
-				} else {
-					_ = s.pool.Release(context.Background(), ip)
-				}
+				_ = s.pool.Release(context.Background(), ip)
 			}
 		}()
 
-		// Step 1b: verify the picked IP is not already held by a VM elsewhere on
-		// the cluster (catches the cross-instance race where two Nimbus instances
-		// each picked the same lowest-free IP from their independent SQLite caches).
-		// On race-loss, releases the local reservation and tries the next free IP,
-		// up to maxVerifyAttempts.
-		//
-		// Skipped for SDN VMs — per-subnet pools are scoped per user and
-		// drawn from a non-overlapping carve of the supernet, so the
-		// cross-Nimbus-instance race verifyAndRetryReserve guards against
-		// can't fire there.
-		if subnet == nil {
-			ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
-			if err != nil {
-				return nil, err
-			}
+		// Step 1b: verify the picked IP is not already held by a VM
+		// elsewhere on the cluster (cross-Nimbus-instance race guard).
+		ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -764,10 +720,6 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", vpc.VNetName); err != nil {
 			return nil, fmt.Errorf("set vm network to %s: %w", vpc.VNetName, err)
 		}
-	case subnet != nil:
-		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet); err != nil {
-			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
-		}
 	case bridgeOverride != "" && bridgeOverride != "vmbr0":
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", bridgeOverride); err != nil {
 			return nil, fmt.Errorf("set vm network to %s: %w", bridgeOverride, err)
@@ -776,8 +728,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 
 	// Step 4: cloud-init. Standalone uses the per-VM /24's gateway
 	// + prefix; VPC uses the VPC subnet's .1 (gateway-LXC eth1 IP);
-	// legacy SDN uses the per-subnet values; plain legacy uses the
-	// cluster-wide values from NetworkSettings.
+	// Cluster LAN uses cluster-wide values from NetworkSettings.
 	gatewayIP, prefixLen := s.GatewayIP(), s.PrefixLen()
 	switch {
 	case standaloneRow != nil:
@@ -790,9 +741,6 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 		gatewayIP = gw
 		prefixLen = prefixLenFromCIDR(vpc.CIDR)
-	case subnet != nil:
-		gatewayIP = subnet.Gateway
-		prefixLen = vnetmgr.PrefixLenOf(subnet)
 	}
 	username := proxmox.TemplateUsername(req.OSTemplate)
 
@@ -965,21 +913,15 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
-	// Standalone + VPC paths skip the pool — their respective rows
-	// (standalonenet.StandaloneVMNetwork / vpcmgr.VPCMembership) are
-	// the allocation records, hard-deleted on cleanup.
-	// Legacy SDN path uses the per-subnet pool variant; plain legacy
-	// uses the global one.
+	// Step 8: commit. Standalone + VPC paths skip the pool — their
+	// respective rows (StandaloneVMNetwork / VPCMembership) are the
+	// allocation records, hard-deleted on cleanup. Cluster LAN uses
+	// the global pool.
 	switch {
 	case standaloneRow != nil:
 		// no pool involvement
 	case useVPC:
 		// no pool involvement; membership row persisted by vpcMgr.AllocateMemberIP
-	case subnet != nil:
-		if err := s.pool.MarkAllocatedInSubnet(ctx, subnet.VNet, ip, newVMID); err != nil {
-			return nil, fmt.Errorf("mark allocated: %w", err)
-		}
 	default:
 		if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
 			return nil, fmt.Errorf("mark allocated: %w", err)
@@ -1007,10 +949,6 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		KeyName:      keyName,
 		SSHPubKey:    sshPubKey,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
-	}
-	if subnet != nil {
-		sid := subnet.ID
-		vm.SubnetID = &sid
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -1046,36 +984,10 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	case useVPC:
 		res.SubnetName = vpc.Name
 		res.SubnetCIDR = vpc.CIDR
-	case subnet != nil:
-		res.SubnetName = subnet.Name
-		res.SubnetCIDR = subnet.Subnet
 	}
 	res.ConsolePassword = cidata.ConsolePassword
 	res.CloudInitError = cidata.Error
 	return res, nil
-}
-
-// shouldUseStandalone reports whether the request should provision via
-// the Networking-v1 Standalone path. Explicit NetworkMode wins; if
-// unset, default to standalone when the service is wired AND the
-// caller didn't set legacy SubnetID/SubnetName/Bridge fields. This
-// preserves backwards compat for existing callers during the
-// deprecation window — the moment a caller stops supplying legacy
-// fields, they get the new path automatically.
-func (s *Service) shouldUseStandalone(req Request) bool {
-	if s.standaloneNet == nil {
-		return false
-	}
-	if req.NetworkMode == NetworkModeStandalone {
-		return true
-	}
-	if req.NetworkMode == NetworkModeVPC {
-		return false
-	}
-	if req.Bridge != "" || req.SubnetID != nil || req.SubnetName != "" {
-		return false
-	}
-	return true
 }
 
 // prefixLenFromCIDR returns the netmask length of a CIDR string, or 0
@@ -1633,22 +1545,10 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	return nil
 }
 
-// releaseVMIP returns the VM's IP to the right pool — per-subnet for
-// SDN VMs (vm.SubnetID set), global for legacy vmbr0 VMs. Looking up
-// the subnet by id gives us the VNet name needed by ReleaseInSubnet.
-// Soft-failure (logged, not propagated) on a missing subnet — the row
-// might have been deleted concurrently and the IP still needs freeing.
+// releaseVMIP returns the VM's IP to the global pool. Standalone +
+// VPC VMs are caught by the standaloneOwned/vpcOwned check earlier
+// in deleteVM, so this path only runs for Cluster LAN bridge VMs.
 func (s *Service) releaseVMIP(ctx context.Context, vm *db.VM) error {
-	if vm.SubnetID != nil {
-		var sub db.UserSubnet
-		if err := s.db.WithContext(ctx).First(&sub, *vm.SubnetID).Error; err == nil {
-			return s.pool.ReleaseInSubnet(ctx, sub.VNet, vm.IP)
-		}
-		// Subnet row gone — fall through to global release as a
-		// last-ditch attempt. Doesn't free the per-subnet row but
-		// keeps "delete is idempotent" the contract.
-		log.Printf("delete vm %d: subnet %d missing during release; falling back to global pool", vm.VMID, *vm.SubnetID)
-	}
 	return s.pool.Release(ctx, vm.IP)
 }
 

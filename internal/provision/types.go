@@ -46,24 +46,21 @@ type Request struct {
 
 	// NetworkMode picks which Networking-v1 primitive backs the VM:
 	//   - "standalone" (default): per-VM Simple zone with PVE-native
-	//     SNAT. Single VM, no cross-VM communication. See
-	//     internal/standalonenet.
+	//     SNAT. Single VM, no cross-VM communication.
 	//   - "vpc": VM joins an existing VPC (VXLAN zone with a per-VPC
 	//     gateway LXC). Multiple VMs across nodes can talk at L2.
-	//     VPCID below must be set. See internal/vpcmgr (Phase 3).
+	//     VPCID below must be set.
 	NetworkMode NetworkMode
 
 	// VPCID is required when NetworkMode == "vpc". Identifies the
-	// VPC the VM joins. Unused for "standalone".
+	// VPC the VM joins.
 	VPCID *uint
 
-	// Deprecated: legacy per-user-subnet model from pre-v1. Kept on
-	// the request type during the deprecation window so existing
-	// callers don't break, but new provisions go through the
-	// NetworkMode dispatch above. v1.1 drops these fields.
-	SubnetID   *uint
-	SubnetName string
-	Bridge     string
+	// Bridge is the Cluster LAN escape hatch — when non-empty, the
+	// VM lands directly on that bridge with a global-pool IP,
+	// bypassing the Networking-v1 primitives. Admins always allowed;
+	// non-admins gated by Service.clusterLANForMembers.
+	Bridge string
 }
 
 // NetworkMode is the v1 Networking primitive selector. See

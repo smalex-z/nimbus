@@ -266,9 +266,14 @@ func (s *Service) tryInsertRow(ctx context.Context, vmID uint, salt, node string
 // back partial PVE state inline because it'd just generate another
 // failure mode without simplifying the caller.
 func (s *Service) bootstrapPVE(ctx context.Context, row *db.StandaloneVMNetwork) error {
+	// Simple zones are host-local — only the node that runs the VM
+	// needs the bridge. Pin via Nodes= so PVE doesn't auto-create
+	// the bridge on every other cluster member (cleaner UI, fewer
+	// orphan bridges if a node leaves the cluster).
 	if err := s.px.CreateSDNZone(ctx, proxmox.SDNZone{
-		Zone: row.ZoneName,
-		Type: "simple",
+		Zone:  row.ZoneName,
+		Type:  "simple",
+		Nodes: row.Node,
 	}); err != nil {
 		return fmt.Errorf("create zone %s: %w", row.ZoneName, err)
 	}

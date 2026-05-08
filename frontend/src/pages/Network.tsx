@@ -1,28 +1,225 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import {
   forceGatewayUpdate,
   getNetworkSettings,
-  getSDNSettings,
-  getTunnelInfo,
+  getNetworkingInfo,
   reconcileVMs,
   renumberAllVMs,
-  resetSDN,
   saveNetworkSettings,
-  saveSDNSettings,
 } from '@/api/client'
 import type {
   NetworkOpReport,
   NetworkSettingsView,
-  SDNResetReport,
-  SDNSettingsView,
-  TunnelInfo,
+  NetworkingInfo,
   VMReconcileReport,
 } from '@/api/client'
 
+// Settings → Network page. Networking-v1: Standalone (per-VM Simple
+// zone) is the always-on default; VPCs are opt-in via env vars; the
+// Cluster LAN bridge is an admin escape hatch with an explicit
+// member-allowed toggle. The form below covers what an admin can
+// actually change at runtime — env-var-driven primitives are shown
+// read-only with the env-var name so the operator knows where to go.
+
 type DangerKind = 'renumber' | 'force-gateway'
 
-function NetworkPanel() {
+export default function Network() {
+  return (
+    <div className="flex flex-col gap-8">
+      <PrimitivesPanel />
+      <ClusterLANPanel />
+      <PoolPanel />
+      <DangerOpsPanel />
+    </div>
+  )
+}
+
+// PrimitivesPanel surfaces the read-only state of the two Networking-v1
+// primitives. Both are configured via env vars and can't be flipped
+// from the UI — but the page tells the admin where to look when
+// something's missing.
+function PrimitivesPanel() {
+  const [info, setInfo] = useState<NetworkingInfo | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    getNetworkingInfo()
+      .then(setInfo)
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+  }, [])
+  return (
+    <section>
+      <div className="eyebrow">Networking v1</div>
+      <h2 className="text-3xl">Primitives</h2>
+      <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
+        Two ways VMs reach the network. Standalone is host-local NAT
+        (one Simple zone per VM); VPC is a VXLAN zone shared across
+        nodes with a dedicated NAT gateway LXC.
+      </p>
+
+      {error && (
+        <div className="mt-4 p-3.5 rounded-[10px] bg-bad/10 border border-bad/30 text-bad text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <PrimitiveCard
+          title="Standalone"
+          enabled={info?.standalone_enabled ?? false}
+          summary="Per-VM Simple zone with PVE-native SNAT. The VM's /24 only exists on its node — no cross-VM communication."
+          envHints={[
+            ['NIMBUS_STANDALONE_POOL_CIDR', 'supernet (default 10.128.0.0/9)'],
+          ]}
+        />
+        <PrimitiveCard
+          title="VPC"
+          enabled={info?.vpc_enabled ?? false}
+          summary="VXLAN zone shared across cluster nodes. VMs in the same VPC reach each other at L2; egress is via a dedicated gateway LXC."
+          disabledReason={info?.vpc_reason}
+          envHints={[
+            ['NIMBUS_NETWORK_NODE', 'PVE node hosting the gateway LXC'],
+            ['NIMBUS_GATEWAY_LXC_IP_POOL', 'host-network IP range (e.g. 192.168.1.200-192.168.1.250)'],
+            ['NIMBUS_GATEWAY_LXC_TEMPLATE', 'Alpine LXC volid'],
+            ['NIMBUS_VPC_POOL_CIDR', 'supernet (default 10.0.0.0/9)'],
+          ]}
+        />
+      </div>
+    </section>
+  )
+}
+
+function PrimitiveCard({
+  title,
+  enabled,
+  summary,
+  disabledReason,
+  envHints,
+}: {
+  title: string
+  enabled: boolean
+  summary: string
+  disabledReason?: string
+  envHints: [string, string][]
+}) {
+  return (
+    <div className="p-4 rounded-[10px] border border-line-2 bg-white/85">
+      <div className="flex items-center gap-2">
+        <span className="text-base font-medium">{title}</span>
+        <span
+          className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+            enabled
+              ? 'bg-good/10 text-good border-good/30'
+              : 'bg-warn/10 text-warn border-warn/30'
+          }`}
+        >
+          {enabled ? 'configured' : 'disabled'}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-ink-2 leading-relaxed">{summary}</p>
+      {!enabled && disabledReason && (
+        <p className="mt-2 text-xs text-warn leading-relaxed">
+          {disabledReason}
+        </p>
+      )}
+      <details className="mt-3">
+        <summary className="cursor-pointer text-[12px] text-ink-2">
+          Environment variables
+        </summary>
+        <ul className="mt-2 flex flex-col gap-1.5">
+          {envHints.map(([name, hint]) => (
+            <li key={name} className="text-[11px] text-ink-3">
+              <code className="font-mono text-[11px] text-ink-2">{name}</code>{' '}
+              — {hint}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  )
+}
+
+// ClusterLANPanel — the toggle that decides whether non-admin users
+// can pick the Cluster LAN escape hatch on the Provision page.
+// Admins always see the chip; the toggle gates everyone else.
+function ClusterLANPanel() {
+  const [settings, setSettings] = useState<NetworkSettingsView | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    getNetworkSettings()
+      .then(setSettings)
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    if (!settings) return
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    try {
+      const updated = await saveNetworkSettings({ cluster_lan_for_members: next })
+      setSettings(updated)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-3xl">Cluster LAN access</h2>
+      <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
+        When enabled, non-admin users can pick "Cluster LAN" at provision
+        time, attaching their VM directly to <code>vmbr0</code> with a
+        global-pool IP. Admins always have this option regardless.
+        Default off — most clusters want member VMs confined to
+        Standalone or a VPC.
+      </p>
+
+      <div className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings?.cluster_lan_for_members ?? false}
+            onChange={(e) => toggle(e.target.checked)}
+            disabled={busy || !settings}
+            className="mt-0.5 w-4 h-4 accent-ink"
+          />
+          <div className="flex-1">
+            <div className="text-sm font-medium">
+              Allow members to attach VMs to <code>vmbr0</code>
+            </div>
+            <div className="text-xs text-ink-3 mt-0.5">
+              Bypasses isolation. Useful for cluster-LAN management VMs
+              when the operator trusts every member to do that
+              responsibly.
+            </div>
+          </div>
+        </label>
+        {saved && (
+          <p className="mt-2 text-xs text-good">Saved.</p>
+        )}
+        {error && (
+          <p className="mt-2 text-xs text-bad">{error}</p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// PoolPanel covers the global IP pool — used by the Cluster LAN
+// path (Bridge override) for VMs that aren't on Standalone or VPC.
+// Standalone/VPC carve their own CIDRs and don't draw from this pool.
+function PoolPanel() {
   const [settings, setSettings] = useState<NetworkSettingsView | null>(null)
   const [poolStart, setPoolStart] = useState('')
   const [poolEnd, setPoolEnd] = useState('')
@@ -31,9 +228,6 @@ function NetworkPanel() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [danger, setDanger] = useState<DangerKind | null>(null)
-  const [report, setReport] = useState<NetworkOpReport | null>(null)
-  const [reportKind, setReportKind] = useState<DangerKind | null>(null)
 
   useEffect(() => {
     getNetworkSettings()
@@ -44,16 +238,17 @@ function NetworkPanel() {
         setGateway(s.gateway_ip)
         setPrefixLen(s.prefix_len > 0 ? s.prefix_len : 24)
       })
-      .catch(() => setError('Failed to load network settings'))
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
   }, [])
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    setSaving(true)
     setError(null)
     setSaved(false)
-    setReport(null)
     try {
-      setSaving(true)
       const next = await saveNetworkSettings({
         ip_pool_start: poolStart,
         ip_pool_end: poolEnd,
@@ -67,8 +262,8 @@ function NetworkPanel() {
       setPrefixLen(next.prefix_len > 0 ? next.prefix_len : 24)
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
@@ -79,188 +274,171 @@ function NetworkPanel() {
     (poolStart !== settings.ip_pool_start ||
       poolEnd !== settings.ip_pool_end ||
       gateway !== settings.gateway_ip ||
-      prefixLen !== (settings.prefix_len > 0 ? settings.prefix_len : 24))
+      prefixLen !== settings.prefix_len)
 
   return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-          IP pool & gateway
-        </span>
-      </div>
-
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Saved values take effect for all <em>new</em> VMs immediately. Existing
-        VMs keep their current IP and gateway until you explicitly push the
-        change to them — see the action buttons below the form. Changing the
-        gateway in your network without also pushing it to existing VMs will
-        cut them off from the LAN.
+    <section>
+      <h2 className="text-3xl">Cluster LAN IP pool</h2>
+      <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
+        Range used when a VM is attached directly to <code>vmbr0</code>.
+        Also drives the cloud-init defaults (gateway and prefix) for
+        legacy VMs from before Networking v1. Standalone and VPC VMs
+        carve their own CIDRs and do not draw from this pool.
       </p>
 
-      <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div className="n-field">
-          <label className="n-label" htmlFor="net-pool-start">IP pool start</label>
+      <form
+        onSubmit={handleSave}
+        className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85 grid grid-cols-1 md:grid-cols-2 gap-3"
+      >
+        <Field label="IP pool start">
           <input
-            id="net-pool-start"
-            className="n-input"
-            type="text"
-            placeholder="192.168.0.150"
             value={poolStart}
             onChange={(e) => setPoolStart(e.target.value)}
+            placeholder="192.168.1.100"
+            className="n-input font-mono"
           />
-        </div>
-        <div className="n-field">
-          <label className="n-label" htmlFor="net-pool-end">IP pool end</label>
+        </Field>
+        <Field label="IP pool end">
           <input
-            id="net-pool-end"
-            className="n-input"
-            type="text"
-            placeholder="192.168.0.200"
             value={poolEnd}
             onChange={(e) => setPoolEnd(e.target.value)}
+            placeholder="192.168.1.200"
+            className="n-input font-mono"
           />
-        </div>
-        <div className="n-field">
-          <label className="n-label" htmlFor="net-gateway">Gateway IP / subnet prefix</label>
-          <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
-            <input
-              id="net-gateway"
-              className="n-input"
-              type="text"
-              placeholder="192.168.0.1"
-              value={gateway}
-              onChange={(e) => setGateway(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <span
-              aria-hidden="true"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: '0 6px',
-                color: 'var(--ink-mute)',
-                fontSize: 16,
-                fontFamily: 'var(--font-mono, monospace)',
-              }}
-            >
-              /
-            </span>
-            <input
-              id="net-prefix"
-              className="n-input"
-              type="number"
-              min={1}
-              max={32}
-              placeholder="24"
-              value={prefixLen}
-              onChange={(e) => setPrefixLen(Number(e.target.value))}
-              aria-label="Subnet prefix length"
-              style={{ width: 88, textAlign: 'center' }}
-            />
-          </div>
-          <span style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 4 }}>
-            Default route + CIDR netmask Nimbus stamps into every VM's cloud-init (e.g. <code>192.168.0.1 / 24</code>, <code>10.0.0.1 / 16</code>). Applies to new VMs only — existing VMs keep their config until you push it with the action below.
-          </span>
-        </div>
+        </Field>
+        <Field label="Gateway IP">
+          <input
+            value={gateway}
+            onChange={(e) => setGateway(e.target.value)}
+            placeholder="192.168.1.1"
+            className="n-input font-mono"
+          />
+        </Field>
+        <Field label="Prefix length">
+          <input
+            type="number"
+            value={prefixLen}
+            min={1}
+            max={32}
+            onChange={(e) => setPrefixLen(Number(e.target.value))}
+            className="n-input font-mono"
+          />
+        </Field>
 
-        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="md:col-span-2 flex items-center gap-3 mt-2">
           <button
             type="submit"
-            className="n-btn n-btn-primary"
-            disabled={saving || !dirty}
-            style={{ minWidth: 100 }}
+            disabled={!dirty || saving}
+            className="px-3.5 py-2 rounded-[8px] text-sm bg-ink text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>
-          {saved && <span style={{ fontSize: 13, color: 'var(--ok)' }}>Saved.</span>}
-          {!dirty && !saving && !saved && (
-            <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
-              No unsaved changes.
-            </span>
-          )}
+          {saved && <span className="text-xs text-good">Saved.</span>}
+          {error && <span className="text-xs text-bad">{error}</span>}
         </div>
       </form>
+    </section>
+  )
+}
 
-      <div
-        style={{
-          marginTop: 6,
-          paddingTop: 18,
-          borderTop: '1px solid var(--line)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 14,
-        }}
-      >
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-          Apply to existing VMs
-        </div>
-        <p style={{ margin: 0, fontSize: 12.5, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-          Both actions reboot every running nimbus-managed VM. Sessions drop,
-          in-progress work in user shells dies. Use only after you've saved
-          the new values above.
-        </p>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            className="n-btn n-btn-secondary"
-            disabled={dirty}
-            onClick={() => {
-              setReport(null)
-              setReportKind(null)
-              setDanger('force-gateway')
-            }}
-            title={dirty ? 'Save your changes first' : ''}
-          >
-            Force gateway + subnet on every VM
-          </button>
-          <button
-            type="button"
-            className="n-btn n-btn-secondary"
-            disabled={dirty}
-            onClick={() => {
-              setReport(null)
-              setReportKind(null)
-              setDanger('renumber')
-            }}
-            title={dirty ? 'Save your changes first' : ''}
-          >
-            Renumber every VM into new pool
-          </button>
-        </div>
+// DangerOpsPanel — disruptive batch ops on existing VMs. Renumber
+// reassigns each VM a fresh IP; force-gateway pushes the saved
+// gateway/prefix to every VM via cloud-init + reboot. Both reboot
+// every VM in sequence — surface the warning and show the report.
+function DangerOpsPanel() {
+  const [danger, setDanger] = useState<DangerKind | null>(null)
+  const [report, setReport] = useState<NetworkOpReport | null>(null)
+  const [reportKind, setReportKind] = useState<DangerKind | null>(null)
+  const [reconcileBusy, setReconcileBusy] = useState(false)
+  const [reconcileReport, setReconcileReport] = useState<VMReconcileReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const runDanger = async (kind: DangerKind) => {
+    setDanger(null)
+    setError(null)
+    setReport(null)
+    try {
+      const r = kind === 'renumber' ? await renumberAllVMs() : await forceGatewayUpdate()
+      setReport(r)
+      setReportKind(kind)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const runReconcile = async () => {
+    setReconcileBusy(true)
+    setError(null)
+    setReconcileReport(null)
+    try {
+      const r = await reconcileVMs()
+      setReconcileReport(r)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setReconcileBusy(false)
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-3xl">Maintenance</h2>
+      <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
+        Batch operations that touch every Nimbus-managed VM. Each one
+        reboots the affected VMs serially — expect downtime
+        proportional to fleet size.
+      </p>
+
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <DangerCard
+          title="Renumber all VMs"
+          summary="Re-assigns each VM a fresh IP from the saved Cluster LAN pool, then reboots."
+          buttonLabel="Renumber"
+          onClick={() => setDanger('renumber')}
+        />
+        <DangerCard
+          title="Push gateway to all VMs"
+          summary="Re-stamps every VM's cloud-init ipconfig0 with the saved gateway and reboots them. Safe if VMs are on the same /24."
+          buttonLabel="Push gateway"
+          onClick={() => setDanger('force-gateway')}
+        />
+        <DangerCard
+          title="Reconcile VM rows"
+          summary="Walks the cluster, drops DB rows for VMs that no longer exist on Proxmox. Read-only on Proxmox."
+          buttonLabel={reconcileBusy ? 'Reconciling…' : 'Reconcile'}
+          onClick={runReconcile}
+          disabled={reconcileBusy}
+        />
       </div>
 
-      {report && (
-        <div
-          style={{
-            marginTop: 4,
-            padding: '14px 16px',
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            background: 'rgba(20,18,28,0.03)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-          }}
-        >
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-            {reportKind === 'renumber' ? 'Renumber complete' : 'Network config push complete'}
+      {danger !== null && (
+        <ConfirmModal
+          kind={danger}
+          onConfirm={() => runDanger(danger)}
+          onCancel={() => setDanger(null)}
+        />
+      )}
+
+      {error && (
+        <div className="mt-4 p-3.5 rounded-[10px] bg-bad/10 border border-bad/30 text-bad text-sm">
+          {error}
+        </div>
+      )}
+
+      {report && reportKind && (
+        <div className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85">
+          <div className="text-sm font-medium">
+            {reportKind === 'renumber' ? 'Renumber report' : 'Push-gateway report'}
           </div>
-          <div style={{ fontSize: 13, color: 'var(--ink-body)' }}>
-            {report.updated} VM{report.updated === 1 ? '' : 's'} updated.{' '}
-            {report.failures.length > 0
-              ? `${report.failures.length} failure${report.failures.length === 1 ? '' : 's'}:`
-              : 'No failures.'}
+          <div className="mt-1 text-sm text-ink-3">
+            Updated {report.updated} VM{report.updated === 1 ? '' : 's'};{' '}
+            {report.failures.length} failure{report.failures.length === 1 ? '' : 's'}.
           </div>
           {report.failures.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--err)' }}>
+            <ul className="mt-2 text-xs text-bad font-mono flex flex-col gap-1">
               {report.failures.map((f) => (
-                <li key={f.vm_row_id}>
-                  {f.hostname || `vm row ${f.vm_row_id}`} (vmid {f.vmid}): {f.error}
+                <li key={f.vmid}>
+                  vmid={f.vmid} ({f.hostname}): {f.error}
                 </li>
               ))}
             </ul>
@@ -268,126 +446,82 @@ function NetworkPanel() {
         </div>
       )}
 
-      {danger && (
-        <DangerModal
-          kind={danger}
-          settings={settings}
-          onClose={() => setDanger(null)}
-          onDone={(rep, kind) => {
-            setReport(rep)
-            setReportKind(kind)
-            setDanger(null)
-          }}
-        />
+      {reconcileReport && (
+        <div className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85 text-sm">
+          <div className="font-medium">Reconcile complete</div>
+          <div className="mt-1 text-ink-3">
+            {reconcileReport.deleted.length} deleted ·{' '}
+            {reconcileReport.migrated.length} migrated ·{' '}
+            {reconcileReport.renamed.length} renamed ·{' '}
+            {reconcileReport.missed.length} still missing ·{' '}
+            {reconcileReport.no_ops} no-op
+          </div>
+        </div>
       )}
+    </section>
+  )
+}
+
+function DangerCard({
+  title,
+  summary,
+  buttonLabel,
+  onClick,
+  disabled,
+}: {
+  title: string
+  summary: string
+  buttonLabel: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="p-4 rounded-[10px] border border-line-2 bg-white/85 flex flex-col gap-2">
+      <div className="text-sm font-medium">{title}</div>
+      <p className="text-xs text-ink-3 leading-relaxed flex-1">{summary}</p>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="self-start px-3 py-1.5 rounded-[8px] text-xs border border-line-2 hover:border-ink/40 disabled:opacity-50"
+      >
+        {buttonLabel}
+      </button>
     </div>
   )
 }
 
-function DangerModal({
+function ConfirmModal({
   kind,
-  settings,
-  onClose,
-  onDone,
+  onConfirm,
+  onCancel,
 }: {
   kind: DangerKind
-  settings: NetworkSettingsView | null
-  onClose: () => void
-  onDone: (rep: NetworkOpReport, kind: DangerKind) => void
+  onConfirm: () => void
+  onCancel: () => void
 }) {
-  const required =
-    kind === 'renumber' ? 'RENUMBER ALL VMS' : 'CHANGE NETWORK ON ALL VMS'
-  const [typed, setTyped] = useState('')
-  const [running, setRunning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const title =
-    kind === 'renumber'
-      ? 'Renumber every nimbus-managed VM'
-      : 'Force gateway + subnet on every VM'
-
-  const description =
-    kind === 'renumber'
-      ? `Every nimbus-managed VM will be assigned a fresh IP from ${
-          settings?.ip_pool_start ?? '?'
-        } – ${settings?.ip_pool_end ?? '?'} and rebooted. The new pool must have at least as many free addresses as you have VMs. Any open SSH sessions will drop. This cannot be cleanly undone — the old IPs are released back to the pool.`
-      : `Every nimbus-managed VM will be reconfigured to use ${
-          settings?.gateway_ip ?? '?'
-        } as its default gateway with a /${
-          settings?.prefix_len && settings.prefix_len > 0 ? settings.prefix_len : 24
-        } subnet, then rebooted. If the new gateway is not yet reachable on your network, every VM will lose connectivity until the network is fixed. Any open SSH sessions will drop.`
-
-  const handleConfirm = async () => {
-    setError(null)
-    try {
-      setRunning(true)
-      const rep = kind === 'renumber' ? await renumberAllVMs() : await forceGatewayUpdate()
-      onDone(rep, kind)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Operation failed')
-    } finally {
-      setRunning(false)
-    }
-  }
-
+  const verb = kind === 'renumber' ? 'renumber every VM' : 'push the gateway to every VM'
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(8,6,12,0.55)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 50,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="glass"
-        style={{
-          width: 'min(520px, 92vw)',
-          padding: '22px 24px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 14,
-          borderColor: 'var(--err)',
-        }}
-      >
-        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--err)' }}>
-          {title}
-        </div>
-        <p style={{ margin: 0, fontSize: 13.5, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-          {description}
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40">
+      <div className="w-[420px] p-6 rounded-[14px] bg-white shadow-xl">
+        <div className="text-base font-medium">Confirm {kind === 'renumber' ? 'renumber' : 'force-gateway'}</div>
+        <p className="mt-2 text-sm text-ink-2">
+          You're about to {verb}. Each VM reboots. Expect 30–90 seconds of downtime per VM.
         </p>
-        <div className="n-field">
-          <label className="n-label" htmlFor="danger-confirm">
-            Type <code style={{ color: 'var(--err)' }}>{required}</code> to confirm
-          </label>
-          <input
-            id="danger-confirm"
-            className="n-input"
-            type="text"
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            placeholder={required}
-            autoFocus
-          />
-        </div>
-        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button type="button" className="n-btn" onClick={onClose} disabled={running}>
+        <div className="mt-4 flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-[8px] text-sm border border-line-2"
+          >
             Cancel
           </button>
           <button
             type="button"
-            className="n-btn n-btn-primary"
-            onClick={handleConfirm}
-            disabled={running || typed !== required}
-            style={{ background: 'var(--err)', borderColor: 'var(--err)' }}
+            onClick={onConfirm}
+            className="px-3 py-1.5 rounded-[8px] text-sm bg-bad text-white"
           >
-            {running ? 'Working…' : kind === 'renumber' ? 'Renumber all VMs' : 'Force gateway + subnet'}
+            {kind === 'renumber' ? 'Renumber' : 'Push gateway'}
           </button>
         </div>
       </div>
@@ -395,901 +529,17 @@ function DangerModal({
   )
 }
 
-function SyncPanel() {
-  const [running, setRunning] = useState(false)
-  const [report, setReport] = useState<VMReconcileReport | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  const handleSync = async () => {
-    setError(null)
-    setReport(null)
-    try {
-      setRunning(true)
-      const rep = await reconcileVMs()
-      setReport(rep)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Reconcile failed')
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
-    >
-      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-        Sync DB with cluster
-      </div>
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Walks every VM row against the live Proxmox cluster. Rows whose VM
-        moved to a different node (manual <code>qm migrate</code>) get their
-        node updated. Rows whose Proxmox display name disagrees with the
-        local hostname get renamed — Proxmox is the source of truth.
-        Rows whose VMID hasn't been observed for 3 consecutive runs get
-        soft-deleted — typically because someone destroyed the VM directly
-        through Proxmox, leaving an orphan here. This runs on the background
-        reconcile loop every minute; the button forces an immediate pass.
-      </p>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
-          type="button"
-          className="n-btn n-btn-primary"
-          onClick={handleSync}
-          disabled={running}
-          style={{ minWidth: 160 }}
-        >
-          {running ? 'Syncing…' : 'Sync now'}
-        </button>
-        {error && <span style={{ fontSize: 13, color: 'var(--err)' }}>{error}</span>}
-      </div>
-      {report && (
-        <div
-          style={{
-            marginTop: 4,
-            padding: '14px 16px',
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            background: 'rgba(20,18,28,0.03)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            fontSize: 13,
-            color: 'var(--ink-body)',
-          }}
-        >
-          <div>
-            Migrated: <strong>{report.migrated.length}</strong> &middot; Renamed:{' '}
-            <strong>{report.renamed.length}</strong> &middot; Soft-deleted:{' '}
-            <strong>{report.deleted.length}</strong> &middot; Going stale:{' '}
-            <strong>{report.missed.length}</strong> &middot; In sync:{' '}
-            <strong>{report.no_ops}</strong>
-          </div>
-          {report.migrated.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {report.migrated.map((m) => (
-                <li key={`mig-${m.vm_row_id}`}>
-                  {m.hostname} (vmid {m.vmid}): {m.from_node} → {m.to_node}
-                </li>
-              ))}
-            </ul>
-          )}
-          {report.renamed.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {report.renamed.map((r) => (
-                <li key={`ren-${r.vm_row_id}`}>
-                  vmid {r.vmid} on {r.node}: {r.from_name} → {r.to_name}
-                </li>
-              ))}
-            </ul>
-          )}
-          {report.deleted.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--err)' }}>
-              {report.deleted.map((d) => (
-                <li key={`del-${d.vm_row_id}`}>
-                  {d.hostname} (vmid {d.vmid} on {d.node}) — soft-deleted
-                </li>
-              ))}
-            </ul>
-          )}
-          {report.missed.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--ink-mute)' }}>
-              {report.missed.map((m) => (
-                <li key={`miss-${m.vm_row_id}`}>
-                  {m.hostname} (vmid {m.vmid} on {m.node}) — missed{' '}
-                  {m.missed_cycles}/3
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default function Network() {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
-      <div>
-        <h1 className="n-display" style={{ fontSize: 28, margin: '0 0 6px' }}>
-          VM network
-        </h1>
-        <p style={{ margin: 0, fontSize: 14, color: 'var(--ink-body)' }}>
-          The IP pool nimbus draws from when provisioning, and the gateway
-          handed to each VM via cloud-init.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-        <div className="lg:col-span-2 flex flex-col gap-6">
-          <NetworkPanel />
-          <SDNPanel />
-          <SyncPanel />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// SDNPanel — admin toggle + diagnostic for the per-user SDN VNet
-// isolation feature. Default off: turning isolation on means VMs are
-// unreachable from anywhere except the cluster's PVE host until at
-// least one user-facing connect path (Gopher tunnel today, browser
-// SSH next) is wired up. The reachability callout below makes that
-// explicit so admins don't ship broken connect UX to their users.
-function SDNPanel() {
-  const [view, setView] = useState<SDNSettingsView | null>(null)
-  const [enabled, setEnabled] = useState(false)
-  const [zoneName, setZoneName] = useState('nimbus')
-  const [zoneType, setZoneType] = useState<'simple' | 'vxlan'>('simple')
-  const [supernet, setSupernet] = useState('')
-  const [subnetSize, setSubnetSize] = useState(24)
-  const [dnsServer, setDNSServer] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [tunnelInfo, setTunnelInfo] = useState<TunnelInfo | null>(null)
-
-  const load = () => {
-    getSDNSettings()
-      .then((v) => {
-        setView(v)
-        setEnabled(v.enabled)
-        setZoneName(v.zone_name || 'nimbus')
-        setZoneType((v.zone_type === 'vxlan' ? 'vxlan' : 'simple'))
-        setSupernet(v.supernet)
-        setSubnetSize(v.subnet_size > 0 ? v.subnet_size : 24)
-        setDNSServer(v.dns_server || '')
-      })
-      .catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : 'failed to load SDN settings'),
-      )
-    getTunnelInfo()
-      .then(setTunnelInfo)
-      .catch(() => {
-        // Tunnel-info fetch failures are non-fatal — the reachability
-        // callout falls back to "not configured" if it can't read.
-      })
-  }
-  useEffect(load, [])
-
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    setSaved(false)
-    setBusy(true)
-    try {
-      const next = await saveSDNSettings({
-        enabled,
-        zone_name: zoneName,
-        zone_type: zoneType,
-        supernet,
-        subnet_size: subnetSize,
-        dns_server: dnsServer,
-      })
-      setView(next)
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2000)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'save failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div
-      className="glass"
-      style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}
-    >
-      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
-        Per-user VNet isolation
-      </div>
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-        Each Nimbus user gets a dedicated Proxmox SDN VNet — VMs can talk
-        within a user's own subnets but can't reach other users' VMs or the
-        cluster's main LAN. Outbound internet works via NAT. Bootstrap
-        (Gopher tunnel, GPU env) runs through the qemu-guest-agent, so
-        isolated VMs provision identically to flat-LAN ones.
-      </p>
-
-      {view && <ZoneStatusChip view={view} />}
-      {enabled && <ReachabilityCallout tunnelEnabled={tunnelInfo?.enabled ?? false} />}
-
-      <form
-        onSubmit={handleSave}
-        style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-      >
-        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-            disabled={busy}
-          />
-          Isolate users on per-user Proxmox SDN VNets
-        </label>
-
-        <div className="n-field">
-          <label className="n-label" htmlFor="sdn-zone">Zone name</label>
-          <input
-            id="sdn-zone"
-            className="n-input"
-            type="text"
-            value={zoneName}
-            onChange={(e) => setZoneName(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
-            placeholder="nimbus"
-            disabled={busy}
-            maxLength={8}
-            pattern="^[a-z][a-z0-9]{0,7}$"
-          />
-          <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
-            1–8 lowercase letters and digits, must start with a letter.
-            Proxmox rejects hyphens, underscores, dots, and uppercase.
-          </p>
-        </div>
-
-        <div className="n-field">
-          <label className="n-label">Zone type</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <ZoneTypeChip
-              active={zoneType === 'simple'}
-              disabled={busy}
-              onClick={() => setZoneType('simple')}
-              label="Simple"
-              hint="Per-host NAT bridge"
-            />
-            <ZoneTypeChip
-              active={zoneType === 'vxlan'}
-              disabled={busy}
-              onClick={() => setZoneType('vxlan')}
-              label="VXLAN"
-              hint="Cross-node L2 overlay"
-            />
-          </div>
-          <p style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
-            {zoneType === 'simple' ? (
-              <>
-                Single-host friendly. Each PVE node has its own bridge — VMs
-                on the same subnet but <em>different nodes</em> can&apos;t
-                talk to each other.
-              </>
-            ) : (
-              <>
-                Cross-node L2: VMs on the same subnet reach each other across
-                nodes via VXLAN tunnels. <strong>Requires UDP 4789 between
-                nodes</strong> and an MTU 50 bytes lower than the underlay.
-                Nimbus fills <code>peers=</code> from the cluster&apos;s online
-                nodes; outbound internet uses the per-subnet SNAT flag (same
-                as simple zone) — each node MASQUERADEs egress traffic to its
-                vmbr0 IP, so VMs reach the internet through whichever PVE
-                host they land on.
-              </>
-            )}
-          </p>
-        </div>
-
-        <SDNAddressSpace
-          pool={supernet}
-          onPoolChange={setSupernet}
-          slice={subnetSize}
-          onSliceChange={setSubnetSize}
-          disabled={busy}
-        />
-
-        <div className="n-field">
-          <label className="n-label" htmlFor="sdn-dns">
-            DNS server (optional, applied to each subnet)
-          </label>
-          <input
-            id="sdn-dns"
-            className="n-input"
-            type="text"
-            value={dnsServer}
-            onChange={(e) => setDNSServer(e.target.value)}
-            placeholder="1.1.1.1"
-            disabled={busy}
-          />
-        </div>
-
-        {error && <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{error}</p>}
-        {saved && <p style={{ margin: 0, fontSize: 13, color: 'var(--good)' }}>Saved.</p>}
-
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button
-            type="submit"
-            className="n-btn n-btn-primary"
-            disabled={busy}
-            style={{ minWidth: 120 }}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-          <SDNResetButton onAfterReset={load} disabled={busy} />
-        </div>
-      </form>
-    </div>
-  )
-}
-
-// SDNResetButton tears down every Nimbus-managed subnet + the
-// configured zone in PVE. Used to recover from "stuck" states (zone
-// type/name changed in settings but PVE still holds the old zone).
-// Refuses on the backend if any VMs are still attached.
-function SDNResetButton({
-  onAfterReset,
-  disabled,
-}: {
-  onAfterReset: () => void
-  disabled: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const [running, setRunning] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  const [report, setReport] = useState<SDNResetReport | null>(null)
-
-  const run = async () => {
-    setErr(null)
-    setRunning(true)
-    try {
-      const r = await resetSDN()
-      setReport(r)
-      onAfterReset()
-    } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : 'reset failed')
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => {
-          setOpen(true)
-          setReport(null)
-          setErr(null)
-        }}
-        disabled={disabled}
-        style={{
-          marginLeft: 'auto',
-          padding: '8px 14px',
-          borderRadius: 8,
-          border: '1px solid var(--err)',
-          background: 'transparent',
-          color: 'var(--err)',
-          fontSize: 13,
-          cursor: disabled ? 'not-allowed' : 'pointer',
-          opacity: disabled ? 0.5 : 1,
-        }}
-      >
-        Reset SDN
-      </button>
-      {open && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.45)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 50,
-          }}
-          onClick={() => !running && setOpen(false)}
-        >
-          <div
-            className="glass"
-            style={{ maxWidth: 540, padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ fontSize: 16, fontWeight: 600 }}>Reset SDN state</div>
-            {!report && (
-              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, color: 'var(--ink-body)' }}>
-                This deletes <strong>every Nimbus-managed subnet</strong> and the
-                <strong> configured zone</strong> from Proxmox. Use this when you&apos;re
-                changing zone type/name and the existing subnets are blocking the change.
-                <br />
-                <br />
-                <strong>VM data is safe</strong> — Reset refuses with a 409 if any VM is
-                still attached to a Nimbus subnet. Delete or migrate attached VMs first
-                via the normal VM lifecycle.
-                <br />
-                <br />
-                After Reset succeeds, the SDN settings panel is in a fresh state — save
-                your new zone config to bootstrap it.
-              </p>
-            )}
-            {report && (
-              <div style={{ fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
-                <div>
-                  Deleted <strong>{report.subnets_deleted}</strong> subnet
-                  {report.subnets_deleted === 1 ? '' : 's'}.
-                </div>
-                {report.orphans_scrubbed > 0 && (
-                  <div>
-                    Scrubbed <strong>{report.orphans_scrubbed}</strong> orphan vnet
-                    {report.orphans_scrubbed === 1 ? '' : 's'} from PVE that weren&apos;t
-                    tracked in Nimbus&apos;s DB.
-                  </div>
-                )}
-                {report.zone_deleted && (
-                  <div>
-                    Deleted zone <span className="font-mono">{report.zone_deleted}</span>.
-                  </div>
-                )}
-                {report.subnet_failures && report.subnet_failures.length > 0 && (
-                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
-                    <div>{report.subnet_failures.length} subnet failure(s):</div>
-                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                      {report.subnet_failures.map((f, i) => (
-                        <li key={i} style={{ fontSize: 12 }}>{f}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                {report.zone_error && (
-                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
-                    Zone delete error: {report.zone_error}
-                  </div>
-                )}
-                {report.apply_error && (
-                  <div style={{ marginTop: 8, color: 'var(--warn)' }}>
-                    ApplySDN error: {report.apply_error}
-                  </div>
-                )}
-              </div>
-            )}
-            {err && <p style={{ margin: 0, fontSize: 13, color: 'var(--err)' }}>{err}</p>}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button
-                type="button"
-                className="n-btn"
-                onClick={() => setOpen(false)}
-                disabled={running}
-              >
-                {report ? 'Close' : 'Cancel'}
-              </button>
-              {!report && (
-                <button
-                  type="button"
-                  onClick={run}
-                  disabled={running}
-                  style={{
-                    padding: '8px 16px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: 'var(--err)',
-                    color: 'white',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: running ? 'not-allowed' : 'pointer',
-                    opacity: running ? 0.6 : 1,
-                  }}
-                >
-                  {running ? 'Resetting…' : 'Yes, reset'}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
-// SDNAddressSpace renders the supernet + slice size as a single
-// composite control instead of two unrelated CIDR inputs. Surfaces
-// the math live so admins see the tradeoff between slice size and
-// max-user count without doing it in their head.
-//
-// The supernet is the IP address space all per-user subnets carve
-// from. The "slice" is the prefix length of each per-user subnet
-// inside that space. Together they answer "how many users can land
-// in this pool, and how many IPs does each one get?"
-function SDNAddressSpace({
-  pool,
-  onPoolChange,
-  slice,
-  onSliceChange,
-  disabled,
-}: {
-  pool: string
-  onPoolChange: (v: string) => void
-  slice: number
-  onSliceChange: (v: number) => void
-  disabled: boolean
-}) {
-  // Parse the supernet's prefix to compute the live preview. Falls
-  // through to a passive hint when the input doesn't parse yet (user
-  // still typing) instead of yelling at them.
-  const poolPrefix = parsePoolPrefix(pool)
-  const preview =
-    poolPrefix !== null && slice >= poolPrefix
-      ? describeCarving(poolPrefix, slice)
-      : null
-
-  // Split the combined CIDR (e.g. "10.42.0.0/16") into the two
-  // input boxes — network on the left, prefix on the right —
-  // mirroring the gateway-IP control above. The parent state keeps
-  // the combined string so the save payload doesn't need a second
-  // assembly step.
-  const split = splitCIDR(pool)
-  const network = split.network
-  const networkPrefix = split.prefix
-  const setNetwork = (v: string) => onPoolChange(joinCIDR(v, networkPrefix))
-  const setNetworkPrefix = (v: number) => onPoolChange(joinCIDR(network, v))
-
-  return (
-    <div className="n-field">
-      <label className="n-label" htmlFor="sdn-supernet-network">
-        IP address space for user subnets
-      </label>
-      <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
-        <input
-          id="sdn-supernet-network"
-          className="n-input"
-          type="text"
-          placeholder="10.42.0.0"
-          value={network}
-          onChange={(e) => setNetwork(e.target.value)}
-          disabled={disabled}
-          style={{ flex: 1 }}
-        />
-        <span
-          aria-hidden="true"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            padding: '0 6px',
-            color: 'var(--ink-mute)',
-            fontSize: 16,
-            fontFamily: 'var(--font-mono, monospace)',
-          }}
-        >
-          /
-        </span>
-        <input
-          id="sdn-supernet-prefix"
-          className="n-input"
-          type="number"
-          min={1}
-          max={32}
-          placeholder="16"
-          value={networkPrefix === 0 ? '' : networkPrefix}
-          onChange={(e) => setNetworkPrefix(Number(e.target.value))}
-          aria-label="Address-space prefix length"
-          disabled={disabled}
-          style={{ width: 88, textAlign: 'center' }}
-        />
-      </div>
-      <p style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
-        Private RFC1918 range Nimbus carves from. Pick something that
-        doesn't overlap with your cluster LAN — VMs in this space are
-        NAT'd to the cluster's upstream gateway.
-      </p>
-
-      <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12, color: 'var(--ink-2)' }}>↳ Each user's subnet:</span>
-        <select
-          value={slice}
-          onChange={(e) => onSliceChange(parseInt(e.target.value, 10) || 24)}
-          disabled={disabled}
-          className="n-input"
-          style={{ width: 'auto', minWidth: 240 }}
-        >
-          {SLICE_CHOICES.map((s) => {
-            const meta = describeSlice(s)
-            return (
-              <option key={s} value={s}>
-                /{s} — {meta.hosts} usable IPs each{s === 24 ? ' (default)' : ''}
-              </option>
-            )
-          })}
-        </select>
-      </div>
-      {preview && (
-        <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--ink-mute)' }}>
-          Yields <strong>{preview.maxSubnets}</strong> subnets ·{' '}
-          <strong>{preview.hostsPerSubnet}</strong> usable IPs per subnet.
-        </p>
-      )}
-    </div>
-  )
-}
-
-// splitCIDR pulls a combined "10.42.0.0/16" into ("10.42.0.0", 16).
-// Returns prefix=0 when the slash is missing or malformed so the
-// number input renders empty rather than NaN. Parent state is the
-// source of truth — this is purely view-time decomposition.
-function splitCIDR(cidr: string): { network: string; prefix: number } {
-  const idx = cidr.indexOf('/')
-  if (idx < 0) {
-    return { network: cidr, prefix: 0 }
-  }
-  const n = parseInt(cidr.slice(idx + 1), 10)
-  return { network: cidr.slice(0, idx), prefix: Number.isFinite(n) ? n : 0 }
-}
-
-// joinCIDR is the inverse of splitCIDR — combines the two inputs
-// back into the API-shaped string. Empty network OR zero prefix
-// means "user is mid-edit"; keep whichever component is set so the
-// other input doesn't drop on the next render.
-function joinCIDR(network: string, prefix: number): string {
-  if (prefix === 0) return network
-  return `${network}/${prefix}`
-}
-
-// Slice choices we surface in the dropdown. /24 is the default — 254
-// usable IPs is plenty for a typical user. Smaller (>= /25) is for
-// dense deployments; larger (<= /23) is rare and the supernet starts
-// constraining max users. Capped at /28 below — anything tighter
-// (/29..-/30) is unusable because the gateway + a few reserves eat the
-// whole space.
-const SLICE_CHOICES: number[] = [22, 23, 24, 25, 26, 27, 28]
-
-function describeSlice(prefix: number): { hosts: number } {
-  // Total addresses in the slice = 2^(32 - prefix). Subtract 2 for
-  // network + broadcast plus our own pool offsets (gateway + reserves)
-  // — see the carve math in vnetmgr/subnets.go (10..-.<broadcast-5>).
-  const total = 1 << (32 - prefix)
-  return { hosts: Math.max(0, total - 16) }
-}
-
-function parsePoolPrefix(cidr: string): number | null {
-  const match = /\/(\d{1,2})$/.exec(cidr.trim())
-  if (!match) return null
-  const n = parseInt(match[1], 10)
-  if (!Number.isFinite(n) || n < 1 || n > 32) return null
-  return n
-}
-
-function describeCarving(poolPrefix: number, slicePrefix: number): { maxSubnets: number; hostsPerSubnet: number } {
-  const maxSubnets = 1 << (slicePrefix - poolPrefix)
-  const hostsPerSubnet = describeSlice(slicePrefix).hosts
-  return { maxSubnets, hostsPerSubnet }
-}
-
-// ZoneTypeChip is a two-line button used in the zone-type selector.
-// Plain HTML to fit the existing form styling; doesn't depend on any
-// of the chip primitives elsewhere in the codebase.
-function ZoneTypeChip({
-  active,
-  disabled,
-  onClick,
+function Field({
   label,
-  hint,
+  children,
 }: {
-  active: boolean
-  disabled: boolean
-  onClick: () => void
   label: string
-  hint: string
+  children: React.ReactNode
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        flex: 1,
-        textAlign: 'left',
-        padding: '8px 12px',
-        borderRadius: 8,
-        border: active ? '1px solid var(--ink)' : '1px solid var(--line)',
-        background: active ? 'var(--ink)' : 'transparent',
-        color: active ? 'white' : 'var(--ink)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        transition: 'background-color 120ms, border-color 120ms',
-      }}
-    >
-      <div style={{ fontSize: 13, fontWeight: 600 }}>{label}</div>
-      <div
-        style={{
-          fontSize: 11,
-          color: active ? 'rgba(255,255,255,0.75)' : 'var(--ink-mute)',
-          marginTop: 2,
-        }}
-      >
-        {hint}
-      </div>
-    </button>
-  )
-}
-
-function ZoneStatusChip({ view }: { view: SDNSettingsView }) {
-  const meta = (() => {
-    switch (view.zone_status) {
-      case 'active':
-        return {
-          label: 'Zone active',
-          color: 'var(--good)',
-          bg: 'rgba(48,128,72,0.08)',
-          border: 'rgba(48,128,72,0.25)',
-        }
-      case 'pending':
-        return {
-          label: 'Zone pending — will apply on next save',
-          color: 'var(--warn)',
-          bg: 'rgba(184,101,15,0.08)',
-          border: 'rgba(184,101,15,0.25)',
-        }
-      case 'missing-pkg':
-        return {
-          label:
-            'Proxmox SDN package not installed — apt install libpve-network-perl on every node',
-          color: 'var(--err)',
-          bg: 'rgba(184,58,58,0.08)',
-          border: 'rgba(184,58,58,0.25)',
-        }
-      case 'unconfigured':
-        return {
-          label: 'Enabled but zone name unset',
-          color: 'var(--warn)',
-          bg: 'rgba(184,101,15,0.08)',
-          border: 'rgba(184,101,15,0.25)',
-        }
-      case 'error':
-        return {
-          label: `Proxmox error: ${view.proxmox_error || 'unknown'}`,
-          color: 'var(--err)',
-          bg: 'rgba(184,58,58,0.08)',
-          border: 'rgba(184,58,58,0.25)',
-        }
-      case 'disabled':
-      default:
-        return {
-          label: 'Disabled — VMs will continue using vmbr0',
-          color: 'var(--ink-mute)',
-          bg: 'rgba(20,18,28,0.04)',
-          border: 'var(--line)',
-        }
-    }
-  })()
-  return (
-    <div
-      style={{
-        padding: '10px 14px',
-        background: meta.bg,
-        border: `1px solid ${meta.border}`,
-        borderRadius: 8,
-        fontSize: 12,
-        color: meta.color,
-        display: 'flex',
-        justifyContent: 'space-between',
-        gap: 12,
-      }}
-    >
-      <span>{meta.label}</span>
-      {view.zone_status === 'active' && view.vnet_count > 0 && (
-        <span>
-          {view.vnet_count} VNet{view.vnet_count === 1 ? '' : 's'}
-        </span>
-      )}
-    </div>
-  )
-}
-
-// ReachabilityCallout explains how users actually connect to VMs once
-// per-user isolation is enabled. The IP shown on the result page isn't
-// reachable from outside the subnet — that's the whole point of
-// isolation — so the operator needs to wire up at least one user-facing
-// connect path. Rendered only when the toggle is on; admins thinking
-// about flipping it see the consequences before they save.
-function ReachabilityCallout({ tunnelEnabled }: { tunnelEnabled: boolean }) {
-  const Row = ({
-    state,
-    title,
-    body,
-  }: {
-    state: 'ok' | 'pending' | 'manual'
-    title: React.ReactNode
-    body: React.ReactNode
-  }) => {
-    const dot =
-      state === 'ok'
-        ? { background: 'var(--good)', label: 'Configured' }
-        : state === 'manual'
-          ? { background: 'var(--ink-mute)', label: 'Manual' }
-          : { background: 'var(--warn)', label: 'Not configured' }
-    return (
-      <li style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-        <span
-          style={{
-            marginTop: 6,
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            flexShrink: 0,
-            background: dot.background,
-          }}
-          aria-label={dot.label}
-        />
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{title}</div>
-          <div style={{ fontSize: 12, color: 'var(--ink-body)', lineHeight: 1.5 }}>{body}</div>
-        </div>
-      </li>
-    )
-  }
-  return (
-    <div
-      style={{
-        padding: '12px 14px',
-        background: 'rgba(20,18,28,0.03)',
-        border: '1px solid var(--line)',
-        borderRadius: 8,
-        fontSize: 12,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-      }}
-    >
-      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        How users reach isolated VMs
-      </div>
-      <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Row
-          state={tunnelEnabled ? 'ok' : 'pending'}
-          title="Gopher reverse tunnel (recommended)"
-          body={
-            tunnelEnabled ? (
-              <>
-                Configured. Users tick <em>Expose SSH publicly</em> at provision time and Nimbus
-                bootstraps a public SSH endpoint via the gateway.
-              </>
-            ) : (
-              <>
-                Not configured — wire it up on{' '}
-                <Link to="/infrastructure/gopher" style={{ color: 'var(--ink)', textDecoration: 'underline' }}>
-                  Infrastructure → Gopher tunnels
-                </Link>
-                . Without this, isolated VMs are only reachable via the Proxmox console or from another
-                VM in the same subnet.
-              </>
-            )
-          }
-        />
-        <Row
-          state="manual"
-          title="Proxmox noVNC console"
-          body={
-            <>
-              Always available from the Proxmox web UI as <em>Console</em> on the VM. Cloud-init
-              templates are SSH-key only by default, so the login prompt is currently a dead end —
-              browser-SSH (next phase) replaces this.
-            </>
-          }
-        />
-        <Row
-          state="pending"
-          title="Browser SSH (coming soon)"
-          body="Server-side SSH via the PVE host, streamed to xterm.js — works on isolated subnets without Gopher or external services. Tracked as the follow-up to this rollout."
-        />
-      </ul>
-    </div>
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] uppercase tracking-wider text-ink-3">{label}</span>
+      {children}
+    </label>
   )
 }

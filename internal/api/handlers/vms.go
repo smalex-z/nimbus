@@ -44,15 +44,11 @@ type createVMRequest struct {
 	Subdomain    string `json:"subdomain,omitempty"`
 	TunnelPort   int    `json:"tunnel_port,omitempty"`
 	EnableGPU    bool   `json:"enable_gpu,omitempty"`
-	// SDN subnet selection. At most one set:
-	//   - SubnetID  → existing subnet (owner-gated)
-	//   - SubnetName → create a new subnet inline
-	//   - both empty → user's default (auto-create on first provision)
-	SubnetID   *uint  `json:"subnet_id,omitempty"`
-	SubnetName string `json:"subnet_name,omitempty"`
-	// Bridge is the admin-only escape hatch — attaches the VM to a
-	// cluster bridge directly (e.g. "vmbr0"), bypassing per-user SDN.
-	// Non-admins setting this get a 400.
+	// Bridge is the Cluster LAN escape hatch — when set, the VM
+	// lands directly on that bridge (e.g. "vmbr0") with a global-pool
+	// IP, bypassing the Networking-v1 primitives. Admins always
+	// allowed; non-admins gated by the cluster-LAN-for-members
+	// admin toggle.
 	Bridge string `json:"bridge,omitempty"`
 
 	// NetworkMode is the Networking-v1 dispatch:
@@ -165,8 +161,6 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		EnableGPU:        req.EnableGPU,
 		OwnerID:          ownerID,
 		RequesterIsAdmin: requesterIsAdmin,
-		SubnetID:         req.SubnetID,
-		SubnetName:       req.SubnetName,
 		Bridge:           req.Bridge,
 		NetworkMode:      provision.NetworkMode(req.NetworkMode),
 		VPCID:            req.VPCID,

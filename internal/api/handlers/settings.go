@@ -44,11 +44,12 @@ type GPUConfigApplier interface {
 }
 
 // NetworkApplier is implemented by anything that needs to be told the live
-// gateway IP and cloud-init prefix length after a Settings → Network save.
-// provision.Service satisfies via SetGatewayIP / SetPrefixLen.
+// gateway IP, cloud-init prefix length, and cluster-LAN-for-members toggle
+// after a Settings → Network save. provision.Service satisfies all three.
 type NetworkApplier interface {
 	SetGatewayIP(string)
 	SetPrefixLen(int)
+	SetClusterLANForMembers(bool)
 }
 
 // NetworkOps performs the disruptive renumber + force-gateway batch ops.
@@ -881,10 +882,11 @@ func (s *Settings) SelfBootstrapStart(w http.ResponseWriter, r *http.Request) {
 
 // networkSettingsView is what GET / PUT /api/settings/network return.
 type networkSettingsView struct {
-	IPPoolStart string `json:"ip_pool_start"`
-	IPPoolEnd   string `json:"ip_pool_end"`
-	GatewayIP   string `json:"gateway_ip"`
-	PrefixLen   int    `json:"prefix_len"`
+	IPPoolStart          string `json:"ip_pool_start"`
+	IPPoolEnd            string `json:"ip_pool_end"`
+	GatewayIP            string `json:"gateway_ip"`
+	PrefixLen            int    `json:"prefix_len"`
+	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
 }
 
 // GetNetwork handles GET /api/settings/network (admin only). Returns the live
@@ -908,18 +910,20 @@ func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	response.Success(w, networkSettingsView{
-		IPPoolStart: settings.IPPoolStart,
-		IPPoolEnd:   settings.IPPoolEnd,
-		GatewayIP:   settings.GatewayIP,
-		PrefixLen:   settings.PrefixLen,
+		IPPoolStart:          settings.IPPoolStart,
+		IPPoolEnd:            settings.IPPoolEnd,
+		GatewayIP:            settings.GatewayIP,
+		PrefixLen:            settings.PrefixLen,
+		ClusterLANForMembers: settings.ClusterLANForMembers,
 	})
 }
 
 type saveNetworkRequest struct {
-	IPPoolStart string `json:"ip_pool_start"`
-	IPPoolEnd   string `json:"ip_pool_end"`
-	GatewayIP   string `json:"gateway_ip"`
-	PrefixLen   int    `json:"prefix_len"`
+	IPPoolStart          string `json:"ip_pool_start"`
+	IPPoolEnd            string `json:"ip_pool_end"`
+	GatewayIP            string `json:"gateway_ip"`
+	PrefixLen            int    `json:"prefix_len"`
+	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
 }
 
 // SaveNetwork handles PUT /api/settings/network (admin only). Persists the
@@ -971,10 +975,11 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.auth.SaveNetworkSettings(db.NetworkSettings{
-		IPPoolStart: start,
-		IPPoolEnd:   end,
-		GatewayIP:   gw,
-		PrefixLen:   req.PrefixLen,
+		IPPoolStart:          start,
+		IPPoolEnd:            end,
+		GatewayIP:            gw,
+		PrefixLen:            req.PrefixLen,
+		ClusterLANForMembers: req.ClusterLANForMembers,
 	}); err != nil {
 		response.InternalError(w, "failed to save network settings")
 		return
@@ -995,13 +1000,15 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	for _, a := range s.networkAppliers {
 		a.SetGatewayIP(settings.GatewayIP)
 		a.SetPrefixLen(settings.PrefixLen)
+		a.SetClusterLANForMembers(settings.ClusterLANForMembers)
 	}
 
 	response.Success(w, networkSettingsView{
-		IPPoolStart: settings.IPPoolStart,
-		IPPoolEnd:   settings.IPPoolEnd,
-		GatewayIP:   settings.GatewayIP,
-		PrefixLen:   settings.PrefixLen,
+		IPPoolStart:          settings.IPPoolStart,
+		IPPoolEnd:            settings.IPPoolEnd,
+		GatewayIP:            settings.GatewayIP,
+		PrefixLen:            settings.PrefixLen,
+		ClusterLANForMembers: settings.ClusterLANForMembers,
 	})
 }
 
