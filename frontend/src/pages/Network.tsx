@@ -1,18 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   forceGatewayUpdate,
   getNetworkSettings,
   getNetworkingInfo,
+  getNetworkingV1Settings,
+  listNodes,
   reconcileVMs,
   renumberAllVMs,
   saveNetworkSettings,
+  saveNetworkingV1Settings,
 } from '@/api/client'
 import type {
   NetworkOpReport,
   NetworkSettingsView,
   NetworkingInfo,
+  NetworkingV1Settings,
   VMReconcileReport,
 } from '@/api/client'
+import type { NodeView } from '@/types'
 
 // Settings → Network page. Networking-v1: Standalone (per-VM Simple
 // zone) is the always-on default; VPCs are opt-in via env vars; the
@@ -26,7 +31,8 @@ type DangerKind = 'renumber' | 'force-gateway'
 export default function Network() {
   return (
     <div className="flex flex-col gap-8">
-      <PrimitivesPanel />
+      <StandalonePanel />
+      <VPCConfigPanel />
       <ClusterLANPanel />
       <PoolPanel />
       <DangerOpsPanel />
@@ -34,109 +40,217 @@ export default function Network() {
   )
 }
 
-// PrimitivesPanel surfaces the read-only state of the two Networking-v1
-// primitives. Both are configured via env vars and can't be flipped
-// from the UI — but the page tells the admin where to look when
-// something's missing.
-function PrimitivesPanel() {
+// StandalonePanel describes the always-on Standalone primitive.
+// Read-only because the only knob (NIMBUS_STANDALONE_POOL_CIDR)
+// changes IP carving math, which is a deployment-time decision.
+function StandalonePanel() {
   const [info, setInfo] = useState<NetworkingInfo | null>(null)
-  const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    getNetworkingInfo()
-      .then(setInfo)
-      .catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+    getNetworkingInfo().then(setInfo).catch(() => undefined)
   }, [])
+  const enabled = info?.standalone_enabled ?? true
   return (
     <section>
       <div className="eyebrow">Networking v1</div>
-      <h2 className="text-3xl">Primitives</h2>
+      <h2 className="text-3xl">Standalone VMs</h2>
       <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
-        Two ways VMs reach the network. Standalone is host-local NAT
-        (one Simple zone per VM); VPC is a VXLAN zone shared across
-        nodes with a dedicated NAT gateway LXC.
+        Per-VM Simple zone with PVE-native SNAT. Each Standalone VM
+        gets its own host-local /24 — no cross-VM communication. This
+        is the default for new provisions and works on a fresh
+        Nimbus with no setup.
       </p>
-
-      {error && (
-        <div className="mt-4 p-3.5 rounded-[10px] bg-bad/10 border border-bad/30 text-bad text-sm">
-          {error}
+      <div className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">Status</span>
+          <span
+            className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+              enabled ? 'bg-good/10 text-good border-good/30' : 'bg-bad/10 text-bad border-bad/30'
+            }`}
+          >
+            {enabled ? 'available' : 'disabled'}
+          </span>
         </div>
-      )}
-
-      <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <PrimitiveCard
-          title="Standalone"
-          enabled={info?.standalone_enabled ?? false}
-          summary="Per-VM Simple zone with PVE-native SNAT. The VM's /24 only exists on its node — no cross-VM communication."
-          envHints={[
-            ['NIMBUS_STANDALONE_POOL_CIDR', 'supernet (default 10.128.0.0/9)'],
-          ]}
-        />
-        <PrimitiveCard
-          title="VPC"
-          enabled={info?.vpc_enabled ?? false}
-          summary="VXLAN zone shared across cluster nodes. VMs in the same VPC reach each other at L2; egress is via a dedicated gateway LXC."
-          disabledReason={info?.vpc_reason}
-          envHints={[
-            ['NIMBUS_NETWORK_NODE', 'PVE node hosting the gateway LXC'],
-            ['NIMBUS_GATEWAY_LXC_IP_POOL', 'host-network IP range (e.g. 192.168.1.200-192.168.1.250)'],
-            ['NIMBUS_GATEWAY_LXC_TEMPLATE', 'Alpine LXC volid'],
-            ['NIMBUS_VPC_POOL_CIDR', 'supernet (default 10.0.0.0/9)'],
-          ]}
-        />
+        <p className="mt-2 text-xs text-ink-3">
+          IP supernet defaults to <code>10.128.0.0/9</code>. Override with{' '}
+          <code className="font-mono">NIMBUS_STANDALONE_POOL_CIDR</code> if it
+          conflicts with cluster-LAN routing.
+        </p>
       </div>
     </section>
   )
 }
 
-function PrimitiveCard({
-  title,
-  enabled,
-  summary,
-  disabledReason,
-  envHints,
-}: {
-  title: string
-  enabled: boolean
-  summary: string
-  disabledReason?: string
-  envHints: [string, string][]
-}) {
+// VPCConfigPanel is the live-editable VPC settings form. Configures
+// network node (where every VPC's gateway LXC lives), the host-side
+// IP pool the gateway LXCs allocate from, and an optional pinned
+// LXC template (otherwise auto-picks Alpine 3.x).
+function VPCConfigPanel() {
+  const [settings, setSettings] = useState<NetworkingV1Settings | null>(null)
+  const [nodes, setNodes] = useState<NodeView[]>([])
+  const [networkNode, setNetworkNode] = useState('')
+  const [ipPool, setIPPool] = useState('')
+  const [template, setTemplate] = useState('')
+  const [storage, setStorage] = useState('local-lvm')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    Promise.all([getNetworkingV1Settings(), listNodes()])
+      .then(([s, ns]) => {
+        setSettings(s)
+        setNetworkNode(s.network_node)
+        setIPPool(s.lxc_ip_pool)
+        setTemplate(s.lxc_template)
+        setStorage(s.lxc_storage || 'local-lvm')
+        setNodes(ns)
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+  }, [])
+
+  const dirty = useMemo(() => {
+    if (!settings) return false
+    return (
+      networkNode !== settings.network_node ||
+      ipPool !== settings.lxc_ip_pool ||
+      template !== settings.lxc_template ||
+      (storage || 'local-lvm') !== (settings.lxc_storage || 'local-lvm')
+    )
+  }, [settings, networkNode, ipPool, template, storage])
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      const next = await saveNetworkingV1Settings({
+        network_node: networkNode.trim(),
+        lxc_ip_pool: ipPool.trim(),
+        lxc_template: template.trim(),
+        lxc_storage: storage.trim() || 'local-lvm',
+      })
+      setSettings(next)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
-    <div className="p-4 rounded-[10px] border border-line-2 bg-white/85">
-      <div className="flex items-center gap-2">
-        <span className="text-base font-medium">{title}</span>
-        <span
-          className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-            enabled
-              ? 'bg-good/10 text-good border-good/30'
-              : 'bg-warn/10 text-warn border-warn/30'
-          }`}
-        >
-          {enabled ? 'configured' : 'disabled'}
-        </span>
-      </div>
-      <p className="mt-2 text-sm text-ink-2 leading-relaxed">{summary}</p>
-      {!enabled && disabledReason && (
-        <p className="mt-2 text-xs text-warn leading-relaxed">
-          {disabledReason}
-        </p>
-      )}
-      <details className="mt-3">
-        <summary className="cursor-pointer text-[12px] text-ink-2">
-          Environment variables
-        </summary>
-        <ul className="mt-2 flex flex-col gap-1.5">
-          {envHints.map(([name, hint]) => (
-            <li key={name} className="text-[11px] text-ink-3">
-              <code className="font-mono text-[11px] text-ink-2">{name}</code>{' '}
-              — {hint}
-            </li>
-          ))}
-        </ul>
-      </details>
-    </div>
+    <section>
+      <h2 className="text-3xl">VPCs</h2>
+      <p className="text-base text-ink-2 mt-2 leading-relaxed max-w-2xl">
+        VXLAN zone shared across cluster nodes plus a dedicated NAT
+        gateway LXC per VPC. Pick a network node where every VPC's
+        gateway LXC will live, and an IP range on that node's host
+        network for the gateway eth0 side.
+      </p>
+
+      <form
+        onSubmit={submit}
+        className="mt-4 p-4 rounded-[10px] border border-line-2 bg-white/85 flex flex-col gap-3"
+      >
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-sm font-medium">Status</span>
+            <span
+              className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                settings?.configured
+                  ? 'bg-good/10 text-good border-good/30'
+                  : 'bg-warn/10 text-warn border-warn/30'
+              }`}
+            >
+              {settings?.configured ? 'configured' : 'needs setup'}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Network node">
+            <select
+              value={networkNode}
+              onChange={(e) => setNetworkNode(e.target.value)}
+              className="n-input"
+            >
+              <option value="">— pick a node —</option>
+              {nodes.map((n) => (
+                <option key={n.name} value={n.name}>
+                  {n.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-ink-3">
+              Every VPC's gateway LXC lives here. v1 limitation; HA
+              across nodes is a future phase.
+            </p>
+          </Field>
+
+          <Field label="LXC storage">
+            <input
+              value={storage}
+              onChange={(e) => setStorage(e.target.value)}
+              placeholder="local-lvm"
+              className="n-input font-mono"
+            />
+            <p className="mt-1 text-[11px] text-ink-3">
+              Storage pool on the network node for the gateway LXC's rootfs.
+            </p>
+          </Field>
+        </div>
+
+        <Field label="Gateway-LXC IP pool">
+          <input
+            value={ipPool}
+            onChange={(e) => setIPPool(e.target.value)}
+            placeholder="192.168.1.200-192.168.1.250"
+            className="n-input font-mono"
+          />
+          <p className="mt-1 text-[11px] text-ink-3">
+            Host-network IPv4 ranges (comma-separated) the gateway
+            LXCs allocate eth0 from. Pick a slice outside the LAN's
+            DHCP range.
+          </p>
+        </Field>
+
+        <Field label="LXC template (optional)">
+          <input
+            value={template}
+            onChange={(e) => setTemplate(e.target.value)}
+            placeholder="local:vztmpl/alpine-3.21-default_20241217_amd64.tar.xz"
+            className="n-input font-mono"
+          />
+          <p className="mt-1 text-[11px] text-ink-3">
+            Leave blank to auto-pick the latest Alpine 3.x system
+            template via PVE's <code>aplinfo</code> repo (downloaded
+            on first VPC create if not cached).
+          </p>
+        </Field>
+
+        <div className="flex items-center gap-3 pt-1">
+          <button
+            type="submit"
+            disabled={!dirty || saving}
+            className="px-3.5 py-2 rounded-[8px] text-sm bg-ink text-white disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Applying…' : 'Save & apply'}
+          </button>
+          {saved && <span className="text-xs text-good">Saved + applied.</span>}
+          {error && <span className="text-xs text-bad">{error}</span>}
+        </div>
+        {saving && (
+          <p className="text-[11px] text-ink-3">
+            First-time apply may take ~30s while the Alpine template
+            downloads to the network node.
+          </p>
+        )}
+      </form>
+    </section>
   )
 }
 

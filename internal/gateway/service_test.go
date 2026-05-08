@@ -59,6 +59,18 @@ func (f *fakeLXC) NextVMID(_ context.Context) (int, error) {
 	v := f.nextVMID.Add(1) + 199
 	return int(v), nil
 }
+func (f *fakeLXC) StorageHasFile(_ context.Context, _, _, _, _ string) (bool, error) {
+	return true, nil // pretend the template is already cached
+}
+func (f *fakeLXC) ListAvailableLXCTemplates(_ context.Context, _ string) ([]proxmox.AplinfoTemplate, error) {
+	return []proxmox.AplinfoTemplate{
+		{Template: "alpine-3.20-default_20240908_amd64.tar.xz", Type: "lxc"},
+		{Template: "alpine-3.21-default_20241217_amd64.tar.xz", Type: "lxc"},
+	}, nil
+}
+func (f *fakeLXC) DownloadLXCTemplate(_ context.Context, _, _, _ string) (string, error) {
+	return "UPID:fake:download", nil
+}
 
 func newTestSvc(t *testing.T, ipPool string) (*gateway.Service, *fakeLXC, *db.DB) {
 	t.Helper()
@@ -203,7 +215,9 @@ func TestProvision_BootstrapFailure(t *testing.T) {
 	}
 }
 
-// TestNew_Validates: missing config fails.
+// TestNew_Validates: missing config fails. Template is now optional —
+// when omitted, EnsureDefaultTemplate downloads the latest Alpine on
+// first VPC create, so New no longer rejects an empty LXCTemplate.
 func TestNew_Validates(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -211,7 +225,6 @@ func TestNew_Validates(t *testing.T) {
 		cfg  gateway.Config
 	}{
 		{"missing node", gateway.Config{LXCTemplate: "x"}},
-		{"missing template", gateway.Config{NetworkNode: "alpha"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,5 +232,65 @@ func TestNew_Validates(t *testing.T) {
 				t.Errorf("expected error for %s", tc.name)
 			}
 		})
+	}
+}
+
+// TestEnsureDefaultTemplate_PicksLatestAlpine: aplinfo returns a
+// mix of Alpine versions; EnsureDefaultTemplate should pick the
+// newest amd64 system template, set cfg.LXCTemplate, and skip
+// download when StorageHasFile reports already-cached.
+func TestEnsureDefaultTemplate_PicksLatestAlpine(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.New(dbPath, &db.GatewayLXCIP{}, &db.VPC{})
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	svc, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
+		NetworkNode:  "alpha",
+		IPPool:       "10.0.0.10-10.0.0.12",
+		PollInterval: 10 * time.Millisecond,
+		// LXCTemplate intentionally empty — this test is the auto-pick path
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	volid, err := svc.EnsureDefaultTemplate(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureDefaultTemplate: %v", err)
+	}
+	want := "local:vztmpl/alpine-3.21-default_20241217_amd64.tar.xz"
+	if volid != want {
+		t.Errorf("volid = %q, want %q", volid, want)
+	}
+	if svc.LXCTemplate() != want {
+		t.Errorf("LXCTemplate() = %q, want %q", svc.LXCTemplate(), want)
+	}
+}
+
+// TestEnsureDefaultTemplate_NoOpWhenPinned: an admin-pinned
+// LXCTemplate must survive — auto-pick should not clobber it.
+func TestEnsureDefaultTemplate_NoOpWhenPinned(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.New(dbPath, &db.GatewayLXCIP{}, &db.VPC{})
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	pinned := "local:vztmpl/alpine-3.18-default_old_amd64.tar.xz"
+	svc, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
+		NetworkNode: "alpha",
+		LXCTemplate: pinned,
+		IPPool:      "10.0.0.10-10.0.0.12",
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	got, err := svc.EnsureDefaultTemplate(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureDefaultTemplate: %v", err)
+	}
+	if got != pinned || svc.LXCTemplate() != pinned {
+		t.Errorf("pinned template clobbered: got %q want %q", got, pinned)
 	}
 }

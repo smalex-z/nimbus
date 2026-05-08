@@ -46,8 +46,9 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
-	VNetMgr       *vnetmgr.Service // legacy: per-user-subnet path during deprecation
-	VPCMgr        *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	VNetMgr       *vnetmgr.Service             // legacy: per-user-subnet path during deprecation
+	VPCMgr        *vpcmgr.Service              // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	V1Applier     handlers.NetworkingV1Applier // closure that rebuilds gateway+vpcmgr from new settings
 	Config        *config.Config
 	Restart       func()
 }
@@ -83,6 +84,7 @@ func NewRouter(d Deps) http.Handler {
 		WithAppURLResolver(auth).
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
+		WithNetworkingV1Applier(d.V1Applier).
 		WithPoolReseeder(d.Pool)
 	if d.VNetMgr != nil {
 		settingsBuilder = settingsBuilder.WithSDNBootstrapper(d.VNetMgr)
@@ -331,6 +333,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
 				r.Get("/settings/network", settings.GetNetwork)
 				r.Put("/settings/network", settings.SaveNetwork)
+				r.Get("/settings/networking-v1", settings.GetNetworkingV1)
+				r.Put("/settings/networking-v1", settings.SaveNetworkingV1)
 				// Per-user SDN VNet isolation. Read returns the live
 				// status (zone exists / pending / missing-pkg); Save
 				// persists + bootstraps in one shot. P1 scope: zone

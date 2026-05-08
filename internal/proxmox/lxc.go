@@ -224,3 +224,66 @@ func (c *Client) LXCExecShell(ctx context.Context, node string, vmid int, script
 	quoted := "'" + strings.ReplaceAll(script, "'", `'\''`) + "'"
 	return c.LXCExec(ctx, node, vmid, []string{"sh", "-c", quoted})
 }
+
+// AplinfoTemplate is one entry from `GET /nodes/{node}/aplinfo` —
+// the curated list of LXC templates Proxmox can fetch from its
+// official template repo. Same source `pveam available` reads.
+type AplinfoTemplate struct {
+	Template string `json:"template"` // e.g. "alpine-3.21-default_20241217_amd64.tar.xz"
+	Section  string `json:"section"`  // "system", "turnkeylinux", etc
+	OS       string `json:"os"`
+	Version  string `json:"version"`
+	Type     string `json:"type"` // "lxc"
+}
+
+// ListAvailableLXCTemplates returns every template the apt-like
+// PVE template repo knows about, fetched from
+// `GET /nodes/{node}/aplinfo`. The result is filtered to lxc-type
+// system templates so callers can pick by name without sorting
+// through TurnKey appliances.
+//
+// Cached server-side by Proxmox; cheap to call repeatedly.
+func (c *Client) ListAvailableLXCTemplates(ctx context.Context, node string) ([]AplinfoTemplate, error) {
+	var out []AplinfoTemplate
+	path := fmt.Sprintf("/nodes/%s/aplinfo", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	keep := out[:0]
+	for _, t := range out {
+		if t.Type == "lxc" || t.Type == "" { // PVE 9 sometimes omits Type
+			keep = append(keep, t)
+		}
+	}
+	return keep, nil
+}
+
+// DownloadLXCTemplate dispatches an aplinfo template download to a
+// node's storage, returning the worker UPID for caller-side
+// WaitForTask. Uses `POST /nodes/{node}/aplinfo` — the same call
+// `pveam download <storage> <template>` makes.
+//
+// templateName is the bare filename Proxmox knows from `pveam
+// available` (e.g. "alpine-3.21-default_20241217_amd64.tar.xz") —
+// NOT a volid. Downloaded files land at
+// `<storage>:vztmpl/<templateName>`.
+//
+// Returns (upid, error). Idempotency is the caller's job — Proxmox
+// 400s if the file already exists, so check StorageHasFile first.
+func (c *Client) DownloadLXCTemplate(ctx context.Context, node, storage, templateName string) (string, error) {
+	if storage == "" {
+		return "", fmt.Errorf("download lxc template: storage required")
+	}
+	if templateName == "" {
+		return "", fmt.Errorf("download lxc template: template name required")
+	}
+	params := url.Values{}
+	params.Set("storage", storage)
+	params.Set("template", templateName)
+	var taskID string
+	path := fmt.Sprintf("/nodes/%s/aplinfo", url.PathEscape(node))
+	if err := c.do(ctx, http.MethodPost, path, params, &taskID); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}

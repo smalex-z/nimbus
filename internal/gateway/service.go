@@ -43,7 +43,19 @@ type LXCClient interface {
 	LXCExecShell(ctx context.Context, node string, vmid int, script string) (*proxmox.LXCExecResult, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	NextVMID(ctx context.Context) (int, error)
+	StorageHasFile(ctx context.Context, node, storage, contentType, filename string) (bool, error)
+	ListAvailableLXCTemplates(ctx context.Context, node string) ([]proxmox.AplinfoTemplate, error)
+	DownloadLXCTemplate(ctx context.Context, node, storage, templateName string) (string, error)
 }
+
+// DefaultLXCTemplatePrefix is the family Nimbus auto-downloads when
+// the operator hasn't explicitly pinned a template. Alpine is small
+// (~30 MB), ships with iptables packages in its repos, and works
+// out-of-the-box with PVE's pct exec — exactly what a NAT-only
+// gateway needs. We pick the latest available `alpine-3.X-default_*`
+// from PVE's aplinfo at startup, so this prefix doesn't need to be
+// version-pinned in code.
+const DefaultLXCTemplatePrefix = "alpine-3."
 
 // Config holds deployment-specific knobs for the gateway service.
 type Config struct {
@@ -96,12 +108,15 @@ type Service struct {
 // if it's not already populated. Idempotent — safe to call on every
 // boot. Returns an error when required config is missing or the
 // pool string can't be parsed.
+//
+// LXCTemplate is optional: when empty, the service will auto-pick
+// and download a default Alpine template at first VPC create (or
+// via EnsureDefaultTemplate, called from main.go startup). This
+// keeps the operator setup to two settings — network node + IP
+// pool — instead of three.
 func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 	if cfg.NetworkNode == "" {
 		return nil, errors.New("gateway: NetworkNode is required")
-	}
-	if cfg.LXCTemplate == "" {
-		return nil, errors.New("gateway: LXCTemplate is required")
 	}
 	if cfg.HostBridge == "" {
 		cfg.HostBridge = "vmbr0"
@@ -122,10 +137,97 @@ func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 	return s, nil
 }
 
+// templateStorage is where Nimbus puts auto-downloaded LXC templates.
+// Hardcoded to `local` since that's the only PVE storage that
+// reliably accepts vztmpl content on a stock install. An admin who
+// wants templates elsewhere can pin LXCTemplate explicitly.
+const templateStorage = "local"
+
+// EnsureDefaultTemplate picks the latest Alpine system template
+// from PVE's aplinfo, downloads it to `local` on the network node
+// if not already cached, and stores the resulting volid on
+// cfg.LXCTemplate. Idempotent — repeated calls no-op once a
+// template is in place. Caller-driven (main.go startup) so the
+// download happens before the first VPC create.
+//
+// No-op when cfg.LXCTemplate is already set (operator pinned a
+// template explicitly via env var). Returns the volid that the
+// service will use for new gateway LXCs.
+func (s *Service) EnsureDefaultTemplate(ctx context.Context) (string, error) {
+	if s.cfg.LXCTemplate != "" {
+		return s.cfg.LXCTemplate, nil
+	}
+
+	available, err := s.px.ListAvailableLXCTemplates(ctx, s.cfg.NetworkNode)
+	if err != nil {
+		return "", fmt.Errorf("list aplinfo templates on %s: %w", s.cfg.NetworkNode, err)
+	}
+	pick := pickLatestAlpine(available)
+	if pick == "" {
+		return "", fmt.Errorf("gateway: no Alpine 3.x template found in PVE aplinfo on %s — try `pveam update` on the node", s.cfg.NetworkNode)
+	}
+
+	have, err := s.px.StorageHasFile(ctx, s.cfg.NetworkNode, templateStorage, "vztmpl", pick)
+	if err != nil {
+		return "", fmt.Errorf("check template presence: %w", err)
+	}
+	if !have {
+		log.Printf("gateway: downloading Alpine LXC template %s to %s:vztmpl on %s", pick, templateStorage, s.cfg.NetworkNode)
+		taskID, err := s.px.DownloadLXCTemplate(ctx, s.cfg.NetworkNode, templateStorage, pick)
+		if err != nil {
+			return "", fmt.Errorf("dispatch template download: %w", err)
+		}
+		if taskID != "" {
+			if err := s.px.WaitForTask(ctx, s.cfg.NetworkNode, taskID, s.cfg.PollInterval); err != nil {
+				return "", fmt.Errorf("wait template download: %w", err)
+			}
+		}
+	}
+
+	s.cfg.LXCTemplate = fmt.Sprintf("%s:vztmpl/%s", templateStorage, pick)
+	log.Printf("gateway: default template ready: %s", s.cfg.LXCTemplate)
+	return s.cfg.LXCTemplate, nil
+}
+
+// pickLatestAlpine selects the most recent
+// `alpine-3.X-default_DATE_amd64.tar.xz` from an aplinfo listing.
+// Sort key is the embedded YYYYMMDD release date — newer wins.
+// Architecture-locked to amd64 since gateway LXCs only run x86 hosts
+// in v1; ARM64 cluster support is a follow-up.
+func pickLatestAlpine(in []proxmox.AplinfoTemplate) string {
+	var best string
+	for _, t := range in {
+		name := t.Template
+		if !strings.HasPrefix(name, DefaultLXCTemplatePrefix) {
+			continue
+		}
+		if !strings.Contains(name, "_amd64.tar.") {
+			continue
+		}
+		// Lexicographic comparison works because the embedded date
+		// (`_YYYYMMDD_`) sorts naturally.
+		if name > best {
+			best = name
+		}
+	}
+	return best
+}
+
+// LXCTemplate returns the volid the service will use for new
+// gateway LXCs — the operator-pinned value or the auto-downloaded
+// default once EnsureDefaultTemplate has run.
+func (s *Service) LXCTemplate() string { return s.cfg.LXCTemplate }
+
 // Provision creates a gateway LXC for a VPC. Returns the LXC's PVE
 // VMID + the node it lives on (always cfg.NetworkNode in v1). The
 // vpc.CIDR's .1 becomes the eth1 IP — VPC members route through it.
 func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, error) {
+	// Lazy-ensure the default template if startup didn't get to it
+	// (e.g. NetworkNode came online late, aplinfo was momentarily
+	// unreachable). No-op when LXCTemplate is already pinned.
+	if _, err := s.EnsureDefaultTemplate(ctx); err != nil {
+		return 0, "", fmt.Errorf("ensure default lxc template: %w", err)
+	}
 	gwIP, err := s.reserveHostIP(ctx, vpc.ID)
 	if err != nil {
 		return 0, "", fmt.Errorf("reserve host ip: %w", err)

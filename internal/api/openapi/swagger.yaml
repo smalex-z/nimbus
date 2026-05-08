@@ -780,6 +780,24 @@ definitions:
       prefix_len:
         type: integer
     type: object
+  handlers.networkingV1View:
+    properties:
+      configured:
+        description: |-
+          Configured reports whether the minimum required fields
+          (network_node + lxc_ip_pool) are set. The frontend uses this
+          to decide whether to show the picker chip as "configured" or
+          "needs setup."
+        type: boolean
+      lxc_ip_pool:
+        type: string
+      lxc_storage:
+        type: string
+      lxc_template:
+        type: string
+      network_node:
+        type: string
+    type: object
   handlers.oauthSettingsView:
     properties:
       github_callback_url:
@@ -933,6 +951,17 @@ definitions:
         type: string
       prefix_len:
         type: integer
+    type: object
+  handlers.saveNetworkingV1Request:
+    properties:
+      lxc_ip_pool:
+        type: string
+      lxc_storage:
+        type: string
+      lxc_template:
+        type: string
+      network_node:
+        type: string
     type: object
   handlers.saveOAuthRequest:
     properties:
@@ -4883,6 +4912,85 @@ paths:
       security:
       - cookieAuth: []
       summary: Renumber every managed VM into the saved pool (admin)
+      tags:
+      - settings
+  /settings/networking-v1:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkingV1View'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read VPC + gateway-LXC config (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Saves and applies network-node + IP-pool + (optional)
+        template / storage. Rebuilds the gateway and vpcmgr
+        services in-process so the change takes effect
+        without a Nimbus restart.
+      parameters:
+      - description: Networking-v1 settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveNetworkingV1Request'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkingV1View'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update VPC + gateway-LXC config (admin)
       tags:
       - settings
   /settings/oauth:

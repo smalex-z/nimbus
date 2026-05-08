@@ -4967,6 +4967,133 @@
                 }
             }
         },
+        "/settings/networking-v1": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Read VPC + gateway-LXC config (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.networkingV1View"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Saves and applies network-node + IP-pool + (optional)\ntemplate / storage. Rebuilds the gateway and vpcmgr\nservices in-process so the change takes effect\nwithout a Nimbus restart.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Update VPC + gateway-LXC config (admin)",
+                "parameters": [
+                    {
+                        "description": "Networking-v1 settings",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.saveNetworkingV1Request"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.networkingV1View"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/oauth": {
             "get": {
                 "security": [
@@ -8315,6 +8442,27 @@
                 }
             }
         },
+        "handlers.networkingV1View": {
+            "type": "object",
+            "properties": {
+                "configured": {
+                    "description": "Configured reports whether the minimum required fields\n(network_node + lxc_ip_pool) are set. The frontend uses this\nto decide whether to show the picker chip as \"configured\" or\n\"needs setup.\"",
+                    "type": "boolean"
+                },
+                "lxc_ip_pool": {
+                    "type": "string"
+                },
+                "lxc_storage": {
+                    "type": "string"
+                },
+                "lxc_template": {
+                    "type": "string"
+                },
+                "network_node": {
+                    "type": "string"
+                }
+            }
+        },
         "handlers.oauthSettingsView": {
             "type": "object",
             "properties": {
@@ -8513,6 +8661,23 @@
                 },
                 "prefix_len": {
                     "type": "integer"
+                }
+            }
+        },
+        "handlers.saveNetworkingV1Request": {
+            "type": "object",
+            "properties": {
+                "lxc_ip_pool": {
+                    "type": "string"
+                },
+                "lxc_storage": {
+                    "type": "string"
+                },
+                "lxc_template": {
+                    "type": "string"
+                },
+                "network_node": {
+                    "type": "string"
                 }
             }
         },

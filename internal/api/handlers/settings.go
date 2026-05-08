@@ -52,6 +52,12 @@ type NetworkApplier interface {
 	SetClusterLANForMembers(bool)
 }
 
+// NetworkingV1Applier rebuilds the gateway + vpcmgr stack from a
+// freshly-persisted NetworkingV1Settings row. main.go provides the
+// closure that swaps the live services and rebinds them to
+// provision.Service.
+type NetworkingV1Applier func(db.NetworkingV1Settings)
+
 // NetworkOps performs the disruptive renumber + force-gateway batch ops.
 // provision.Service satisfies this; the handler keeps it as an interface so
 // tests can inject a fake without booting the whole orchestrator.
@@ -109,6 +115,7 @@ type Settings struct {
 	networkOps      NetworkOps
 	pool            PoolReseeder
 	sdn             SDNBootstrapper
+	v1Applier       NetworkingV1Applier
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -171,6 +178,15 @@ func (s *Settings) WithNetworkAppliers(a ...NetworkApplier) *Settings {
 // provision.Service satisfies it.
 func (s *Settings) WithNetworkOps(o NetworkOps) *Settings {
 	s.networkOps = o
+	return s
+}
+
+// WithNetworkingV1Applier wires the closure main.go uses to rebuild
+// the gateway + vpcmgr stack after Settings → Network → VPC saves.
+// nil applier means VPC config saves persist but the live stack
+// won't reflect them until restart.
+func (s *Settings) WithNetworkingV1Applier(a NetworkingV1Applier) *Settings {
+	s.v1Applier = a
 	return s
 }
 
@@ -1484,4 +1500,138 @@ func (s *Settings) ResetSDN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, report)
+}
+
+// networkingV1View is the JSON shape for GET / PUT
+// /api/settings/networking-v1.
+type networkingV1View struct {
+	NetworkNode string `json:"network_node"`
+	LXCIPPool   string `json:"lxc_ip_pool"`
+	LXCTemplate string `json:"lxc_template"`
+	LXCStorage  string `json:"lxc_storage"`
+	// Configured reports whether the minimum required fields
+	// (network_node + lxc_ip_pool) are set. The frontend uses this
+	// to decide whether to show the picker chip as "configured" or
+	// "needs setup."
+	Configured bool `json:"configured"`
+}
+
+// GetNetworkingV1 handles GET /api/settings/networking-v1 (admin only).
+//
+// @Summary     Read VPC + gateway-LXC config (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=networkingV1View}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/networking-v1 [get]
+func (s *Settings) GetNetworkingV1(w http.ResponseWriter, _ *http.Request) {
+	row, err := s.auth.GetNetworkingV1Settings()
+	if err != nil {
+		response.InternalError(w, "failed to load networking-v1 settings")
+		return
+	}
+	response.Success(w, networkingV1View{
+		NetworkNode: row.NetworkNode,
+		LXCIPPool:   row.LXCIPPool,
+		LXCTemplate: row.LXCTemplate,
+		LXCStorage:  row.LXCStorage,
+		Configured:  row.NetworkNode != "" && row.LXCIPPool != "",
+	})
+}
+
+type saveNetworkingV1Request struct {
+	NetworkNode string `json:"network_node"`
+	LXCIPPool   string `json:"lxc_ip_pool"`
+	LXCTemplate string `json:"lxc_template"`
+	LXCStorage  string `json:"lxc_storage"`
+}
+
+// SaveNetworkingV1 handles PUT /api/settings/networking-v1 (admin only).
+// Persists the new values, then live-rotates the gateway + vpcmgr
+// stack via the registered applier.
+//
+// @Summary     Update VPC + gateway-LXC config (admin)
+// @Description Saves and applies network-node + IP-pool + (optional)
+// @Description template / storage. Rebuilds the gateway and vpcmgr
+// @Description services in-process so the change takes effect
+// @Description without a Nimbus restart.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveNetworkingV1Request true "Networking-v1 settings"
+// @Success     200  {object} EnvelopeOK{data=networkingV1View}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/networking-v1 [put]
+func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
+	var req saveNetworkingV1Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	// Validate IP pool ranges if provided. Format: "start-end[,start-end...]"
+	if req.LXCIPPool != "" {
+		if err := validateIPPoolRanges(req.LXCIPPool); err != nil {
+			response.BadRequest(w, "lxc_ip_pool: "+err.Error())
+			return
+		}
+	}
+	if err := s.auth.SaveNetworkingV1Settings(db.NetworkingV1Settings{
+		NetworkNode: strings.TrimSpace(req.NetworkNode),
+		LXCIPPool:   strings.TrimSpace(req.LXCIPPool),
+		LXCTemplate: strings.TrimSpace(req.LXCTemplate),
+		LXCStorage:  strings.TrimSpace(req.LXCStorage),
+	}); err != nil {
+		response.InternalError(w, "failed to save networking-v1 settings")
+		return
+	}
+	row, err := s.auth.GetNetworkingV1Settings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+	if s.v1Applier != nil {
+		s.v1Applier(*row)
+	}
+	response.Success(w, networkingV1View{
+		NetworkNode: row.NetworkNode,
+		LXCIPPool:   row.LXCIPPool,
+		LXCTemplate: row.LXCTemplate,
+		LXCStorage:  row.LXCStorage,
+		Configured:  row.NetworkNode != "" && row.LXCIPPool != "",
+	})
+}
+
+// validateIPPoolRanges checks the comma-separated start-end form
+// gateway.seedPool also expects: "192.168.1.200-192.168.1.250" or
+// "10.0.0.10-10.0.0.20,10.0.1.10-10.0.1.20". Each side must parse
+// as IPv4 and end >= start.
+func validateIPPoolRanges(spec string) error {
+	for _, raw := range strings.Split(spec, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parts := strings.SplitN(raw, "-", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("range %q: expected start-end", raw)
+		}
+		start := net.ParseIP(strings.TrimSpace(parts[0])).To4()
+		end := net.ParseIP(strings.TrimSpace(parts[1])).To4()
+		if start == nil || end == nil {
+			return fmt.Errorf("range %q: invalid IPv4", raw)
+		}
+		startU := uint32(start[0])<<24 | uint32(start[1])<<16 | uint32(start[2])<<8 | uint32(start[3])
+		endU := uint32(end[0])<<24 | uint32(end[1])<<16 | uint32(end[2])<<8 | uint32(end[3])
+		if endU < startU {
+			return fmt.Errorf("range %q: end before start", raw)
+		}
+	}
+	return nil
 }

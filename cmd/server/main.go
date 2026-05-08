@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"nimbus/internal/api"
+	"nimbus/internal/api/handlers"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
@@ -159,6 +160,7 @@ func main() {
 		&db.VPC{},
 		&db.VPCMembership{},
 		&db.GatewayLXCIP{},
+		&db.NetworkingV1Settings{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -613,41 +615,105 @@ func main() {
 	}
 
 	// Networking-v1 VPC primitive — VXLAN zone shared across nodes
-	// + per-VPC gateway LXC for NAT egress. Requires NIMBUS_NETWORK_NODE
-	// + NIMBUS_GATEWAY_LXC_IP_POOL + NIMBUS_GATEWAY_LXC_TEMPLATE; when
-	// any of those are missing, VPC support is silently disabled and
-	// the /api/vpcs routes don't mount.
-	var vpcMgrSvc *vpcmgr.Service
-	if cfg.NetworkNode != "" && cfg.GatewayLXCIPPool != "" && cfg.GatewayLXCTemplate != "" {
+	// + per-VPC gateway LXC for NAT egress.
+	//
+	// Config source-of-truth: db.NetworkingV1Settings. On first boot
+	// we one-shot-seed it from env vars (mirrors Gopher/GPU). After
+	// that the Settings → Network page is authoritative and live-
+	// rotates without a restart via the applier below.
+	v1Settings, err := authSvc.GetNetworkingV1Settings()
+	if err != nil {
+		log.Fatalf("failed to load networking-v1 settings: %v", err)
+	}
+	if v1Settings.NetworkNode == "" && v1Settings.LXCIPPool == "" &&
+		(cfg.NetworkNode != "" || cfg.GatewayLXCIPPool != "") {
+		seed := db.NetworkingV1Settings{
+			NetworkNode: cfg.NetworkNode,
+			LXCIPPool:   cfg.GatewayLXCIPPool,
+			LXCTemplate: cfg.GatewayLXCTemplate,
+			LXCStorage:  cfg.GatewayLXCStorage,
+		}
+		if err := authSvc.SaveNetworkingV1Settings(seed); err != nil {
+			log.Printf("warning: seed networking-v1 settings from env: %v", err)
+		} else {
+			log.Printf("seeded networking-v1 settings from env (one-time migration)")
+			v1Settings, _ = authSvc.GetNetworkingV1Settings()
+		}
+	}
+
+	// vpcStack lazily holds the live gateway + vpcmgr services.
+	// rebuildVPCStack tears down the old pair and stands up new ones
+	// from current settings; called once at startup and again from
+	// the Settings → Network save handler.
+	type vpcStack struct {
+		gw  *gateway.Service
+		mgr *vpcmgr.Service
+	}
+	var (
+		vpcMgrSvc       *vpcmgr.Service
+		vpcStackCurrent *vpcStack
+	)
+	rebuildVPCStack := func(s db.NetworkingV1Settings) {
+		if s.NetworkNode == "" || s.LXCIPPool == "" {
+			log.Printf("VPCs disabled — Settings → Network is missing network_node and/or lxc_ip_pool")
+			vpcMgrSvc = nil
+			vpcStackCurrent = nil
+			provSvc.SetVPCMgr(nil)
+			return
+		}
+		storage := s.LXCStorage
+		if storage == "" {
+			storage = "local-lvm"
+		}
 		gwSvc, gwErr := gateway.New(pveClient, database.DB, gateway.Config{
-			NetworkNode:   cfg.NetworkNode,
+			NetworkNode:   s.NetworkNode,
 			HostBridge:    "vmbr0",
 			HostGatewayIP: cfg.GatewayIP,
 			HostPrefixLen: cfg.VMPrefixLen,
-			IPPool:        cfg.GatewayLXCIPPool,
-			LXCTemplate:   cfg.GatewayLXCTemplate,
-			LXCStorage:    cfg.GatewayLXCStorage,
+			IPPool:        s.LXCIPPool,
+			LXCTemplate:   s.LXCTemplate,
+			LXCStorage:    storage,
 		})
 		if gwErr != nil {
 			log.Printf("warning: gateway service disabled (%v) — VPCs unavailable", gwErr)
-		} else {
-			peerResolver := vpcmgr.PeerResolverFunc(func(ctx context.Context) (string, error) {
-				return proxmox.ResolveOnlinePeerIPs(ctx, pveClient)
-			})
-			mgr, vpcErr := vpcmgr.New(pveClient, peerResolver, database.DB, vpcmgr.Config{
-				PoolCIDR: cfg.VPCPoolCIDR,
-			})
-			if vpcErr != nil {
-				log.Printf("warning: vpcmgr disabled (%v)", vpcErr)
-			} else {
-				mgr.SetGateway(&vpcGatewayAdapter{gw: gwSvc})
-				vpcMgrSvc = mgr
-				provSvc.SetVPCMgr(mgr)
-			}
+			vpcMgrSvc = nil
+			vpcStackCurrent = nil
+			provSvc.SetVPCMgr(nil)
+			return
 		}
-	} else {
-		log.Printf("VPCs disabled — set NIMBUS_NETWORK_NODE + NIMBUS_GATEWAY_LXC_IP_POOL + NIMBUS_GATEWAY_LXC_TEMPLATE to enable")
+		ensureCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		if _, err := gwSvc.EnsureDefaultTemplate(ensureCtx); err != nil {
+			log.Printf("warning: gateway template ensure (continuing — will retry on first VPC create): %v", err)
+		}
+		cancel()
+
+		peerResolver := vpcmgr.PeerResolverFunc(func(ctx context.Context) (string, error) {
+			return proxmox.ResolveOnlinePeerIPs(ctx, pveClient)
+		})
+		mgr, vpcErr := vpcmgr.New(pveClient, peerResolver, database.DB, vpcmgr.Config{
+			PoolCIDR: cfg.VPCPoolCIDR,
+		})
+		if vpcErr != nil {
+			log.Printf("warning: vpcmgr disabled (%v)", vpcErr)
+			vpcMgrSvc = nil
+			vpcStackCurrent = nil
+			provSvc.SetVPCMgr(nil)
+			return
+		}
+		mgr.SetGateway(&vpcGatewayAdapter{gw: gwSvc})
+		vpcMgrSvc = mgr
+		vpcStackCurrent = &vpcStack{gw: gwSvc, mgr: mgr}
+		provSvc.SetVPCMgr(mgr)
+		log.Printf("VPCs ready (network_node=%s, ip_pool=%s, template=%s)",
+			s.NetworkNode, s.LXCIPPool, gwSvc.LXCTemplate())
 	}
+	rebuildVPCStack(*v1Settings)
+	_ = vpcStackCurrent // available for future debug surfacing
+
+	// Applier the Settings → Network handler calls on save. Accepts
+	// the freshly-persisted row and rebuilds the gateway + vpcmgr
+	// stack so live config takes effect without a server restart.
+	v1Applier := handlers.NetworkingV1Applier(rebuildVPCStack)
 
 	// Legacy SDN manager. Networking-v1 doesn't dispatch through
 	// vnetmgr at provision time anymore — Standalone + VPC primitives
@@ -684,6 +750,7 @@ func main() {
 		NodeMgr:       nodeMgrSvc,
 		VNetMgr:       vnetMgr,
 		VPCMgr:        vpcMgrSvc,
+		V1Applier:     v1Applier,
 		Config:        cfg,
 		Restart:       restartSelf,
 	})

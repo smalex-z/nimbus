@@ -753,3 +753,20 @@ type GatewayLXCIP struct {
 	VPCID  *uint  `gorm:"column:vpc_id;index"`
 	Status string `gorm:"column:status;not null;default:'free'"`
 }
+
+// NetworkingV1Settings is the singleton (ID=1) holding the
+// admin-editable VPC + gateway-LXC config. Mirrors the Gopher /
+// GPU pattern: env vars seed-once on first boot, after that the
+// Settings → Network page is the source of truth and live-rotates
+// without a server restart.
+//
+// LXCTemplate stays optional even here — when blank, the gateway
+// service auto-picks the latest Alpine 3.x via PVE's aplinfo. The
+// admin can still pin a specific template volid if they want to.
+type NetworkingV1Settings struct {
+	ID          uint   `gorm:"primaryKey"`
+	NetworkNode string `gorm:"column:network_node;default:''"`
+	LXCIPPool   string `gorm:"column:lxc_ip_pool;default:''"`
+	LXCTemplate string `gorm:"column:lxc_template;default:''"`
+	LXCStorage  string `gorm:"column:lxc_storage;default:'local-lvm'"`
+}

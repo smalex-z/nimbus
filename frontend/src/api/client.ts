@@ -1295,6 +1295,41 @@ export async function getNetworkingInfo(): Promise<NetworkingInfo> {
   return data
 }
 
+// NetworkingV1Settings is the admin-editable VPC + gateway-LXC
+// config. Mirrors the GopherSettings / GPUSettings shape: GET
+// returns the persisted state, PUT writes and live-rotates the
+// gateway/vpcmgr stack.
+export interface NetworkingV1Settings {
+  network_node: string
+  lxc_ip_pool: string
+  lxc_template: string
+  lxc_storage: string
+  configured: boolean
+}
+
+export async function getNetworkingV1Settings(): Promise<NetworkingV1Settings> {
+  const { data } = await api.get<NetworkingV1Settings>('/settings/networking-v1')
+  return data
+}
+
+export interface SaveNetworkingV1Request {
+  network_node?: string
+  lxc_ip_pool?: string
+  lxc_template?: string
+  lxc_storage?: string
+}
+
+export async function saveNetworkingV1Settings(
+  req: SaveNetworkingV1Request,
+): Promise<NetworkingV1Settings> {
+  // Apply triggers a gateway-stack rebuild + Alpine template ensure
+  // (~30s on first run if the template isn't cached yet).
+  const { data } = await api.put<NetworkingV1Settings>('/settings/networking-v1', req, {
+    timeout: 90_000,
+  })
+  return data
+}
+
 // PublicSDNStatus is the verified-user-readable view of SDN
 // enablement. Drives the Provision form picker: when Enabled is
 // false the picker collapses to a single greyed "Cluster LAN" tile;
