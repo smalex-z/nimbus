@@ -55,6 +55,7 @@ import (
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/standalonenet"
 	"nimbus/internal/tunnel"
 	"nimbus/internal/vnetmgr"
 )
@@ -594,6 +595,21 @@ func main() {
 	// and the next cycle retries.
 	go runNodeReconcileLoop(bgCtx, nodeMgrSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
+	// Networking-v1 Standalone primitive — per-VM Simple zone with
+	// PVE-native SNAT. Wired before the legacy vnetmgr so new
+	// provisions default to it; legacy SubnetResolver path remains
+	// available for callers that pass SubnetID/SubnetName/Bridge
+	// during the deprecation window. Construction failure (bad
+	// CIDR) is logged and downgrades to legacy-only mode.
+	standaloneNetSvc, snErr := standalonenet.New(pveClient, database.DB, standalonenet.Config{
+		PoolCIDR: cfg.StandalonePoolCIDR,
+	})
+	if snErr != nil {
+		log.Printf("warning: standalonenet disabled (%v) — provisions fall back to legacy SDN path", snErr)
+	} else {
+		provSvc.SetStandaloneNet(standaloneNetSvc)
+	}
+
 	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
 	// the With* builders wire the DB + pool + VM-ref counter for the
 	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
@@ -606,9 +622,11 @@ func main() {
 		WithDB(database.DB).
 		WithPool(pool).
 		WithVMRefCounter(provSvc)
-	// Wire vnetmgr into provision so the per-user subnet path
-	// (ResolveForProvision → CreateSubnet/EnsureDefault) fires
-	// whenever SDN is enabled. nil here = SDN-disabled fallback.
+	// Wire vnetmgr into provision so legacy callers that explicitly
+	// pass SubnetID / SubnetName / Bridge keep working during the
+	// deprecation window. nil here = SDN-disabled fallback (and the
+	// dispatcher uses standalonenet — or legacy global pool if neither
+	// is wired).
 	provSvc.SetSubnetResolver(vnetMgr)
 	bootstrapSDNCtx, bootstrapSDNCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := vnetMgr.Bootstrap(bootstrapSDNCtx); err != nil {
