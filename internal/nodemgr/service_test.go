@@ -32,6 +32,9 @@ type fakePVE struct {
 	migrateErr    error
 	deleteNodeErr error
 
+	destroys   []destroyCall
+	destroyErr error
+
 	// Hook fired right after each MigrateVM call returns. Tests use it
 	// to mutate cluster state mid-batch (e.g. fill a node) so the next
 	// migration's re-validation triggers.
@@ -43,6 +46,11 @@ type migrateCall struct {
 	VMID   int
 	Target string
 	Online bool
+}
+
+type destroyCall struct {
+	Node string
+	VMID int
 }
 
 func (f *fakePVE) GetNodes(_ context.Context) ([]proxmox.Node, error) {
@@ -114,6 +122,16 @@ func (f *fakePVE) MigrateVM(_ context.Context, source string, vmid int, target s
 		hook(call)
 	}
 	return "", nil // empty UPID skips WaitForTask
+}
+
+func (f *fakePVE) DestroyVM(_ context.Context, node string, vmid int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.destroys = append(f.destroys, destroyCall{Node: node, VMID: vmid})
+	if f.destroyErr != nil {
+		return "", f.destroyErr
+	}
+	return "", nil
 }
 
 func (f *fakePVE) WaitForTask(_ context.Context, _, _ string, _ time.Duration) error { return nil }

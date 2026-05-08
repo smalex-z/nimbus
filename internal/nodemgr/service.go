@@ -20,6 +20,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"nimbus/internal/bootstrap"
 	"nimbus/internal/db"
 	"nimbus/internal/nodescore"
 	"nimbus/internal/proxmox"
@@ -50,8 +51,17 @@ type ProxmoxClient interface {
 	ClusterName(ctx context.Context) (string, error)
 	Version(ctx context.Context) (string, error)
 	MigrateVM(ctx context.Context, sourceNode string, vmid int, targetNode string, online bool) (string, error)
+	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	DeleteNode(ctx context.Context, node string) error
+}
+
+// TemplateBootstrapper is the subset of *bootstrap.Service nodemgr depends
+// on for auto-bootstrapping templates onto newly-observed nodes. Defined
+// at the consumer per the "accept interfaces" idiom; injected via
+// SetTemplateBootstrapper to keep New's signature unchanged.
+type TemplateBootstrapper interface {
+	Bootstrap(ctx context.Context, req bootstrap.Request) (*bootstrap.Result, error)
 }
 
 // Service is the admin-facing handle for node management. Callers obtain one
@@ -67,6 +77,25 @@ type Service struct {
 	// the map to refuse mid-flight mutations on the same node.
 	drainsMu       sync.Mutex
 	drainsInFlight map[string]bool
+
+	// bootstrapper is the optional template-bootstrap dependency wired
+	// in by main.go via SetTemplateBootstrapper. nil means auto-bootstrap
+	// is disabled (e.g. tests, install-wizard mode).
+	bootstrapper TemplateBootstrapper
+
+	// bootstrapsMu guards bootstrapsInFlight. Bootstrap is slow
+	// (~10-20 min for the full 4-OS catalog) and Reconcile fires every
+	// 60 s — without this guard we'd stack parallel bootstraps onto the
+	// same node. Mirrors the drainsInFlight pattern.
+	bootstrapsMu       sync.Mutex
+	bootstrapsInFlight map[string]bool
+}
+
+// SetTemplateBootstrapper wires a bootstrap service into the nodemgr so
+// the background Reconcile loop can fan out template installs onto newly-
+// observed nodes. Idempotent — pass nil to disable.
+func (s *Service) SetTemplateBootstrapper(b TemplateBootstrapper) {
+	s.bootstrapper = b
 }
 
 // Config tunes per-VM execution timeouts and reconciler thresholds. Zero
@@ -108,10 +137,11 @@ func New(database *gorm.DB, px ProxmoxClient, cfg Config) *Service {
 		cfg.VacateMissThreshold = 3
 	}
 	return &Service{
-		db:             database,
-		px:             px,
-		cfg:            cfg,
-		drainsInFlight: make(map[string]bool),
+		db:                 database,
+		px:                 px,
+		cfg:                cfg,
+		drainsInFlight:     make(map[string]bool),
+		bootstrapsInFlight: make(map[string]bool),
 	}
 }
 
@@ -565,14 +595,114 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 			hwByNode[name] = hu
 		}
 	}
-	if _, err := s.reconcileObserved(ctx, nodes, hwByNode); err != nil {
+	rowsByName, err := s.reconcileObserved(ctx, nodes, hwByNode)
+	if err != nil {
 		return 0, 0, err
 	}
 	pruned, err = s.PruneMissing(ctx, cycleInterval)
 	if err != nil {
 		return len(nodes), 0, err
 	}
+	// Fan out template bootstrap onto any online node that's missing
+	// templates. Each call is async + guarded so a slow image download
+	// (~10-20 min for the full 4-OS catalog) doesn't stack across the
+	// every-60 s reconcile cadence.
+	s.maybeBootstrapMissingTemplates(ctx, nodes, rowsByName)
 	return len(nodes), pruned, nil
+}
+
+// maybeBootstrapMissingTemplates inspects each online node and kicks off
+// bootstrap.Service.Bootstrap async for any node missing one or more
+// templates. No-op when no bootstrapper is wired, when the node is
+// cordoned/draining, when arch isn't amd64 (catalog is amd64-only), or
+// when a bootstrap is already in flight for that node.
+//
+// Naturally handles two scenarios with the same code path:
+//   - new node joins the cluster → 0 templates → bootstrap fires
+//   - operator retried after a partial failure → 1-3 templates → fires
+//     for the missing ones (bootstrap is idempotent + force=false skips
+//     present ones, so it cleanly tops up).
+func (s *Service) maybeBootstrapMissingTemplates(ctx context.Context, nodes []proxmox.Node, rowsByName map[string]db.Node) {
+	if s.bootstrapper == nil {
+		return
+	}
+	expected := len(bootstrap.Catalog)
+
+	// Count templates already installed per node.
+	var rows []db.NodeTemplate
+	if err := s.db.WithContext(ctx).Find(&rows).Error; err != nil {
+		// Best-effort — skip the whole pass on DB error rather than
+		// firing bootstraps with stale info.
+		return
+	}
+	countByNode := make(map[string]int, len(nodes))
+	for _, r := range rows {
+		countByNode[r.Node]++
+	}
+
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		row := rowsByName[n.Name]
+		if lockOrNone(row.LockState) != "none" {
+			continue
+		}
+		// Skip non-amd64 hosts — Catalog only ships amd64 cloud
+		// images; firing on ARM would just re-fail every cycle.
+		archARM := false
+		for _, t := range nodescore.DeriveAutoTags(autoTagInputFor(row)) {
+			if t == "arm" {
+				archARM = true
+				break
+			}
+		}
+		if archARM {
+			continue
+		}
+		if countByNode[n.Name] >= expected {
+			continue
+		}
+		if !s.acquireBootstrapSlot(n.Name) {
+			continue
+		}
+		go s.runBootstrap(n.Name)
+	}
+}
+
+// acquireBootstrapSlot reserves the in-flight slot for `node`. Returns
+// false if a bootstrap is already in flight on that node (caller skips).
+func (s *Service) acquireBootstrapSlot(node string) bool {
+	s.bootstrapsMu.Lock()
+	defer s.bootstrapsMu.Unlock()
+	if s.bootstrapsInFlight[node] {
+		return false
+	}
+	s.bootstrapsInFlight[node] = true
+	return true
+}
+
+// releaseBootstrapSlot clears the in-flight marker so the next reconcile
+// pass can retry (e.g. after a partial-failure top-up, or if the user
+// later attaches storage).
+func (s *Service) releaseBootstrapSlot(node string) {
+	s.bootstrapsMu.Lock()
+	defer s.bootstrapsMu.Unlock()
+	delete(s.bootstrapsInFlight, node)
+}
+
+// runBootstrap is the goroutine body — uses a fresh background context
+// (the parent Reconcile ctx is short-lived; bootstrap takes 10-20 min)
+// and always releases the in-flight slot on exit.
+func (s *Service) runBootstrap(node string) {
+	defer s.releaseBootstrapSlot(node)
+	// Detach from the Reconcile ctx so a 60 s tick doesn't cancel a
+	// 20 min image download. Use a generous overall cap.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	_, _ = s.bootstrapper.Bootstrap(ctx, bootstrap.Request{
+		Nodes: []string{node},
+	})
 }
 
 // Binding is what GET /api/proxmox/binding returns — the Nodes page

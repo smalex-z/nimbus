@@ -583,6 +583,12 @@ func main() {
 		SelfHostName:        selfHost,
 		VMDiskStorage:       cfg.VMDiskStorage,
 	})
+	// Auto-bootstrap templates onto newly-observed nodes. The reconcile
+	// loop checks each online node's template count and fires
+	// bootstrapSvc.Bootstrap async for any node with a deficit. Slow
+	// (~10-20 min for the full 4-OS catalog) so an in-flight guard
+	// inside nodemgr prevents the every-60 s tick from stacking calls.
+	nodeMgrSvc.SetTemplateBootstrapper(bootstrapSvc)
 	// Background reconcile: same cadence as the IP pool's. Observed
 	// nodes upsert + LastSeenAt bump; unobserved nodes prune after the
 	// miss threshold, mirroring the ippool pattern. Failures are logged
