@@ -26,6 +26,7 @@ import (
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
 	"nimbus/internal/vnetmgr"
+	"nimbus/internal/vpcmgr"
 )
 
 // Deps bundles the dependencies the router needs.
@@ -45,7 +46,8 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
-	VNetMgr       *vnetmgr.Service // P1: SDN bootstrap; P2: per-user VNet allocation
+	VNetMgr       *vnetmgr.Service // legacy: per-user-subnet path during deprecation
+	VPCMgr        *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
 	Config        *config.Config
 	Restart       func()
 }
@@ -91,6 +93,10 @@ func NewRouter(d Deps) http.Handler {
 	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
 	subnets := handlers.NewSubnets(d.VNetMgr)
+	var vpcs *handlers.VPCs
+	if d.VPCMgr != nil {
+		vpcs = handlers.NewVPCs(d.VPCMgr)
+	}
 	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU
@@ -404,9 +410,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{id}/default", keys.SetDefault)
 				})
 
-				// Per-user SDN subnets — OCI-style: each user manages
-				// their own list of subnets, picks one (or creates new
-				// inline) at provision time. Same shape as /keys.
+				// Per-user SDN subnets — legacy. Kept during the
+				// Networking-v1 deprecation window so existing
+				// callers can read their old subnets; new networks
+				// land on the Standalone primitive or VPCs below.
 				r.Route("/subnets", func(r chi.Router) {
 					r.Get("/", subnets.List)
 					r.Post("/", subnets.Create)
@@ -414,6 +421,19 @@ func NewRouter(d Deps) http.Handler {
 					r.Delete("/{id}", subnets.Delete)
 					r.Post("/{id}/default", subnets.SetDefault)
 				})
+
+				// Networking-v1 VPCs. Each VPC is a VXLAN zone
+				// shared across nodes plus a dedicated gateway LXC
+				// for NAT egress. Gated behind d.VPCMgr — disabled
+				// when standalonenet/vpcmgr aren't wired.
+				if vpcs != nil {
+					r.Route("/vpcs", func(r chi.Router) {
+						r.Get("/", vpcs.List)
+						r.Post("/", vpcs.Create)
+						r.Get("/{id}", vpcs.Get)
+						r.Delete("/{id}", vpcs.Delete)
+					})
+				}
 
 				// User-owned buckets on the shared MinIO host. Each user has
 				// a stable name prefix (`<sanitized-name>-u<id>`); composed

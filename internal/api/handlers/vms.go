@@ -54,6 +54,14 @@ type createVMRequest struct {
 	// cluster bridge directly (e.g. "vmbr0"), bypassing per-user SDN.
 	// Non-admins setting this get a 400.
 	Bridge string `json:"bridge,omitempty"`
+
+	// NetworkMode is the Networking-v1 dispatch:
+	//   "standalone" (default) → per-VM Simple zone with PVE SNAT
+	//   "vpc"                  → join an existing VPC (VPCID required)
+	//   "" (empty)             → standalone if wired, else legacy
+	NetworkMode string `json:"network_mode,omitempty"`
+	// VPCID is required when NetworkMode == "vpc".
+	VPCID *uint `json:"vpc_id,omitempty"`
 }
 
 // Create handles POST /api/vms — the long-running provision call.
@@ -160,6 +168,8 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		SubnetID:         req.SubnetID,
 		SubnetName:       req.SubnetName,
 		Bridge:           req.Bridge,
+		NetworkMode:      provision.NetworkMode(req.NetworkMode),
+		VPCID:            req.VPCID,
 	}, reporter)
 	if err != nil {
 		writeLine(map[string]any{

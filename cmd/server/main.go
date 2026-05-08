@@ -43,6 +43,7 @@ import (
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/gateway"
 	"nimbus/internal/gpu"
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
@@ -58,6 +59,7 @@ import (
 	"nimbus/internal/standalonenet"
 	"nimbus/internal/tunnel"
 	"nimbus/internal/vnetmgr"
+	"nimbus/internal/vpcmgr"
 )
 
 //go:embed all:frontend/dist
@@ -610,6 +612,43 @@ func main() {
 		provSvc.SetStandaloneNet(standaloneNetSvc)
 	}
 
+	// Networking-v1 VPC primitive — VXLAN zone shared across nodes
+	// + per-VPC gateway LXC for NAT egress. Requires NIMBUS_NETWORK_NODE
+	// + NIMBUS_GATEWAY_LXC_IP_POOL + NIMBUS_GATEWAY_LXC_TEMPLATE; when
+	// any of those are missing, VPC support is silently disabled and
+	// the /api/vpcs routes don't mount.
+	var vpcMgrSvc *vpcmgr.Service
+	if cfg.NetworkNode != "" && cfg.GatewayLXCIPPool != "" && cfg.GatewayLXCTemplate != "" {
+		gwSvc, gwErr := gateway.New(pveClient, database.DB, gateway.Config{
+			NetworkNode:   cfg.NetworkNode,
+			HostBridge:    "vmbr0",
+			HostGatewayIP: cfg.GatewayIP,
+			HostPrefixLen: cfg.VMPrefixLen,
+			IPPool:        cfg.GatewayLXCIPPool,
+			LXCTemplate:   cfg.GatewayLXCTemplate,
+			LXCStorage:    cfg.GatewayLXCStorage,
+		})
+		if gwErr != nil {
+			log.Printf("warning: gateway service disabled (%v) — VPCs unavailable", gwErr)
+		} else {
+			peerResolver := vpcmgr.PeerResolverFunc(func(ctx context.Context) (string, error) {
+				return proxmox.ResolveOnlinePeerIPs(ctx, pveClient)
+			})
+			mgr, vpcErr := vpcmgr.New(pveClient, peerResolver, database.DB, vpcmgr.Config{
+				PoolCIDR: cfg.VPCPoolCIDR,
+			})
+			if vpcErr != nil {
+				log.Printf("warning: vpcmgr disabled (%v)", vpcErr)
+			} else {
+				mgr.SetGateway(&vpcGatewayAdapter{gw: gwSvc})
+				vpcMgrSvc = mgr
+				provSvc.SetVPCMgr(mgr)
+			}
+		}
+	} else {
+		log.Printf("VPCs disabled — set NIMBUS_NETWORK_NODE + NIMBUS_GATEWAY_LXC_IP_POOL + NIMBUS_GATEWAY_LXC_TEMPLATE to enable")
+	}
+
 	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
 	// the With* builders wire the DB + pool + VM-ref counter for the
 	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
@@ -651,6 +690,7 @@ func main() {
 		GX10Assets:    gx10AssetsFS,
 		NodeMgr:       nodeMgrSvc,
 		VNetMgr:       vnetMgr,
+		VPCMgr:        vpcMgrSvc,
 		Config:        cfg,
 		Restart:       restartSelf,
 	})
@@ -751,6 +791,22 @@ func runBootstrap(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// vpcGatewayAdapter bridges the gateway.Service to vpcmgr's
+// GatewayProvisioner interface. The interface lives in vpcmgr; the
+// real implementation is in gateway. Adapter prevents an import cycle
+// between the two packages.
+type vpcGatewayAdapter struct {
+	gw *gateway.Service
+}
+
+func (a *vpcGatewayAdapter) Provision(ctx context.Context, vpc *db.VPC) (int, string, error) {
+	return a.gw.Provision(ctx, vpc)
+}
+
+func (a *vpcGatewayAdapter) Destroy(ctx context.Context, vpc *db.VPC) error {
+	return a.gw.Destroy(ctx, vpc)
 }
 
 func splitCSV(s string) []string {

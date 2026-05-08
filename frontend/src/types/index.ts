@@ -78,6 +78,13 @@ export interface ProvisionRequest {
   // bridge (e.g. "vmbr0"), bypassing per-user SDN. Members get a
   // 400. Sent only when the form's subnetMode is 'bridge'.
   bridge?: string
+  // Networking-v1 dispatch:
+  //   "standalone" (default) → per-VM Simple zone with PVE SNAT
+  //   "vpc"                  → join an existing VPC (vpc_id required)
+  //   omitted                → standalone if available, else legacy
+  network_mode?: 'standalone' | 'vpc'
+  // Required when network_mode === "vpc".
+  vpc_id?: number
 }
 
 export interface SSHKey {

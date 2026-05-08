@@ -7224,6 +7224,243 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/vpcs": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "List the caller's VPCs",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/handlers.vpcView"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Provisions a per-VPC VXLAN zone + dedicated gateway LXC\nfor NAT egress. Returns once the gateway LXC is healthy.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Create a new VPC",
+                "parameters": [
+                    {
+                        "description": "VPC to create",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.createVPCRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.vpcView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/vpcs/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Get a single VPC",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "VPC ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.vpcView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Refused while any VM is still a member. Tears down the\ngateway LXC, VXLAN zone, VNet, subnet, and IP allocations.",
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Delete a VPC",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "VPC ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -7851,6 +8088,10 @@ const docTemplate = `{
                 "hostname": {
                     "type": "string"
                 },
+                "network_mode": {
+                    "description": "NetworkMode is the Networking-v1 dispatch:\n  \"standalone\" (default) → per-VM Simple zone with PVE SNAT\n  \"vpc\"                  → join an existing VPC (VPCID required)\n  \"\" (empty)             → standalone if wired, else legacy",
+                    "type": "string"
+                },
                 "os_template": {
                     "type": "string"
                 },
@@ -7885,6 +8126,18 @@ const docTemplate = `{
                 },
                 "tunnel_port": {
                     "type": "integer"
+                },
+                "vpc_id": {
+                    "description": "VPCID is required when NetworkMode == \"vpc\".",
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.createVPCRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
                 }
             }
         },
@@ -8768,6 +9021,35 @@ const docTemplate = `{
                 "sourceExternal"
             ]
         },
+        "handlers.vpcView": {
+            "type": "object",
+            "properties": {
+                "cidr": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "gateway_lxc_id": {
+                    "type": "integer"
+                },
+                "gateway_node": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "member_count": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
         "handlers.workerStatusRequest": {
             "type": "object",
             "properties": {
@@ -9509,6 +9791,10 @@ const docTemplate = `{
             "properties": {
                 "apply_error": {
                     "type": "string"
+                },
+                "orphans_scrubbed": {
+                    "description": "OrphansScrubbed counts PVE vnets in the zone that weren't\ntracked in Nimbus's DB but were holding the zone hostage\n(residue from earlier failed deletes). Reset force-cleans\nthese so the zone delete can proceed.",
+                    "type": "integer"
                 },
                 "subnet_failures": {
                     "type": "array",

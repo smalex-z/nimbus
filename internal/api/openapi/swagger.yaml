@@ -466,6 +466,13 @@ definitions:
         type: boolean
       hostname:
         type: string
+      network_mode:
+        description: |-
+          NetworkMode is the Networking-v1 dispatch:
+            "standalone" (default) → per-VM Simple zone with PVE SNAT
+            "vpc"                  → join an existing VPC (VPCID required)
+            "" (empty)             → standalone if wired, else legacy
+        type: string
       os_template:
         type: string
       public_tunnel:
@@ -497,6 +504,14 @@ definitions:
         type: string
       tunnel_port:
         type: integer
+      vpc_id:
+        description: VPCID is required when NetworkMode == "vpc".
+        type: integer
+    type: object
+  handlers.createVPCRequest:
+    properties:
+      name:
+        type: string
     type: object
   handlers.credentialsView:
     properties:
@@ -1101,6 +1116,25 @@ definitions:
     - sourceLocal
     - sourceForeign
     - sourceExternal
+  handlers.vpcView:
+    properties:
+      cidr:
+        type: string
+      created_at:
+        type: string
+      gateway_lxc_id:
+        type: integer
+      gateway_node:
+        type: string
+      id:
+        type: integer
+      member_count:
+        type: integer
+      name:
+        type: string
+      status:
+        type: string
+    type: object
   handlers.workerStatusRequest:
     properties:
       artifact_path:
@@ -1658,6 +1692,13 @@ definitions:
     properties:
       apply_error:
         type: string
+      orphans_scrubbed:
+        description: |-
+          OrphansScrubbed counts PVE vnets in the zone that weren't
+          tracked in Nimbus's DB but were holding the zone hostage
+          (residue from earlier failed deletes). Reset force-cleans
+          these so the zone delete can proceed.
+        type: integer
       subnet_failures:
         items:
           type: string
@@ -6317,6 +6358,152 @@ paths:
       summary: Force a vms-table reconcile against Proxmox (admin)
       tags:
       - vms
+  /vpcs:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.vpcView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the caller's VPCs
+      tags:
+      - vpcs
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Provisions a per-VPC VXLAN zone + dedicated gateway LXC
+        for NAT egress. Returns once the gateway LXC is healthy.
+      parameters:
+      - description: VPC to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createVPCRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.vpcView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a new VPC
+      tags:
+      - vpcs
+  /vpcs/{id}:
+    delete:
+      description: |-
+        Refused while any VM is still a member. Tears down the
+        gateway LXC, VXLAN zone, VNet, subnet, and IP allocations.
+      parameters:
+      - description: VPC ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a VPC
+      tags:
+      - vpcs
+    get:
+      parameters:
+      - description: VPC ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.vpcView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get a single VPC
+      tags:
+      - vpcs
 securityDefinitions:
   cookieAuth:
     description: |-

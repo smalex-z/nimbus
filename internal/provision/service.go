@@ -223,6 +223,11 @@ type Service struct {
 	// during the deprecation window for callers that pass SubnetID /
 	// SubnetName / Bridge explicitly.
 	standaloneNet StandaloneNetService
+
+	// vpcMgr is the Networking-v1 VPC primitive (VXLAN zone + per-VPC
+	// gateway LXC). nil means VPC mode is unavailable on this Nimbus
+	// instance (admin hasn't configured network node + gateway pool).
+	vpcMgr VPCMgrService
 }
 
 // SubnetResolver is the small interface vnetmgr.Service satisfies for
@@ -260,6 +265,23 @@ type StandaloneNetService interface {
 // the legacy SubnetResolver path. Idempotent; pass nil to disable.
 func (s *Service) SetStandaloneNet(svc StandaloneNetService) {
 	s.standaloneNet = svc
+}
+
+// VPCMgrService is the slice of vpcmgr.Service the provision flow
+// consumes for NetworkModeVPC. Defined here per the "accept
+// interfaces" idiom.
+type VPCMgrService interface {
+	GetVPC(ctx context.Context, vpcID, ownerID uint, isAdmin bool) (*db.VPC, error)
+	AllocateMemberIP(ctx context.Context, vpcID, vmID uint) (string, error)
+	ReleaseMember(ctx context.Context, vmID uint) error
+	GetMembership(ctx context.Context, vmID uint) (*db.VPCMembership, error)
+}
+
+// SetVPCMgr wires the vpcmgr service onto the Service. When non-nil,
+// requests with NetworkMode=vpc + VPCID set go through the VPC path.
+// nil leaves VPC mode permanently unavailable (returns 400).
+func (s *Service) SetVPCMgr(svc VPCMgrService) {
+	s.vpcMgr = svc
 }
 
 // SetQuotaResolver wires a QuotaResolver onto the Service so the
@@ -473,16 +495,37 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	//     NetworkMode + standaloneNet not wired): existing
 	//     SubnetResolver + global pool flow, kept during deprecation.
 	useStandalone := s.shouldUseStandalone(req)
-	if req.NetworkMode == NetworkModeVPC {
+	useVPC := req.NetworkMode == NetworkModeVPC
+	if useVPC && s.vpcMgr == nil {
 		return nil, &internalerrors.ValidationError{
 			Field:   "network_mode",
-			Message: "VPC networking is not yet implemented (Phase 3)",
+			Message: "VPC networking is not configured on this Nimbus instance",
 		}
+	}
+	if useVPC && req.VPCID == nil {
+		return nil, &internalerrors.ValidationError{
+			Field:   "vpc_id",
+			Message: "vpc_id is required when network_mode=vpc",
+		}
+	}
+	// Validate the VPC up-front (existence + ownership) so we fail
+	// fast before any IP / clone work.
+	var vpc *db.VPC
+	if useVPC {
+		ownerID := uint(0)
+		if req.OwnerID != nil {
+			ownerID = *req.OwnerID
+		}
+		v, err := s.vpcMgr.GetVPC(ctx, *req.VPCID, ownerID, req.RequesterIsAdmin)
+		if err != nil {
+			return nil, err
+		}
+		vpc = v
 	}
 
 	var subnet *db.UserSubnet
 	bridgeOverride := ""
-	if !useStandalone {
+	if !useStandalone && !useVPC {
 		// Bridge override (admin-only escape hatch): when req.Bridge is
 		// set, the VM lands on that bridge directly with the global IP
 		// pool, bypassing per-user SDN entirely. Used by admins for
@@ -512,16 +555,16 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 
 	// Step 1: reserve IP — for legacy/bridge-override only. The
-	// Standalone path defers IP allocation until after NextVMID
-	// (the IP is .10 of the VMID-hashed /24), so there's nothing to
-	// reserve from a pool here.
+	// Standalone and VPC paths defer IP allocation until after
+	// NextVMID (Standalone derives from the VMID-hashed /24; VPC
+	// allocates from the VPC's /16 via vpcmgr).
 	//
 	// SDN legacy path uses the per-subnet pool (scoped to one
 	// user-subnet's CIDR); plain legacy uses the global pool. defer
 	// release on any later failure — same shape both paths.
 	var ip string
 	released := false
-	if !useStandalone {
+	if !useStandalone && !useVPC {
 		if subnet != nil {
 			ip, err = s.pool.ReserveInSubnet(ctx, subnet.VNet, req.Hostname)
 		} else {
@@ -621,32 +664,49 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		return nil, fmt.Errorf("nextid: %w", err)
 	}
 
-	// Step 3a: provision the per-VM Standalone network if we're on
-	// that path. We do this BEFORE the clone so SetVMNetwork has a
-	// VNet to point at, and so cloud-init's gateway/IP/prefix come
-	// from the freshly-allocated /24. Failure tears down any partial
-	// PVE state inline; the deferred destroy below also fires if a
-	// later step fails.
+	// Step 3a: provision the per-VM Standalone network OR allocate
+	// the VPC member IP, depending on the dispatch. We do this BEFORE
+	// the clone so SetVMNetwork has a VNet to point at and cloud-init
+	// has gateway/IP/prefix. Failure tears down any partial state
+	// inline; the deferred cleanup below fires if a later step fails.
 	var standaloneRow *db.StandaloneVMNetwork
-	if useStandalone {
+	var vpcMemberIP string
+	switch {
+	case useStandalone:
 		standaloneRow, err = s.standaloneNet.Provision(ctx, uint(newVMID), fmt.Sprintf("vm-%d", newVMID), target)
 		if err != nil {
 			return nil, fmt.Errorf("provision standalone network: %w", err)
 		}
 		ip = standaloneRow.VMIP
+	case useVPC:
+		vpcMemberIP, err = s.vpcMgr.AllocateMemberIP(ctx, vpc.ID, uint(newVMID))
+		if err != nil {
+			return nil, fmt.Errorf("allocate vpc member ip: %w", err)
+		}
+		ip = vpcMemberIP
 	}
 	standaloneToDestroy := uint(0)
 	if standaloneRow != nil {
 		standaloneToDestroy = standaloneRow.VMID
 	}
+	vpcMemberToRelease := uint(0)
+	if vpcMemberIP != "" {
+		vpcMemberToRelease = uint(newVMID)
+	}
 	defer func() {
-		if standaloneToDestroy == 0 || s.standaloneNet == nil {
-			return
+		if standaloneToDestroy != 0 && s.standaloneNet != nil {
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.standaloneNet.Destroy(cleanCtx, standaloneToDestroy); err != nil {
+				log.Printf("provision cleanup: destroy standalone network for vmid=%d failed: %v", standaloneToDestroy, err)
+			}
 		}
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := s.standaloneNet.Destroy(cleanCtx, standaloneToDestroy); err != nil {
-			log.Printf("provision cleanup: destroy standalone network for vmid=%d failed: %v", standaloneToDestroy, err)
+		if vpcMemberToRelease != 0 && s.vpcMgr != nil {
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.vpcMgr.ReleaseMember(cleanCtx, vpcMemberToRelease); err != nil {
+				log.Printf("provision cleanup: release vpc membership for vmid=%d failed: %v", vpcMemberToRelease, err)
+			}
 		}
 	}()
 
@@ -700,6 +760,10 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", standaloneRow.VNetName); err != nil {
 			return nil, fmt.Errorf("set vm network to %s: %w", standaloneRow.VNetName, err)
 		}
+	case useVPC:
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", vpc.VNetName); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", vpc.VNetName, err)
+		}
 	case subnet != nil:
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet); err != nil {
 			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
@@ -710,14 +774,22 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 4: cloud-init. Standalone uses the per-VM /24's gateway +
-	// prefix; legacy SDN uses the per-subnet values; plain legacy
-	// uses the cluster-wide values from NetworkSettings.
+	// Step 4: cloud-init. Standalone uses the per-VM /24's gateway
+	// + prefix; VPC uses the VPC subnet's .1 (gateway-LXC eth1 IP);
+	// legacy SDN uses the per-subnet values; plain legacy uses the
+	// cluster-wide values from NetworkSettings.
 	gatewayIP, prefixLen := s.GatewayIP(), s.PrefixLen()
 	switch {
 	case standaloneRow != nil:
 		gatewayIP = standaloneRow.GatewayIP
 		prefixLen = prefixLenFromCIDR(standaloneRow.SubnetCIDR)
+	case useVPC:
+		gw, _, gerr := splitVPCGateway(vpc.CIDR)
+		if gerr != nil {
+			return nil, fmt.Errorf("derive vpc gateway: %w", gerr)
+		}
+		gatewayIP = gw
+		prefixLen = prefixLenFromCIDR(vpc.CIDR)
 	case subnet != nil:
 		gatewayIP = subnet.Gateway
 		prefixLen = vnetmgr.PrefixLenOf(subnet)
@@ -894,13 +966,16 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 
 	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
-	// Standalone path skips the pool — the standalonenet row IS the
-	// allocation record (1:1 with the VM, hard-deleted on Destroy).
+	// Standalone + VPC paths skip the pool — their respective rows
+	// (standalonenet.StandaloneVMNetwork / vpcmgr.VPCMembership) are
+	// the allocation records, hard-deleted on cleanup.
 	// Legacy SDN path uses the per-subnet pool variant; plain legacy
 	// uses the global one.
 	switch {
 	case standaloneRow != nil:
-		// no pool involvement; row already persisted by standaloneNet.Provision
+		// no pool involvement
+	case useVPC:
+		// no pool involvement; membership row persisted by vpcMgr.AllocateMemberIP
 	case subnet != nil:
 		if err := s.pool.MarkAllocatedInSubnet(ctx, subnet.VNet, ip, newVMID); err != nil {
 			return nil, fmt.Errorf("mark allocated: %w", err)
@@ -913,6 +988,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	released = true         // success path — do NOT run the deferred release
 	cleanupVMID = 0         // success path — keep the Proxmox VM
 	standaloneToDestroy = 0 // success path — keep the standalone PVE state
+	vpcMemberToRelease = 0  // success path — keep the VPC membership
 
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
@@ -967,6 +1043,9 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	case standaloneRow != nil:
 		res.SubnetName = fmt.Sprintf("standalone-vm%d", newVMID)
 		res.SubnetCIDR = standaloneRow.SubnetCIDR
+	case useVPC:
+		res.SubnetName = vpc.Name
+		res.SubnetCIDR = vpc.CIDR
 	case subnet != nil:
 		res.SubnetName = subnet.Name
 		res.SubnetCIDR = subnet.Subnet
@@ -1009,6 +1088,22 @@ func prefixLenFromCIDR(cidr string) int {
 	}
 	ones, _ := ipnet.Mask.Size()
 	return ones
+}
+
+// splitVPCGateway returns (gateway=.1, host=.10) of a VPC CIDR.
+// VPC convention is gateway-LXC eth1 IP = .1, members start at .10.
+func splitVPCGateway(cidr string) (gateway, host string, err error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", "", fmt.Errorf("parse cidr %q: %w", cidr, err)
+	}
+	base := ipnet.IP.To4()
+	if base == nil {
+		return "", "", fmt.Errorf("not an ipv4 cidr: %s", cidr)
+	}
+	gw := net.IPv4(base[0], base[1], base[2], base[3]+1).To4()
+	hi := net.IPv4(base[0], base[1], base[2], base[3]+10).To4()
+	return gw.String(), hi.String(), nil
 }
 
 // BackfillNimbusMetadata walks every persisted VM row and ensures the Proxmox
@@ -1492,10 +1587,10 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 		}
 	}
 
-	// Networking-v1 Standalone teardown. If a standalonenet row
-	// exists for this VM, the per-VM Simple zone + VNet + subnet are
-	// ours to destroy AND the IP is not in any pool (the row IS the
-	// allocation record). Skipped silently for legacy VMs.
+	// Networking-v1 teardown. Either a Standalone VM (per-VM zone +
+	// VNet + subnet are Nimbus-owned) or a VPC member (membership
+	// row + IP are Nimbus-owned). Both cases skip the IP-pool release
+	// — the per-network row IS the allocation record.
 	standaloneOwned := false
 	if s.standaloneNet != nil {
 		row, err := s.standaloneNet.Get(ctx, uint(vm.VMID))
@@ -1508,8 +1603,20 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 			}
 		}
 	}
+	vpcOwned := false
+	if s.vpcMgr != nil {
+		mem, err := s.vpcMgr.GetMembership(ctx, uint(vm.VMID))
+		if err != nil {
+			log.Printf("delete vm %d: lookup vpc membership: %v", vm.VMID, err)
+		} else if mem != nil {
+			vpcOwned = true
+			if err := s.vpcMgr.ReleaseMember(ctx, uint(vm.VMID)); err != nil {
+				log.Printf("delete vm %d: release vpc membership: %v", vm.VMID, err)
+			}
+		}
+	}
 
-	if vm.IP != "" && !standaloneOwned {
+	if vm.IP != "" && !standaloneOwned && !vpcOwned {
 		if err := s.releaseVMIP(ctx, vm); err != nil {
 			log.Printf("delete vm %d: release ip %s: %v", vm.VMID, vm.IP, err)
 		}

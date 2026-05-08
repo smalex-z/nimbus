@@ -1288,6 +1288,39 @@ export async function setDefaultSubnet(id: number): Promise<void> {
   await api.post(`/subnets/${id}/default`)
 }
 
+// VPC — Networking-v1 primitive. VXLAN zone shared across nodes plus
+// a dedicated gateway LXC for NAT egress. CIDR is auto-allocated by
+// Nimbus from the configured supernet.
+export interface VPC {
+  id: number
+  name: string
+  cidr: string
+  status: 'provisioning' | 'active' | 'degraded' | 'error'
+  gateway_lxc_id?: number
+  gateway_node?: string
+  member_count: number
+  created_at: string
+}
+
+export async function listVPCs(): Promise<VPC[]> {
+  const { data } = await api.get<VPC[]>('/vpcs')
+  return data
+}
+
+export async function getVPC(id: number): Promise<VPC> {
+  const { data } = await api.get<VPC>(`/vpcs/${id}`)
+  return data
+}
+
+export async function createVPC(req: { name: string }): Promise<VPC> {
+  const { data } = await api.post<VPC>('/vpcs', req, { timeout: 90_000 })
+  return data
+}
+
+export async function deleteVPC(id: number): Promise<void> {
+  await api.delete(`/vpcs/${id}`, { timeout: 60_000 })
+}
+
 // PublicSDNStatus is the verified-user-readable view of SDN
 // enablement. Drives the Provision form picker: when Enabled is
 // false the picker collapses to a single greyed "Cluster LAN" tile;
