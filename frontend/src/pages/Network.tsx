@@ -88,7 +88,8 @@ function VPCConfigPanel() {
   const [settings, setSettings] = useState<NetworkingV1Settings | null>(null)
   const [nodes, setNodes] = useState<NodeView[]>([])
   const [networkNode, setNetworkNode] = useState('')
-  const [ipPool, setIPPool] = useState('')
+  const [ipPoolStart, setIPPoolStart] = useState('')
+  const [ipPoolEnd, setIPPoolEnd] = useState('')
   const [template, setTemplate] = useState('')
   const [storage, setStorage] = useState('local-lvm')
   const [saving, setSaving] = useState(false)
@@ -100,7 +101,8 @@ function VPCConfigPanel() {
       .then(([s, ns]) => {
         setSettings(s)
         setNetworkNode(s.network_node)
-        setIPPool(s.lxc_ip_pool)
+        setIPPoolStart(s.lxc_ip_pool_start)
+        setIPPoolEnd(s.lxc_ip_pool_end)
         setTemplate(s.lxc_template)
         setStorage(s.lxc_storage || 'local-lvm')
         setNodes(ns)
@@ -114,11 +116,12 @@ function VPCConfigPanel() {
     if (!settings) return false
     return (
       networkNode !== settings.network_node ||
-      ipPool !== settings.lxc_ip_pool ||
+      ipPoolStart !== settings.lxc_ip_pool_start ||
+      ipPoolEnd !== settings.lxc_ip_pool_end ||
       template !== settings.lxc_template ||
       (storage || 'local-lvm') !== (settings.lxc_storage || 'local-lvm')
     )
-  }, [settings, networkNode, ipPool, template, storage])
+  }, [settings, networkNode, ipPoolStart, ipPoolEnd, template, storage])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -128,7 +131,8 @@ function VPCConfigPanel() {
     try {
       const next = await saveNetworkingV1Settings({
         network_node: networkNode.trim(),
-        lxc_ip_pool: ipPool.trim(),
+        lxc_ip_pool_start: ipPoolStart.trim(),
+        lxc_ip_pool_end: ipPoolEnd.trim(),
         lxc_template: template.trim(),
         lxc_storage: storage.trim() || 'local-lvm',
       })
@@ -204,19 +208,28 @@ function VPCConfigPanel() {
           </Field>
         </div>
 
-        <Field label="Gateway-LXC IP pool">
-          <input
-            value={ipPool}
-            onChange={(e) => setIPPool(e.target.value)}
-            placeholder="192.168.1.200-192.168.1.250"
-            className="n-input font-mono"
-          />
-          <p className="mt-1 text-[11px] text-ink-3">
-            Host-network IPv4 ranges (comma-separated) the gateway
-            LXCs allocate eth0 from. Pick a slice outside the LAN's
-            DHCP range.
-          </p>
-        </Field>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Gateway-LXC IP pool start">
+            <input
+              value={ipPoolStart}
+              onChange={(e) => setIPPoolStart(e.target.value)}
+              placeholder="192.168.1.200"
+              className="n-input font-mono"
+            />
+          </Field>
+          <Field label="Gateway-LXC IP pool end">
+            <input
+              value={ipPoolEnd}
+              onChange={(e) => setIPPoolEnd(e.target.value)}
+              placeholder="192.168.1.250"
+              className="n-input font-mono"
+            />
+          </Field>
+        </div>
+        <p className="-mt-1 text-[11px] text-ink-3">
+          Host-network IPv4 range each VPC's gateway LXC eth0 allocates from.
+          Pick a slice outside the LAN's DHCP range.
+        </p>
 
         <Field label="LXC template (optional)">
           <input

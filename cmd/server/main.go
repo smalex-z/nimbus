@@ -625,13 +625,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load networking-v1 settings: %v", err)
 	}
-	if v1Settings.NetworkNode == "" && v1Settings.LXCIPPool == "" &&
+	if v1Settings.NetworkNode == "" && v1Settings.LXCIPPoolStart == "" &&
 		(cfg.NetworkNode != "" || cfg.GatewayLXCIPPool != "") {
+		// NIMBUS_GATEWAY_LXC_IP_POOL is the legacy "start-end" CSV
+		// form; split into the first range's start/end on seed.
+		start, end := splitFirstIPRange(cfg.GatewayLXCIPPool)
 		seed := db.NetworkingV1Settings{
-			NetworkNode: cfg.NetworkNode,
-			LXCIPPool:   cfg.GatewayLXCIPPool,
-			LXCTemplate: cfg.GatewayLXCTemplate,
-			LXCStorage:  cfg.GatewayLXCStorage,
+			NetworkNode:    cfg.NetworkNode,
+			LXCIPPoolStart: start,
+			LXCIPPoolEnd:   end,
+			LXCTemplate:    cfg.GatewayLXCTemplate,
+			LXCStorage:     cfg.GatewayLXCStorage,
 		}
 		if err := authSvc.SaveNetworkingV1Settings(seed); err != nil {
 			log.Printf("warning: seed networking-v1 settings from env: %v", err)
@@ -644,21 +648,33 @@ func main() {
 	// vpcStack lazily holds the live gateway + vpcmgr services.
 	// rebuildVPCStack tears down the old pair and stands up new ones
 	// from current settings; called once at startup and again from
-	// the Settings → Network save handler.
+	// the Settings → Network save handler. Pre-construct the swappable
+	// handlers up here so the closure can call SetSvc / SetVPCSource
+	// on them.
 	type vpcStack struct {
 		gw  *gateway.Service
 		mgr *vpcmgr.Service
 	}
 	var (
-		vpcMgrSvc       *vpcmgr.Service
-		vpcStackCurrent *vpcStack
+		vpcMgrSvc         *vpcmgr.Service
+		vpcStackCurrent   *vpcStack
+		vpcsHandler       = handlers.NewVPCs(nil)
+		networkingHandler = handlers.NewNetworking(nil, provSvc)
 	)
+	// disableVPCs is called from every error path in rebuildVPCStack.
+	// Centralizes the four places state has to be unwound so we can't
+	// forget to update one of them.
+	disableVPCs := func() {
+		vpcMgrSvc = nil
+		vpcStackCurrent = nil
+		provSvc.SetVPCMgr(nil)
+		vpcsHandler.SetSvc(nil)
+		networkingHandler.SetVPCSource(nil)
+	}
 	rebuildVPCStack := func(s db.NetworkingV1Settings) {
-		if s.NetworkNode == "" || s.LXCIPPool == "" {
-			log.Printf("VPCs disabled — Settings → Network is missing network_node and/or lxc_ip_pool")
-			vpcMgrSvc = nil
-			vpcStackCurrent = nil
-			provSvc.SetVPCMgr(nil)
+		if s.NetworkNode == "" || s.LXCIPPoolStart == "" || s.LXCIPPoolEnd == "" {
+			log.Printf("VPCs disabled — Settings → Network is missing network_node and/or gateway-LXC IP pool")
+			disableVPCs()
 			return
 		}
 		storage := s.LXCStorage
@@ -670,15 +686,14 @@ func main() {
 			HostBridge:    "vmbr0",
 			HostGatewayIP: cfg.GatewayIP,
 			HostPrefixLen: cfg.VMPrefixLen,
-			IPPool:        s.LXCIPPool,
+			IPPoolStart:   s.LXCIPPoolStart,
+			IPPoolEnd:     s.LXCIPPoolEnd,
 			LXCTemplate:   s.LXCTemplate,
 			LXCStorage:    storage,
 		})
 		if gwErr != nil {
 			log.Printf("warning: gateway service disabled (%v) — VPCs unavailable", gwErr)
-			vpcMgrSvc = nil
-			vpcStackCurrent = nil
-			provSvc.SetVPCMgr(nil)
+			disableVPCs()
 			return
 		}
 		ensureCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -695,17 +710,17 @@ func main() {
 		})
 		if vpcErr != nil {
 			log.Printf("warning: vpcmgr disabled (%v)", vpcErr)
-			vpcMgrSvc = nil
-			vpcStackCurrent = nil
-			provSvc.SetVPCMgr(nil)
+			disableVPCs()
 			return
 		}
 		mgr.SetGateway(&vpcGatewayAdapter{gw: gwSvc})
 		vpcMgrSvc = mgr
 		vpcStackCurrent = &vpcStack{gw: gwSvc, mgr: mgr}
 		provSvc.SetVPCMgr(mgr)
-		log.Printf("VPCs ready (network_node=%s, ip_pool=%s, template=%s)",
-			s.NetworkNode, s.LXCIPPool, gwSvc.LXCTemplate())
+		vpcsHandler.SetSvc(mgr)
+		networkingHandler.SetVPCSource(mgr)
+		log.Printf("VPCs ready (network_node=%s, ip_pool=%s-%s, template=%s)",
+			s.NetworkNode, s.LXCIPPoolStart, s.LXCIPPoolEnd, gwSvc.LXCTemplate())
 	}
 	rebuildVPCStack(*v1Settings)
 	_ = vpcStackCurrent // available for future debug surfacing
@@ -733,26 +748,28 @@ func main() {
 	provSvc.SetClusterLANForMembers(netSettings.ClusterLANForMembers)
 
 	router := api.NewRouter(api.Deps{
-		Auth:          authSvc,
-		Provision:     provSvc,
-		Bootstrap:     bootstrapSvc,
-		Keys:          keysSvc,
-		Pool:          pool,
-		Reconciler:    reconciler,
-		Proxmox:       pveClient,
-		Tunnels:       tunnelClient,
-		TunnelURL:     gopherSettings.APIURL,
-		SelfBootstrap: selfTunnelSvc,
-		S3:            s3Svc,
-		UserBuckets:   userBucketsSvc,
-		GPU:           gpuSvc,
-		GX10Assets:    gx10AssetsFS,
-		NodeMgr:       nodeMgrSvc,
-		VNetMgr:       vnetMgr,
-		VPCMgr:        vpcMgrSvc,
-		V1Applier:     v1Applier,
-		Config:        cfg,
-		Restart:       restartSelf,
+		Auth:              authSvc,
+		Provision:         provSvc,
+		Bootstrap:         bootstrapSvc,
+		Keys:              keysSvc,
+		Pool:              pool,
+		Reconciler:        reconciler,
+		Proxmox:           pveClient,
+		Tunnels:           tunnelClient,
+		TunnelURL:         gopherSettings.APIURL,
+		SelfBootstrap:     selfTunnelSvc,
+		S3:                s3Svc,
+		UserBuckets:       userBucketsSvc,
+		GPU:               gpuSvc,
+		GX10Assets:        gx10AssetsFS,
+		NodeMgr:           nodeMgrSvc,
+		VNetMgr:           vnetMgr,
+		VPCMgr:            vpcMgrSvc,
+		VPCsHandler:       vpcsHandler,
+		NetworkingHandler: networkingHandler,
+		V1Applier:         v1Applier,
+		Config:            cfg,
+		Restart:           restartSelf,
 	})
 
 	mux := http.NewServeMux()
@@ -867,6 +884,26 @@ func (a *vpcGatewayAdapter) Provision(ctx context.Context, vpc *db.VPC) (int, st
 
 func (a *vpcGatewayAdapter) Destroy(ctx context.Context, vpc *db.VPC) error {
 	return a.gw.Destroy(ctx, vpc)
+}
+
+// splitFirstIPRange parses the legacy comma-separated start-end form
+// from NIMBUS_GATEWAY_LXC_IP_POOL and returns the first range's
+// start + end. Used only for one-shot env-var seeding into
+// db.NetworkingV1Settings, which now stores the two fields explicitly.
+// Returns ("","") when the input is empty or malformed.
+func splitFirstIPRange(spec string) (string, string) {
+	for _, raw := range strings.Split(spec, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parts := strings.SplitN(raw, "-", 2)
+		if len(parts) != 2 {
+			return "", ""
+		}
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return "", ""
 }
 
 func splitCSV(s string) []string {

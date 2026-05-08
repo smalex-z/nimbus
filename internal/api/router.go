@@ -46,11 +46,18 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
-	VNetMgr       *vnetmgr.Service             // legacy: per-user-subnet path during deprecation
-	VPCMgr        *vpcmgr.Service              // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
-	V1Applier     handlers.NetworkingV1Applier // closure that rebuilds gateway+vpcmgr from new settings
-	Config        *config.Config
-	Restart       func()
+	VNetMgr       *vnetmgr.Service // legacy: per-user-subnet path during deprecation
+	VPCMgr        *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	// VPCsHandler and NetworkingHandler are pre-constructed in main.go
+	// so the rebuildVPCStack closure can call SetSvc / SetVPCSource on
+	// them after every Settings → Network save (live-rotate without a
+	// Nimbus restart). When nil, the router constructs new ones from
+	// d.VPCMgr — fine for tests / the install wizard.
+	VPCsHandler       *handlers.VPCs
+	NetworkingHandler *handlers.Networking
+	V1Applier         handlers.NetworkingV1Applier
+	Config            *config.Config
+	Restart           func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -97,13 +104,20 @@ func NewRouter(d Deps) http.Handler {
 	// VPCs handler is always mounted; nil service → 503 with a clear
 	// "VPCs not configured" message. Lets the frontend reflect
 	// availability via /api/vpcs/status without 404 surprises.
-	vpcs := handlers.NewVPCs(d.VPCMgr)
-	// Unified Networking-v1 status surface for the Provision picker.
-	var vpcSource handlers.NetworkingVPCSource
-	if d.VPCMgr != nil {
-		vpcSource = d.VPCMgr
+	// Reuse pre-constructed handler when main.go supplies one (the
+	// live-rotate path); otherwise construct fresh.
+	vpcs := d.VPCsHandler
+	if vpcs == nil {
+		vpcs = handlers.NewVPCs(d.VPCMgr)
 	}
-	networking := handlers.NewNetworking(vpcSource, d.Provision)
+	networking := d.NetworkingHandler
+	if networking == nil {
+		var vpcSource handlers.NetworkingVPCSource
+		if d.VPCMgr != nil {
+			vpcSource = d.VPCMgr
+		}
+		networking = handlers.NewNetworking(vpcSource, d.Provision)
+	}
 	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU

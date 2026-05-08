@@ -73,10 +73,12 @@ type Config struct {
 	// HostPrefixLen is the netmask of the host network (e.g. 24 for
 	// /24). Used as the prefix on the LXC's eth0 IP.
 	HostPrefixLen int
-	// IPPool is the comma-separated list of host-network IP ranges
-	// (e.g. "192.168.1.200-192.168.1.250"). Seeded into
-	// db.GatewayLXCIP at startup; gateway LXCs allocate from here.
-	IPPool string
+	// IPPoolStart and IPPoolEnd bound the host-network IPv4 range
+	// the gateway LXCs allocate eth0 from. Seeded into db.GatewayLXCIP
+	// at startup; the pool grows by re-running with a wider range
+	// (existing rows are preserved).
+	IPPoolStart string
+	IPPoolEnd   string
 	// LXCTemplate is the Proxmox volid of an Alpine template
 	// reachable on NetworkNode (e.g.
 	// "local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz").
@@ -131,7 +133,7 @@ func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 		cfg.HostPrefixLen = 24
 	}
 	s := &Service{px: px, db: dbConn, cfg: cfg}
-	if err := s.seedPool(cfg.IPPool); err != nil {
+	if err := s.seedPool(cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
 		return nil, fmt.Errorf("gateway: seed ip pool: %w", err)
 	}
 	return s, nil
@@ -452,46 +454,38 @@ func (s *Service) gatewayNode(vpc *db.VPC) string {
 	return s.cfg.NetworkNode
 }
 
-// seedPool inserts every IP in the configured ranges as a free row.
-// Existing rows are left untouched (so re-seeding doesn't reset
-// allocated state). Pool format: "192.168.1.200-192.168.1.250" or
-// comma-separated multiple ranges.
-func (s *Service) seedPool(spec string) error {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return nil // no pool configured — admin must populate before VPCs work
+// seedPool inserts every IP in [start, end] as a free row.
+// Existing rows are left untouched so re-seeding (e.g. widening the
+// range) doesn't reset allocated state. Empty start AND end is a
+// no-op — admin hasn't configured the pool yet.
+func (s *Service) seedPool(start, end string) error {
+	start = strings.TrimSpace(start)
+	end = strings.TrimSpace(end)
+	if start == "" && end == "" {
+		return nil
 	}
-	for _, raw := range strings.Split(spec, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		parts := strings.SplitN(raw, "-", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid range %q (expected start-end)", raw)
-		}
-		start := strings.TrimSpace(parts[0])
-		end := strings.TrimSpace(parts[1])
-		startU, err := parseIPv4(start)
-		if err != nil {
-			return fmt.Errorf("parse start %q: %w", start, err)
-		}
-		endU, err := parseIPv4(end)
-		if err != nil {
-			return fmt.Errorf("parse end %q: %w", end, err)
-		}
-		if endU < startU {
-			return fmt.Errorf("range %q: end before start", raw)
-		}
-		for u := startU; u <= endU; u++ {
-			ip := uint32ToIPv4(u).String()
-			row := db.GatewayLXCIP{IP: ip, Status: "free"}
-			// FirstOrCreate by IP keeps the seed idempotent.
-			if err := s.db.Where(&db.GatewayLXCIP{IP: ip}).
-				Attrs(&db.GatewayLXCIP{Status: "free"}).
-				FirstOrCreate(&row).Error; err != nil {
-				return fmt.Errorf("seed row for %s: %w", ip, err)
-			}
+	if start == "" || end == "" {
+		return fmt.Errorf("ip pool: both start and end required (got start=%q end=%q)", start, end)
+	}
+	startU, err := parseIPv4(start)
+	if err != nil {
+		return fmt.Errorf("parse start %q: %w", start, err)
+	}
+	endU, err := parseIPv4(end)
+	if err != nil {
+		return fmt.Errorf("parse end %q: %w", end, err)
+	}
+	if endU < startU {
+		return fmt.Errorf("ip pool: end %s is before start %s", end, start)
+	}
+	for u := startU; u <= endU; u++ {
+		ip := uint32ToIPv4(u).String()
+		row := db.GatewayLXCIP{IP: ip, Status: "free"}
+		// FirstOrCreate by IP keeps the seed idempotent.
+		if err := s.db.Where(&db.GatewayLXCIP{IP: ip}).
+			Attrs(&db.GatewayLXCIP{Status: "free"}).
+			FirstOrCreate(&row).Error; err != nil {
+			return fmt.Errorf("seed row for %s: %w", ip, err)
 		}
 	}
 	return nil

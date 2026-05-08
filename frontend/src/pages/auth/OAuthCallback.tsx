@@ -71,7 +71,7 @@ export default function OAuthCallback() {
     })
     timers.push(
       setTimeout(
-        () => navigate(user?.is_admin ? '/admin' : '/', { replace: true }),
+        () => navigate(user?.is_admin ? '/dashboard' : '/', { replace: true }),
         350 + steps.length * 420 + 600,
       ),
     )

@@ -72,8 +72,9 @@ func (f *fakeLXC) DownloadLXCTemplate(_ context.Context, _, _, _ string) (string
 	return "UPID:fake:download", nil
 }
 
-func newTestSvc(t *testing.T, ipPool string) (*gateway.Service, *fakeLXC, *db.DB) {
+func newTestSvc(t *testing.T, ipPoolRange string) (*gateway.Service, *fakeLXC, *db.DB) {
 	t.Helper()
+	start, end := splitTestRange(ipPoolRange)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	database, err := db.New(dbPath, &db.GatewayLXCIP{}, &db.VPC{})
 	if err != nil {
@@ -85,7 +86,8 @@ func newTestSvc(t *testing.T, ipPool string) (*gateway.Service, *fakeLXC, *db.DB
 		HostBridge:    "vmbr0",
 		HostGatewayIP: "192.168.1.1",
 		HostPrefixLen: 24,
-		IPPool:        ipPool,
+		IPPoolStart:   start,
+		IPPoolEnd:     end,
 		LXCTemplate:   "local:vztmpl/alpine.tar.xz",
 		LXCStorage:    "local-lvm",
 		PollInterval:  10 * time.Millisecond,
@@ -94,6 +96,17 @@ func newTestSvc(t *testing.T, ipPool string) (*gateway.Service, *fakeLXC, *db.DB
 		t.Fatalf("gateway.New: %v", err)
 	}
 	return svc, lxc, database
+}
+
+// splitTestRange parses the legacy "start-end" CSV form used by older
+// tests into the new (start, end) pair gateway.Config expects.
+func splitTestRange(spec string) (string, string) {
+	for i := 0; i < len(spec); i++ {
+		if spec[i] == '-' {
+			return spec[:i], spec[i+1:]
+		}
+	}
+	return spec, spec
 }
 
 // TestSeedPool_Idempotent: re-seeding the same range doesn't reset
@@ -109,7 +122,8 @@ func TestSeedPool_Idempotent(t *testing.T) {
 	}
 	// Re-seed (by constructing a new service with the same pool).
 	if _, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
-		NetworkNode: "alpha", LXCTemplate: "x", IPPool: "10.0.0.10-10.0.0.12",
+		NetworkNode: "alpha", LXCTemplate: "x",
+		IPPoolStart: "10.0.0.10", IPPoolEnd: "10.0.0.12",
 	}); err != nil {
 		t.Fatalf("re-seed: %v", err)
 	}
@@ -248,7 +262,8 @@ func TestEnsureDefaultTemplate_PicksLatestAlpine(t *testing.T) {
 	}
 	svc, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
 		NetworkNode:  "alpha",
-		IPPool:       "10.0.0.10-10.0.0.12",
+		IPPoolStart:  "10.0.0.10",
+		IPPoolEnd:    "10.0.0.12",
 		PollInterval: 10 * time.Millisecond,
 		// LXCTemplate intentionally empty — this test is the auto-pick path
 	})
@@ -281,7 +296,8 @@ func TestEnsureDefaultTemplate_NoOpWhenPinned(t *testing.T) {
 	svc, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
 		NetworkNode: "alpha",
 		LXCTemplate: pinned,
-		IPPool:      "10.0.0.10-10.0.0.12",
+		IPPoolStart: "10.0.0.10",
+		IPPoolEnd:   "10.0.0.12",
 	})
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)

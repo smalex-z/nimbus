@@ -132,29 +132,38 @@ export default function App() {
                           counterparts so bookmarks still resolve. */}
                       <Route path="/infrastructure" element={<Navigate to="/infrastructure/email" replace />} />
                       <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
-                      <Route path="/infrastructure/gopher" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
-                      <Route path="/infrastructure/network" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
+                      {/* Networking-v1 routes: /tunnels (WAN egress
+                          via Gopher) and /networking (LAN — Standalone,
+                          VPCs, Cluster LAN). Old /gopher and /network
+                          paths redirect for bookmark compatibility. */}
+                      <Route path="/infrastructure/tunnels" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/networking" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/api-docs" element={<RequireAdmin><InfrastructureLayout><ApiDocs /></InfrastructureLayout></RequireAdmin>} />
-                      {/* Bookmark redirects. /users + /settings/sign-in
-                          → /authentication. /settings/* was the prior
-                          name of /infrastructure/*. /infrastructure/s3
-                          and /infrastructure/gpu-hosts moved out to
-                          /s3 and /gpu respectively. */}
+                      {/* Bookmark redirects. URL → page-title alignment:
+                          older /infrastructure/gopher and /network paths
+                          predate the Tunnels (WAN) / Networking (LAN)
+                          rename — keep them resolving so saved links
+                          still work. */}
+                      <Route path="/infrastructure/gopher" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/infrastructure/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/email" element={<Navigate to="/infrastructure/email" replace />} />
-                      <Route path="/gophers" element={<Navigate to="/infrastructure/gopher" replace />} />
-                      <Route path="/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/gophers" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/gpu-host" element={<Navigate to="/gpu" replace />} />
                       <Route path="/users" element={<Navigate to="/authentication" replace />} />
                       <Route path="/settings" element={<Navigate to="/infrastructure" replace />} />
                       <Route path="/settings/sign-in" element={<Navigate to="/authentication" replace />} />
                       <Route path="/settings/email" element={<Navigate to="/infrastructure/email" replace />} />
-                      <Route path="/settings/gopher" element={<Navigate to="/infrastructure/gopher" replace />} />
-                      <Route path="/settings/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/settings/gopher" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/settings/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/settings/s3" element={<Navigate to="/s3" replace />} />
                       <Route path="/settings/gpu-hosts" element={<Navigate to="/gpu" replace />} />
                       <Route path="/infrastructure/s3" element={<Navigate to="/s3" replace />} />
                       <Route path="/infrastructure/gpu-hosts" element={<Navigate to="/gpu" replace />} />
-                      <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
+                      {/* Top-nav reads "Dashboard"; URL matches. /admin
+                          stays as a redirect for old bookmarks. */}
+                      <Route path="/dashboard" element={<RequireAdmin><Admin /></RequireAdmin>} />
+                      <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                   </Layout>
                 </RequireVerified>

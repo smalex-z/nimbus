@@ -716,7 +716,7 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
             {!tunnelInfo?.enabled && (
               <div className="text-xs text-warn mt-1">
                 Tunnel integration not configured —{' '}
-                <Link to="/infrastructure/gopher" className="underline">admin setup</Link>.
+                <Link to="/infrastructure/tunnels" className="underline">admin setup</Link>.
               </div>
             )}
             {tunnelInfo?.enabled && !selectedKeyHasPrivate && (
@@ -974,7 +974,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
     : 'bg-[rgba(45,125,90,0.1)] text-good'
   const dotColorClass = hasWarning ? 'bg-warn' : 'bg-good'
-  const dashboardHref = user?.is_admin ? '/admin' : '/vms'
+  const dashboardHref = user?.is_admin ? '/dashboard' : '/vms'
   const dashboardLabel = user?.is_admin ? 'Back to dashboard' : 'Back to my machines'
   return (
     <div className="py-5 pb-10">
@@ -1392,8 +1392,8 @@ function SubnetPicker({
           {!netInfo.vpc_enabled ? (
             <p className="text-[11px] text-warn leading-relaxed">
               VPCs not configured on this Nimbus. Admins: see{' '}
-              <Link to="/infrastructure/network" className="underline">
-                Settings → Network
+              <Link to="/infrastructure/networking" className="underline">
+                Networking (LAN)
               </Link>{' '}
               for the env-var checklist.
             </p>

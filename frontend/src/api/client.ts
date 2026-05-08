@@ -1298,10 +1298,12 @@ export async function getNetworkingInfo(): Promise<NetworkingInfo> {
 // NetworkingV1Settings is the admin-editable VPC + gateway-LXC
 // config. Mirrors the GopherSettings / GPUSettings shape: GET
 // returns the persisted state, PUT writes and live-rotates the
-// gateway/vpcmgr stack.
+// gateway/vpcmgr stack. IP-pool fields are split into start/end to
+// match the existing NetworkSettingsView shape.
 export interface NetworkingV1Settings {
   network_node: string
-  lxc_ip_pool: string
+  lxc_ip_pool_start: string
+  lxc_ip_pool_end: string
   lxc_template: string
   lxc_storage: string
   configured: boolean
@@ -1314,7 +1316,8 @@ export async function getNetworkingV1Settings(): Promise<NetworkingV1Settings> {
 
 export interface SaveNetworkingV1Request {
   network_node?: string
-  lxc_ip_pool?: string
+  lxc_ip_pool_start?: string
+  lxc_ip_pool_end?: string
   lxc_template?: string
   lxc_storage?: string
 }

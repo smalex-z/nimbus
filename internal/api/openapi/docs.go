@@ -8453,10 +8453,13 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "configured": {
-                    "description": "Configured reports whether the minimum required fields\n(network_node + lxc_ip_pool) are set. The frontend uses this\nto decide whether to show the picker chip as \"configured\" or\n\"needs setup.\"",
+                    "description": "Configured reports whether the minimum required fields\n(network_node + a complete pool range) are set. The frontend\nuses this to flip the status pill from \"needs setup\" to\n\"configured.\"",
                     "type": "boolean"
                 },
-                "lxc_ip_pool": {
+                "lxc_ip_pool_end": {
+                    "type": "string"
+                },
+                "lxc_ip_pool_start": {
                     "type": "string"
                 },
                 "lxc_storage": {
@@ -8674,7 +8677,10 @@ const docTemplate = `{
         "handlers.saveNetworkingV1Request": {
             "type": "object",
             "properties": {
-                "lxc_ip_pool": {
+                "lxc_ip_pool_end": {
+                    "type": "string"
+                },
+                "lxc_ip_pool_start": {
                     "type": "string"
                 },
                 "lxc_storage": {

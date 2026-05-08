@@ -764,9 +764,10 @@ type GatewayLXCIP struct {
 // service auto-picks the latest Alpine 3.x via PVE's aplinfo. The
 // admin can still pin a specific template volid if they want to.
 type NetworkingV1Settings struct {
-	ID          uint   `gorm:"primaryKey"`
-	NetworkNode string `gorm:"column:network_node;default:''"`
-	LXCIPPool   string `gorm:"column:lxc_ip_pool;default:''"`
-	LXCTemplate string `gorm:"column:lxc_template;default:''"`
-	LXCStorage  string `gorm:"column:lxc_storage;default:'local-lvm'"`
+	ID             uint   `gorm:"primaryKey"`
+	NetworkNode    string `gorm:"column:network_node;default:''"`
+	LXCIPPoolStart string `gorm:"column:lxc_ip_pool_start;default:''"`
+	LXCIPPoolEnd   string `gorm:"column:lxc_ip_pool_end;default:''"`
+	LXCTemplate    string `gorm:"column:lxc_template;default:''"`
+	LXCStorage     string `gorm:"column:lxc_storage;default:'local-lvm'"`
 }

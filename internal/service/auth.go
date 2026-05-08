@@ -1392,18 +1392,22 @@ func (s *AuthService) SaveNetworkingV1Settings(next db.NetworkingV1Settings) err
 	if next.NetworkNode == "" {
 		next.NetworkNode = existing.NetworkNode
 	}
-	if next.LXCIPPool == "" {
-		next.LXCIPPool = existing.LXCIPPool
+	if next.LXCIPPoolStart == "" {
+		next.LXCIPPoolStart = existing.LXCIPPoolStart
+	}
+	if next.LXCIPPoolEnd == "" {
+		next.LXCIPPoolEnd = existing.LXCIPPoolEnd
 	}
 	// LXCTemplate is a special case: empty has the meaning "auto-pick
 	// latest Alpine via aplinfo." So we DO let the operator clear it
 	// back to empty if they previously pinned a value. Same rule for
 	// LXCStorage falls back to default at apply time.
 	return s.db.Model(&db.NetworkingV1Settings{}).Where("id = ?", 1).Updates(map[string]any{
-		"network_node": next.NetworkNode,
-		"lxc_ip_pool":  next.LXCIPPool,
-		"lxc_template": next.LXCTemplate,
-		"lxc_storage":  next.LXCStorage,
+		"network_node":      next.NetworkNode,
+		"lxc_ip_pool_start": next.LXCIPPoolStart,
+		"lxc_ip_pool_end":   next.LXCIPPoolEnd,
+		"lxc_template":      next.LXCTemplate,
+		"lxc_storage":       next.LXCStorage,
 	}).Error
 }
 

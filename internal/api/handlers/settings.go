@@ -1503,16 +1503,18 @@ func (s *Settings) ResetSDN(w http.ResponseWriter, r *http.Request) {
 }
 
 // networkingV1View is the JSON shape for GET / PUT
-// /api/settings/networking-v1.
+// /api/settings/networking-v1. The IP-pool fields mirror the
+// existing NetworkSettingsView (start/end) for UI consistency.
 type networkingV1View struct {
-	NetworkNode string `json:"network_node"`
-	LXCIPPool   string `json:"lxc_ip_pool"`
-	LXCTemplate string `json:"lxc_template"`
-	LXCStorage  string `json:"lxc_storage"`
+	NetworkNode    string `json:"network_node"`
+	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
+	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
+	LXCTemplate    string `json:"lxc_template"`
+	LXCStorage     string `json:"lxc_storage"`
 	// Configured reports whether the minimum required fields
-	// (network_node + lxc_ip_pool) are set. The frontend uses this
-	// to decide whether to show the picker chip as "configured" or
-	// "needs setup."
+	// (network_node + a complete pool range) are set. The frontend
+	// uses this to flip the status pill from "needs setup" to
+	// "configured."
 	Configured bool `json:"configured"`
 }
 
@@ -1534,19 +1536,21 @@ func (s *Settings) GetNetworkingV1(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	response.Success(w, networkingV1View{
-		NetworkNode: row.NetworkNode,
-		LXCIPPool:   row.LXCIPPool,
-		LXCTemplate: row.LXCTemplate,
-		LXCStorage:  row.LXCStorage,
-		Configured:  row.NetworkNode != "" && row.LXCIPPool != "",
+		NetworkNode:    row.NetworkNode,
+		LXCIPPoolStart: row.LXCIPPoolStart,
+		LXCIPPoolEnd:   row.LXCIPPoolEnd,
+		LXCTemplate:    row.LXCTemplate,
+		LXCStorage:     row.LXCStorage,
+		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
 	})
 }
 
 type saveNetworkingV1Request struct {
-	NetworkNode string `json:"network_node"`
-	LXCIPPool   string `json:"lxc_ip_pool"`
-	LXCTemplate string `json:"lxc_template"`
-	LXCStorage  string `json:"lxc_storage"`
+	NetworkNode    string `json:"network_node"`
+	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
+	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
+	LXCTemplate    string `json:"lxc_template"`
+	LXCStorage     string `json:"lxc_storage"`
 }
 
 // SaveNetworkingV1 handles PUT /api/settings/networking-v1 (admin only).
@@ -1575,18 +1579,34 @@ func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid JSON")
 		return
 	}
-	// Validate IP pool ranges if provided. Format: "start-end[,start-end...]"
-	if req.LXCIPPool != "" {
-		if err := validateIPPoolRanges(req.LXCIPPool); err != nil {
-			response.BadRequest(w, "lxc_ip_pool: "+err.Error())
+	// Validate the start + end pair: both must be empty (= clear) or
+	// both must parse as IPv4 with end >= start.
+	start := strings.TrimSpace(req.LXCIPPoolStart)
+	end := strings.TrimSpace(req.LXCIPPoolEnd)
+	if (start == "") != (end == "") {
+		response.BadRequest(w, "lxc_ip_pool: both start and end required (or both blank to clear)")
+		return
+	}
+	if start != "" {
+		if ip := net.ParseIP(start).To4(); ip == nil {
+			response.BadRequest(w, "lxc_ip_pool_start is not a valid IPv4 address")
+			return
+		}
+		if ip := net.ParseIP(end).To4(); ip == nil {
+			response.BadRequest(w, "lxc_ip_pool_end is not a valid IPv4 address")
+			return
+		}
+		if compareIPv4(start, end) > 0 {
+			response.BadRequest(w, "lxc_ip_pool_end must be >= lxc_ip_pool_start")
 			return
 		}
 	}
 	if err := s.auth.SaveNetworkingV1Settings(db.NetworkingV1Settings{
-		NetworkNode: strings.TrimSpace(req.NetworkNode),
-		LXCIPPool:   strings.TrimSpace(req.LXCIPPool),
-		LXCTemplate: strings.TrimSpace(req.LXCTemplate),
-		LXCStorage:  strings.TrimSpace(req.LXCStorage),
+		NetworkNode:    strings.TrimSpace(req.NetworkNode),
+		LXCIPPoolStart: start,
+		LXCIPPoolEnd:   end,
+		LXCTemplate:    strings.TrimSpace(req.LXCTemplate),
+		LXCStorage:     strings.TrimSpace(req.LXCStorage),
 	}); err != nil {
 		response.InternalError(w, "failed to save networking-v1 settings")
 		return
@@ -1600,38 +1620,27 @@ func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
 		s.v1Applier(*row)
 	}
 	response.Success(w, networkingV1View{
-		NetworkNode: row.NetworkNode,
-		LXCIPPool:   row.LXCIPPool,
-		LXCTemplate: row.LXCTemplate,
-		LXCStorage:  row.LXCStorage,
-		Configured:  row.NetworkNode != "" && row.LXCIPPool != "",
+		NetworkNode:    row.NetworkNode,
+		LXCIPPoolStart: row.LXCIPPoolStart,
+		LXCIPPoolEnd:   row.LXCIPPoolEnd,
+		LXCTemplate:    row.LXCTemplate,
+		LXCStorage:     row.LXCStorage,
+		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
 	})
 }
 
-// validateIPPoolRanges checks the comma-separated start-end form
-// gateway.seedPool also expects: "192.168.1.200-192.168.1.250" or
-// "10.0.0.10-10.0.0.20,10.0.1.10-10.0.1.20". Each side must parse
-// as IPv4 and end >= start.
-func validateIPPoolRanges(spec string) error {
-	for _, raw := range strings.Split(spec, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
+// compareIPv4 returns -1/0/+1 for a < b / a == b / a > b. Both
+// arguments must already be valid IPv4 strings.
+func compareIPv4(a, b string) int {
+	aip := net.ParseIP(a).To4()
+	bip := net.ParseIP(b).To4()
+	for i := 0; i < 4; i++ {
+		if aip[i] < bip[i] {
+			return -1
 		}
-		parts := strings.SplitN(raw, "-", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("range %q: expected start-end", raw)
-		}
-		start := net.ParseIP(strings.TrimSpace(parts[0])).To4()
-		end := net.ParseIP(strings.TrimSpace(parts[1])).To4()
-		if start == nil || end == nil {
-			return fmt.Errorf("range %q: invalid IPv4", raw)
-		}
-		startU := uint32(start[0])<<24 | uint32(start[1])<<16 | uint32(start[2])<<8 | uint32(start[3])
-		endU := uint32(end[0])<<24 | uint32(end[1])<<16 | uint32(end[2])<<8 | uint32(end[3])
-		if endU < startU {
-			return fmt.Errorf("range %q: end before start", raw)
+		if aip[i] > bip[i] {
+			return 1
 		}
 	}
-	return nil
+	return 0
 }

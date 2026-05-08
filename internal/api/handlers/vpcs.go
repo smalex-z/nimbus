@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -16,22 +17,42 @@ import (
 // VPCs is the HTTP surface for the Networking-v1 VPC primitive
 // (VXLAN zone shared across nodes + per-VPC gateway LXC). The handler
 // is always mounted; when the service is nil (admin hasn't configured
-// NIMBUS_NETWORK_NODE + NIMBUS_GATEWAY_LXC_IP_POOL +
-// NIMBUS_GATEWAY_LXC_TEMPLATE) every method returns 503 with a clear
-// "VPCs not configured" message instead of letting the route 404.
+// the network node + gateway-LXC IP pool) every method returns 503
+// with a clear "VPCs not configured" message instead of letting the
+// route 404.
+//
+// The svc reference is swappable via SetSvc so the Settings → Network
+// save handler can flip VPCs on without a Nimbus restart. Mutex-
+// protected — HTTP requests race the swap, so reads need to be safe.
 type VPCs struct {
+	mu  sync.RWMutex
 	svc *vpcmgr.Service
 }
 
-// NewVPCs constructs the VPCs handler. svc may be nil — see the
-// comment on VPCs for behavior in that case.
+// NewVPCs constructs the VPCs handler. svc may be nil; subsequent
+// SetSvc calls live-rotate the service.
 func NewVPCs(svc *vpcmgr.Service) *VPCs { return &VPCs{svc: svc} }
+
+// SetSvc swaps the live vpcmgr service. Called from main.go's
+// rebuildVPCStack on every Settings → Network save.
+func (h *VPCs) SetSvc(svc *vpcmgr.Service) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.svc = svc
+}
+
+// service returns the current service under read-lock.
+func (h *VPCs) service() *vpcmgr.Service {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.svc
+}
 
 // disabledMessage is what the handler returns when no vpcmgr is wired.
 const disabledMessage = "VPC networking is not configured on this Nimbus instance — set NIMBUS_NETWORK_NODE, NIMBUS_GATEWAY_LXC_IP_POOL, and NIMBUS_GATEWAY_LXC_TEMPLATE, then restart"
 
 func (h *VPCs) requireEnabled(w http.ResponseWriter) bool {
-	if h.svc == nil {
+	if h.service() == nil {
 		response.Error(w, http.StatusServiceUnavailable, disabledMessage)
 		return false
 	}
@@ -56,7 +77,7 @@ type vpcStatusView struct {
 // @Success     200 {object} EnvelopeOK{data=vpcStatusView}
 // @Router      /vpcs/status [get]
 func (h *VPCs) GetStatus(w http.ResponseWriter, _ *http.Request) {
-	if h.svc == nil {
+	if h.service() == nil {
 		response.Success(w, vpcStatusView{Enabled: false, Reason: disabledMessage})
 		return
 	}
@@ -84,10 +105,11 @@ type NetworkingInfoSource interface {
 	ClusterLANForMembers() bool
 }
 
-// Networking is the public networking-info handler. Uses just the
-// VPC service (for VPC availability) and a cluster-LAN-for-members
-// reader (the provision service in production).
+// Networking is the public networking-info handler. The VPC source
+// is swappable via SetVPCSource so the Settings → Network save can
+// flip the picker chip without a Nimbus restart.
 type Networking struct {
+	mu  sync.RWMutex
 	vpc NetworkingVPCSource
 	src NetworkingInfoSource
 }
@@ -106,6 +128,14 @@ func NewNetworking(vpc NetworkingVPCSource, src NetworkingInfoSource) *Networkin
 	return &Networking{vpc: vpc, src: src}
 }
 
+// SetVPCSource swaps the VPC availability source. Called by main.go's
+// rebuildVPCStack on every Settings → Network save.
+func (h *Networking) SetVPCSource(vpc NetworkingVPCSource) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.vpc = vpc
+}
+
 // GetInfo handles GET /api/networking/info.
 //
 // @Summary     Networking-v1 availability snapshot
@@ -115,8 +145,12 @@ func NewNetworking(vpc NetworkingVPCSource, src NetworkingInfoSource) *Networkin
 // @Success     200 {object} EnvelopeOK{data=NetworkingInfo}
 // @Router      /networking/info [get]
 func (h *Networking) GetInfo(w http.ResponseWriter, _ *http.Request) {
+	h.mu.RLock()
+	vpc := h.vpc
+	h.mu.RUnlock()
+
 	info := NetworkingInfo{StandaloneEnabled: true}
-	if h.vpc != nil && h.vpc.Enabled() {
+	if vpc != nil && vpc.Enabled() {
 		info.VPCEnabled = true
 	} else {
 		info.VPCReason = disabledMessage
@@ -176,14 +210,15 @@ func (h *VPCs) List(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	rows, err := h.svc.ListVPCs(r.Context(), user.ID, user.IsAdmin)
+	svc := h.service()
+	rows, err := svc.ListVPCs(r.Context(), user.ID, user.IsAdmin)
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
 	out := make([]vpcView, 0, len(rows))
 	for i := range rows {
-		count, _ := h.svc.CountMembers(r.Context(), rows[i].ID)
+		count, _ := svc.CountMembers(r.Context(), rows[i].ID)
 		out = append(out, toVPCView(&rows[i], count))
 	}
 	response.Success(w, out)
@@ -214,12 +249,13 @@ func (h *VPCs) Get(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	row, err := h.svc.GetVPC(r.Context(), id, user.ID, user.IsAdmin)
+	svc := h.service()
+	row, err := svc.GetVPC(r.Context(), id, user.ID, user.IsAdmin)
 	if err != nil {
 		response.FromError(w, err)
 		return
 	}
-	count, _ := h.svc.CountMembers(r.Context(), row.ID)
+	count, _ := svc.CountMembers(r.Context(), row.ID)
 	response.Success(w, toVPCView(row, count))
 }
 
@@ -253,7 +289,7 @@ func (h *VPCs) Create(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	row, err := h.svc.CreateVPC(r.Context(), user.ID, req.Name)
+	row, err := h.service().CreateVPC(r.Context(), user.ID, req.Name)
 	if err != nil {
 		response.FromError(w, err)
 		return
@@ -288,7 +324,7 @@ func (h *VPCs) Delete(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
-	if err := h.svc.DeleteVPC(r.Context(), id, user.ID, user.IsAdmin); err != nil {
+	if err := h.service().DeleteVPC(r.Context(), id, user.ID, user.IsAdmin); err != nil {
 		response.FromError(w, err)
 		return
 	}

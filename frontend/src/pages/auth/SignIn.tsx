@@ -60,7 +60,7 @@ export default function SignIn() {
     try {
       setLoading(true)
       const res = await api.post<{ is_admin: boolean }>('/auth/login', { email, password })
-      window.location.replace(res.data?.is_admin ? '/admin' : '/')
+      window.location.replace(res.data?.is_admin ? '/dashboard' : '/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
