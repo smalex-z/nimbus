@@ -8458,9 +8458,6 @@
                 "lxc_storage": {
                     "type": "string"
                 },
-                "lxc_template": {
-                    "type": "string"
-                },
                 "network_node": {
                     "type": "string"
                 }
@@ -8677,9 +8674,6 @@
                     "type": "string"
                 },
                 "lxc_storage": {
-                    "type": "string"
-                },
-                "lxc_template": {
                     "type": "string"
                 },
                 "network_node": {

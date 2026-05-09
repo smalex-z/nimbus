@@ -917,6 +917,33 @@ func (c *Client) GetStorageConfig(ctx context.Context, storage string) (*Storage
 	return &s, nil
 }
 
+// NodeNetworkInterface is one entry from `GET /nodes/{n}/network/{iface}`.
+// Only the fields gateway.Service consumes are pulled out — adding
+// more is fine (the JSON decoder ignores unknown keys).
+type NodeNetworkInterface struct {
+	Iface   string `json:"iface"`
+	Type    string `json:"type"`
+	Address string `json:"address"`           // IPv4 dotted quad
+	Netmask string `json:"netmask,omitempty"` // "16" (prefix) on PVE 8/9 vmbr0
+	CIDR    string `json:"cidr,omitempty"`    // "192.168.0.245/16" — preferred when present
+	Gateway string `json:"gateway,omitempty"`
+	Active  int    `json:"active,omitempty"`
+}
+
+// GetNodeNetworkInterface returns the live config of one named
+// interface on a node (e.g. vmbr0). Used by the gateway service to
+// auto-detect the host-network prefix + default gateway instead of
+// asking the operator to enter them by hand.
+func (c *Client) GetNodeNetworkInterface(ctx context.Context, node, iface string) (*NodeNetworkInterface, error) {
+	var out NodeNetworkInterface
+	path := fmt.Sprintf("/nodes/%s/network/%s",
+		url.PathEscape(node), url.PathEscape(iface))
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // EnsureStorageContent guarantees the given storage accepts a particular
 // content type (e.g. "import"). If the type is already in the storage's
 // content list this is a no-op; otherwise the storage is reconfigured.

@@ -73,11 +73,6 @@ type Config struct {
 	// range and restarting (existing rows are not clobbered).
 	GatewayLXCIPPool string
 
-	// GatewayLXCTemplate is the Proxmox volid of an Alpine LXC
-	// template reachable on NetworkNode. Required for VPC creation
-	// to work — Nimbus does not auto-download.
-	GatewayLXCTemplate string
-
 	// GatewayLXCStorage names the PVE storage pool for the gateway
 	// LXC's rootfs. Default "local-lvm".
 	GatewayLXCStorage string
@@ -160,7 +155,6 @@ func Load() (*Config, error) {
 		VPCPoolCIDR:             getEnv("NIMBUS_VPC_POOL_CIDR", "10.0.0.0/9"),
 		NetworkNode:             os.Getenv("NIMBUS_NETWORK_NODE"),
 		GatewayLXCIPPool:        os.Getenv("NIMBUS_GATEWAY_LXC_IP_POOL"),
-		GatewayLXCTemplate:      os.Getenv("NIMBUS_GATEWAY_LXC_TEMPLATE"),
 		GatewayLXCStorage:       getEnv("NIMBUS_GATEWAY_LXC_STORAGE", "local-lvm"),
 
 		ReconcileIntervalSeconds: getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),

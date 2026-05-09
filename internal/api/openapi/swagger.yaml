@@ -795,8 +795,6 @@ definitions:
         type: string
       lxc_storage:
         type: string
-      lxc_template:
-        type: string
       network_node:
         type: string
     type: object
@@ -961,8 +959,6 @@ definitions:
       lxc_ip_pool_start:
         type: string
       lxc_storage:
-        type: string
-      lxc_template:
         type: string
       network_node:
         type: string

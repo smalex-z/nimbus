@@ -1,5 +1,5 @@
 // Package gateway owns the per-VPC gateway LXC lifecycle. Each VPC
-// gets a dedicated Alpine LXC with two NICs:
+// gets a dedicated Debian LXC with two NICs:
 //
 //   - eth0 on vmbr0 (or whatever the operator points at) with an IP
 //     from the Nimbus-managed gateway-IP pool. Default route lives
@@ -8,9 +8,14 @@
 //     (.1 of the /16). Member VMs route their outbound traffic
 //     through this IP.
 //
-// Inside the LXC: ip_forward=1 + iptables MASQUERADE on eth0. Both
-// are persisted via /etc/sysctl.d and Alpine's iptables OpenRC
-// service so the LXC recovers correctly across reboots.
+// Inside the LXC: ip_forward=1 + iptables MASQUERADE on eth0, both
+// persisted via /etc/sysctl.d and a systemd unit so the LXC
+// recovers correctly across reboots. The OS family is fixed to
+// debian-12-standard — Nimbus's SSH bootstrap script assumes
+// apt + iptables + systemd, so operator-tunable templates are a
+// foot-gun, not flexibility. Aplinfo still picks the latest minor
+// (12.7, 12.8, …) so we don't churn the const on every Debian point
+// release.
 //
 // One designated network node holds every VPC's gateway LXC in v1
 // (NIMBUS_NETWORK_NODE). HA-VRRP is a future phase. Inter-VM VPC
@@ -24,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,22 +46,23 @@ type LXCClient interface {
 	StartLXC(ctx context.Context, node string, vmid int) (string, error)
 	StopLXC(ctx context.Context, node string, vmid int) (string, error)
 	DestroyLXC(ctx context.Context, node string, vmid int) (string, error)
-	LXCExecShell(ctx context.Context, node string, vmid int, script string) (*proxmox.LXCExecResult, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	NextVMID(ctx context.Context) (int, error)
 	StorageHasFile(ctx context.Context, node, storage, contentType, filename string) (bool, error)
 	ListAvailableLXCTemplates(ctx context.Context, node string) ([]proxmox.AplinfoTemplate, error)
 	DownloadLXCTemplate(ctx context.Context, node, storage, templateName string) (string, error)
+	ReloadNodeNetwork(ctx context.Context, node string) error
+	GetNodeNetworkInterface(ctx context.Context, node, iface string) (*proxmox.NodeNetworkInterface, error)
 }
 
-// DefaultLXCTemplatePrefix is the family Nimbus auto-downloads when
-// the operator hasn't explicitly pinned a template. Alpine is small
-// (~30 MB), ships with iptables packages in its repos, and works
-// out-of-the-box with PVE's pct exec — exactly what a NAT-only
-// gateway needs. We pick the latest available `alpine-3.X-default_*`
-// from PVE's aplinfo at startup, so this prefix doesn't need to be
-// version-pinned in code.
-const DefaultLXCTemplatePrefix = "alpine-3."
+// gatewayTemplateFamily is the LXC template family Nimbus uses for
+// every gateway. Debian 12 is fixed in code on purpose: the SSH
+// bootstrap script assumes apt + iptables + systemd, debian-12 is
+// supported by every PVE 7.x/8.x release, and "operator picks the
+// OS" is a foot-gun (Alpine/Fedora/etc. would silently fail at
+// bootstrap). Aplinfo still resolves the family to the latest
+// available minor (12.7-1, 12.8-1, …).
+const gatewayTemplateFamily = "debian-12-standard"
 
 // Config holds deployment-specific knobs for the gateway service.
 type Config struct {
@@ -79,10 +86,11 @@ type Config struct {
 	// (existing rows are preserved).
 	IPPoolStart string
 	IPPoolEnd   string
-	// LXCTemplate is the Proxmox volid of an Alpine template
-	// reachable on NetworkNode (e.g.
-	// "local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz").
-	// Required — Nimbus does not auto-download templates here.
+	// LXCTemplate is an unexported test seam — when set, the service
+	// uses the given volid verbatim and skips aplinfo discovery /
+	// download. Production code never sets this; the env var and
+	// Settings UI that previously fed it have been removed because
+	// the gateway OS is fixed (see gatewayTemplateFamily).
 	LXCTemplate string
 	// LXCStorage is the storage pool for the gateway LXC's rootfs.
 	// Default "local-lvm".
@@ -104,6 +112,26 @@ type Service struct {
 	// needs a happy path that doesn't churn through retries on
 	// race losses.
 	allocMu sync.Mutex
+
+	// templateMu guards reads + writes of cfg.LXCTemplate. The
+	// startup ensure runs in a goroutine (so the HTTP listener
+	// binds immediately) while Provision lazy-retries the same
+	// ensure on first VPC create — both paths can mutate the
+	// volid concurrently.
+	templateMu sync.Mutex
+
+	// bootstrapFn is the post-start NAT setup hook. Defaults to
+	// runSSHBootstrap (real SSH-into-LXC) in production; tests
+	// install a no-op via SetBootstrapFn so they don't try to dial
+	// a non-existent SSH server.
+	bootstrapFn func(ctx context.Context, host string, key *EphemeralKeypair, script string) error
+}
+
+// SetBootstrapFn replaces the post-start NAT bootstrap. Tests
+// install a no-op so they don't try to SSH into a non-existent
+// container; production code paths leave the default.
+func (s *Service) SetBootstrapFn(fn func(ctx context.Context, host string, key *EphemeralKeypair, script string) error) {
+	s.bootstrapFn = fn
 }
 
 // New constructs the Service and seeds db.GatewayLXCIP from cfg.IPPool
@@ -111,11 +139,11 @@ type Service struct {
 // boot. Returns an error when required config is missing or the
 // pool string can't be parsed.
 //
-// LXCTemplate is optional: when empty, the service will auto-pick
-// and download a default Alpine template at first VPC create (or
-// via EnsureDefaultTemplate, called from main.go startup). This
-// keeps the operator setup to two settings — network node + IP
-// pool — instead of three.
+// LXCTemplate is a test-only override: production callers leave it
+// blank and the service auto-picks the latest debian-12-standard
+// from PVE's aplinfo at first VPC create (or via EnsureDefaultTemplate
+// called from main.go startup). The operator setup is two settings —
+// network node + IP pool.
 func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 	if cfg.NetworkNode == "" {
 		return nil, errors.New("gateway: NetworkNode is required")
@@ -132,7 +160,7 @@ func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 	if cfg.HostPrefixLen == 0 {
 		cfg.HostPrefixLen = 24
 	}
-	s := &Service{px: px, db: dbConn, cfg: cfg}
+	s := &Service{px: px, db: dbConn, cfg: cfg, bootstrapFn: runSSHBootstrap}
 	if err := s.seedPool(cfg.IPPoolStart, cfg.IPPoolEnd); err != nil {
 		return nil, fmt.Errorf("gateway: seed ip pool: %w", err)
 	}
@@ -141,21 +169,23 @@ func New(px LXCClient, dbConn *gorm.DB, cfg Config) (*Service, error) {
 
 // templateStorage is where Nimbus puts auto-downloaded LXC templates.
 // Hardcoded to `local` since that's the only PVE storage that
-// reliably accepts vztmpl content on a stock install. An admin who
-// wants templates elsewhere can pin LXCTemplate explicitly.
+// reliably accepts vztmpl content on a stock install.
 const templateStorage = "local"
 
-// EnsureDefaultTemplate picks the latest Alpine system template
-// from PVE's aplinfo, downloads it to `local` on the network node
-// if not already cached, and stores the resulting volid on
+// EnsureDefaultTemplate picks the latest debian-12-standard system
+// template from PVE's aplinfo, downloads it to `local` on the network
+// node if not already cached, and stores the resulting volid on
 // cfg.LXCTemplate. Idempotent — repeated calls no-op once a
-// template is in place. Caller-driven (main.go startup) so the
-// download happens before the first VPC create.
+// template is in place. Serialized via templateMu so a concurrent
+// startup goroutine + first-Provision lazy retry don't both fire
+// the download and race the volid write.
 //
-// No-op when cfg.LXCTemplate is already set (operator pinned a
-// template explicitly via env var). Returns the volid that the
-// service will use for new gateway LXCs.
+// No-op when cfg.LXCTemplate is already set (test seam, or a prior
+// successful ensure). Returns the volid that the service will use
+// for new gateway LXCs.
 func (s *Service) EnsureDefaultTemplate(ctx context.Context) (string, error) {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
 	if s.cfg.LXCTemplate != "" {
 		return s.cfg.LXCTemplate, nil
 	}
@@ -164,9 +194,9 @@ func (s *Service) EnsureDefaultTemplate(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list aplinfo templates on %s: %w", s.cfg.NetworkNode, err)
 	}
-	pick := pickLatestAlpine(available)
+	pick := pickGatewayTemplate(available)
 	if pick == "" {
-		return "", fmt.Errorf("gateway: no Alpine 3.x template found in PVE aplinfo on %s — try `pveam update` on the node", s.cfg.NetworkNode)
+		return "", fmt.Errorf("gateway: no %s template found in PVE aplinfo on %s — try `pveam update` on the node", gatewayTemplateFamily, s.cfg.NetworkNode)
 	}
 
 	have, err := s.px.StorageHasFile(ctx, s.cfg.NetworkNode, templateStorage, "vztmpl", pick)
@@ -174,7 +204,7 @@ func (s *Service) EnsureDefaultTemplate(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("check template presence: %w", err)
 	}
 	if !have {
-		log.Printf("gateway: downloading Alpine LXC template %s to %s:vztmpl on %s", pick, templateStorage, s.cfg.NetworkNode)
+		log.Printf("gateway: downloading LXC template %s to %s:vztmpl on %s", pick, templateStorage, s.cfg.NetworkNode)
 		taskID, err := s.px.DownloadLXCTemplate(ctx, s.cfg.NetworkNode, templateStorage, pick)
 		if err != nil {
 			return "", fmt.Errorf("dispatch template download: %w", err)
@@ -191,23 +221,21 @@ func (s *Service) EnsureDefaultTemplate(ctx context.Context) (string, error) {
 	return s.cfg.LXCTemplate, nil
 }
 
-// pickLatestAlpine selects the most recent
-// `alpine-3.X-default_DATE_amd64.tar.xz` from an aplinfo listing.
-// Sort key is the embedded YYYYMMDD release date — newer wins.
-// Architecture-locked to amd64 since gateway LXCs only run x86 hosts
-// in v1; ARM64 cluster support is a follow-up.
-func pickLatestAlpine(in []proxmox.AplinfoTemplate) string {
+// pickGatewayTemplate scans aplinfo and returns the lexicographically-
+// greatest amd64 template name in gatewayTemplateFamily (e.g.
+// `debian-12-standard_12.8-1_amd64.tar.zst` beats
+// `debian-12-standard_12.7-1_amd64.tar.zst`). Returns "" when no
+// template of the family is present in the cluster's aplinfo.
+func pickGatewayTemplate(in []proxmox.AplinfoTemplate) string {
 	var best string
 	for _, t := range in {
 		name := t.Template
-		if !strings.HasPrefix(name, DefaultLXCTemplatePrefix) {
+		if !strings.HasPrefix(name, gatewayTemplateFamily) {
 			continue
 		}
 		if !strings.Contains(name, "_amd64.tar.") {
 			continue
 		}
-		// Lexicographic comparison works because the embedded date
-		// (`_YYYYMMDD_`) sorts naturally.
 		if name > best {
 			best = name
 		}
@@ -216,18 +244,25 @@ func pickLatestAlpine(in []proxmox.AplinfoTemplate) string {
 }
 
 // LXCTemplate returns the volid the service will use for new
-// gateway LXCs — the operator-pinned value or the auto-downloaded
-// default once EnsureDefaultTemplate has run.
-func (s *Service) LXCTemplate() string { return s.cfg.LXCTemplate }
+// gateway LXCs — the test-seam value or the auto-downloaded default
+// once EnsureDefaultTemplate has run. Empty string means the
+// background ensure hasn't completed yet.
+func (s *Service) LXCTemplate() string {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	return s.cfg.LXCTemplate
+}
 
 // Provision creates a gateway LXC for a VPC. Returns the LXC's PVE
 // VMID + the node it lives on (always cfg.NetworkNode in v1). The
 // vpc.CIDR's .1 becomes the eth1 IP — VPC members route through it.
 func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, error) {
-	// Lazy-ensure the default template if startup didn't get to it
-	// (e.g. NetworkNode came online late, aplinfo was momentarily
-	// unreachable). No-op when LXCTemplate is already pinned.
-	if _, err := s.EnsureDefaultTemplate(ctx); err != nil {
+	// Lazy-ensure the default template if startup's background
+	// ensure didn't get to it (e.g. NetworkNode came online late,
+	// aplinfo was momentarily unreachable, or this is the very
+	// first VPC create). No-op when LXCTemplate is already cached.
+	templateVolid, err := s.EnsureDefaultTemplate(ctx)
+	if err != nil {
 		return 0, "", fmt.Errorf("ensure default lxc template: %w", err)
 	}
 	gwIP, err := s.reserveHostIP(ctx, vpc.ID)
@@ -255,11 +290,31 @@ func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, erro
 		return 0, "", fmt.Errorf("nextvmid: %w", err)
 	}
 
+	// Auto-detect the host network's prefix + gateway from the
+	// network node's vmbr0 (or whatever HostBridge is set to). This
+	// avoids the foot-gun where the operator's legacy VM_PREFIX_LEN
+	// (often 24) is wrong for a /16 cluster LAN — the LXC's eth0
+	// would get the right IP but the wrong subnet mask, and its
+	// kernel would refuse to route to the gateway because it's
+	// "outside" the bogus /24. cfg values are the fallback when the
+	// API call fails.
+	hostPrefix, hostGw := s.cfg.HostPrefixLen, s.cfg.HostGatewayIP
+	if iface, err := s.px.GetNodeNetworkInterface(ctx, s.cfg.NetworkNode, s.cfg.HostBridge); err == nil {
+		if p := prefixFromIface(iface); p > 0 {
+			hostPrefix = p
+		}
+		if iface.Gateway != "" {
+			hostGw = iface.Gateway
+		}
+	} else {
+		log.Printf("gateway: could not resolve %s on %s (%v) — falling back to cfg HostPrefixLen=%d HostGatewayIP=%s",
+			s.cfg.HostBridge, s.cfg.NetworkNode, err, s.cfg.HostPrefixLen, s.cfg.HostGatewayIP)
+	}
 	hostNet := proxmox.LXCNetSpec{
 		Name:   "eth0",
 		Bridge: s.cfg.HostBridge,
-		IP:     fmt.Sprintf("%s/%d", gwIP, s.cfg.HostPrefixLen),
-		Gw:     s.cfg.HostGatewayIP,
+		IP:     fmt.Sprintf("%s/%d", gwIP, hostPrefix),
+		Gw:     hostGw,
 	}
 	vpcNet := proxmox.LXCNetSpec{
 		Name:   "eth1",
@@ -271,18 +326,42 @@ func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, erro
 	if len(hostname) > 63 {
 		hostname = hostname[:63]
 	}
+	// vpcmgr.ApplySDN dispatches reload tasks asynchronously — by
+	// the time we get here, the VPC's VXLAN bridge may not be up on
+	// our network node yet, and StartLXC would race the reload and
+	// fail with "bridge ... does not exist". One synchronous reload
+	// on the single node we're about to land on closes the race.
+	if err := s.px.ReloadNodeNetwork(ctx, s.cfg.NetworkNode); err != nil {
+		log.Printf("gateway: pre-create reload network on %s: %v (continuing — start may race)", s.cfg.NetworkNode, err)
+	}
+
+	// Mint a one-shot ed25519 keypair Nimbus uses to SSH into the
+	// freshly-created container exactly once. PVE writes the public
+	// half into /root/.ssh/authorized_keys at create time; the
+	// private half lives only in this function's stack frame. After
+	// bootstrap completes the keypair is discarded — there's no
+	// long-lived SSH credential anywhere on disk.
+	keypair, err := newEphemeralKeypair()
+	if err != nil {
+		return 0, "", fmt.Errorf("generate ssh keypair: %w", err)
+	}
+
 	createTask, err := s.px.CreateLXC(ctx, s.cfg.NetworkNode, proxmox.LXCCreateOpts{
-		VMID:         vmid,
-		OSTemplate:   s.cfg.LXCTemplate,
-		Hostname:     hostname,
-		Storage:      s.cfg.LXCStorage,
-		RootDiskGiB:  1,
-		MemoryMiB:    128,
-		Cores:        1,
-		Net0:         hostNet.String(),
-		Net1:         vpcNet.String(),
-		Unprivileged: true,
-		Features:     "keyctl=1",
+		VMID:          vmid,
+		OSTemplate:    templateVolid,
+		Hostname:      hostname,
+		Storage:       s.cfg.LXCStorage,
+		RootDiskGiB:   2,
+		MemoryMiB:     256,
+		Cores:         1,
+		Net0:          hostNet.String(),
+		Net1:          vpcNet.String(),
+		Unprivileged:  true,
+		SSHPublicKeys: keypair.authorizedKey,
+		// Features intentionally unset. PVE gates every flag except
+		// `nesting` to root@pam — tokens can't set `keyctl=1`. The
+		// default-feature unprivileged container has CAP_NET_ADMIN,
+		// which is all iptables MASQUERADE needs.
 	})
 	if err != nil {
 		return 0, "", fmt.Errorf("create lxc: %w", err)
@@ -315,7 +394,7 @@ func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, erro
 		}
 	}
 
-	if err := s.bootstrapNAT(ctx, vmid); err != nil {
+	if err := s.bootstrapNAT(ctx, gwIP, keypair); err != nil {
 		return 0, "", fmt.Errorf("bootstrap nat: %w", err)
 	}
 
@@ -361,43 +440,50 @@ func (s *Service) Destroy(ctx context.Context, vpc *db.VPC) error {
 	return nil
 }
 
-// bootstrapNAT runs the in-LXC commands that turn it into a NAT
-// gateway. Persists across reboots via /etc/sysctl.d + the Alpine
-// iptables OpenRC service. The script idempotently re-applies on
-// repeated calls — no harm in running it twice during retry.
-func (s *Service) bootstrapNAT(ctx context.Context, vmid int) error {
+// bootstrapNAT SSHes into the freshly-created container at its
+// host-network IP and runs the NAT setup as root. Connects with the
+// ephemeral keypair PVE injected at create time. Targets Debian
+// standard LXC templates: apt-get, iptables-persistent, systemd.
+//
+// Network-up handling is critical: PVE returns from StartLXC as soon
+// as the container's init has launched; sshd takes another ~5-15 s
+// to start. dialSSHWithRetries inside runSSHBootstrap polls TCP/22
+// until the handshake works, so we don't sleep here.
+func (s *Service) bootstrapNAT(ctx context.Context, gwIP string, key *EphemeralKeypair) error {
 	const script = `set -e
-# Wait briefly for the container's network to come up.
-for i in 1 2 3 4 5; do
-  ip a show eth0 | grep -q "inet " && break
-  sleep 1
-done
+export DEBIAN_FRONTEND=noninteractive
 
-# Persist ip_forward.
-echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/10-nimbus.conf
-sysctl -w net.ipv4.ip_forward=1
+# Persist ip_forward (also enable now via sysctl --system).
+cat > /etc/sysctl.d/99-nimbus.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+sysctl --system >/dev/null
 
-# Install iptables if missing.
-if ! command -v iptables >/dev/null 2>&1; then
-  apk add --no-cache iptables
-fi
+# iptables-persistent flushes/restores rules at boot via the
+# netfilter-persistent service. Pre-seed answers so apt doesn't
+# prompt for "save current rules?".
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+apt-get update -qq
+apt-get install -y -qq iptables iptables-persistent
 
-# Idempotent MASQUERADE rule.
-iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+# Idempotent MASQUERADE: -C succeeds if the rule already exists, in
+# which case -A is skipped. eth0 is the host-network NIC PVE assigned.
+iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
-# Persist via OpenRC service so rules survive reboot.
+# Persist via netfilter-persistent.
 mkdir -p /etc/iptables
-iptables-save > /etc/iptables/rules-save
-rc-update add iptables default 2>/dev/null || true
-rc-service iptables save 2>/dev/null || true
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+systemctl enable netfilter-persistent
+systemctl restart netfilter-persistent
 `
-	res, err := s.px.LXCExecShell(ctx, s.cfg.NetworkNode, vmid, script)
-	if err != nil {
-		return fmt.Errorf("exec bootstrap: %w", err)
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("bootstrap exited %d: stderr=%s", res.ExitCode, res.ErrData)
+	sshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	if err := s.bootstrapFn(sshCtx, gwIP, key, script); err != nil {
+		return fmt.Errorf("ssh bootstrap: %w", err)
 	}
 	return nil
 }
@@ -509,6 +595,37 @@ func prefixLenOf(cidr string) (int, error) {
 	}
 	ones, _ := ipnet.Mask.Size()
 	return ones, nil
+}
+
+// prefixFromIface extracts an IPv4 prefix length from PVE's interface
+// shape. Tries iface.CIDR first ("192.168.0.245/16" — preferred),
+// then iface.Netmask which can be either a prefix string ("16") or
+// a dotted-quad mask ("255.255.0.0"). Returns 0 if nothing parses.
+func prefixFromIface(iface *proxmox.NodeNetworkInterface) int {
+	if iface == nil {
+		return 0
+	}
+	if iface.CIDR != "" {
+		if i := strings.LastIndex(iface.CIDR, "/"); i >= 0 {
+			if p, err := strconv.Atoi(iface.CIDR[i+1:]); err == nil && p >= 1 && p <= 32 {
+				return p
+			}
+		}
+	}
+	if iface.Netmask != "" {
+		// Numeric prefix form ("16")
+		if p, err := strconv.Atoi(iface.Netmask); err == nil && p >= 1 && p <= 32 {
+			return p
+		}
+		// Dotted-quad form ("255.255.0.0")
+		if mask := net.IPMask(net.ParseIP(iface.Netmask).To4()); mask != nil {
+			ones, bits := mask.Size()
+			if bits == 32 && ones >= 1 {
+				return ones
+			}
+		}
+	}
+	return 0
 }
 
 func parseIPv4(s string) (uint32, error) {

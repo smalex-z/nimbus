@@ -14,7 +14,9 @@ import (
 )
 
 // fakeLXC stubs LXCClient. Default behavior is "all calls succeed";
-// override hooks let tests inject failures.
+// override hooks let tests inject failures. The bootstrap step is a
+// separate seam (Service.SetBootstrapFn) — exec counters live on
+// fakeLXC so the synthetic bootstrap closure can bump them.
 type fakeLXC struct {
 	createCalls  atomic.Int32
 	startCalls   atomic.Int32
@@ -24,9 +26,7 @@ type fakeLXC struct {
 	nextVMID     atomic.Int32
 
 	createOpts proxmox.LXCCreateOpts
-	execScript string
 	execErr    error
-	execExit   int
 }
 
 func (f *fakeLXC) CreateLXC(_ context.Context, _ string, opts proxmox.LXCCreateOpts) (string, error) {
@@ -46,14 +46,6 @@ func (f *fakeLXC) DestroyLXC(_ context.Context, _ string, _ int) (string, error)
 	f.destroyCalls.Add(1)
 	return "UPID:destroy", nil
 }
-func (f *fakeLXC) LXCExecShell(_ context.Context, _ string, _ int, script string) (*proxmox.LXCExecResult, error) {
-	f.execCalls.Add(1)
-	f.execScript = script
-	if f.execErr != nil {
-		return nil, f.execErr
-	}
-	return &proxmox.LXCExecResult{ExitCode: f.execExit}, nil
-}
 func (f *fakeLXC) WaitForTask(_ context.Context, _, _ string, _ time.Duration) error { return nil }
 func (f *fakeLXC) NextVMID(_ context.Context) (int, error) {
 	v := f.nextVMID.Add(1) + 199
@@ -64,12 +56,25 @@ func (f *fakeLXC) StorageHasFile(_ context.Context, _, _, _, _ string) (bool, er
 }
 func (f *fakeLXC) ListAvailableLXCTemplates(_ context.Context, _ string) ([]proxmox.AplinfoTemplate, error) {
 	return []proxmox.AplinfoTemplate{
-		{Template: "alpine-3.20-default_20240908_amd64.tar.xz", Type: "lxc"},
-		{Template: "alpine-3.21-default_20241217_amd64.tar.xz", Type: "lxc"},
+		{Template: "debian-12-standard_12.12-1_amd64.tar.zst", Type: "lxc"},
+		{Template: "debian-13-standard_13.1-2_amd64.tar.zst", Type: "lxc"},
+		{Template: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst", Type: "lxc"},
 	}, nil
 }
 func (f *fakeLXC) DownloadLXCTemplate(_ context.Context, _, _, _ string) (string, error) {
 	return "UPID:fake:download", nil
+}
+func (f *fakeLXC) ReloadNodeNetwork(_ context.Context, _ string) error { return nil }
+func (f *fakeLXC) GetNodeNetworkInterface(_ context.Context, _, iface string) (*proxmox.NodeNetworkInterface, error) {
+	// Default: return a /16 LAN with a routable gateway. Tests that
+	// care about the auto-detect path can override via fakeLXC.ifaceFn
+	// — for now the global value is enough to keep Provision happy.
+	return &proxmox.NodeNetworkInterface{
+		Iface:   iface,
+		Address: "192.168.1.10",
+		CIDR:    "192.168.1.10/16",
+		Gateway: "192.168.1.1",
+	}, nil
 }
 
 func newTestSvc(t *testing.T, ipPoolRange string) (*gateway.Service, *fakeLXC, *db.DB) {
@@ -95,6 +100,14 @@ func newTestSvc(t *testing.T, ipPoolRange string) (*gateway.Service, *fakeLXC, *
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}
+	// Skip the real SSH bootstrap — there's no LXC to dial. The
+	// fakeLXC.execCalls counter gets bumped here so existing tests
+	// that asserted "exec was called" stay valid; bootstrapErr
+	// lets BootstrapFailure inject a synthetic failure.
+	svc.SetBootstrapFn(func(_ context.Context, _ string, _ *gateway.EphemeralKeypair, _ string) error {
+		lxc.execCalls.Add(1)
+		return lxc.execErr
+	})
 	return svc, lxc, database
 }
 
@@ -230,7 +243,7 @@ func TestProvision_BootstrapFailure(t *testing.T) {
 }
 
 // TestNew_Validates: missing config fails. Template is now optional —
-// when omitted, EnsureDefaultTemplate downloads the latest Alpine on
+// when omitted, EnsureDefaultTemplate downloads the latest Debian on
 // first VPC create, so New no longer rejects an empty LXCTemplate.
 func TestNew_Validates(t *testing.T) {
 	t.Parallel()
@@ -249,11 +262,12 @@ func TestNew_Validates(t *testing.T) {
 	}
 }
 
-// TestEnsureDefaultTemplate_PicksLatestAlpine: aplinfo returns a
-// mix of Alpine versions; EnsureDefaultTemplate should pick the
-// newest amd64 system template, set cfg.LXCTemplate, and skip
-// download when StorageHasFile reports already-cached.
-func TestEnsureDefaultTemplate_PicksLatestAlpine(t *testing.T) {
+// TestEnsureDefaultTemplate_PicksLatestDebian12: aplinfo returns a
+// mix of families; EnsureDefaultTemplate should pick the newest
+// debian-12-standard amd64 entry, ignore debian-13 / ubuntu, set
+// cfg.LXCTemplate, and skip download when StorageHasFile reports
+// already-cached.
+func TestEnsureDefaultTemplate_PicksLatestDebian12(t *testing.T) {
 	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	database, err := db.New(dbPath, &db.GatewayLXCIP{}, &db.VPC{})
@@ -274,7 +288,7 @@ func TestEnsureDefaultTemplate_PicksLatestAlpine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDefaultTemplate: %v", err)
 	}
-	want := "local:vztmpl/alpine-3.21-default_20241217_amd64.tar.xz"
+	want := "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
 	if volid != want {
 		t.Errorf("volid = %q, want %q", volid, want)
 	}
@@ -283,8 +297,8 @@ func TestEnsureDefaultTemplate_PicksLatestAlpine(t *testing.T) {
 	}
 }
 
-// TestEnsureDefaultTemplate_NoOpWhenPinned: an admin-pinned
-// LXCTemplate must survive — auto-pick should not clobber it.
+// TestEnsureDefaultTemplate_NoOpWhenPinned: when LXCTemplate is set
+// (test seam), auto-pick must not clobber it.
 func TestEnsureDefaultTemplate_NoOpWhenPinned(t *testing.T) {
 	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -292,7 +306,7 @@ func TestEnsureDefaultTemplate_NoOpWhenPinned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
-	pinned := "local:vztmpl/alpine-3.18-default_old_amd64.tar.xz"
+	pinned := "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
 	svc, err := gateway.New(&fakeLXC{}, database.DB, gateway.Config{
 		NetworkNode: "alpha",
 		LXCTemplate: pinned,

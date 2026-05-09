@@ -8465,9 +8465,6 @@ const docTemplate = `{
                 "lxc_storage": {
                     "type": "string"
                 },
-                "lxc_template": {
-                    "type": "string"
-                },
                 "network_node": {
                     "type": "string"
                 }
@@ -8684,9 +8681,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "lxc_storage": {
-                    "type": "string"
-                },
-                "lxc_template": {
                     "type": "string"
                 },
                 "network_node": {

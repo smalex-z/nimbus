@@ -81,16 +81,16 @@ function StandalonePanel() {
 }
 
 // VPCConfigPanel is the live-editable VPC settings form. Configures
-// network node (where every VPC's gateway LXC lives), the host-side
-// IP pool the gateway LXCs allocate from, and an optional pinned
-// LXC template (otherwise auto-picks Alpine 3.x).
+// network node (where every VPC's gateway LXC lives) and the host-
+// side IP pool the gateway LXCs allocate from. The OS image is
+// fixed (debian-12-standard, auto-resolved via aplinfo) — see
+// internal/gateway/service.go.
 function VPCConfigPanel() {
   const [settings, setSettings] = useState<NetworkingV1Settings | null>(null)
   const [nodes, setNodes] = useState<NodeView[]>([])
   const [networkNode, setNetworkNode] = useState('')
   const [ipPoolStart, setIPPoolStart] = useState('')
   const [ipPoolEnd, setIPPoolEnd] = useState('')
-  const [template, setTemplate] = useState('')
   const [storage, setStorage] = useState('local-lvm')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -103,7 +103,6 @@ function VPCConfigPanel() {
         setNetworkNode(s.network_node)
         setIPPoolStart(s.lxc_ip_pool_start)
         setIPPoolEnd(s.lxc_ip_pool_end)
-        setTemplate(s.lxc_template)
         setStorage(s.lxc_storage || 'local-lvm')
         setNodes(ns)
       })
@@ -118,10 +117,9 @@ function VPCConfigPanel() {
       networkNode !== settings.network_node ||
       ipPoolStart !== settings.lxc_ip_pool_start ||
       ipPoolEnd !== settings.lxc_ip_pool_end ||
-      template !== settings.lxc_template ||
       (storage || 'local-lvm') !== (settings.lxc_storage || 'local-lvm')
     )
-  }, [settings, networkNode, ipPoolStart, ipPoolEnd, template, storage])
+  }, [settings, networkNode, ipPoolStart, ipPoolEnd, storage])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -133,7 +131,6 @@ function VPCConfigPanel() {
         network_node: networkNode.trim(),
         lxc_ip_pool_start: ipPoolStart.trim(),
         lxc_ip_pool_end: ipPoolEnd.trim(),
-        lxc_template: template.trim(),
         lxc_storage: storage.trim() || 'local-lvm',
       })
       setSettings(next)
@@ -231,19 +228,11 @@ function VPCConfigPanel() {
           Pick a slice outside the LAN's DHCP range.
         </p>
 
-        <Field label="LXC template (optional)">
-          <input
-            value={template}
-            onChange={(e) => setTemplate(e.target.value)}
-            placeholder="local:vztmpl/alpine-3.21-default_20241217_amd64.tar.xz"
-            className="n-input font-mono"
-          />
-          <p className="mt-1 text-[11px] text-ink-3">
-            Leave blank to auto-pick the latest Alpine 3.x system
-            template via PVE's <code>aplinfo</code> repo (downloaded
-            on first VPC create if not cached).
-          </p>
-        </Field>
+        <p className="text-[11px] text-ink-3">
+          Gateway image is fixed to <code>debian-12-standard</code>;
+          the latest minor is fetched from PVE's <code>aplinfo</code>
+          on first VPC create.
+        </p>
 
         <div className="flex items-center gap-3 pt-1">
           <button
@@ -258,7 +247,7 @@ function VPCConfigPanel() {
         </div>
         {saving && (
           <p className="text-[11px] text-ink-3">
-            First-time apply may take ~30s while the Alpine template
+            First-time apply may take ~30s while the Debian template
             downloads to the network node.
           </p>
         )}

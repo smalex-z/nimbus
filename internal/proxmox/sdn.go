@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Proxmox SDN endpoints surface as `/cluster/sdn/{zones,vnets,subnets}` —
@@ -289,17 +290,30 @@ func (c *Client) ApplySDN(ctx context.Context) error {
 // ReloadNodeNetwork triggers `ifreload -a` on a single node via PVE's
 // PUT /nodes/{node}/network endpoint. Mirrors what the web UI's
 // "Apply" button does on the per-node Network tab — the missing piece
-// after ApplySDN when a cluster member hasn't been kicked since
-// joining.
+// after ApplySDN when a fresh cluster member's per-node reload hasn't
+// fired yet.
 //
-// Idempotent at the network layer (ifreload already-up bridges is a
-// no-op). Returns nil on success; transport errors propagate.
+// PVE returns a UPID for the reload worker, NOT a synchronous result
+// — so callers (e.g. gateway.Provision before StartLXC) need the
+// reload to be FINISHED, not just dispatched. We block on the UPID
+// here so the function returning means the bridge is actually up.
+//
+// Idempotent at the network layer (ifreload over an already-up
+// bridge is a cheap no-op).
 func (c *Client) ReloadNodeNetwork(ctx context.Context, node string) error {
 	if node == "" {
 		return errors.New("reload node network: node required")
 	}
+	var taskID string
 	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
-	return c.do(ctx, http.MethodPut, path, nil, nil)
+	if err := c.do(ctx, http.MethodPut, path, nil, &taskID); err != nil {
+		return err
+	}
+	if taskID == "" {
+		// Older PVE responded synchronously — nothing to wait for.
+		return nil
+	}
+	return c.WaitForTask(ctx, node, taskID, 500*time.Millisecond)
 }
 
 // SetVMNetwork rewrites the bridge on a VM's network device after

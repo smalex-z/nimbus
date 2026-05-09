@@ -51,7 +51,6 @@ type SDNClient interface {
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnetID string) error
 	ApplySDN(ctx context.Context) error
-	ReloadNodeNetwork(ctx context.Context, node string) error
 }
 
 // Config is the deployment-specific knobs the Service needs.
@@ -295,15 +294,12 @@ func (s *Service) bootstrapPVE(ctx context.Context, row *db.StandaloneVMNetwork)
 	if err := s.px.ApplySDN(ctx); err != nil {
 		return fmt.Errorf("apply sdn: %w", err)
 	}
-	// ApplySDN writes /etc/network/interfaces.d/sdn on every node but
-	// doesn't reliably reload ifupdown2 on freshly-added members. The
-	// VM's NIC binds to a bridge that doesn't exist until ifreload
-	// runs, so cloud-init hangs on systemd-networkd-wait-online.
-	// Force the reload on the target node — best-effort because older
-	// PVE may not expose the endpoint.
-	if err := s.px.ReloadNodeNetwork(ctx, row.Node); err != nil {
-		log.Printf("standalonenet: reload network on %s after apply failed: %v (run `ifreload -a` on the node if the bridge is missing)", row.Node, err)
-	}
+	// ApplySDN itself triggers cluster-wide ifreload via PVE's
+	// "Reload network configuration on all nodes" task. We don't
+	// chase it with an explicit per-node reload anymore — that
+	// doubled the reload count for every provision. If a fresh
+	// node ever needs a manual nudge, `ifreload -a` on the host
+	// is the one-shot recovery.
 	return nil
 }
 

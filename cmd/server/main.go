@@ -634,7 +634,6 @@ func main() {
 			NetworkNode:    cfg.NetworkNode,
 			LXCIPPoolStart: start,
 			LXCIPPoolEnd:   end,
-			LXCTemplate:    cfg.GatewayLXCTemplate,
 			LXCStorage:     cfg.GatewayLXCStorage,
 		}
 		if err := authSvc.SaveNetworkingV1Settings(seed); err != nil {
@@ -688,7 +687,6 @@ func main() {
 			HostPrefixLen: cfg.VMPrefixLen,
 			IPPoolStart:   s.LXCIPPoolStart,
 			IPPoolEnd:     s.LXCIPPoolEnd,
-			LXCTemplate:   s.LXCTemplate,
 			LXCStorage:    storage,
 		})
 		if gwErr != nil {
@@ -696,11 +694,19 @@ func main() {
 			disableVPCs()
 			return
 		}
-		ensureCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		if _, err := gwSvc.EnsureDefaultTemplate(ensureCtx); err != nil {
-			log.Printf("warning: gateway template ensure (continuing — will retry on first VPC create): %v", err)
-		}
-		cancel()
+		// Template download can take 30-90s+ depending on PVE's mirror.
+		// Run it in the background so the HTTP listener can bind
+		// immediately on startup and Settings → Network save returns
+		// without a long spinner. Service.Provision lazy-retries the
+		// ensure on first VPC create, so a slow/failed background
+		// download just postpones the work, never breaks it.
+		go func() {
+			ensureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if _, err := gwSvc.EnsureDefaultTemplate(ensureCtx); err != nil {
+				log.Printf("warning: gateway template ensure (continuing — will retry on first VPC create): %v", err)
+			}
+		}()
 
 		peerResolver := vpcmgr.PeerResolverFunc(func(ctx context.Context) (string, error) {
 			return proxmox.ResolveOnlinePeerIPs(ctx, pveClient)

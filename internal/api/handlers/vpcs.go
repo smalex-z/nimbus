@@ -49,7 +49,7 @@ func (h *VPCs) service() *vpcmgr.Service {
 }
 
 // disabledMessage is what the handler returns when no vpcmgr is wired.
-const disabledMessage = "VPC networking is not configured on this Nimbus instance — set NIMBUS_NETWORK_NODE, NIMBUS_GATEWAY_LXC_IP_POOL, and NIMBUS_GATEWAY_LXC_TEMPLATE, then restart"
+const disabledMessage = "VPC networking is not configured on this Nimbus instance — set the network node and gateway-LXC IP pool in Settings → Network"
 
 func (h *VPCs) requireEnabled(w http.ResponseWriter) bool {
 	if h.service() == nil {

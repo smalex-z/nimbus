@@ -760,14 +760,14 @@ type GatewayLXCIP struct {
 // Settings → Network page is the source of truth and live-rotates
 // without a server restart.
 //
-// LXCTemplate stays optional even here — when blank, the gateway
-// service auto-picks the latest Alpine 3.x via PVE's aplinfo. The
-// admin can still pin a specific template volid if they want to.
+// The OS image is intentionally not in here — the gateway service
+// auto-picks the latest debian-12-standard via PVE's aplinfo, and
+// the bootstrap script assumes that family. (An old `lxc_template`
+// column may still exist on upgraded DBs; it is unread.)
 type NetworkingV1Settings struct {
 	ID             uint   `gorm:"primaryKey"`
 	NetworkNode    string `gorm:"column:network_node;default:''"`
 	LXCIPPoolStart string `gorm:"column:lxc_ip_pool_start;default:''"`
 	LXCIPPoolEnd   string `gorm:"column:lxc_ip_pool_end;default:''"`
-	LXCTemplate    string `gorm:"column:lxc_template;default:''"`
 	LXCStorage     string `gorm:"column:lxc_storage;default:'local-lvm'"`
 }

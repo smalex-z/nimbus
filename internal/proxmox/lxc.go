@@ -57,13 +57,20 @@ type LXCCreateOpts struct {
 	// safer and works on PVE 8.x with the right features flag.
 	Unprivileged bool
 	// Features enables container features that need extra perms.
-	// Gateway LXCs need keyctl=1 to load iptables modules and
-	// nesting=0 (we don't run docker-in-LXC). Empty leaves PVE
-	// defaults.
+	// Features turns on optional cgroup/namespace knobs (e.g.
+	// `nesting=1`). PVE blocks every flag except `nesting` for API
+	// tokens, so callers running as a token should leave this empty.
 	Features string
 	// Start=true brings the container up after create. Default false
 	// so the caller can apply more config before first boot.
 	Start bool
+	// SSHPublicKeys, when non-empty, is written into the freshly-
+	// created container's /root/.ssh/authorized_keys. PVE handles
+	// the rootfs injection itself; we just pass the key string. Used
+	// by gateway.Service to bootstrap NAT setup over SSH (PVE has no
+	// REST endpoint for `pct exec`, so we authenticate to the
+	// container's sshd over the host network instead).
+	SSHPublicKeys string
 }
 
 // CreateLXC provisions a new Linux container on the given node with
@@ -115,6 +122,9 @@ func (c *Client) CreateLXC(ctx context.Context, node string, opts LXCCreateOpts)
 	}
 	if opts.Start {
 		params.Set("start", "1")
+	}
+	if opts.SSHPublicKeys != "" {
+		params.Set("ssh-public-keys", opts.SSHPublicKeys)
 	}
 
 	var taskID string

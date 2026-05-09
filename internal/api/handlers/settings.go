@@ -1509,7 +1509,6 @@ type networkingV1View struct {
 	NetworkNode    string `json:"network_node"`
 	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
 	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
-	LXCTemplate    string `json:"lxc_template"`
 	LXCStorage     string `json:"lxc_storage"`
 	// Configured reports whether the minimum required fields
 	// (network_node + a complete pool range) are set. The frontend
@@ -1539,7 +1538,6 @@ func (s *Settings) GetNetworkingV1(w http.ResponseWriter, _ *http.Request) {
 		NetworkNode:    row.NetworkNode,
 		LXCIPPoolStart: row.LXCIPPoolStart,
 		LXCIPPoolEnd:   row.LXCIPPoolEnd,
-		LXCTemplate:    row.LXCTemplate,
 		LXCStorage:     row.LXCStorage,
 		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
 	})
@@ -1549,7 +1547,6 @@ type saveNetworkingV1Request struct {
 	NetworkNode    string `json:"network_node"`
 	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
 	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
-	LXCTemplate    string `json:"lxc_template"`
 	LXCStorage     string `json:"lxc_storage"`
 }
 
@@ -1605,7 +1602,6 @@ func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
 		NetworkNode:    strings.TrimSpace(req.NetworkNode),
 		LXCIPPoolStart: start,
 		LXCIPPoolEnd:   end,
-		LXCTemplate:    strings.TrimSpace(req.LXCTemplate),
 		LXCStorage:     strings.TrimSpace(req.LXCStorage),
 	}); err != nil {
 		response.InternalError(w, "failed to save networking-v1 settings")
@@ -1623,7 +1619,6 @@ func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
 		NetworkNode:    row.NetworkNode,
 		LXCIPPoolStart: row.LXCIPPoolStart,
 		LXCIPPoolEnd:   row.LXCIPPoolEnd,
-		LXCTemplate:    row.LXCTemplate,
 		LXCStorage:     row.LXCStorage,
 		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
 	})

@@ -1272,12 +1272,16 @@ export async function getVPC(id: number): Promise<VPC> {
 }
 
 export async function createVPC(req: { name: string }): Promise<VPC> {
-  const { data } = await api.post<VPC>('/vpcs', req, { timeout: 90_000 })
+  // 5-minute ceiling: gateway LXC create + start + sshd-readiness +
+  // bootstrap can hit 60-90s on busy hardware, and a fresh template
+  // download tacks on another minute or two. The handler is still
+  // synchronous (no polling endpoint yet) so the client must wait.
+  const { data } = await api.post<VPC>('/vpcs', req, { timeout: 300_000 })
   return data
 }
 
 export async function deleteVPC(id: number): Promise<void> {
-  await api.delete(`/vpcs/${id}`, { timeout: 60_000 })
+  await api.delete(`/vpcs/${id}`, { timeout: 120_000 })
 }
 
 // NetworkingInfo is the snapshot the Provision page reads to render
@@ -1304,7 +1308,6 @@ export interface NetworkingV1Settings {
   network_node: string
   lxc_ip_pool_start: string
   lxc_ip_pool_end: string
-  lxc_template: string
   lxc_storage: string
   configured: boolean
 }
@@ -1318,14 +1321,13 @@ export interface SaveNetworkingV1Request {
   network_node?: string
   lxc_ip_pool_start?: string
   lxc_ip_pool_end?: string
-  lxc_template?: string
   lxc_storage?: string
 }
 
 export async function saveNetworkingV1Settings(
   req: SaveNetworkingV1Request,
 ): Promise<NetworkingV1Settings> {
-  // Apply triggers a gateway-stack rebuild + Alpine template ensure
+  // Apply triggers a gateway-stack rebuild + Debian template ensure
   // (~30s on first run if the template isn't cached yet).
   const { data } = await api.put<NetworkingV1Settings>('/settings/networking-v1', req, {
     timeout: 90_000,
