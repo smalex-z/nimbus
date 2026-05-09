@@ -31,6 +31,15 @@ else
   systemctl stop "$APP_NAME"
   cp "$ROOT/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
   chown "$APP_NAME:$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+
+  # Refresh systemd units before starting the service. Idempotent;
+  # required for the cloud-tunnel install path (drops the
+  # nimbus-gopher-bootstrap.{path,service} units the hardened main
+  # service can't write to itself). --units-only skips the binary
+  # copy + restart that would otherwise conflict with the just-
+  # swapped binary running this command.
+  "$INSTALL_DIR/$APP_NAME" install --units-only
+
   systemctl start "$APP_NAME"
 fi
 

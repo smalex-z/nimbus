@@ -27,6 +27,16 @@ const (
 	sudoersFile = "/etc/sudoers.d/nimbus"
 	serviceUser = "nimbus"
 	appName     = "nimbus"
+
+	// Cloud-tunnel bootstrap helper. The main nimbus.service unit is
+	// hardened (NoNewPrivileges, ProtectSystem=strict) which prevents
+	// it from running `apt install rathole` and dropping a systemd
+	// unit on the host. The helper service runs UNHARDENED, as root,
+	// in oneshot mode — fired by a path unit watching for a
+	// trigger file the main service drops.
+	gopherHelperPath    = "/etc/systemd/system/nimbus-gopher-bootstrap.path"
+	gopherHelperService = "/etc/systemd/system/nimbus-gopher-bootstrap.service"
+	gopherHelperUnit    = "nimbus-gopher-bootstrap.path"
 )
 
 // Run executes the install subcommand. If not running as root it re-execs
@@ -38,6 +48,7 @@ const (
 func Run(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	upgrade := fs.Bool("upgrade", false, "replace binary and restart service; leave config/systemd/sudoers untouched")
+	unitsOnly := fs.Bool("units-only", false, "(re)write systemd units only — no binary copy or service restart. Used by reinstall.sh after a hot-swap to land new units without conflicting with the running binary.")
 	_ = fs.Parse(args)
 
 	if runtime.GOOS != "linux" {
@@ -49,10 +60,32 @@ func Run(args []string) {
 		return
 	}
 
+	if *unitsOnly {
+		fmt.Println("\nNimbus Units-Only Refresh")
+		fmt.Println("────────────────────────────────────────────────")
+		// Re-writes systemd unit files in place. Skips installBinary
+		// (which would 'text file busy' against the running process)
+		// and skips restartService (caller controls lifecycle).
+		// Idempotent.
+		step("Writing systemd unit", writeServiceUnit)
+		step("Writing gopher-bootstrap helper unit", writeGopherHelperUnit)
+		// Enable the helper path unit so it's active after this call
+		// returns. Idempotent — already-enabled is a no-op.
+		_ = exec.Command("systemctl", "enable", gopherHelperUnit).Run()
+		_ = exec.Command("systemctl", "start", gopherHelperUnit).Run()
+		fmt.Printf("\n✅ Nimbus units refreshed.\n\n")
+		return
+	}
+
 	if *upgrade {
 		fmt.Println("\nNimbus Upgrade")
 		fmt.Println("────────────────────────────────────────────────")
 		step("Installing binary", installBinary)
+		// Idempotent — re-writes the file with the current content
+		// even when present, so an upgrade picks up unit-file
+		// changes (e.g. the gopher-bootstrap helper itself, when
+		// the unit definition shifts in a future release).
+		step("Writing gopher-bootstrap helper unit", writeGopherHelperUnit)
 		step("Restarting service", startService)
 		fmt.Printf("\n✅ Nimbus upgraded.\n\n")
 		return
@@ -65,6 +98,7 @@ func Run(args []string) {
 	step("Installing binary", installBinary)
 	step("Writing env file stub", writeEnvStub)
 	step("Writing systemd unit", writeServiceUnit)
+	step("Writing gopher-bootstrap helper unit", writeGopherHelperUnit)
 	step("Writing sudoers rule", writeSudoers)
 	step("Enabling & starting service", startService)
 
@@ -197,8 +231,62 @@ func writeSudoers() error {
 	return os.WriteFile(sudoersFile, []byte(sudoersRule), 0440)
 }
 
+// gopherHelperPathUnit watches /var/lib/nimbus/bootstrap-trigger and
+// fires the helper service when the file appears. The main nimbus
+// service drops the trigger; the helper service consumes (deletes)
+// it after running so subsequent invocations re-fire cleanly.
+const gopherHelperPathUnit = `[Unit]
+Description=Watch for Nimbus gopher-bootstrap trigger
+After=network-online.target
+
+[Path]
+PathExists=/var/lib/nimbus/bootstrap-trigger
+
+[Install]
+WantedBy=multi-user.target
+`
+
+// gopherHelperServiceUnit runs the actual install (curl | bash from
+// the Gopher gateway). Deliberately UNHARDENED — apt and systemd
+// drops need real root + filesystem write access. The trigger file
+// is the only privilege boundary; nimbus.service can write into
+// /var/lib/nimbus, that's it.
+//
+// Reads /var/lib/nimbus/bootstrap-pending.json (URL + machine_name),
+// writes /var/lib/nimbus/bootstrap-result.json on completion. The
+// nimbus subcommand handles all of that — see cmd/server/main.go's
+// runGopherBootstrap.
+const gopherHelperServiceUnit = `[Unit]
+Description=Run Nimbus gopher-bootstrap (rathole install)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nimbus/nimbus gopher-bootstrap
+# Clean up the trigger file so the path unit re-fires on next touch
+# rather than retriggering on metadata changes from the helper.
+ExecStartPost=-/bin/rm -f /var/lib/nimbus/bootstrap-trigger
+`
+
+func writeGopherHelperUnit() error {
+	if err := os.WriteFile(gopherHelperPath, []byte(gopherHelperPathUnit), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(gopherHelperService, []byte(gopherHelperServiceUnit), 0644); err != nil {
+		return err
+	}
+	return exec.Command("systemctl", "daemon-reload").Run()
+}
+
 func startService() error {
 	_ = exec.Command("systemctl", "enable", appName).Run()
+	// Enable + start the helper path unit so the trigger-file watcher
+	// is live before any operator clicks "Bootstrap cloud tunnel."
+	// Failing here doesn't block the main service install — the
+	// Settings page surfaces "helper unit not found" if the helper
+	// is missing at runtime.
+	_ = exec.Command("systemctl", "enable", gopherHelperUnit).Run()
+	_ = exec.Command("systemctl", "start", gopherHelperUnit).Run()
 	return exec.Command("systemctl", "restart", appName).Run()
 }
 
