@@ -44,5 +44,35 @@ func New(path string, models ...any) (*DB, error) {
 		}
 	}
 
+	// Partial unique indexes for soft-deletable models. GORM struct
+	// tags can't express `WHERE deleted_at IS NULL`, but the
+	// reconciler soft-deletes vm rows on purpose (preserve history,
+	// allow recovery), and a plain unique index would keep tombstoned
+	// vmids/hostnames "taken" forever — blocking VMID reuse after
+	// Proxmox recycles the slot. Drop any AutoMigrate-created plain
+	// unique indexes first, then create the partial ones.
+	//
+	// Per-table guard: tests sometimes open a DB without the vms
+	// model (only the slice of tables they care about). Skip the
+	// migration entirely when the parent table isn't present.
+	if gormDB.Migrator().HasTable(&VM{}) {
+		// idx_vms_vm_id (not _vmid) is what GORM auto-named the
+		// unique index — VMID's camelCase splits to v_m_i_d-ish per
+		// the CLAUDE.md naming-convention gotcha. Drop both spellings
+		// to be safe across whatever historical builds put on disk.
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_vms_vm_id`,
+			`DROP INDEX IF EXISTS idx_vms_vmid`,
+			`DROP INDEX IF EXISTS idx_vms_hostname`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_vmid_alive ON vms(vmid) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_hostname_alive ON vms(hostname) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+
 	return &DB{gormDB}, nil
 }

@@ -487,16 +487,6 @@ func main() {
 	}
 	ownerBackfillCancel()
 
-	// Hard-delete pre-existing soft-deleted vms rows. Older builds
-	// of deleteVM left tombstoned rows whose `vmid` still occupied
-	// the unique index — the next provision that landed on the same
-	// PVE-recycled VMID failed with `UNIQUE constraint failed: vms.vmid`.
-	// One-shot cleanup; idempotent.
-	if n, err := provSvc.HardDeleteSoftDeletedVMs(); err != nil {
-		log.Printf("warning: stale vm-row cleanup failed: %v", err)
-	} else if n > 0 {
-		log.Printf("backfill: hard-deleted %d soft-deleted VM row(s) (freed vmid unique index)", n)
-	}
 
 	// Same backfill for ssh_keys: legacy rows (created before ownership
 	// tracking, or migrated from VMs that had NULL owner_id) get bound to

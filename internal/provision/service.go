@@ -1188,23 +1188,6 @@ func (s *Service) BackfillOwnership(ctx context.Context) (int64, error) {
 	return res.RowsAffected, nil
 }
 
-// HardDeleteSoftDeletedVMs purges any vms rows with deleted_at IS
-// NOT NULL. Pre-existing soft-deleted rows from before deleteVM
-// switched to Unscoped().Delete still hold their `vmid` in the
-// unique index, blocking new provisions from re-using those VMIDs
-// after PVE recycles them. Idempotent: a no-op when nothing's stale.
-//
-// Returns the number of rows hard-deleted. Run from main.go at
-// startup; safe to call repeatedly.
-func (s *Service) HardDeleteSoftDeletedVMs() (int64, error) {
-	res := s.db.Unscoped().
-		Where("deleted_at IS NOT NULL").
-		Delete(&db.VM{})
-	if res.Error != nil {
-		return 0, fmt.Errorf("hard-delete soft-deleted vms: %w", res.Error)
-	}
-	return res.RowsAffected, nil
-}
 
 // GetPrivateKey returns the decrypted private key for a VM, if one is
 // available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound

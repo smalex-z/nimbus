@@ -318,10 +318,19 @@ type GPUJob struct {
 func (GPUJob) TableName() string { return "gpu_jobs" }
 
 // VM is the canonical record for a provisioned virtual machine.
+//
+// IMPORTANT: vmid and hostname are uniqueness-enforced via PARTIAL
+// unique indexes (see db.New's post-AutoMigrate step), NOT via
+// `uniqueIndex` struct tags. The reconciler soft-deletes rows (via
+// gorm.DeletedAt) to preserve VM history; a plain unique index would
+// keep tombstoned vmids/hostnames "taken" forever and block VMID
+// reuse after Proxmox recycles the slot. Partial indexes scoped to
+// `deleted_at IS NULL` are SQLite's solution. The struct just keeps
+// non-unique `index`es for query performance.
 type VM struct {
 	gorm.Model
-	VMID     int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
-	Hostname string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
+	VMID     int    `gorm:"column:vmid;index;not null"              json:"vmid"`
+	Hostname string `gorm:"column:hostname;index;not null"          json:"hostname"`
 	IP       string `gorm:"column:ip;index;not null"                json:"ip"`
 	Node     string `gorm:"column:node;not null"                    json:"node"`
 	Tier     string `gorm:"column:tier;not null"                    json:"tier"`
