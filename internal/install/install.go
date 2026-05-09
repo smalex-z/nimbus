@@ -48,6 +48,7 @@ const (
 func Run(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	upgrade := fs.Bool("upgrade", false, "replace binary and restart service; leave config/systemd/sudoers untouched")
+	unitsOnly := fs.Bool("units-only", false, "(re)write systemd units only — no binary copy or service restart. Used by reinstall.sh after a hot-swap to land new units without conflicting with the running binary.")
 	_ = fs.Parse(args)
 
 	if runtime.GOOS != "linux" {
@@ -56,6 +57,23 @@ func Run(args []string) {
 
 	if os.Getuid() != 0 {
 		selfExecWithSudo()
+		return
+	}
+
+	if *unitsOnly {
+		fmt.Println("\nNimbus Units-Only Refresh")
+		fmt.Println("────────────────────────────────────────────────")
+		// Re-writes systemd unit files in place. Skips installBinary
+		// (which would 'text file busy' against the running process)
+		// and skips restartService (caller controls lifecycle).
+		// Idempotent.
+		step("Writing systemd unit", writeServiceUnit)
+		step("Writing gopher-bootstrap helper unit", writeGopherHelperUnit)
+		// Enable the helper path unit so it's active after this call
+		// returns. Idempotent — already-enabled is a no-op.
+		_ = exec.Command("systemctl", "enable", gopherHelperUnit).Run()
+		_ = exec.Command("systemctl", "start", gopherHelperUnit).Run()
+		fmt.Printf("\n✅ Nimbus units refreshed.\n\n")
 		return
 	}
 
