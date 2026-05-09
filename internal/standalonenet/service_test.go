@@ -140,11 +140,15 @@ func TestProvision_HappyPath(t *testing.T) {
 	}
 }
 
-// TestProvision_Idempotent asserts re-running Provision for the same
-// VM returns the existing row and skips the PVE-side calls. Crucial
-// because retried provisioning (e.g. a flaky network in mid-flight)
-// must not double-create PVE resources.
-func TestProvision_Idempotent(t *testing.T) {
+// TestProvision_PurgesOrphanForRecycledVMID asserts that re-running
+// Provision for an already-known vmid replaces the row from scratch
+// rather than returning the existing one. PVE recycles vmids via
+// /cluster/nextid, so the same vmID seen twice is by definition a
+// brand new VM that happens to inherit a previous one's id — the
+// stale row must be purged and PVE state re-created. (The pre-fix
+// "return existing row" behavior would have used the wrong zone /
+// subnet for the new VM.)
+func TestProvision_PurgesOrphanForRecycledVMID(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSDN{}
 	svc := newTestSvc(t, fake)
@@ -153,22 +157,31 @@ func TestProvision_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Provision: %v", err)
 	}
-	second, err := svc.Provision(context.Background(), 1, "vm-uuid-1", "alpha")
+	// Same vmid, different identifier — simulates PVE recycling vmid
+	// 1 onto a brand new VM whose UUID hashes differently. The orphan
+	// from the previous owner must be cleared and a fresh row inserted.
+	second, err := svc.Provision(context.Background(), 1, "vm-uuid-2", "bravo")
 	if err != nil {
-		t.Fatalf("second Provision: %v", err)
+		t.Fatalf("second Provision after recycling: %v", err)
 	}
-	if first.ID != second.ID || first.ZoneName != second.ZoneName {
-		t.Errorf("idempotent re-provision returned a different row")
+	if first.ID == second.ID {
+		t.Errorf("re-provision returned the same row ID %d; expected a fresh row", first.ID)
 	}
-	if fake.createZoneCalls != 1 {
-		t.Errorf("expected exactly 1 PVE create on re-run, got %d", fake.createZoneCalls)
+	if first.ZoneName == second.ZoneName {
+		t.Errorf("re-provision kept old zone %q; expected a fresh derivation", first.ZoneName)
+	}
+	if fake.createZoneCalls != 2 {
+		t.Errorf("expected 2 PVE creates across both Provisions, got %d", fake.createZoneCalls)
 	}
 }
 
 // TestProvision_PVEFailureRollsBackRow asserts that a PVE-side
-// failure during bootstrap (e.g. CreateSDNVNet errors) results in
-// the row being deleted, so a follow-up Provision call doesn't
-// short-circuit on the orphan and instead retries cleanly.
+// failure during bootstrap (e.g. CreateSDNSubnet errors) results in
+// the row being deleted, so the operator-facing DB matches reality
+// and doesn't surface a phantom orphan. The follow-up Provision call
+// would also succeed via the orphan-purge path; this test pins the
+// inline rollback specifically so we don't silently regress to "leak
+// the row, rely on next-call cleanup."
 func TestProvision_PVEFailureRollsBackRow(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSDN{createSubnetErr: errors.New("boom")}
@@ -179,8 +192,6 @@ func TestProvision_PVEFailureRollsBackRow(t *testing.T) {
 		t.Fatalf("expected error from CreateSDNSubnet failure, got nil")
 	}
 
-	// Row should be gone — try again with a working fake and verify
-	// it succeeds (would fail on idempotent-find if the row stuck).
 	fake.createSubnetErr = nil
 	row, err := svc.Provision(context.Background(), 1, "vm-uuid-1", "alpha")
 	if err != nil {
@@ -217,6 +228,63 @@ func TestProvision_CollisionRetriesWithSalt(t *testing.T) {
 	}
 	if a.ZoneName == b.ZoneName {
 		t.Errorf("collision retry didn't pick a new zone: both = %q", a.ZoneName)
+	}
+}
+
+// TestProvision_ClearsPreSeededOrphan covers the "Destroy was
+// skipped entirely" failure mode directly: a row exists for vmID
+// without ever having gone through Provision in this test, and
+// Provision must purge it before inserting fresh. The
+// PurgesOrphanForRecycledVMID test covers the through-Provision
+// path; this one pins the unconditional purge behavior.
+func TestProvision_ClearsPreSeededOrphan(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	path := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.New(path, &db.StandaloneVMNetwork{})
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	svc, err := standalonenet.New(fake, database.DB, standalonenet.Config{
+		PoolCIDR: "10.128.0.0/9",
+	})
+	if err != nil {
+		t.Fatalf("standalonenet.New: %v", err)
+	}
+
+	// Seed a fully-formed orphan row that pretends a previous VM
+	// owned vmid=99 with manually chosen zone/subnet values.
+	orphan := &db.StandaloneVMNetwork{
+		VMID:       99,
+		ZoneName:   "sdeadbef",
+		VNetName:   "sdeadbef",
+		SubnetCIDR: "10.128.99.0/24",
+		GatewayIP:  "10.128.99.1",
+		VMIP:       "10.128.99.10",
+		Node:       "ghost-node",
+	}
+	if err := database.DB.Create(orphan).Error; err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	row, err := svc.Provision(context.Background(), 99, "vm-uuid-fresh", "alpha")
+	if err != nil {
+		t.Fatalf("Provision after pre-seeded orphan: %v", err)
+	}
+	if row.ZoneName == "sdeadbef" {
+		t.Errorf("kept the orphan's zone %q; expected fresh derivation", row.ZoneName)
+	}
+	if row.Node != "alpha" {
+		t.Errorf("node = %q, want alpha", row.Node)
+	}
+
+	var count int64
+	if err := database.DB.Model(&db.StandaloneVMNetwork{}).
+		Where("vm_id = ?", uint(99)).Count(&count).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("rows for vmid=99 = %d, want 1", count)
 	}
 }
 

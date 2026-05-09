@@ -74,5 +74,40 @@ func New(path string, models ...any) (*DB, error) {
 		}
 	}
 
+	// Same partial-unique pattern for the per-VM network tables. PVE
+	// recycles vmids handed out by /cluster/nextid, so any unique
+	// index on vm_id that doesn't filter on deleted_at would let a
+	// tombstone block the next allocation that draws the same id.
+	if gormDB.Migrator().HasTable(&VPCMembership{}) {
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_vpc_memberships_vm_id`,
+			`DROP INDEX IF EXISTS idx_vpcmem_vpc_vm`,
+			`DROP INDEX IF EXISTS idx_vpcmem_vpc_ip`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vm_id_alive ON vpc_memberships(vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vpc_vm_alive ON vpc_memberships(vpc_id, vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vpc_ip_alive ON vpc_memberships(vpc_id, vm_ip) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+	if gormDB.Migrator().HasTable(&StandaloneVMNetwork{}) {
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_vm_id`,
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_zone_name`,
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_vnet_name`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_vm_id_alive ON standalone_vm_networks(vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_zone_name_alive ON standalone_vm_networks(zone_name) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_vnet_name_alive ON standalone_vm_networks(vnet_name) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+
 	return &DB{gormDB}, nil
 }

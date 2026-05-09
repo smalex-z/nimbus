@@ -719,19 +719,26 @@ type UserSubnet struct {
 // VM. Created at provision time, destroyed at VM deletion. Every
 // Standalone VM owns its own zone+vnet+subnet — collisions across
 // nodes are impossible because Simple zones are host-local.
+//
+// IMPORTANT: vm_id, zone_name, and vnet_name are uniqueness-enforced
+// via PARTIAL unique indexes (see db.New's post-AutoMigrate step), NOT
+// via `uniqueIndex` struct tags — same reasoning as db.VM. PVE recycles
+// vmids handed out by /cluster/nextid, and Destroy-failures leave
+// soft-deleted rows whose unique columns would otherwise stay "taken"
+// forever. Plain `index` tags here keep the columns searchable.
 type StandaloneVMNetwork struct {
 	gorm.Model
-	// VMID is the foreign key to db.VM. Unique because each Standalone
-	// VM has exactly one network record.
-	VMID uint `gorm:"column:vm_id;not null;uniqueIndex"`
+	// VMID is the foreign key to db.VM. Unique among live rows because
+	// each Standalone VM has exactly one network record.
+	VMID uint `gorm:"column:vm_id;not null;index"`
 	// ZoneName is the Proxmox SDN zone name. Format "s<7 hex>" derived
 	// from sha256(vm.UUID); guaranteed lowercase alphanumeric and 8
 	// chars (Proxmox's hard cap on zone IDs).
-	ZoneName string `gorm:"column:zone_name;not null;uniqueIndex"`
+	ZoneName string `gorm:"column:zone_name;not null;index"`
 	// VNetName is the Proxmox VNet name. We use the same string as
 	// ZoneName since both have the same constraints; a single VNet
 	// per Standalone VM zone is sufficient.
-	VNetName string `gorm:"column:vnet_name;not null;uniqueIndex"`
+	VNetName string `gorm:"column:vnet_name;not null;index"`
 	// SubnetCIDR is the per-VM /24 carved from the Standalone pool
 	// (default 10.128.0.0/9). E.g. "10.128.42.0/24".
 	SubnetCIDR string `gorm:"column:subnet_cidr;not null"`
@@ -778,13 +785,19 @@ type VPC struct {
 }
 
 // VPCMembership joins a VM to a VPC with its assigned IP from the
-// VPC's CIDR. Composite-unique on (vpc_id, vm_id) so a VM is in at
-// most one VPC; (vpc_id, vm_ip) keeps IPs unique per VPC.
+// VPC's CIDR.
+//
+// IMPORTANT: uniqueness on vm_id (a VM is in at most one VPC),
+// (vpc_id, vm_id), and (vpc_id, vm_ip) is enforced via PARTIAL unique
+// indexes (see db.New's post-AutoMigrate step), NOT `uniqueIndex` struct
+// tags — same reasoning as db.VM. PVE recycles vmids and a stale
+// tombstoned membership row would otherwise keep a recycled vmid (or
+// IP) "taken." Plain `index` tags here keep vpc_id and vm_id searchable.
 type VPCMembership struct {
 	gorm.Model
-	VPCID uint   `gorm:"column:vpc_id;not null;index;uniqueIndex:idx_vpcmem_vpc_vm;uniqueIndex:idx_vpcmem_vpc_ip"`
-	VMID  uint   `gorm:"column:vm_id;not null;uniqueIndex;uniqueIndex:idx_vpcmem_vpc_vm"`
-	VMIP  string `gorm:"column:vm_ip;not null;uniqueIndex:idx_vpcmem_vpc_ip"`
+	VPCID uint   `gorm:"column:vpc_id;not null;index"`
+	VMID  uint   `gorm:"column:vm_id;not null;index"`
+	VMIP  string `gorm:"column:vm_ip;not null"`
 }
 
 // GatewayLXCIP is one row in the Nimbus-managed pool of vmbr0-side

@@ -109,9 +109,16 @@ const maxCollisionRetries = 8
 //
 // vmIdentifier is a stable string — Nimbus passes the VM's UUID, but
 // any unique input works. The zone name is derived from
-// `sha256(vmIdentifier)` so re-running with the same identifier is
-// idempotent (returns the existing row when its zone is still in
-// PVE; no-op).
+// `sha256(vmIdentifier)`.
+//
+// Callers pass the new VM's PVE vmid (from /cluster/nextid). PVE
+// recycles vmids of deleted VMs, so a previously-released vmid can
+// come back attached to a fresh provision. Any existing row for vmID
+// is therefore dead state from a previous Destroy that didn't run or
+// didn't finish — vmid has just been handed out by nextid, so by
+// definition no live VM owns it. We purge any matching row up-front
+// (Unscoped, to also catch tombstones) so the fresh insert always
+// starts clean.
 //
 // Failure modes:
 //   - All collision retries exhausted → ConflictError surfaces to the
@@ -131,13 +138,13 @@ func (s *Service) Provision(ctx context.Context, vmID uint, vmIdentifier, node s
 		return nil, errors.New("standalonenet: node required")
 	}
 
-	// Idempotency: if a row already exists for this VM, return it.
-	// Caller treats this as "already provisioned, nothing to do."
-	var existing db.StandaloneVMNetwork
-	if err := s.db.WithContext(ctx).Where("vm_id = ?", vmID).First(&existing).Error; err == nil {
-		return &existing, nil
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("standalonenet: lookup existing: %w", err)
+	res := s.db.WithContext(ctx).Unscoped().
+		Where("vm_id = ?", vmID).Delete(&db.StandaloneVMNetwork{})
+	if res.Error != nil {
+		return nil, fmt.Errorf("standalonenet: clear orphan row for vmid %d: %w", vmID, res.Error)
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("standalonenet: cleared %d orphan row(s) for reused vmid %d before provision", res.RowsAffected, vmID)
 	}
 
 	// Hash + collision-retry loop. Each iteration salts the input,

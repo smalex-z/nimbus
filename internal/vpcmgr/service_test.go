@@ -285,6 +285,49 @@ func TestReleaseMember_Idempotent(t *testing.T) {
 	}
 }
 
+// TestAllocateMemberIP_ClearsOrphanForRecycledVMID: PVE recycles
+// vmids handed out by /cluster/nextid. If a previous Destroy/Release
+// for the old VM was skipped, an orphan VPCMembership row remains in
+// the table with that vmid; the global UNIQUE on vm_id would then
+// block every fresh allocation for that recycled id. AllocateMemberIP
+// must purge the orphan up-front and succeed.
+func TestAllocateMemberIP_ClearsOrphanForRecycledVMID(t *testing.T) {
+	t.Parallel()
+	svc, _, _, database := newTestService(t)
+	row, err := svc.CreateVPC(context.Background(), 1, "alpha")
+	if err != nil {
+		t.Fatalf("CreateVPC: %v", err)
+	}
+
+	// Seed an orphan membership row that pretends a long-deleted VM
+	// once held vmid=42 in this VPC at .200. ReleaseMember was never
+	// called for it, so the row sits there blocking the next vmid=42.
+	orphan := &db.VPCMembership{VPCID: row.ID, VMID: 42, VMIP: "10.0.0.200"}
+	if err := database.DB.Create(orphan).Error; err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	got, err := svc.AllocateMemberIP(context.Background(), row.ID, 42)
+	if err != nil {
+		t.Fatalf("AllocateMemberIP after orphan: %v", err)
+	}
+	// Fresh allocation should land at the lowest free offset (.10),
+	// NOT inherit the orphan's IP — the row is replaced wholesale.
+	if got == "10.0.0.200" {
+		t.Errorf("got orphan's IP %s; expected fresh allocation", got)
+	}
+
+	// And exactly one live row for vmid=42 should remain.
+	var count int64
+	if err := database.DB.Model(&db.VPCMembership{}).
+		Where("vm_id = ?", uint(42)).Count(&count).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("rows for vmid=42 = %d, want 1", count)
+	}
+}
+
 // TestNew_ValidatesConfig: empty pool, bad CIDR, bad VPCSize all rejected.
 func TestNew_ValidatesConfig(t *testing.T) {
 	t.Parallel()

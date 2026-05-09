@@ -284,6 +284,15 @@ func (s *Service) GetVPC(ctx context.Context, vpcID, ownerID uint, isAdmin bool)
 // and inserts a VPCMembership row for the VM. Returns the allocated
 // IP. Linear-scan from .10 — VPCs hold 65K addresses by default, so
 // even a worst-case full pool is sub-millisecond on SQLite.
+//
+// Callers pass the new VM's PVE vmid (from /cluster/nextid). PVE
+// recycles vmids of deleted VMs, so a previously-released vmid can
+// come back attached to a fresh provision. The membership table has a
+// global UNIQUE on vm_id (a VM is in at most one VPC), so any orphan
+// row pointing at the same vmid would block every insert. We drop
+// orphans up-front: vmid has just been handed out by nextid, so by
+// definition no live VM owns it, and any matching row is dead state
+// the previous deletion failed to clean up.
 func (s *Service) AllocateMemberIP(ctx context.Context, vpcID, vmID uint) (string, error) {
 	var vpc db.VPC
 	if err := s.db.WithContext(ctx).First(&vpc, vpcID).Error; err != nil {
@@ -299,6 +308,15 @@ func (s *Service) AllocateMemberIP(ctx context.Context, vpcID, vmID uint) (strin
 	prefix, _ := ipnet.Mask.Size()
 	totalHosts := uint32(1) << uint(32-prefix)
 	base := ipv4ToUint32(ipnet.IP.To4())
+
+	res := s.db.WithContext(ctx).Unscoped().
+		Where("vm_id = ?", vmID).Delete(&db.VPCMembership{})
+	if res.Error != nil {
+		return "", fmt.Errorf("clear orphan membership for vmid %d: %w", vmID, res.Error)
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("vpcmgr: cleared %d orphan membership row(s) for reused vmid %d before allocation", res.RowsAffected, vmID)
+	}
 
 	// Snapshot existing memberships into a set so we can find the
 	// first gap. Linear in member count; fine for 1K-member VPCs.
@@ -320,7 +338,11 @@ func (s *Service) AllocateMemberIP(ctx context.Context, vpcID, vmID uint) (strin
 		mem := &db.VPCMembership{VPCID: vpcID, VMID: vmID, VMIP: candidate}
 		if err := s.db.WithContext(ctx).Create(mem).Error; err != nil {
 			if isUniqueViolation(err) {
-				// Lost a race; retry the scan from where we are.
+				// Lost a race on this IP; retry from the next
+				// offset. Orphan rows for vmID were dropped
+				// above, so a unique violation here is on
+				// (vpc_id, vm_ip) — i.e. someone else just
+				// took this IP.
 				taken[candidate] = struct{}{}
 				continue
 			}
