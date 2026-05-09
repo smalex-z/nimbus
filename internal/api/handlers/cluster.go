@@ -1,10 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -13,6 +17,7 @@ import (
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 )
@@ -23,6 +28,7 @@ type Cluster struct {
 	svc     *provision.Service
 	nodeMgr *nodemgr.Service
 	audit   *audit.Service
+	ops     *operations.Service
 }
 
 func NewCluster(px *proxmox.Client, svc *provision.Service, nodeMgr *nodemgr.Service) *Cluster {
@@ -32,6 +38,14 @@ func NewCluster(px *proxmox.Client, svc *provision.Service, nodeMgr *nodemgr.Ser
 // WithAudit installs the audit-log sink. Nil disables emission; tests
 // pass nil and production wires d.Audit.
 func (h *Cluster) WithAudit(a *audit.Service) *Cluster { h.audit = a; return h }
+
+// WithOperations installs the background-task registry so MigrateVM can
+// fire async and surface progress in the toolbar dropdown. Nil makes
+// MigrateVM fall back to its synchronous behaviour (the response shape
+// flips between migrateVMResponse and migrateVMAcceptedResponse based
+// on whether ops is wired — the SPA detects via the presence of
+// `operation_id`).
+func (h *Cluster) WithOperations(o *operations.Service) *Cluster { h.ops = o; return h }
 
 // vmSource describes which Nimbus instance (if any) provisioned a VM.
 //   - "local"    — created by this Nimbus instance (in the local DB)
@@ -349,11 +363,45 @@ type migrateVMRequest struct {
 	AllowOffline bool   `json:"allow_offline,omitempty"`
 }
 
-// migrateVMResponse is the body of a successful migrate.
+// migrateVMResponse is the body of a successful synchronous migrate.
+// Returned when no operations.Service is wired (test-mode + setup-router
+// fallback). The async path returns migrateVMAcceptedResponse instead.
 type migrateVMResponse struct {
 	Mode       provision.MigrationMode `json:"mode" example:"online"`
 	TargetNode string                  `json:"target_node" example:"pve-2"`
 	WasStopped bool                    `json:"was_stopped" example:"false"`
+}
+
+// migrateVMAcceptedResponse is what 202 returns when MigrateVM fires
+// async via the operations framework. The SPA polls
+// /api/operations/{id} for state until terminal.
+type migrateVMAcceptedResponse struct {
+	OperationID uint   `json:"operation_id" example:"42"`
+	TargetNode  string `json:"target_node" example:"pve-2"`
+}
+
+// migrateOpDetails is the JSON shape persisted in
+// db.Operation.DetailsJSON for migrate operations. The SPA reads it to
+// surface the failure-mode UX (online_migration_failed → confirm-offline
+// prompt, retried as a new operation with allow_offline=true).
+type migrateOpDetails struct {
+	SourceNode   string `json:"source_node"`
+	TargetNode   string `json:"target_node"`
+	AllowOffline bool   `json:"allow_offline"`
+	// FailureCode, when populated on a terminal failed row, is a
+	// stable token the SPA dispatches on. Today only
+	// "online_migration_failed" is emitted; future codes will surface
+	// here as the migrate flow grows.
+	FailureCode string `json:"failure_code,omitempty"`
+	// FailureReason is the upstream Proxmox message verbatim. Shown
+	// to the operator in the confirm-offline prompt so they can see
+	// the actual cause (snapshot present, no shared storage, etc.).
+	FailureReason string `json:"failure_reason,omitempty"`
+	// Mode + WasStopped land here once the migration succeeds, so a
+	// completed Operation row carries the same info the synchronous
+	// migrateVMResponse used to.
+	Mode       string `json:"mode,omitempty"`
+	WasStopped bool   `json:"was_stopped,omitempty"`
 }
 
 // onlineMigrationFailedResponse is the structured 409 the SPA recognises
@@ -368,25 +416,38 @@ type onlineMigrationFailedResponse struct {
 	Reason  string `json:"reason" example:"VM has a snapshot; live migration not possible"`
 }
 
-// MigrateVM handles POST /api/cluster/vms/{id}/migrate (admin-only). Two-
-// step UX: the first call tries an online migration when the VM is
-// running and surfaces a structured 409 if Proxmox refuses; the SPA then
-// re-POSTs with allow_offline=true to do a stop → migrate → restart
-// cycle. Stopped VMs migrate offline directly on the first call.
+// MigrateVM handles POST /api/cluster/vms/{id}/migrate (admin-only).
+//
+// Async flow (when operations.Service is wired): the handler validates
+// the request, audits the dispatch, creates an Operation row, fires a
+// goroutine that runs the migration, and returns 202 with the operation
+// id. The SPA polls /api/operations/{id} and renders progress in the
+// toolbar dropdown, free to navigate away and re-attach later.
+//
+// On `online_migration_failed`, the operation lands in state=failed
+// with details.failure_code = "online_migration_failed" and
+// details.failure_reason verbatim from Proxmox — the SPA reads those
+// fields to render the confirm-offline prompt and retries with a fresh
+// operation when the operator consents. (One operation per attempt
+// keeps the state machine simple — no resume semantics.)
+//
+// Synchronous fallback (no operations.Service wired, e.g. setup-mode
+// or test-router): preserves the original 200/409 behavior so existing
+// clients keep working.
 //
 // @Summary     Migrate a VM to a different cluster node (admin)
-// @Description Tries live migration when the VM is running. On rejection,
-// @Description responds 409 with `code: "online_migration_failed"` so the
-// @Description SPA can prompt the operator. Re-POST with
-// @Description `allow_offline: true` to fall back to a stop → migrate →
-// @Description restart cycle. Stopped VMs migrate offline directly. Foreign
-// @Description / external VMs (no DB row) 404 here.
+// @Description Async: returns 202 + operation_id; poll /operations/{id}
+// @Description for progress. On online failure the operation lands
+// @Description failed with details.failure_code = online_migration_failed
+// @Description so the SPA can prompt for offline retry (start a new
+// @Description migrate operation with allow_offline=true).
 // @Tags        cluster
 // @Security    cookieAuth
 // @Accept      json
 // @Produce     json
 // @Param       id   path     int              true "Nimbus VM DB id"
 // @Param       body body     migrateVMRequest true "Target node + offline-fallback consent"
+// @Success     202  {object} EnvelopeOK{data=migrateVMAcceptedResponse}
 // @Success     200  {object} EnvelopeOK{data=migrateVMResponse}
 // @Failure     400  {object} EnvelopeError
 // @Failure     401  {object} EnvelopeError
@@ -409,7 +470,147 @@ func (h *Cluster) MigrateVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, uint(id), nil)
-	res, err := h.svc.MigrateAdmin(r.Context(), uint(id), req.TargetNode, req.AllowOffline)
+
+	// Sync fallback when no operations registry is wired — preserves
+	// the pre-async 200/409 contract so test routers and the setup
+	// wizard keep working without an operations dependency.
+	if h.ops == nil {
+		h.migrateVMSync(w, r, uint(id), req, vmid, hostname, dbID)
+		return
+	}
+
+	op, err := h.ops.Create(r.Context(), operations.CreateInput{
+		Type:        "vm.migrate",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Message:     fmt.Sprintf("queued: migrating to %s", req.TargetNode),
+		Details: migrateOpDetails{
+			TargetNode:   req.TargetNode,
+			AllowOffline: req.AllowOffline,
+		},
+	})
+	if err != nil {
+		response.InternalError(w, "failed to create operation: "+err.Error())
+		return
+	}
+
+	// Audit the dispatch up-front — same pattern as gpu.SubmitJob: the
+	// row records the operator's intent regardless of whether the
+	// goroutine eventually succeeds. The terminal outcome lands as a
+	// second audit event from the goroutine (action="vm.migrate",
+	// success bit set) so post-hoc filters by success/failure work.
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.migrate.dispatch",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details: map[string]any{
+			"db_id":         dbID,
+			"target_node":   req.TargetNode,
+			"allow_offline": req.AllowOffline,
+			"operation_id":  op.ID,
+		},
+		Success: true,
+	})
+
+	go h.runMigrateOp(op.ID, uint(id), req, vmid, hostname, dbID)
+
+	response.Accepted(w, migrateVMAcceptedResponse{
+		OperationID: op.ID,
+		TargetNode:  req.TargetNode,
+	})
+}
+
+// runMigrateOp is the goroutine body. Detached context (NOT the
+// request ctx — that gets cancelled when the SPA closes its tab, and
+// the whole point of the framework is to keep going). 60-minute cap
+// matches the existing migrate handler timeout.
+func (h *Cluster) runMigrateOp(opID, dbID uint, req migrateVMRequest, vmid, hostname string, dbIDInt uint) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	if err := h.ops.Start(ctx, opID); err != nil {
+		log.Printf("operations: start migrate op=%d: %v", opID, err)
+	}
+	if err := h.ops.UpdateMessage(ctx, opID, fmt.Sprintf("migrating to %s…", req.TargetNode)); err != nil {
+		log.Printf("operations: update migrate op=%d: %v", opID, err)
+	}
+
+	res, err := h.svc.MigrateAdmin(ctx, dbID, req.TargetNode, req.AllowOffline)
+	if err != nil {
+		details := migrateOpDetails{
+			TargetNode:   req.TargetNode,
+			AllowOffline: req.AllowOffline,
+		}
+		var onlineFail *internalerrors.OnlineMigrationFailedError
+		if errors.As(err, &onlineFail) {
+			details.FailureCode = "online_migration_failed"
+			details.FailureReason = onlineFail.Reason
+		}
+		// Persist details FIRST so the terminal poll sees the
+		// failure code; Finish flips state and surfaces the
+		// human-readable message.
+		if buf, jerr := json.Marshal(details); jerr == nil {
+			_ = h.ops.UpdateDetails(ctx, opID, string(buf))
+		}
+		_ = h.ops.Finish(ctx, opID, operations.StateFailed, err.Error())
+
+		h.audit.Record(ctx, audit.Event{
+			Action:      "vm.migrate",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details: map[string]any{
+				"db_id":         dbIDInt,
+				"target_node":   req.TargetNode,
+				"allow_offline": req.AllowOffline,
+				"operation_id":  opID,
+			},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
+		return
+	}
+
+	// Success — bake the result fields into the operation details so
+	// the SPA's terminal-state read sees mode/was_stopped/target_node
+	// without a separate API call.
+	details := migrateOpDetails{
+		TargetNode: res.TargetNode,
+		Mode:       string(res.Mode),
+		WasStopped: res.WasStopped,
+	}
+	if buf, jerr := json.Marshal(details); jerr == nil {
+		_ = h.ops.UpdateDetails(ctx, opID, string(buf))
+	}
+	successMsg := fmt.Sprintf("migrated to %s (%s)", res.TargetNode, res.Mode)
+	if res.WasStopped {
+		successMsg += " — VM was stopped to migrate"
+	}
+	_ = h.ops.Finish(ctx, opID, operations.StateSucceeded, successMsg)
+
+	h.audit.Record(ctx, audit.Event{
+		Action:      "vm.migrate",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details: map[string]any{
+			"db_id":        dbIDInt,
+			"target_node":  res.TargetNode,
+			"mode":         res.Mode,
+			"was_stopped":  res.WasStopped,
+			"operation_id": opID,
+		},
+		Success: true,
+	})
+}
+
+// migrateVMSync is the original synchronous behavior, preserved for
+// callers without an operations registry (test routers + setup wizard).
+// Identical to the pre-async handler.
+func (h *Cluster) migrateVMSync(w http.ResponseWriter, r *http.Request, id uint, req migrateVMRequest, vmid, hostname string, dbID uint) {
+	res, err := h.svc.MigrateAdmin(r.Context(), id, req.TargetNode, req.AllowOffline)
 	if err != nil {
 		h.audit.Record(r.Context(), audit.Event{
 			Action:      "vm.migrate",

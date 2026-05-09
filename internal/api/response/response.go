@@ -37,6 +37,13 @@ func Created(w http.ResponseWriter, data interface{}) {
 	JSON(w, http.StatusCreated, Response{Success: true, Data: data})
 }
 
+// Accepted writes a 202 — used for endpoints that kick off async work
+// (the operations framework: migrate, provision...) and return a
+// tracking id rather than the final result.
+func Accepted(w http.ResponseWriter, data interface{}) {
+	JSON(w, http.StatusAccepted, Response{Success: true, Data: data})
+}
+
 func NoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }

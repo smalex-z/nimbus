@@ -49,6 +49,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/netscan"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -150,6 +151,7 @@ func main() {
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
 		&db.AuditEvent{},
+		&db.Operation{},
 		&db.UserSubnet{},
 		ippool.Model(),
 	)
@@ -605,6 +607,20 @@ func main() {
 		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 	}
 
+	// Background-task registry: Operation rows survive an HTTP request
+	// so the SPA can close a tab and re-attach. On every startup, reap
+	// any non-terminal rows whose work goroutine died with a previous
+	// nimbus process — without this they'd stay "running" forever and
+	// the SPA's poll would never observe a final state. One-hour
+	// staleness is generous: provision is ~10 min worst-case, migrate
+	// 30 min for a busy VM.
+	opsSvc := operations.New(database.DB)
+	if reaped, err := opsSvc.ReapStuck(context.Background(), time.Hour); err != nil {
+		log.Printf("warning: reap stuck operations: %v", err)
+	} else if reaped > 0 {
+		log.Printf("startup: reaped %d stuck operation(s)", reaped)
+	}
+
 	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
 	// the With* builders wire the DB + pool + VM-ref counter for the
 	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
@@ -644,6 +660,7 @@ func main() {
 		GX10Assets:    gx10AssetsFS,
 		NodeMgr:       nodeMgrSvc,
 		Audit:         auditSvc,
+		Operations:    opsSvc,
 		VNetMgr:       vnetMgr,
 		Config:        cfg,
 		Restart:       restartSelf,

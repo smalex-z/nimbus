@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import {
   adminMigrateVM,
   getMigratePlan,
+  getOperation,
+  isTerminalOperationState,
   listNodes,
   OnlineMigrationFailedError,
 } from '@/api/client'
-import type { MigratePlan, MigratePlanEligibleTarget } from '@/api/client'
+import type { MigratePlan, MigratePlanEligibleTarget, Operation } from '@/api/client'
 import { TIERS, type NodeView, type TierName } from '@/types'
 
 // MigrateVMModal — admin-only flow for moving a VM between cluster nodes.
@@ -61,6 +63,11 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [offlineReason, setOfflineReason] = useState('')
+  // progressMsg is the latest server-reported status from the
+  // operation row poll (e.g. "migrating to neanderthal…"). Empty
+  // on first frame; replaced on each tick. The busy view falls back
+  // to a generic message when this is empty.
+  const [progressMsg, setProgressMsg] = useState('')
 
   const busy = view === 'busy'
 
@@ -140,13 +147,78 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
     return plan.eligible.find((e) => e.node === target) ?? null
   }, [plan, target])
 
+  // pollIntervalRef holds the active poll so cleanup can clear it on
+  // unmount (e.g. operator closes the modal mid-migrate). The
+  // operation itself keeps running server-side; only the SPA's
+  // observation of it stops.
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  useEffect(
+    () => () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    },
+    [],
+  )
+
+  // pollOperation watches an operation row until terminal. Updates the
+  // modal's status text on each tick; resolves with the final row.
+  // The interval tag matches the ~2s cadence used elsewhere (drain).
+  const pollOperation = (opID: number): Promise<Operation> =>
+    new Promise((resolve, reject) => {
+      const tick = async () => {
+        try {
+          const op = await getOperation(opID)
+          if (op.message) setProgressMsg(op.message)
+          if (isTerminalOperationState(op.state)) {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current)
+              pollIntervalRef.current = null
+            }
+            resolve(op)
+          }
+        } catch (err) {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          reject(err)
+        }
+      }
+      // Fire immediately so we don't sit on a blank "queued" state for
+      // 2s after the dispatch.
+      void tick()
+      pollIntervalRef.current = setInterval(tick, 2000)
+    })
+
   const submit = async (allowOffline: boolean) => {
     if (!target) return
     setView('busy')
     setError(null)
+    setProgressMsg('')
     try {
-      const res = await adminMigrateVM(vm.id, target, allowOffline)
-      onMigrated(res.target_node)
+      const dispatch = await adminMigrateVM(vm.id, target, allowOffline)
+      // Sync path (legacy backend without ops): the response IS the
+      // terminal result, no polling needed.
+      if (dispatch.kind === 'completed') {
+        onMigrated(dispatch.targetNode)
+        return
+      }
+      // Async path: poll the operation row until terminal.
+      const op = await pollOperation(dispatch.operationID)
+      if (op.state === 'succeeded') {
+        onMigrated(dispatch.targetNode)
+        return
+      }
+      // Failed terminal — re-derive the online_migration_failed
+      // discriminator from details_json so the SPA still flips to the
+      // confirm-offline view. Same UX as the pre-async sync 409 path.
+      const reason = parseFailureReason(op.details_json)
+      if (reason) {
+        setOfflineReason(reason)
+        setView('confirm-offline')
+        return
+      }
+      setError(op.message || 'migration failed')
+      setView('error')
     } catch (err) {
       if (err instanceof OnlineMigrationFailedError) {
         setOfflineReason(err.reason)
@@ -195,6 +267,7 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
             targetOpt={targetOpt}
             view={view}
             error={error}
+            progressMsg={progressMsg}
             onCancel={onClose}
             onMigrate={() => submit(false)}
           />
@@ -203,6 +276,27 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
     </div>,
     document.body,
   )
+}
+
+// parseFailureReason extracts the human-readable reason from a
+// failed operation's details_json. The migrate handler stores
+// {failure_code, failure_reason} on Proxmox-rejected online attempts;
+// returns the reason when present (so the modal can flip to confirm-
+// offline) or empty (caller falls through to the generic error path).
+function parseFailureReason(detailsJSON: string | undefined): string {
+  if (!detailsJSON) return ''
+  try {
+    const parsed = JSON.parse(detailsJSON) as {
+      failure_code?: string
+      failure_reason?: string
+    }
+    if (parsed.failure_code === 'online_migration_failed') {
+      return parsed.failure_reason ?? 'live migration unavailable'
+    }
+  } catch {
+    // ignore — fall through to empty
+  }
+  return ''
 }
 
 function PickerBody({
@@ -217,6 +311,7 @@ function PickerBody({
   targetOpt,
   view,
   error,
+  progressMsg,
   onCancel,
   onMigrate,
 }: {
@@ -231,6 +326,7 @@ function PickerBody({
   targetOpt: MigratePlanEligibleTarget | null
   view: View
   error: string | null
+  progressMsg: string
   onCancel: () => void
   onMigrate: () => void
 }) {
@@ -317,8 +413,9 @@ function PickerBody({
 
       {busy && (
         <div className="mt-5 mb-5 p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2 text-sm text-ink-2">
-          Migrating to {target}… this can take several minutes for a busy
-          VM. Don't close this tab.
+          {progressMsg || `Migrating to ${target}…`} You can safely close
+          this tab — the migration keeps running, and you can re-attach
+          to it from the Tasks panel in the header.
         </div>
       )}
 

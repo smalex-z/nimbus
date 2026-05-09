@@ -19,6 +19,7 @@ import (
 	"nimbus/internal/gpu"
 	"nimbus/internal/ippool"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -46,8 +47,9 @@ type Deps struct {
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
 	NodeMgr       *nodemgr.Service
-	Audit         *audit.Service   // nil-safe — handlers and emit sites no-op when unset
-	VNetMgr       *vnetmgr.Service // P1: SDN bootstrap; P2: per-user VNet allocation
+	Audit         *audit.Service      // nil-safe — handlers and emit sites no-op when unset
+	Operations    *operations.Service // tracks long-running migrate/provision tasks; nil-safe
+	VNetMgr       *vnetmgr.Service    // P1: SDN bootstrap; P2: per-user VNet allocation
 	Config        *config.Config
 	Restart       func()
 }
@@ -64,15 +66,16 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(rateLimiter(100, 200))
 
 	health := handlers.NewHealth(d.Proxmox)
-	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit)
+	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit).WithOperations(d.Operations)
 	keys := handlers.NewKeys(d.Keys).WithAudit(d.Audit)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)
-	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit)
+	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit).WithOperations(d.Operations)
 	bs := handlers.NewBootstrap(d.Bootstrap).WithAudit(d.Audit)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
+	opsH := handlers.NewOperations(d.Operations)
 	if d.UserBuckets != nil {
 		auth = auth.WithBucketPurger(d.UserBuckets)
 	}
@@ -431,6 +434,14 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/credentials", buckets.Credentials)
 					r.Delete("/{name}", buckets.Delete)
 				})
+
+				// Background-task registry — long-running migrate /
+				// provision flows write Operation rows the SPA polls for
+				// progress, so the operator can close the modal/tab and
+				// re-attach later. Visibility is per-actor for non-admins
+				// (admin sees the full cluster view).
+				r.Get("/operations", opsH.List)
+				r.Get("/operations/{id}", opsH.Get)
 
 				// GPU plane — submit/list/cancel jobs, inference status.
 				// Mounted under requireVerified so the access-code gate

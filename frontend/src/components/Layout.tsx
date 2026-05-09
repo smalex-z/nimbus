@@ -4,6 +4,7 @@ import nimbusLogo from '@/assets/Nimbus_Logo.png'
 import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
+import TasksDropdown from '@/components/TasksDropdown'
 
 interface LayoutProps {
   children: ReactNode
@@ -87,6 +88,11 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   Quotas
                 </NavLink>
               )}
+
+              {/* Background tasks chip — re-attach to in-flight
+                  migrate/provision operations from any page. Hidden
+                  when not signed in (no operations to track). */}
+              {user && <TasksDropdown />}
 
               {user && <div className="w-px h-4 bg-[rgba(20,18,28,0.1)] mx-1.5" />}
 
