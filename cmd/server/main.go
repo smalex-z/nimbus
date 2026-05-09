@@ -39,11 +39,13 @@ import (
 	"time"
 
 	"nimbus/internal/api"
+	"nimbus/internal/api/handlers"
 	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
 	"nimbus/internal/db"
+	"nimbus/internal/gateway"
 	"nimbus/internal/gpu"
 	"nimbus/internal/install"
 	"nimbus/internal/ippool"
@@ -57,8 +59,10 @@ import (
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/sshkeys"
+	"nimbus/internal/standalonenet"
 	"nimbus/internal/tunnel"
 	"nimbus/internal/vnetmgr"
+	"nimbus/internal/vpcmgr"
 )
 
 //go:embed all:frontend/dist
@@ -166,6 +170,14 @@ func main() {
 		&db.AuditEvent{},
 		&db.Operation{},
 		&db.UserSubnet{},
+		// Networking v1: Standalone VMs and VPCs. UserSubnet stays
+		// in the migrate list during the v1.0 deprecation window so
+		// upgrades from pre-v1 don't drop it; v1.1 removes it.
+		&db.StandaloneVMNetwork{},
+		&db.VPC{},
+		&db.VPCMembership{},
+		&db.GatewayLXCIP{},
+		&db.NetworkingV1Settings{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -610,12 +622,9 @@ func main() {
 	// and the next cycle retries.
 	go runNodeReconcileLoop(bgCtx, nodeMgrSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
+	// Audit log writer + retention reaper. Prune rows older than
+	// NIMBUS_AUDIT_RETENTION_DAYS (default 90); zero disables.
 	auditSvc := audit.New(database.DB)
-	// Audit reaper: prune rows older than NIMBUS_AUDIT_RETENTION_DAYS
-	// (default 90). Daily cadence is plenty — audit writes are cheap
-	// but the table grows monotonically without it. Zero retention
-	// disables the reaper (operators who want unbounded retention
-	// just set NIMBUS_AUDIT_RETENTION_DAYS=0).
 	if cfg.AuditRetentionDays > 0 {
 		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 	}
@@ -634,49 +643,220 @@ func main() {
 		log.Printf("startup: reaped %d stuck operation(s)", reaped)
 	}
 
-	// Per-user SDN subnet manager. Zone bootstrap runs once at startup;
-	// the With* builders wire the DB + pool + VM-ref counter for the
-	// subnet CRUD surface (CreateSubnet / DeleteSubnet / EnsureDefault
-	// etc.). VMRefCounter is the provision service — it knows how to
-	// count VMs by SubnetID without vnetmgr pulling in the gorm.DB
-	// directly. Bootstrap surfaces SDN-package-missing as a logged
-	// warning rather than fatal so the rest of Nimbus runs on vmbr0
-	// when SDN isn't installed cluster-wide.
+	// Networking-v1 Standalone primitive — per-VM Simple zone with
+	// PVE-native SNAT. Wired before the legacy vnetmgr so new
+	// provisions default to it; legacy SubnetResolver path remains
+	// available for callers that pass SubnetID/SubnetName/Bridge
+	// during the deprecation window. Construction failure (bad
+	// CIDR) is logged and downgrades to legacy-only mode.
+	standaloneNetSvc, snErr := standalonenet.New(pveClient, database.DB, standalonenet.Config{
+		PoolCIDR: cfg.StandalonePoolCIDR,
+	})
+	if snErr != nil {
+		log.Printf("warning: standalonenet disabled (%v) — provisions fall back to legacy SDN path", snErr)
+	} else {
+		provSvc.SetStandaloneNet(standaloneNetSvc)
+	}
+
+	// Networking-v1 VPC primitive — VXLAN zone shared across nodes
+	// + per-VPC gateway LXC for NAT egress.
+	//
+	// Config source-of-truth: db.NetworkingV1Settings. On first boot
+	// we one-shot-seed it from env vars (mirrors Gopher/GPU). After
+	// that the Settings → Network page is authoritative and live-
+	// rotates without a restart via the applier below.
+	v1Settings, err := authSvc.GetNetworkingV1Settings()
+	if err != nil {
+		log.Fatalf("failed to load networking-v1 settings: %v", err)
+	}
+	if v1Settings.NetworkNode == "" && v1Settings.LXCIPPoolStart == "" &&
+		(cfg.NetworkNode != "" || cfg.GatewayLXCIPPool != "") {
+		// NIMBUS_GATEWAY_LXC_IP_POOL is the legacy "start-end" CSV
+		// form; split into the first range's start/end on seed.
+		start, end := splitFirstIPRange(cfg.GatewayLXCIPPool)
+		seed := db.NetworkingV1Settings{
+			NetworkNode:    cfg.NetworkNode,
+			LXCIPPoolStart: start,
+			LXCIPPoolEnd:   end,
+			LXCStorage:     cfg.GatewayLXCStorage,
+		}
+		if err := authSvc.SaveNetworkingV1Settings(seed); err != nil {
+			log.Printf("warning: seed networking-v1 settings from env: %v", err)
+		} else {
+			log.Printf("seeded networking-v1 settings from env (one-time migration)")
+			v1Settings, _ = authSvc.GetNetworkingV1Settings()
+		}
+	}
+
+	// vpcStack lazily holds the live gateway + vpcmgr services.
+	// rebuildVPCStack tears down the old pair and stands up new ones
+	// from current settings; called once at startup and again from
+	// the Settings → Network save handler. Pre-construct the swappable
+	// handlers up here so the closure can call SetSvc / SetVPCSource
+	// on them.
+	type vpcStack struct {
+		gw  *gateway.Service
+		mgr *vpcmgr.Service
+	}
+	var (
+		vpcMgrSvc         *vpcmgr.Service
+		vpcStackCurrent   *vpcStack
+		vpcsHandler       = handlers.NewVPCs(nil)
+		networkingHandler = func() *handlers.Networking {
+			h := handlers.NewNetworking(nil, provSvc)
+			h.SetStorageLister(pveClient.GetStorages)
+			return h
+		}()
+	)
+	// disableVPCs is called from every error path in rebuildVPCStack.
+	// Centralizes the four places state has to be unwound so we can't
+	// forget to update one of them.
+	disableVPCs := func() {
+		vpcMgrSvc = nil
+		vpcStackCurrent = nil
+		provSvc.SetVPCMgr(nil)
+		vpcsHandler.SetSvc(nil)
+		networkingHandler.SetVPCSource(nil)
+	}
+	rebuildVPCStack := func(s db.NetworkingV1Settings) {
+		if s.NetworkNode == "" || s.LXCIPPoolStart == "" || s.LXCIPPoolEnd == "" {
+			log.Printf("VPCs disabled — Settings → Network is missing network_node and/or gateway-LXC IP pool")
+			disableVPCs()
+			return
+		}
+		storage := s.LXCStorage
+		if storage == "" {
+			storage = "local-lvm"
+		}
+		gwSvc, gwErr := gateway.New(pveClient, database.DB, gateway.Config{
+			NetworkNode:   s.NetworkNode,
+			HostBridge:    "vmbr0",
+			HostGatewayIP: cfg.GatewayIP,
+			HostPrefixLen: cfg.VMPrefixLen,
+			IPPoolStart:   s.LXCIPPoolStart,
+			IPPoolEnd:     s.LXCIPPoolEnd,
+			LXCStorage:    storage,
+		})
+		if gwErr != nil {
+			log.Printf("warning: gateway service disabled (%v) — VPCs unavailable", gwErr)
+			disableVPCs()
+			return
+		}
+		// Template download can take 30-90s+ depending on PVE's mirror.
+		// Run it in the background so the HTTP listener can bind
+		// immediately on startup and Settings → Network save returns
+		// without a long spinner. Service.Provision lazy-retries the
+		// ensure on first VPC create, so a slow/failed background
+		// download just postpones the work, never breaks it.
+		go func() {
+			ensureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if _, err := gwSvc.EnsureDefaultTemplate(ensureCtx); err != nil {
+				log.Printf("warning: gateway template ensure (continuing — will retry on first VPC create): %v", err)
+			}
+		}()
+
+		peerResolver := vpcmgr.PeerResolverFunc(func(ctx context.Context) (string, error) {
+			return proxmox.ResolveOnlinePeerIPs(ctx, pveClient)
+		})
+		mgr, vpcErr := vpcmgr.New(pveClient, peerResolver, database.DB, vpcmgr.Config{
+			PoolCIDR: cfg.VPCPoolCIDR,
+		})
+		if vpcErr != nil {
+			log.Printf("warning: vpcmgr disabled (%v)", vpcErr)
+			disableVPCs()
+			return
+		}
+		mgr.SetGateway(&vpcGatewayAdapter{gw: gwSvc})
+		vpcMgrSvc = mgr
+		vpcStackCurrent = &vpcStack{gw: gwSvc, mgr: mgr}
+		provSvc.SetVPCMgr(mgr)
+		vpcsHandler.SetSvc(mgr)
+		networkingHandler.SetVPCSource(mgr)
+		log.Printf("VPCs ready (network_node=%s, ip_pool=%s-%s, template=%s)",
+			s.NetworkNode, s.LXCIPPoolStart, s.LXCIPPoolEnd, gwSvc.LXCTemplate())
+	}
+	rebuildVPCStack(*v1Settings)
+	_ = vpcStackCurrent // available for future debug surfacing
+
+	// Applier the Settings → Network handler calls on save. Accepts
+	// the freshly-persisted row and rebuilds the gateway + vpcmgr
+	// stack so live config takes effect without a server restart.
+	v1Applier := handlers.NetworkingV1Applier(rebuildVPCStack)
+
+	// Background sweep: every reconcile-interval, release stale
+	// `reserved` gateway-LXC IPs (Nimbus-crashed-mid-provision
+	// orphans) and flip VPC.Status to `degraded` when the gateway
+	// LXC isn't running. Runs only when the VPC stack is wired.
+	go func() {
+		interval := time.Duration(cfg.ReconcileIntervalSeconds) * time.Second
+		if interval <= 0 {
+			return
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if vpcStackCurrent == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
+				if _, err := vpcStackCurrent.gw.SweepStaleReservations(ctx); err != nil {
+					log.Printf("gateway sweep: stale reservations: %v", err)
+				}
+				if err := vpcStackCurrent.gw.SweepHealth(ctx, pveClient); err != nil {
+					log.Printf("gateway sweep: health: %v", err)
+				}
+				cancel()
+			}
+		}
+	}()
+
+	// Legacy SDN manager. Networking-v1 doesn't dispatch through
+	// vnetmgr at provision time anymore — Standalone + VPC primitives
+	// own that surface — but vnetmgr stays wired so admins can run
+	// "Reset SDN" from Settings → Network to clean up legacy
+	// per-user-subnet PVE state inherited from pre-v1 deployments.
+	// v1.1 will drop the package entirely.
 	vnetMgr := vnetmgr.New(pveClient, authSvc).
 		WithDB(database.DB).
 		WithPool(pool).
 		WithVMRefCounter(provSvc)
-	// Wire vnetmgr into provision so the per-user subnet path
-	// (ResolveForProvision → CreateSubnet/EnsureDefault) fires
-	// whenever SDN is enabled. nil here = SDN-disabled fallback.
-	provSvc.SetSubnetResolver(vnetMgr)
-	bootstrapSDNCtx, bootstrapSDNCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := vnetMgr.Bootstrap(bootstrapSDNCtx); err != nil {
-		log.Printf("warning: SDN bootstrap: %v", err)
-	}
-	bootstrapSDNCancel()
+
+	// Cluster LAN admin toggle: live-loaded from the cluster-LAN
+	// setting in db.NetworkSettings (Settings → Network). Default
+	// false — non-admin members can't pick "Cluster LAN" on the
+	// Provision page. Admins always can.
+	provSvc.SetClusterLANForMembers(netSettings.ClusterLANForMembers)
 
 	router := api.NewRouter(api.Deps{
-		Auth:          authSvc,
-		Provision:     provSvc,
-		Bootstrap:     bootstrapSvc,
-		Keys:          keysSvc,
-		Pool:          pool,
-		Reconciler:    reconciler,
-		Proxmox:       pveClient,
-		Tunnels:       tunnelClient,
-		TunnelURL:     gopherSettings.APIURL,
-		SelfBootstrap: selfTunnelSvc,
-		S3:            s3Svc,
-		UserBuckets:   userBucketsSvc,
-		GPU:           gpuSvc,
-		GX10Assets:    gx10AssetsFS,
-		NodeMgr:       nodeMgrSvc,
-		Audit:         auditSvc,
-		Operations:    opsSvc,
-		VNetMgr:       vnetMgr,
-		Config:        cfg,
-		Restart:       restartSelf,
+		Auth:              authSvc,
+		Provision:         provSvc,
+		Bootstrap:         bootstrapSvc,
+		Keys:              keysSvc,
+		Pool:              pool,
+		Reconciler:        reconciler,
+		Proxmox:           pveClient,
+		Tunnels:           tunnelClient,
+		TunnelURL:         gopherSettings.APIURL,
+		SelfBootstrap:     selfTunnelSvc,
+		S3:                s3Svc,
+		UserBuckets:       userBucketsSvc,
+		GPU:               gpuSvc,
+		GX10Assets:        gx10AssetsFS,
+		NodeMgr:           nodeMgrSvc,
+		Audit:             auditSvc,
+		Operations:        opsSvc,
+		VNetMgr:           vnetMgr,
+		VPCMgr:            vpcMgrSvc,
+		VPCsHandler:       vpcsHandler,
+		NetworkingHandler: networkingHandler,
+		V1Applier:         v1Applier,
+		Config:            cfg,
+		Restart:           restartSelf,
 	})
 
 	mux := http.NewServeMux()
@@ -775,6 +955,42 @@ func runBootstrap(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// vpcGatewayAdapter bridges the gateway.Service to vpcmgr's
+// GatewayProvisioner interface. The interface lives in vpcmgr; the
+// real implementation is in gateway. Adapter prevents an import cycle
+// between the two packages.
+type vpcGatewayAdapter struct {
+	gw *gateway.Service
+}
+
+func (a *vpcGatewayAdapter) Provision(ctx context.Context, vpc *db.VPC) (int, string, error) {
+	return a.gw.Provision(ctx, vpc)
+}
+
+func (a *vpcGatewayAdapter) Destroy(ctx context.Context, vpc *db.VPC) error {
+	return a.gw.Destroy(ctx, vpc)
+}
+
+// splitFirstIPRange parses the legacy comma-separated start-end form
+// from NIMBUS_GATEWAY_LXC_IP_POOL and returns the first range's
+// start + end. Used only for one-shot env-var seeding into
+// db.NetworkingV1Settings, which now stores the two fields explicitly.
+// Returns ("","") when the input is empty or malformed.
+func splitFirstIPRange(spec string) (string, string) {
+	for _, raw := range strings.Split(spec, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parts := strings.SplitN(raw, "-", 2)
+		if len(parts) != 2 {
+			return "", ""
+		}
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return "", ""
 }
 
 func splitCSV(s string) []string {

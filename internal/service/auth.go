@@ -1392,6 +1392,44 @@ func (s *AuthService) SaveCloudTunnelState(state db.GopherSettings) error {
 	}).Error
 }
 
+// GetNetworkingV1Settings returns the VPC / gateway-LXC config
+// singleton (ID=1), creating an empty row on first call. Mirrors
+// GopherSettings/GPUSettings: env vars seed once at startup, the
+// Settings → Network page edits live, no restart needed.
+func (s *AuthService) GetNetworkingV1Settings() (*db.NetworkingV1Settings, error) {
+	var settings db.NetworkingV1Settings
+	err := s.db.FirstOrCreate(&settings, db.NetworkingV1Settings{ID: 1}).Error
+	return &settings, err
+}
+
+// SaveNetworkingV1Settings persists VPC + gateway-LXC config. Empty
+// fields preserve existing values so the UI can update one knob
+// without round-tripping the others. Caller is responsible for
+// pushing the new values into gateway.Service / vpcmgr.Service via
+// the applier interface.
+func (s *AuthService) SaveNetworkingV1Settings(next db.NetworkingV1Settings) error {
+	existing, err := s.GetNetworkingV1Settings()
+	if err != nil {
+		return err
+	}
+	if next.NetworkNode == "" {
+		next.NetworkNode = existing.NetworkNode
+	}
+	if next.LXCIPPoolStart == "" {
+		next.LXCIPPoolStart = existing.LXCIPPoolStart
+	}
+	if next.LXCIPPoolEnd == "" {
+		next.LXCIPPoolEnd = existing.LXCIPPoolEnd
+	}
+	// LXCStorage falls back to default at apply time when blank.
+	return s.db.Model(&db.NetworkingV1Settings{}).Where("id = ?", 1).Updates(map[string]any{
+		"network_node":      next.NetworkNode,
+		"lxc_ip_pool_start": next.LXCIPPoolStart,
+		"lxc_ip_pool_end":   next.LXCIPPoolEnd,
+		"lxc_storage":       next.LXCStorage,
+	}).Error
+}
+
 // GetGPUSettings returns the GX10 / GPU plane settings, creating an empty
 // row on first call. Empty BaseURL or Enabled=false means the GPU plane is
 // effectively off — VMs receive no inference env vars and the jobs API
@@ -1483,10 +1521,11 @@ func (s *AuthService) SaveNetworkSettings(next db.NetworkSettings) error {
 		next.PrefixLen = existing.PrefixLen
 	}
 	return s.db.Model(&db.NetworkSettings{}).Where("id = ?", 1).Updates(map[string]any{
-		"ip_pool_start": next.IPPoolStart,
-		"ip_pool_end":   next.IPPoolEnd,
-		"gateway_ip":    next.GatewayIP,
-		"prefix_len":    next.PrefixLen,
+		"ip_pool_start":           next.IPPoolStart,
+		"ip_pool_end":             next.IPPoolEnd,
+		"gateway_ip":              next.GatewayIP,
+		"prefix_len":              next.PrefixLen,
+		"cluster_lan_for_members": next.ClusterLANForMembers,
 	}).Error
 }
 

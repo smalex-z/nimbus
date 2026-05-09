@@ -15,20 +15,22 @@ import (
 // function field the test overrides; defaults are no-ops returning nil
 // so a test only has to wire what it cares about.
 type fakeSDN struct {
-	getZone       func(ctx context.Context, zone string) (*proxmox.SDNZone, error)
-	createZone    func(ctx context.Context, z proxmox.SDNZone) error
-	listVNets     func(ctx context.Context) ([]proxmox.SDNVNet, error)
-	applySDN      func(ctx context.Context) error
-	createVNet    func(ctx context.Context, v proxmox.SDNVNet) error
-	deleteVNet    func(ctx context.Context, vnet string) error
-	createSubnet  func(ctx context.Context, s proxmox.SDNSubnet) error
-	deleteSubnet  func(ctx context.Context, vnet, subnet string) error
-	createCalls   atomic.Int32
-	applyCalls    atomic.Int32
-	createVNetCnt atomic.Int32
-	createSubCnt  atomic.Int32
-	deleteVNetCnt atomic.Int32
-	deleteSubCnt  atomic.Int32
+	getZone          func(ctx context.Context, zone string) (*proxmox.SDNZone, error)
+	createZone       func(ctx context.Context, z proxmox.SDNZone) error
+	listVNets        func(ctx context.Context) ([]proxmox.SDNVNet, error)
+	applySDN         func(ctx context.Context) error
+	createVNet       func(ctx context.Context, v proxmox.SDNVNet) error
+	deleteVNet       func(ctx context.Context, vnet string) error
+	createSubnet     func(ctx context.Context, s proxmox.SDNSubnet) error
+	deleteSubnet     func(ctx context.Context, vnet, subnet string) error
+	deleteZone       func(ctx context.Context, zone string) error
+	getClusterStatus func(ctx context.Context) ([]proxmox.ClusterStatusEntry, error)
+	createCalls      atomic.Int32
+	applyCalls       atomic.Int32
+	createVNetCnt    atomic.Int32
+	createSubCnt     atomic.Int32
+	deleteVNetCnt    atomic.Int32
+	deleteSubCnt     atomic.Int32
 }
 
 func (f *fakeSDN) GetSDNZone(ctx context.Context, zone string) (*proxmox.SDNZone, error) {
@@ -59,6 +61,24 @@ func (f *fakeSDN) ApplySDN(ctx context.Context) error {
 		return nil
 	}
 	return f.applySDN(ctx)
+}
+
+func (f *fakeSDN) GetClusterStatus(ctx context.Context) ([]proxmox.ClusterStatusEntry, error) {
+	if f.getClusterStatus == nil {
+		return nil, nil
+	}
+	return f.getClusterStatus(ctx)
+}
+
+func (f *fakeSDN) DeleteSDNZone(ctx context.Context, zone string) error {
+	if f.deleteZone == nil {
+		return nil
+	}
+	return f.deleteZone(ctx, zone)
+}
+
+func (f *fakeSDN) ListSDNSubnets(_ context.Context, _ string) ([]proxmox.SDNSubnet, error) {
+	return nil, nil
 }
 
 func (f *fakeSDN) CreateSDNVNet(ctx context.Context, v proxmox.SDNVNet) error {
@@ -144,6 +164,81 @@ func TestBootstrap_EnabledMissingZoneCreatesAndApplies(t *testing.T) {
 	}
 	if px.applyCalls.Load() != 1 {
 		t.Errorf("expected 1 apply call, got %d", px.applyCalls.Load())
+	}
+}
+
+// TestBootstrap_VXLANResolvesPeers asserts that for a vxlan zone,
+// Bootstrap reads /cluster/status, builds peers= from every online
+// node's IP, and skips offline nodes. We deliberately do NOT set
+// exitnodes — that property is EVPN-only and PVE rejects it on
+// plain vxlan zones (regression: real PVE returned "unexpected
+// property 'exitnodes'" the first time we shipped this).
+func TestBootstrap_VXLANResolvesPeers(t *testing.T) {
+	t.Parallel()
+	var captured proxmox.SDNZone
+	px := &fakeSDN{
+		getZone: func(_ context.Context, _ string) (*proxmox.SDNZone, error) {
+			return nil, proxmox.ErrNotFound
+		},
+		createZone: func(_ context.Context, z proxmox.SDNZone) error {
+			captured = z
+			return nil
+		},
+		getClusterStatus: func(_ context.Context) ([]proxmox.ClusterStatusEntry, error) {
+			return []proxmox.ClusterStatusEntry{
+				{Type: "cluster", Name: "demo"},
+				{Type: "node", Name: "charlie", IP: "10.0.0.3", Online: 1},
+				{Type: "node", Name: "alpha", IP: "10.0.0.1", Online: 1},
+				{Type: "node", Name: "bravo", IP: "10.0.0.2", Online: 0}, // offline → skipped
+			}, nil
+		},
+	}
+	svc := vnetmgr.New(px, &fakeSettings{Settings: &db.NetworkSettings{
+		SDNEnabled:  true,
+		SDNZoneName: "nimbus",
+		SDNZoneType: "vxlan",
+	}})
+
+	if err := svc.Bootstrap(context.Background()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if captured.Type != "vxlan" {
+		t.Errorf("zone type = %q, want vxlan", captured.Type)
+	}
+	if captured.Peers != "10.0.0.3,10.0.0.1" {
+		t.Errorf("peers = %q, want 10.0.0.3,10.0.0.1 (offline bravo skipped)", captured.Peers)
+	}
+	if captured.Exitnodes != "" {
+		t.Errorf("exitnodes = %q, want empty (EVPN-only field; PVE rejects on vxlan)", captured.Exitnodes)
+	}
+}
+
+// TestBootstrap_VXLANNoOnlineNodesErrors asserts the explicit error
+// rather than silently creating a useless zone with peers="".
+func TestBootstrap_VXLANNoOnlineNodesErrors(t *testing.T) {
+	t.Parallel()
+	px := &fakeSDN{
+		getZone: func(_ context.Context, _ string) (*proxmox.SDNZone, error) {
+			return nil, proxmox.ErrNotFound
+		},
+		getClusterStatus: func(_ context.Context) ([]proxmox.ClusterStatusEntry, error) {
+			return []proxmox.ClusterStatusEntry{
+				{Type: "node", Name: "alpha", IP: "10.0.0.1", Online: 0},
+			}, nil
+		},
+	}
+	svc := vnetmgr.New(px, &fakeSettings{Settings: &db.NetworkSettings{
+		SDNEnabled:  true,
+		SDNZoneName: "nimbus",
+		SDNZoneType: "vxlan",
+	}})
+
+	err := svc.Bootstrap(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if px.createCalls.Load() != 0 {
+		t.Errorf("createZone called %d times — should bail before create", px.createCalls.Load())
 	}
 }
 

@@ -44,27 +44,37 @@ type Request struct {
 	// every guest. Ignored when the GPU plane isn't configured cluster-wide.
 	EnableGPU bool
 
-	// SDN subnet selection — at most one of (SubnetID, SubnetName) set:
-	//   - SubnetID != nil → attach to an existing user-owned subnet
-	//   - SubnetName != "" → create a new subnet inline (becomes
-	//     default if the user has none yet)
-	//   - both empty → use the user's default subnet (auto-create on
-	//     first provision)
-	// Resolved via the wired SubnetResolver; nil resolver OR a
-	// resolver returning (nil, nil) means SDN is disabled cluster-wide
-	// and the legacy global vmbr0 pool is used. Same first-time UX as
-	// SSH keys: provisioning never refuses for "you have no subnets."
-	SubnetID   *uint
-	SubnetName string
+	// NetworkMode picks which Networking-v1 primitive backs the VM:
+	//   - "standalone" (default): per-VM Simple zone with PVE-native
+	//     SNAT. Single VM, no cross-VM communication.
+	//   - "vpc": VM joins an existing VPC (VXLAN zone with a per-VPC
+	//     gateway LXC). Multiple VMs across nodes can talk at L2.
+	//     VPCID below must be set.
+	NetworkMode NetworkMode
 
-	// Bridge is an admin-only escape hatch: if non-empty (e.g. "vmbr0"),
-	// the VM lands on this bridge directly with the global IP pool,
-	// bypassing per-user SDN isolation entirely. Required by admins
-	// for management VMs that need to reach the cluster LAN. Members
-	// who set this get a 403 — isolation is enforced for non-admin
-	// users when SDN is enabled.
+	// VPCID is required when NetworkMode == "vpc". Identifies the
+	// VPC the VM joins.
+	VPCID *uint
+
+	// Bridge is the Cluster LAN escape hatch — when non-empty, the
+	// VM lands directly on that bridge with a global-pool IP,
+	// bypassing the Networking-v1 primitives. Admins always allowed;
+	// non-admins gated by Service.clusterLANForMembers.
 	Bridge string
 }
+
+// NetworkMode is the v1 Networking primitive selector. See
+// Request.NetworkMode for the per-mode behavior.
+type NetworkMode string
+
+const (
+	// NetworkModeStandalone gives the VM its own per-VM Simple zone.
+	// Default for new provisions when Request.NetworkMode is empty.
+	NetworkModeStandalone NetworkMode = "standalone"
+	// NetworkModeVPC attaches the VM to an existing VPC (VXLAN zone
+	// with shared gateway LXC). Request.VPCID must be set.
+	NetworkModeVPC NetworkMode = "vpc"
+)
 
 // Result is the value returned to the user after a successful provision.
 //

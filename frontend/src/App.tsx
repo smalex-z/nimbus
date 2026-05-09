@@ -27,7 +27,7 @@ import SignIn from '@/pages/auth/SignIn'
 import SignUp from '@/pages/auth/SignUp'
 import OAuthCallback from '@/pages/auth/OAuthCallback'
 import Setup from '@/pages/Setup'
-import Subnets from '@/pages/Subnets'
+import VPCs from '@/pages/VPCs'
 import Verify from '@/pages/Verify'
 import { useAuth } from '@/hooks/useAuth'
 import { getSetupStatus } from '@/api/client'
@@ -94,10 +94,10 @@ export default function App() {
                       <Route path="/" element={<Provision />} />
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
-                      {/* /subnets is the per-user SDN subnet manager.
-                          OCI-style: users CRUD subnets and pick one
-                          (or create new inline) at provision time. */}
-                      <Route path="/subnets" element={<Subnets />} />
+                      {/* /vpcs is the Networking-v1 VPC manager —
+                          private networks shared across nodes, each
+                          backed by a per-VPC gateway LXC for NAT. */}
+                      <Route path="/vpcs" element={<VPCs />} />
                       {/* /buckets is the per-user S3 surface — every
                           verified user (admin or member) lands here to
                           manage their own prefixed buckets and copy
@@ -134,29 +134,38 @@ export default function App() {
                       <Route path="/infrastructure" element={<Navigate to="/infrastructure/email" replace />} />
                       <Route path="/infrastructure/audit" element={<RequireAdmin><InfrastructureLayout><Audit /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
-                      <Route path="/infrastructure/gopher" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
-                      <Route path="/infrastructure/network" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
+                      {/* Networking-v1 routes: /tunnels (WAN egress
+                          via Gopher) and /networking (LAN — Standalone,
+                          VPCs, Cluster LAN). Old /gopher and /network
+                          paths redirect for bookmark compatibility. */}
+                      <Route path="/infrastructure/tunnels" element={<RequireAdmin><InfrastructureLayout><GopherTunnels /></InfrastructureLayout></RequireAdmin>} />
+                      <Route path="/infrastructure/networking" element={<RequireAdmin><InfrastructureLayout><Network /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/api-docs" element={<RequireAdmin><InfrastructureLayout><ApiDocs /></InfrastructureLayout></RequireAdmin>} />
-                      {/* Bookmark redirects. /users + /settings/sign-in
-                          → /authentication. /settings/* was the prior
-                          name of /infrastructure/*. /infrastructure/s3
-                          and /infrastructure/gpu-hosts moved out to
-                          /s3 and /gpu respectively. */}
+                      {/* Bookmark redirects. URL → page-title alignment:
+                          older /infrastructure/gopher and /network paths
+                          predate the Tunnels (WAN) / Networking (LAN)
+                          rename — keep them resolving so saved links
+                          still work. */}
+                      <Route path="/infrastructure/gopher" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/infrastructure/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/email" element={<Navigate to="/infrastructure/email" replace />} />
-                      <Route path="/gophers" element={<Navigate to="/infrastructure/gopher" replace />} />
-                      <Route path="/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/gophers" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/gpu-host" element={<Navigate to="/gpu" replace />} />
                       <Route path="/users" element={<Navigate to="/authentication" replace />} />
                       <Route path="/settings" element={<Navigate to="/infrastructure" replace />} />
                       <Route path="/settings/sign-in" element={<Navigate to="/authentication" replace />} />
                       <Route path="/settings/email" element={<Navigate to="/infrastructure/email" replace />} />
-                      <Route path="/settings/gopher" element={<Navigate to="/infrastructure/gopher" replace />} />
-                      <Route path="/settings/network" element={<Navigate to="/infrastructure/network" replace />} />
+                      <Route path="/settings/gopher" element={<Navigate to="/infrastructure/tunnels" replace />} />
+                      <Route path="/settings/network" element={<Navigate to="/infrastructure/networking" replace />} />
                       <Route path="/settings/s3" element={<Navigate to="/s3" replace />} />
                       <Route path="/settings/gpu-hosts" element={<Navigate to="/gpu" replace />} />
                       <Route path="/infrastructure/s3" element={<Navigate to="/s3" replace />} />
                       <Route path="/infrastructure/gpu-hosts" element={<Navigate to="/gpu" replace />} />
-                      <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
+                      {/* Top-nav reads "Dashboard"; URL matches. /admin
+                          stays as a redirect for old bookmarks. */}
+                      <Route path="/dashboard" element={<RequireAdmin><Admin /></RequireAdmin>} />
+                      <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                   </Layout>
                 </RequireVerified>

@@ -178,6 +178,17 @@ definitions:
         example: true
         type: boolean
     type: object
+  handlers.NetworkingInfo:
+    properties:
+      cluster_lan_for_members:
+        type: boolean
+      standalone_enabled:
+        type: boolean
+      vpc_enabled:
+        type: boolean
+      vpc_reason:
+        type: string
+    type: object
   handlers.QuotaSettingsView:
     properties:
       member_max_active_jobs:
@@ -464,13 +475,6 @@ definitions:
       updated_at:
         type: string
     type: object
-  handlers.createSubnetRequest:
-    properties:
-      name:
-        type: string
-      set_default:
-        type: boolean
-    type: object
   handlers.createTunnelRequest:
     properties:
       bot_protection_allow_ip:
@@ -496,15 +500,24 @@ definitions:
     properties:
       bridge:
         description: |-
-          Bridge is the admin-only escape hatch — attaches the VM to a
-          cluster bridge directly (e.g. "vmbr0"), bypassing per-user SDN.
-          Non-admins setting this get a 400.
+          Bridge is the Cluster LAN escape hatch — when set, the VM
+          lands directly on that bridge (e.g. "vmbr0") with a global-pool
+          IP, bypassing the Networking-v1 primitives. Admins always
+          allowed; non-admins gated by the cluster-LAN-for-members
+          admin toggle.
         type: string
       enable_gpu:
         type: boolean
       generate_key:
         type: boolean
       hostname:
+        type: string
+      network_mode:
+        description: |-
+          NetworkMode is the Networking-v1 dispatch:
+            "standalone" (default) → per-VM Simple zone with PVE SNAT
+            "vpc"                  → join an existing VPC (VPCID required)
+            "" (empty)             → standalone if wired, else legacy
         type: string
       os_template:
         type: string
@@ -524,19 +537,18 @@ definitions:
         type: string
       subdomain:
         type: string
-      subnet_id:
-        description: |-
-          SDN subnet selection. At most one set:
-            - SubnetID  → existing subnet (owner-gated)
-            - SubnetName → create a new subnet inline
-            - both empty → user's default (auto-create on first provision)
-        type: integer
-      subnet_name:
-        type: string
       tier:
         type: string
       tunnel_port:
         type: integer
+      vpc_id:
+        description: VPCID is required when NetworkMode == "vpc".
+        type: integer
+    type: object
+  handlers.createVPCRequest:
+    properties:
+      name:
+        type: string
     type: object
   handlers.credentialsView:
     properties:
@@ -767,6 +779,15 @@ definitions:
       password:
         type: string
     type: object
+  handlers.lxcStorageView:
+    properties:
+      active:
+        type: boolean
+      name:
+        type: string
+      type:
+        type: string
+    type: object
   handlers.migrateVMAcceptedResponse:
     properties:
       operation_id:
@@ -818,6 +839,8 @@ definitions:
     type: object
   handlers.networkSettingsView:
     properties:
+      cluster_lan_for_members:
+        type: boolean
       gateway_ip:
         type: string
       ip_pool_end:
@@ -826,6 +849,24 @@ definitions:
         type: string
       prefix_len:
         type: integer
+    type: object
+  handlers.networkingV1View:
+    properties:
+      configured:
+        description: |-
+          Configured reports whether the minimum required fields
+          (network_node + a complete pool range) are set. The frontend
+          uses this to flip the status pill from "needs setup" to
+          "configured."
+        type: boolean
+      lxc_ip_pool_end:
+        type: string
+      lxc_ip_pool_start:
+        type: string
+      lxc_storage:
+        type: string
+      network_node:
+        type: string
     type: object
   handlers.oauthSettingsView:
     properties:
@@ -1012,6 +1053,8 @@ definitions:
     type: object
   handlers.saveNetworkRequest:
     properties:
+      cluster_lan_for_members:
+        type: boolean
       gateway_ip:
         type: string
       ip_pool_end:
@@ -1020,6 +1063,17 @@ definitions:
         type: string
       prefix_len:
         type: integer
+    type: object
+  handlers.saveNetworkingV1Request:
+    properties:
+      lxc_ip_pool_end:
+        type: string
+      lxc_ip_pool_start:
+        type: string
+      lxc_storage:
+        type: string
+      network_node:
+        type: string
     type: object
   handlers.saveOAuthRequest:
     properties:
@@ -1132,31 +1186,6 @@ definitions:
       vm_id:
         type: integer
     type: object
-  handlers.subnetView:
-    properties:
-      created_at:
-        type: string
-      gateway:
-        type: string
-      id:
-        type: integer
-      is_default:
-        type: boolean
-      name:
-        type: string
-      pool_end:
-        type: string
-      pool_start:
-        type: string
-      status:
-        type: string
-      subnet:
-        type: string
-      updated_at:
-        type: string
-      vnet:
-        type: string
-    type: object
   handlers.suspendRequest:
     properties:
       suspended:
@@ -1204,6 +1233,32 @@ definitions:
     - sourceLocal
     - sourceForeign
     - sourceExternal
+  handlers.vpcStatusView:
+    properties:
+      enabled:
+        type: boolean
+      reason:
+        type: string
+    type: object
+  handlers.vpcView:
+    properties:
+      cidr:
+        type: string
+      created_at:
+        type: string
+      gateway_lxc_id:
+        type: integer
+      gateway_node:
+        type: string
+      id:
+        type: integer
+      member_count:
+        type: integer
+      name:
+        type: string
+      status:
+        type: string
+    type: object
   handlers.workerStatusRequest:
     properties:
       artifact_path:
@@ -1755,6 +1810,28 @@ definitions:
           subdomain — they're reached at <gateway>:<server_port>.
         type: string
       tunnel_url:
+        type: string
+    type: object
+  vnetmgr.ResetReport:
+    properties:
+      apply_error:
+        type: string
+      orphans_scrubbed:
+        description: |-
+          OrphansScrubbed counts PVE vnets in the zone that weren't
+          tracked in Nimbus's DB but were holding the zone hostage
+          (residue from earlier failed deletes). Reset force-cleans
+          these so the zone delete can proceed.
+        type: integer
+      subnet_failures:
+        items:
+          type: string
+        type: array
+      subnets_deleted:
+        type: integer
+      zone_deleted:
+        type: string
+      zone_error:
         type: string
     type: object
 info:
@@ -3517,6 +3594,60 @@ paths:
       summary: The current session's user
       tags:
       - auth
+  /networking/info:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.NetworkingInfo'
+              type: object
+      security:
+      - cookieAuth: []
+      summary: Networking-v1 availability snapshot
+      tags:
+      - networking
+  /networking/lxc-storages:
+    get:
+      parameters:
+      - description: PVE node name
+        in: query
+        name: node
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.lxcStorageView'
+                  type: array
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List LXC-rootfs-capable storages on a node
+      tags:
+      - networking
   /nodes:
     get:
       description: |-
@@ -5110,6 +5241,85 @@ paths:
       summary: Renumber every managed VM into the saved pool (admin)
       tags:
       - settings
+  /settings/networking-v1:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkingV1View'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read VPC + gateway-LXC config (admin)
+      tags:
+      - settings
+    put:
+      consumes:
+      - application/json
+      description: |-
+        Saves and applies network-node + IP-pool + (optional)
+        template / storage. Rebuilds the gateway and vpcmgr
+        services in-process so the change takes effect
+        without a Nimbus restart.
+      parameters:
+      - description: Networking-v1 settings
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.saveNetworkingV1Request'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.networkingV1View'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Update VPC + gateway-LXC config (admin)
+      tags:
+      - settings
   /settings/oauth:
     get:
       description: |-
@@ -5415,6 +5625,40 @@ paths:
       summary: Update SDN settings (admin)
       tags:
       - settings
+  /settings/sdn/reset:
+    post:
+      description: |-
+        Tears down every Nimbus-managed subnet and the
+        configured zone in Proxmox. Refuses with 409 if any
+        VMs are still attached to Nimbus subnets — operator
+        must delete those via the normal VM lifecycle first.
+        On success returns a per-step report so the admin UI
+        shows exactly what was torn down.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/vnetmgr.ResetReport'
+              type: object
+        "409":
+          description: VMs still attached
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Reset SDN state in Proxmox
+      tags:
+      - admin
   /settings/smtp:
     get:
       description: |-
@@ -5608,195 +5852,6 @@ paths:
       summary: First-run setup status
       tags:
       - setup
-  /subnets:
-    get:
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/handlers.EnvelopeOK'
-            - properties:
-                data:
-                  items:
-                    $ref: '#/definitions/handlers.subnetView'
-                  type: array
-              type: object
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: List the caller's SDN subnets
-      tags:
-      - subnets
-    post:
-      consumes:
-      - application/json
-      description: |-
-        Carves a fresh /N from the configured supernet, creates
-        the Proxmox VNet + Subnet, seeds the per-subnet IP pool.
-        Set `set_default: true` to make it the user's default
-        in one round trip.
-      parameters:
-      - description: Subnet to create
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/handlers.createSubnetRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            allOf:
-            - $ref: '#/definitions/handlers.EnvelopeOK'
-            - properties:
-                data:
-                  $ref: '#/definitions/handlers.subnetView'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "503":
-          description: Service Unavailable
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Create a new SDN subnet
-      tags:
-      - subnets
-  /subnets/{id}:
-    delete:
-      description: |-
-        Refused while any VM still references the subnet, and
-        for an only-default subnet (no fallback to land new
-        VMs on). Tears down the Proxmox VNet + Subnet + IP pool.
-      parameters:
-      - description: Subnet ID
-        in: path
-        name: id
-        required: true
-        type: integer
-      responses:
-        "204":
-          description: No Content
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Delete a subnet
-      tags:
-      - subnets
-    get:
-      parameters:
-      - description: Subnet ID
-        in: path
-        name: id
-        required: true
-        type: integer
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/handlers.EnvelopeOK'
-            - properties:
-                data:
-                  $ref: '#/definitions/handlers.subnetView'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Get a single subnet
-      tags:
-      - subnets
-  /subnets/{id}/default:
-    post:
-      description: |-
-        New VMs without an explicit subnet pick land on the
-        default. Idempotent — calling on an already-default
-        subnet is a no-op.
-      parameters:
-      - description: Subnet ID
-        in: path
-        name: id
-        required: true
-        type: integer
-      responses:
-        "204":
-          description: No Content
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/handlers.EnvelopeError'
-      security:
-      - cookieAuth: []
-      summary: Mark this subnet as the caller's default
-      tags:
-      - subnets
   /tunnels:
     get:
       description: |-
@@ -6550,6 +6605,171 @@ paths:
       summary: Force a vms-table reconcile against Proxmox (admin)
       tags:
       - vms
+  /vpcs:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.vpcView'
+                  type: array
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List the caller's VPCs
+      tags:
+      - vpcs
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Provisions a per-VPC VXLAN zone + dedicated gateway LXC
+        for NAT egress. Returns once the gateway LXC is healthy.
+      parameters:
+      - description: VPC to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.createVPCRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.vpcView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Create a new VPC
+      tags:
+      - vpcs
+  /vpcs/{id}:
+    delete:
+      description: |-
+        Refused while any VM is still a member. Tears down the
+        gateway LXC, VXLAN zone, VNet, subnet, and IP allocations.
+      parameters:
+      - description: VPC ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Delete a VPC
+      tags:
+      - vpcs
+    get:
+      parameters:
+      - description: VPC ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.vpcView'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Get a single VPC
+      tags:
+      - vpcs
+  /vpcs/status:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.vpcStatusView'
+              type: object
+      security:
+      - cookieAuth: []
+      summary: Report VPC primitive availability
+      tags:
+      - vpcs
 securityDefinitions:
   cookieAuth:
     description: |-

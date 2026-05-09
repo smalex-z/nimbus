@@ -63,7 +63,7 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   land. Dashboard + Quotas are admin-only; Provision +
                   My machines are universal. */}
               {user?.is_admin && (
-                <NavLink to="/admin" className={navLinkClass}>
+                <NavLink to="/dashboard" className={navLinkClass}>
                   Dashboard
                 </NavLink>
               )}
@@ -133,8 +133,8 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
                   </NavLink>
-                  <NavLink to="/subnets" className={dropdownItemClass}>
-                    <NetworkIcon /><span>Subnets</span>
+                  <NavLink to="/vpcs" className={dropdownItemClass}>
+                    <NetworkIcon /><span>VPCs</span>
                   </NavLink>
                   <NavLink to="/buckets" className={dropdownItemClass}>
                     <DatabaseIcon /><span>Buckets</span>
@@ -162,8 +162,8 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
                   <NavLink to="/keys" className={dropdownItemClass}>
                     <KeyIcon /><span>Keys</span>
                   </NavLink>
-                  <NavLink to="/subnets" className={dropdownItemClass}>
-                    <NetworkIcon /><span>Subnets</span>
+                  <NavLink to="/vpcs" className={dropdownItemClass}>
+                    <NetworkIcon /><span>VPCs</span>
                   </NavLink>
                   <NavLink to="/buckets" className={dropdownItemClass}>
                     <DatabaseIcon /><span>Buckets</span>

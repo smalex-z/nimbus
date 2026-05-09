@@ -28,6 +28,7 @@ import (
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
 	"nimbus/internal/vnetmgr"
+	"nimbus/internal/vpcmgr"
 )
 
 // Deps bundles the dependencies the router needs.
@@ -49,9 +50,18 @@ type Deps struct {
 	NodeMgr       *nodemgr.Service
 	Audit         *audit.Service      // nil-safe — handlers and emit sites no-op when unset
 	Operations    *operations.Service // tracks long-running migrate/provision tasks; nil-safe
-	VNetMgr       *vnetmgr.Service    // P1: SDN bootstrap; P2: per-user VNet allocation
-	Config        *config.Config
-	Restart       func()
+	VNetMgr       *vnetmgr.Service    // legacy: per-user-subnet path during deprecation
+	VPCMgr        *vpcmgr.Service     // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	// VPCsHandler and NetworkingHandler are pre-constructed in main.go
+	// so the rebuildVPCStack closure can call SetSvc / SetVPCSource on
+	// them after every Settings → Network save (live-rotate without a
+	// Nimbus restart). When nil, the router constructs new ones from
+	// d.VPCMgr — fine for tests / the install wizard.
+	VPCsHandler       *handlers.VPCs
+	NetworkingHandler *handlers.Networking
+	V1Applier         handlers.NetworkingV1Applier
+	Config            *config.Config
+	Restart           func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -88,6 +98,8 @@ func NewRouter(d Deps) http.Handler {
 		WithAppURLResolver(auth).
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
+		WithNetworkingV1Applier(d.V1Applier).
+		WithNodeIfaceInspector(d.Proxmox.GetNodeNetworkInterface).
 		WithPoolReseeder(d.Pool).
 		WithAudit(d.Audit)
 	if d.VNetMgr != nil {
@@ -98,7 +110,23 @@ func NewRouter(d Deps) http.Handler {
 	}
 	settings := settingsBuilder
 	s3 := handlers.NewS3(d.S3, d.Provision)
-	subnets := handlers.NewSubnets(d.VNetMgr)
+	// VPCs handler is always mounted; nil service → 503 with a clear
+	// "VPCs not configured" message. Lets the frontend reflect
+	// availability via /api/vpcs/status without 404 surprises.
+	// Reuse pre-constructed handler when main.go supplies one (the
+	// live-rotate path); otherwise construct fresh.
+	vpcs := d.VPCsHandler
+	if vpcs == nil {
+		vpcs = handlers.NewVPCs(d.VPCMgr)
+	}
+	networking := d.NetworkingHandler
+	if networking == nil {
+		var vpcSource handlers.NetworkingVPCSource
+		if d.VPCMgr != nil {
+			vpcSource = d.VPCMgr
+		}
+		networking = handlers.NewNetworking(vpcSource, d.Provision)
+	}
 	buckets := handlers.NewBuckets(d.UserBuckets)
 
 	var gpuHandler *handlers.GPU
@@ -334,6 +362,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
 				r.Get("/settings/network", settings.GetNetwork)
 				r.Put("/settings/network", settings.SaveNetwork)
+				r.Get("/settings/networking-v1", settings.GetNetworkingV1)
+				r.Put("/settings/networking-v1", settings.SaveNetworkingV1)
 				// Per-user SDN VNet isolation. Read returns the live
 				// status (zone exists / pending / missing-pkg); Save
 				// persists + bootstraps in one shot. P1 scope: zone
@@ -341,6 +371,11 @@ func NewRouter(d Deps) http.Handler {
 				// vmbr0 until P2 lands.
 				r.Get("/settings/sdn", settings.GetSDN)
 				r.Put("/settings/sdn", settings.SaveSDN)
+				// Reset SDN: tears down every Nimbus-managed subnet and
+				// the configured zone in PVE, leaving Nimbus in a Clean
+				// state. Refuses if any VMs are still attached.
+				r.With(middleware.Timeout(2*time.Minute)).
+					Post("/settings/sdn/reset", settings.ResetSDN)
 				// Disruptive batch ops — generous timeout because each VM
 				// reboot waits on a Proxmox task.
 				r.With(middleware.Timeout(15*time.Minute)).
@@ -413,15 +448,23 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{id}/default", keys.SetDefault)
 				})
 
-				// Per-user SDN subnets — OCI-style: each user manages
-				// their own list of subnets, picks one (or creates new
-				// inline) at provision time. Same shape as /keys.
-				r.Route("/subnets", func(r chi.Router) {
-					r.Get("/", subnets.List)
-					r.Post("/", subnets.Create)
-					r.Get("/{id}", subnets.Get)
-					r.Delete("/{id}", subnets.Delete)
-					r.Post("/{id}/default", subnets.SetDefault)
+				// Networking-v1 unified availability snapshot — drives
+				// the Provision page picker (which chips are
+				// available, with reasons when disabled).
+				r.Get("/networking/info", networking.GetInfo)
+				r.Get("/networking/lxc-storages", networking.ListLXCStorages)
+
+				// Networking-v1 VPCs. Always mounted — when the
+				// admin hasn't configured the gateway-LXC env, every
+				// non-status endpoint returns 503 with a clear
+				// "VPCs not configured" body so the frontend can
+				// surface the reason.
+				r.Route("/vpcs", func(r chi.Router) {
+					r.Get("/status", vpcs.GetStatus)
+					r.Get("/", vpcs.List)
+					r.Post("/", vpcs.Create)
+					r.Get("/{id}", vpcs.Get)
+					r.Delete("/{id}", vpcs.Delete)
 				})
 
 				// User-owned buckets on the shared MinIO host. Each user has

@@ -51,7 +51,7 @@ export default function OAuthCallback() {
   // pretend-progress — the backend already did the work.
   useEffect(() => {
     if (error) return
-    navigate(user?.is_admin ? '/admin' : '/', { replace: true })
+    navigate(user?.is_admin ? '/dashboard' : '/', { replace: true })
   }, [error, user, navigate])
 
   // Render nothing while the success-path redirect runs — it's

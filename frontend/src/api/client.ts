@@ -1363,6 +1363,7 @@ export interface NetworkSettingsView {
   ip_pool_end: string
   gateway_ip: string
   prefix_len: number
+  cluster_lan_for_members: boolean
 }
 
 export interface SaveNetworkSettingsRequest {
@@ -1370,6 +1371,7 @@ export interface SaveNetworkSettingsRequest {
   ip_pool_end?: string
   gateway_ip?: string
   prefix_len?: number
+  cluster_lan_for_members?: boolean
 }
 
 export async function getNetworkSettings(): Promise<NetworkSettingsView> {
@@ -1384,47 +1386,108 @@ export async function saveNetworkSettings(
   return data
 }
 
-// Subnet — one user-owned SDN subnet (= Proxmox VNet + carved CIDR).
-// Multiple per user, OCI-style. Mirrors db.UserSubnet's wire shape.
-export interface Subnet {
+// VPC — Networking-v1 primitive. VXLAN zone shared across nodes plus
+// a dedicated gateway LXC for NAT egress. CIDR is auto-allocated by
+// Nimbus from the configured supernet.
+export interface VPC {
   id: number
   name: string
-  vnet: string
-  subnet: string
-  gateway: string
-  pool_start: string
-  pool_end: string
-  is_default: boolean
-  status: 'active' | 'error'
+  cidr: string
+  status: 'provisioning' | 'active' | 'degraded' | 'error'
+  gateway_lxc_id?: number
+  gateway_node?: string
+  member_count: number
   created_at: string
-  updated_at: string
 }
 
-export async function listSubnets(): Promise<Subnet[]> {
-  const { data } = await api.get<Subnet[]>('/subnets')
+export async function listVPCs(): Promise<VPC[]> {
+  const { data } = await api.get<VPC[]>('/vpcs')
   return data
 }
 
-export async function getSubnet(id: number): Promise<Subnet> {
-  const { data } = await api.get<Subnet>(`/subnets/${id}`)
+export async function getVPC(id: number): Promise<VPC> {
+  const { data } = await api.get<VPC>(`/vpcs/${id}`)
   return data
 }
 
-// createSubnet provisions a fresh user subnet end-to-end (Proxmox
-// VNet + Subnet + per-subnet IP pool + DB row). Long-running compared
-// to other CRUD — Proxmox apply takes ~1-2s per cluster node — so we
-// give it a 30s budget.
-export async function createSubnet(req: { name: string; set_default?: boolean }): Promise<Subnet> {
-  const { data } = await api.post<Subnet>('/subnets', req, { timeout: 30_000 })
+export async function createVPC(req: { name: string }): Promise<VPC> {
+  // 5-minute ceiling: gateway LXC create + start + sshd-readiness +
+  // bootstrap can hit 60-90s on busy hardware, and a fresh template
+  // download tacks on another minute or two. The handler is still
+  // synchronous (no polling endpoint yet) so the client must wait.
+  const { data } = await api.post<VPC>('/vpcs', req, { timeout: 300_000 })
   return data
 }
 
-export async function deleteSubnet(id: number): Promise<void> {
-  await api.delete(`/subnets/${id}`, { timeout: 30_000 })
+export async function deleteVPC(id: number): Promise<void> {
+  await api.delete(`/vpcs/${id}`, { timeout: 120_000 })
 }
 
-export async function setDefaultSubnet(id: number): Promise<void> {
-  await api.post(`/subnets/${id}/default`)
+// NetworkingInfo is the snapshot the Provision page reads to render
+// its picker. Each flag gates one chip (Standalone / VPC / Cluster
+// LAN), with reasons attached when a primitive is disabled.
+export interface NetworkingInfo {
+  standalone_enabled: boolean
+  vpc_enabled: boolean
+  vpc_reason?: string
+  cluster_lan_for_members: boolean
+}
+
+export async function getNetworkingInfo(): Promise<NetworkingInfo> {
+  const { data } = await api.get<NetworkingInfo>('/networking/info')
+  return data
+}
+
+// LXCStorageOption is one entry in the gateway-LXC storage dropdown.
+// Backend filters to storages on the chosen network node that accept
+// rootdir content (i.e. can host an LXC's rootfs).
+export interface LXCStorageOption {
+  name: string
+  type: string
+  active: boolean
+}
+
+export async function listLXCStorages(node: string): Promise<LXCStorageOption[]> {
+  const { data } = await api.get<LXCStorageOption[]>('/networking/lxc-storages', {
+    params: { node },
+  })
+  return data
+}
+
+// NetworkingV1Settings is the admin-editable VPC + gateway-LXC
+// config. Mirrors the GopherSettings / GPUSettings shape: GET
+// returns the persisted state, PUT writes and live-rotates the
+// gateway/vpcmgr stack. IP-pool fields are split into start/end to
+// match the existing NetworkSettingsView shape.
+export interface NetworkingV1Settings {
+  network_node: string
+  lxc_ip_pool_start: string
+  lxc_ip_pool_end: string
+  lxc_storage: string
+  configured: boolean
+}
+
+export async function getNetworkingV1Settings(): Promise<NetworkingV1Settings> {
+  const { data } = await api.get<NetworkingV1Settings>('/settings/networking-v1')
+  return data
+}
+
+export interface SaveNetworkingV1Request {
+  network_node?: string
+  lxc_ip_pool_start?: string
+  lxc_ip_pool_end?: string
+  lxc_storage?: string
+}
+
+export async function saveNetworkingV1Settings(
+  req: SaveNetworkingV1Request,
+): Promise<NetworkingV1Settings> {
+  // Apply triggers a gateway-stack rebuild + Debian template ensure
+  // (~30s on first run if the template isn't cached yet).
+  const { data } = await api.put<NetworkingV1Settings>('/settings/networking-v1', req, {
+    timeout: 90_000,
+  })
+  return data
 }
 
 // PublicSDNStatus is the verified-user-readable view of SDN
@@ -1491,6 +1554,29 @@ export async function saveSDNSettings(
 ): Promise<SDNSettingsView> {
   const { data } = await api.put<SDNSettingsView>('/settings/sdn', req, {
     timeout: 35_000,
+  })
+  return data
+}
+
+// SDNResetReport is what /settings/sdn/reset returns: per-step
+// counts so the UI shows what was torn down. Errors don't fail the
+// overall reset — they're surfaced for visibility.
+export interface SDNResetReport {
+  subnets_deleted: number
+  orphans_scrubbed: number
+  subnet_failures?: string[]
+  zone_deleted?: string
+  zone_error?: string
+  apply_error?: string
+}
+
+// resetSDN tears down every Nimbus-managed subnet + the configured
+// zone in Proxmox, leaving the platform in a fresh state. Refused
+// (409) if any VMs are still attached to Nimbus subnets — operator
+// must delete those first via the normal VM lifecycle.
+export async function resetSDN(): Promise<SDNResetReport> {
+  const { data } = await api.post<SDNResetReport>('/settings/sdn/reset', null, {
+    timeout: 90_000,
   })
   return data
 }

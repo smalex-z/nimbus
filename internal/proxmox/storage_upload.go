@@ -3,18 +3,22 @@ package proxmox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 )
 
 // UploadFile uploads a file to a node's storage with the named
-// content type. Proxmox 8.x accepts `iso`, `vztmpl`, and `import` —
-// `snippets` is NOT accepted by this endpoint, contrary to some
-// older docs (verified empirically and against PVE perl source).
+// content type. Proxmox 8.x and 9.x accept `iso`, `vztmpl`, and
+// `import` — `snippets` is NOT accepted by this endpoint, contrary
+// to some older docs (verified empirically and against PVE perl
+// source).
 //
 // The body has exactly two multipart parts:
 //   - `content` field = e.g. "iso"
@@ -25,6 +29,13 @@ import (
 // duplicate-key form data confused Proxmox's perl parser
 // (last-write-wins) on some PVE versions, occasionally landing the
 // file under the wrong name.
+//
+// IMPORTANT: PVE's upload endpoint is asynchronous — it forks a
+// worker and returns a UPID immediately, before the file is on
+// disk. We block on the UPID via WaitForTask so the caller can
+// safely reference the volid right away (e.g. AttachCDROM as the
+// next step). Without this wait, Proxmox responds with "volume does
+// not exist" on the next API call that touches the volid.
 func (c *Client) UploadFile(ctx context.Context, node, storage, contentType, filename string, content []byte) error {
 	if filename == "" {
 		return fmt.Errorf("upload: empty filename")
@@ -76,7 +87,66 @@ func (c *Client) UploadFile(ctx context.Context, node, storage, contentType, fil
 			Body:   string(respBody),
 		}
 	}
+
+	// Parse the UPID and wait for the upload task to complete. Older
+	// PVE / non-task responses return a non-string `data` (or no UPID
+	// shape) — in that case we assume synchronous completion and
+	// return nil so we don't break anything that worked before.
+	//
+	// Critical: the worker UPID may report a DIFFERENT node than the
+	// node we POSTed to. On a cluster where storage is shared or
+	// where PVE routes the imgcopy worker to whichever node already
+	// has the source data, the response can carry e.g.
+	// `UPID:sixseven:...` even though the upload was POSTed to
+	// `neanderthal`. /nodes/{node}/tasks/{upid}/status is NOT
+	// cluster-aware — it 400s "no such task" when {node} doesn't
+	// match the UPID's node prefix. So we must poll on the node
+	// embedded in the UPID, not the upload-target node.
+	upid := parseUploadUPID(respBody)
+	if upid == "" {
+		return nil
+	}
+	taskNode := nodeFromUPID(upid)
+	if taskNode == "" {
+		taskNode = node // defensive fallback for malformed UPIDs
+	}
+	if err := c.WaitForTask(ctx, taskNode, upid, 500*time.Millisecond); err != nil {
+		return fmt.Errorf("upload %s/%s on %s: wait task: %w", storage, filename, node, err)
+	}
 	return nil
+}
+
+// parseUploadUPID extracts the UPID string from PVE's upload
+// response envelope, e.g. {"data":"UPID:node:..."}. Returns empty
+// string when the response shape is unexpected (older PVE versions
+// or storage backends that respond synchronously).
+func parseUploadUPID(body []byte) string {
+	var env struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return ""
+	}
+	if !strings.HasPrefix(env.Data, "UPID:") {
+		return ""
+	}
+	return env.Data
+}
+
+// nodeFromUPID extracts the node name from a Proxmox UPID string.
+// UPID format is `UPID:nodename:pid:starttime:tstime:type:id:user:`
+// — the nodename is the second colon-separated field. Returns empty
+// string when the input doesn't look like a UPID; callers should
+// fall back to a known node in that case.
+func nodeFromUPID(upid string) string {
+	if !strings.HasPrefix(upid, "UPID:") {
+		return ""
+	}
+	rest := upid[len("UPID:"):]
+	if i := strings.IndexByte(rest, ':'); i > 0 {
+		return rest[:i]
+	}
+	return ""
 }
 
 // DeleteStorageVolume removes a single volume (file) from a node's

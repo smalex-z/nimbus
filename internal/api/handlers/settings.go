@@ -3,16 +3,21 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	internalerrors "nimbus/internal/errors"
+
 	"nimbus/internal/api/response"
 	"nimbus/internal/audit"
 	"nimbus/internal/db"
 	"nimbus/internal/provision"
+	"nimbus/internal/proxmox"
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/tunnel"
@@ -41,12 +46,25 @@ type GPUConfigApplier interface {
 }
 
 // NetworkApplier is implemented by anything that needs to be told the live
-// gateway IP and cloud-init prefix length after a Settings → Network save.
-// provision.Service satisfies via SetGatewayIP / SetPrefixLen.
+// gateway IP, cloud-init prefix length, and cluster-LAN-for-members toggle
+// after a Settings → Network save. provision.Service satisfies all three.
 type NetworkApplier interface {
 	SetGatewayIP(string)
 	SetPrefixLen(int)
+	SetClusterLANForMembers(bool)
 }
+
+// NetworkingV1Applier rebuilds the gateway + vpcmgr stack from a
+// freshly-persisted NetworkingV1Settings row. main.go provides the
+// closure that swaps the live services and rebinds them to
+// provision.Service.
+type NetworkingV1Applier func(db.NetworkingV1Settings)
+
+// NodeIfaceInspector reads a single network interface's live config
+// from a PVE node — we use it to validate that an admin-supplied
+// gateway-LXC IP pool falls inside the network node's vmbr0 CIDR
+// before we let the save through. Implemented by *proxmox.Client.
+type NodeIfaceInspector func(ctx context.Context, node, iface string) (*proxmox.NodeNetworkInterface, error)
 
 // NetworkOps performs the disruptive renumber + force-gateway batch ops.
 // provision.Service satisfies this; the handler keeps it as an interface so
@@ -69,6 +87,8 @@ type PoolReseeder interface {
 type SDNBootstrapper interface {
 	Bootstrap(ctx context.Context) error
 	Status(ctx context.Context) (*vnetmgr.StatusView, error)
+	Reset(ctx context.Context) (*vnetmgr.ResetReport, error)
+	CountUserSubnets(ctx context.Context) (int64, error)
 }
 
 // SelfBootstrap is implemented by selftunnel.Service. SaveGopher fires
@@ -104,6 +124,8 @@ type Settings struct {
 	pool            PoolReseeder
 	audit           *audit.Service
 	sdn             SDNBootstrapper
+	v1Applier       NetworkingV1Applier
+	ifaceInspector  NodeIfaceInspector
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -170,6 +192,25 @@ func (s *Settings) WithNetworkAppliers(a ...NetworkApplier) *Settings {
 // provision.Service satisfies it.
 func (s *Settings) WithNetworkOps(o NetworkOps) *Settings {
 	s.networkOps = o
+	return s
+}
+
+// WithNetworkingV1Applier wires the closure main.go uses to rebuild
+// the gateway + vpcmgr stack after Settings → Network → VPC saves.
+// nil applier means VPC config saves persist but the live stack
+// won't reflect them until restart.
+func (s *Settings) WithNetworkingV1Applier(a NetworkingV1Applier) *Settings {
+	s.v1Applier = a
+	return s
+}
+
+// WithNodeIfaceInspector wires the per-node interface reader the
+// SaveNetworkingV1 handler uses to validate that a gateway-LXC IP
+// pool falls inside vmbr0's actual CIDR. nil inspector skips the
+// check (saves go through without validation — strictly worse UX
+// but never blocks a deploy).
+func (s *Settings) WithNodeIfaceInspector(f NodeIfaceInspector) *Settings {
+	s.ifaceInspector = f
 	return s
 }
 
@@ -951,10 +992,11 @@ func (s *Settings) SelfBootstrapStart(w http.ResponseWriter, r *http.Request) {
 
 // networkSettingsView is what GET / PUT /api/settings/network return.
 type networkSettingsView struct {
-	IPPoolStart string `json:"ip_pool_start"`
-	IPPoolEnd   string `json:"ip_pool_end"`
-	GatewayIP   string `json:"gateway_ip"`
-	PrefixLen   int    `json:"prefix_len"`
+	IPPoolStart          string `json:"ip_pool_start"`
+	IPPoolEnd            string `json:"ip_pool_end"`
+	GatewayIP            string `json:"gateway_ip"`
+	PrefixLen            int    `json:"prefix_len"`
+	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
 }
 
 // GetNetwork handles GET /api/settings/network (admin only). Returns the live
@@ -978,18 +1020,20 @@ func (s *Settings) GetNetwork(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	response.Success(w, networkSettingsView{
-		IPPoolStart: settings.IPPoolStart,
-		IPPoolEnd:   settings.IPPoolEnd,
-		GatewayIP:   settings.GatewayIP,
-		PrefixLen:   settings.PrefixLen,
+		IPPoolStart:          settings.IPPoolStart,
+		IPPoolEnd:            settings.IPPoolEnd,
+		GatewayIP:            settings.GatewayIP,
+		PrefixLen:            settings.PrefixLen,
+		ClusterLANForMembers: settings.ClusterLANForMembers,
 	})
 }
 
 type saveNetworkRequest struct {
-	IPPoolStart string `json:"ip_pool_start"`
-	IPPoolEnd   string `json:"ip_pool_end"`
-	GatewayIP   string `json:"gateway_ip"`
-	PrefixLen   int    `json:"prefix_len"`
+	IPPoolStart          string `json:"ip_pool_start"`
+	IPPoolEnd            string `json:"ip_pool_end"`
+	GatewayIP            string `json:"gateway_ip"`
+	PrefixLen            int    `json:"prefix_len"`
+	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
 }
 
 // SaveNetwork handles PUT /api/settings/network (admin only). Persists the
@@ -1041,10 +1085,11 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.auth.SaveNetworkSettings(db.NetworkSettings{
-		IPPoolStart: start,
-		IPPoolEnd:   end,
-		GatewayIP:   gw,
-		PrefixLen:   req.PrefixLen,
+		IPPoolStart:          start,
+		IPPoolEnd:            end,
+		GatewayIP:            gw,
+		PrefixLen:            req.PrefixLen,
+		ClusterLANForMembers: req.ClusterLANForMembers,
 	}); err != nil {
 		response.InternalError(w, "failed to save network settings")
 		return
@@ -1065,6 +1110,7 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 	for _, a := range s.networkAppliers {
 		a.SetGatewayIP(settings.GatewayIP)
 		a.SetPrefixLen(settings.PrefixLen)
+		a.SetClusterLANForMembers(settings.ClusterLANForMembers)
 	}
 
 	s.audit.Record(r.Context(), audit.Event{
@@ -1078,10 +1124,11 @@ func (s *Settings) SaveNetwork(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 	})
 	response.Success(w, networkSettingsView{
-		IPPoolStart: settings.IPPoolStart,
-		IPPoolEnd:   settings.IPPoolEnd,
-		GatewayIP:   settings.GatewayIP,
-		PrefixLen:   settings.PrefixLen,
+		IPPoolStart:          settings.IPPoolStart,
+		IPPoolEnd:            settings.IPPoolEnd,
+		GatewayIP:            settings.GatewayIP,
+		PrefixLen:            settings.PrefixLen,
+		ClusterLANForMembers: settings.ClusterLANForMembers,
 	})
 }
 
@@ -1427,10 +1474,20 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if zoneType != "" && zoneType != "simple" {
-		// VXLAN lands in P4. Hard-reject anything else for now so an
-		// admin doesn't silently misconfigure.
-		response.BadRequest(w, "zone_type must be 'simple' (VXLAN support is planned)")
+	if zoneType != "" && zoneType != "simple" && zoneType != "vxlan" {
+		// `vlan` and `qinq` aren't supported yet — they require switch
+		// trunking config Nimbus can't drive from the API. Hard-reject
+		// so an admin doesn't silently misconfigure.
+		response.BadRequest(w, "zone_type must be 'simple' or 'vxlan'")
+		return
+	}
+	if zone != "" && !validSDNZoneName(zone) {
+		// Proxmox is strict: zone IDs are 1–8 chars, lowercase
+		// alphanumeric, must start with a letter. Hyphens, dots,
+		// underscores, uppercase all rejected. Fail fast with a clear
+		// message instead of letting Proxmox surface the cryptic
+		// "invalid format" 400 in the bootstrap path.
+		response.BadRequest(w, "zone_name must be 1–8 lowercase alphanumeric characters starting with a letter (no hyphens, underscores, or dots)")
 		return
 	}
 	if supernet != "" {
@@ -1442,6 +1499,43 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 	if req.SubnetSize != 0 && (req.SubnetSize < 16 || req.SubnetSize > 30) {
 		response.BadRequest(w, "subnet_size must be between /16 and /30")
 		return
+	}
+
+	// Pre-check zone-changing saves: if there are existing subnets
+	// pointing at the current zone, refuse the save up front instead
+	// of letting it persist and surface as a confusing
+	// ZoneTypeMismatchError downstream from Bootstrap. The operator
+	// has to either delete the subnets manually or run "Reset SDN"
+	// (admin button), which is the explicit unblock for this state.
+	if req.Enabled {
+		existing, err := s.auth.GetNetworkSettings()
+		if err != nil {
+			response.InternalError(w, "load existing settings: "+err.Error())
+			return
+		}
+		nameChanging := zone != "" && existing.SDNZoneName != "" && zone != existing.SDNZoneName
+		typeChanging := zoneType != "" && existing.SDNZoneType != "" && zoneType != existing.SDNZoneType
+		if nameChanging || typeChanging {
+			subnetCount, cerr := s.sdn.CountUserSubnets(r.Context())
+			if cerr != nil {
+				response.InternalError(w, "count subnets: "+cerr.Error())
+				return
+			}
+			if subnetCount > 0 {
+				what := "zone name"
+				if typeChanging && !nameChanging {
+					what = "zone type"
+				} else if typeChanging && nameChanging {
+					what = "zone name and type"
+				}
+				response.BadRequest(w, fmt.Sprintf(
+					"cannot change %s while %d subnet(s) exist under the current zone %q (type=%s) — "+
+						"either delete each subnet on the Subnets page first, or click \"Reset SDN\" "+
+						"to wipe Nimbus's SDN state cleanly. Reset refuses if any VMs are still attached.",
+					what, subnetCount, existing.SDNZoneName, existing.SDNZoneType))
+				return
+			}
+		}
 	}
 
 	if err := s.auth.SaveSDNSettings(db.NetworkSettings{
@@ -1488,4 +1582,229 @@ func (s *Settings) SaveSDN(w http.ResponseWriter, r *http.Request) {
 		VNetCount:    st.VNetCount,
 		ProxmoxError: st.ProxmoxError,
 	})
+}
+
+// validSDNZoneName mirrors Proxmox's zone ID rule: 1-8 chars,
+// must start with a lowercase letter, lowercase alphanumeric only.
+// Catches hyphens / underscores / dots / uppercase before they reach
+// the create endpoint and surface as a cryptic "invalid format"
+// upstream error.
+func validSDNZoneName(s string) bool {
+	if len(s) < 1 || len(s) > 8 {
+		return false
+	}
+	if s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// ResetSDN tears down Nimbus's SDN state in Proxmox: every
+// user_subnets row, plus the configured zone, plus the apply.
+// Refuses if any VMs are still attached to Nimbus subnets — Reset
+// never destroys VM data. Used to recover from "stuck" states (e.g.
+// operator changed zone type/name in settings but PVE still holds
+// the old zone) without manual pvesh surgery.
+//
+// @Summary     Reset SDN state in Proxmox
+// @Description Tears down every Nimbus-managed subnet and the
+// @Description configured zone in Proxmox. Refuses with 409 if any
+// @Description VMs are still attached to Nimbus subnets — operator
+// @Description must delete those via the normal VM lifecycle first.
+// @Description On success returns a per-step report so the admin UI
+// @Description shows exactly what was torn down.
+// @Tags        admin
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=vnetmgr.ResetReport}
+// @Failure     409 {object} EnvelopeError "VMs still attached"
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/sdn/reset [post]
+func (s *Settings) ResetSDN(w http.ResponseWriter, r *http.Request) {
+	if s.sdn == nil {
+		response.InternalError(w, "SDN bootstrapper not wired")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	report, err := s.sdn.Reset(ctx)
+	if err != nil {
+		var conflict *internalerrors.ConflictError
+		if errors.As(err, &conflict) {
+			response.Error(w, http.StatusConflict, conflict.Message)
+			return
+		}
+		response.InternalError(w, "reset sdn: "+err.Error())
+		return
+	}
+	response.Success(w, report)
+}
+
+// networkingV1View is the JSON shape for GET / PUT
+// /api/settings/networking-v1. The IP-pool fields mirror the
+// existing NetworkSettingsView (start/end) for UI consistency.
+type networkingV1View struct {
+	NetworkNode    string `json:"network_node"`
+	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
+	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
+	LXCStorage     string `json:"lxc_storage"`
+	// Configured reports whether the minimum required fields
+	// (network_node + a complete pool range) are set. The frontend
+	// uses this to flip the status pill from "needs setup" to
+	// "configured."
+	Configured bool `json:"configured"`
+}
+
+// GetNetworkingV1 handles GET /api/settings/networking-v1 (admin only).
+//
+// @Summary     Read VPC + gateway-LXC config (admin)
+// @Tags        settings
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=networkingV1View}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /settings/networking-v1 [get]
+func (s *Settings) GetNetworkingV1(w http.ResponseWriter, _ *http.Request) {
+	row, err := s.auth.GetNetworkingV1Settings()
+	if err != nil {
+		response.InternalError(w, "failed to load networking-v1 settings")
+		return
+	}
+	response.Success(w, networkingV1View{
+		NetworkNode:    row.NetworkNode,
+		LXCIPPoolStart: row.LXCIPPoolStart,
+		LXCIPPoolEnd:   row.LXCIPPoolEnd,
+		LXCStorage:     row.LXCStorage,
+		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
+	})
+}
+
+type saveNetworkingV1Request struct {
+	NetworkNode    string `json:"network_node"`
+	LXCIPPoolStart string `json:"lxc_ip_pool_start"`
+	LXCIPPoolEnd   string `json:"lxc_ip_pool_end"`
+	LXCStorage     string `json:"lxc_storage"`
+}
+
+// SaveNetworkingV1 handles PUT /api/settings/networking-v1 (admin only).
+// Persists the new values, then live-rotates the gateway + vpcmgr
+// stack via the registered applier.
+//
+// @Summary     Update VPC + gateway-LXC config (admin)
+// @Description Saves and applies network-node + IP-pool + (optional)
+// @Description template / storage. Rebuilds the gateway and vpcmgr
+// @Description services in-process so the change takes effect
+// @Description without a Nimbus restart.
+// @Tags        settings
+// @Security    cookieAuth
+// @Accept      json
+// @Produce     json
+// @Param       body body     saveNetworkingV1Request true "Networking-v1 settings"
+// @Success     200  {object} EnvelopeOK{data=networkingV1View}
+// @Failure     400  {object} EnvelopeError
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /settings/networking-v1 [put]
+func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
+	var req saveNetworkingV1Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid JSON")
+		return
+	}
+	// Validate the start + end pair: both must be empty (= clear) or
+	// both must parse as IPv4 with end >= start.
+	start := strings.TrimSpace(req.LXCIPPoolStart)
+	end := strings.TrimSpace(req.LXCIPPoolEnd)
+	if (start == "") != (end == "") {
+		response.BadRequest(w, "lxc_ip_pool: both start and end required (or both blank to clear)")
+		return
+	}
+	if start != "" {
+		if ip := net.ParseIP(start).To4(); ip == nil {
+			response.BadRequest(w, "lxc_ip_pool_start is not a valid IPv4 address")
+			return
+		}
+		if ip := net.ParseIP(end).To4(); ip == nil {
+			response.BadRequest(w, "lxc_ip_pool_end is not a valid IPv4 address")
+			return
+		}
+		if compareIPv4(start, end) > 0 {
+			response.BadRequest(w, "lxc_ip_pool_end must be >= lxc_ip_pool_start")
+			return
+		}
+		// Cross-check against the network node's vmbr0 CIDR. The
+		// gateway LXC's eth0 sits on vmbr0 — if the pool isn't
+		// inside that subnet, the LXC's gateway is unroutable, the
+		// SSH bootstrap times out, and the operator gets a confusing
+		// "context canceled" error from a 90s timeout. Catch it here
+		// instead.
+		if node := strings.TrimSpace(req.NetworkNode); node != "" && s.ifaceInspector != nil {
+			ifaceCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			iface, err := s.ifaceInspector(ifaceCtx, node, "vmbr0")
+			if err != nil {
+				log.Printf("save networking-v1: vmbr0 lookup on %s failed (%v) — skipping pool-CIDR check", node, err)
+			} else if cidr := iface.CIDR; cidr != "" {
+				_, ipnet, perr := net.ParseCIDR(cidr)
+				if perr == nil {
+					if !ipnet.Contains(net.ParseIP(start)) || !ipnet.Contains(net.ParseIP(end)) {
+						response.BadRequest(w, fmt.Sprintf(
+							"lxc_ip_pool [%s..%s] is outside vmbr0's CIDR (%s) on %s — pick a slice inside the cluster LAN",
+							start, end, cidr, node))
+						return
+					}
+				}
+			}
+		}
+	}
+	if err := s.auth.SaveNetworkingV1Settings(db.NetworkingV1Settings{
+		NetworkNode:    strings.TrimSpace(req.NetworkNode),
+		LXCIPPoolStart: start,
+		LXCIPPoolEnd:   end,
+		LXCStorage:     strings.TrimSpace(req.LXCStorage),
+	}); err != nil {
+		response.InternalError(w, "failed to save networking-v1 settings")
+		return
+	}
+	row, err := s.auth.GetNetworkingV1Settings()
+	if err != nil {
+		response.InternalError(w, "saved, but failed to reload: "+err.Error())
+		return
+	}
+	if s.v1Applier != nil {
+		s.v1Applier(*row)
+	}
+	response.Success(w, networkingV1View{
+		NetworkNode:    row.NetworkNode,
+		LXCIPPoolStart: row.LXCIPPoolStart,
+		LXCIPPoolEnd:   row.LXCIPPoolEnd,
+		LXCStorage:     row.LXCStorage,
+		Configured:     row.NetworkNode != "" && row.LXCIPPoolStart != "" && row.LXCIPPoolEnd != "",
+	})
+}
+
+// compareIPv4 returns -1/0/+1 for a < b / a == b / a > b. Both
+// arguments must already be valid IPv4 strings.
+func compareIPv4(a, b string) int {
+	aip := net.ParseIP(a).To4()
+	bip := net.ParseIP(b).To4()
+	for i := 0; i < 4; i++ {
+		if aip[i] < bip[i] {
+			return -1
+		}
+		if aip[i] > bip[i] {
+			return 1
+		}
+	}
+	return 0
 }

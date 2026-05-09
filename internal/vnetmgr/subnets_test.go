@@ -296,7 +296,13 @@ func TestDeleteSubnet_RefusedWhileVMsAttached(t *testing.T) {
 	}
 }
 
-func TestDeleteSubnet_RefusedForOnlyDefault(t *testing.T) {
+// Deleting the only-default subnet was previously refused, but that
+// guard was overly paternalistic — operators reconfiguring zones (e.g.
+// switching simple → vxlan) need to delete all subnets to rebuild
+// under the new zone. EnsureDefault auto-recreates a fresh default
+// on the next provision, so zero-subnet state is recoverable. The
+// vmRefs guard above is the real safety net.
+func TestDeleteSubnet_OnlyDefaultAllowedWhenNoVMs(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newSubnetTestSvc(t)
 	ctx := context.Background()
@@ -305,10 +311,8 @@ func TestDeleteSubnet_RefusedForOnlyDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDefault: %v", err)
 	}
-	err = svc.DeleteSubnet(ctx, row.ID, 1)
-	var conflict *internalerrors.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("expected ConflictError for only-default delete, got %T %v", err, err)
+	if err := svc.DeleteSubnet(ctx, row.ID, 1); err != nil {
+		t.Fatalf("DeleteSubnet should succeed when no VMs reference it: %v", err)
 	}
 }
 

@@ -2699,6 +2699,102 @@ const docTemplate = `{
                 }
             }
         },
+        "/networking/info": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "networking"
+                ],
+                "summary": "Networking-v1 availability snapshot",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.NetworkingInfo"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/networking/lxc-storages": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "networking"
+                ],
+                "summary": "List LXC-rootfs-capable storages on a node",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "PVE node name",
+                        "name": "node",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/handlers.lxcStorageView"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/nodes": {
             "get": {
                 "security": [
@@ -5216,6 +5312,133 @@ const docTemplate = `{
                 }
             }
         },
+        "/settings/networking-v1": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Read VPC + gateway-LXC config (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.networkingV1View"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Saves and applies network-node + IP-pool + (optional)\ntemplate / storage. Rebuilds the gateway and vpcmgr\nservices in-process so the change takes effect\nwithout a Nimbus restart.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Update VPC + gateway-LXC config (admin)",
+                "parameters": [
+                    {
+                        "description": "Networking-v1 settings",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.saveNetworkingV1Request"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.networkingV1View"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/oauth": {
             "get": {
                 "security": [
@@ -5695,6 +5918,55 @@ const docTemplate = `{
                 }
             }
         },
+        "/settings/sdn/reset": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Tears down every Nimbus-managed subnet and the\nconfigured zone in Proxmox. Refuses with 409 if any\nVMs are still attached to Nimbus subnets — operator\nmust delete those via the normal VM lifecycle first.\nOn success returns a per-step report so the admin UI\nshows exactly what was torn down.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Reset SDN state in Proxmox",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/vnetmgr.ResetReport"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "409": {
+                        "description": "VMs still attached",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/settings/smtp": {
             "get": {
                 "security": [
@@ -5992,301 +6264,6 @@ const docTemplate = `{
                                     }
                                 }
                             ]
-                        }
-                    }
-                }
-            }
-        },
-        "/subnets": {
-            "get": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "subnets"
-                ],
-                "summary": "List the caller's SDN subnets",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/handlers.EnvelopeOK"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "type": "array",
-                                            "items": {
-                                                "$ref": "#/definitions/handlers.subnetView"
-                                            }
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    }
-                }
-            },
-            "post": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "description": "Carves a fresh /N from the configured supernet, creates\nthe Proxmox VNet + Subnet, seeds the per-subnet IP pool.\nSet ` + "`" + `set_default: true` + "`" + ` to make it the user's default\nin one round trip.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "subnets"
-                ],
-                "summary": "Create a new SDN subnet",
-                "parameters": [
-                    {
-                        "description": "Subnet to create",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/handlers.createSubnetRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/handlers.EnvelopeOK"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/handlers.subnetView"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "503": {
-                        "description": "Service Unavailable",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    }
-                }
-            }
-        },
-        "/subnets/{id}": {
-            "get": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "subnets"
-                ],
-                "summary": "Get a single subnet",
-                "parameters": [
-                    {
-                        "type": "integer",
-                        "description": "Subnet ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/handlers.EnvelopeOK"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/handlers.subnetView"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    }
-                }
-            },
-            "delete": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "description": "Refused while any VM still references the subnet, and\nfor an only-default subnet (no fallback to land new\nVMs on). Tears down the Proxmox VNet + Subnet + IP pool.",
-                "tags": [
-                    "subnets"
-                ],
-                "summary": "Delete a subnet",
-                "parameters": [
-                    {
-                        "type": "integer",
-                        "description": "Subnet ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No Content"
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    }
-                }
-            }
-        },
-        "/subnets/{id}/default": {
-            "post": {
-                "security": [
-                    {
-                        "cookieAuth": []
-                    }
-                ],
-                "description": "New VMs without an explicit subnet pick land on the\ndefault. Idempotent — calling on an already-default\nsubnet is a no-op.",
-                "tags": [
-                    "subnets"
-                ],
-                "summary": "Mark this subnet as the caller's default",
-                "parameters": [
-                    {
-                        "type": "integer",
-                        "description": "Subnet ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "204": {
-                        "description": "No Content"
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/handlers.EnvelopeError"
                         }
                     }
                 }
@@ -7453,6 +7430,279 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/vpcs": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "List the caller's VPCs",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/handlers.vpcView"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Provisions a per-VPC VXLAN zone + dedicated gateway LXC\nfor NAT egress. Returns once the gateway LXC is healthy.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Create a new VPC",
+                "parameters": [
+                    {
+                        "description": "VPC to create",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handlers.createVPCRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.vpcView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/vpcs/status": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Report VPC primitive availability",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.vpcStatusView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/vpcs/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Get a single VPC",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "VPC ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.vpcView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Refused while any VM is still a member. Tears down the\ngateway LXC, VXLAN zone, VNet, subnet, and IP allocations.",
+                "tags": [
+                    "vpcs"
+                ],
+                "summary": "Delete a VPC",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "VPC ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -7669,6 +7919,23 @@ const docTemplate = `{
                 "success": {
                     "type": "boolean",
                     "example": true
+                }
+            }
+        },
+        "handlers.NetworkingInfo": {
+            "type": "object",
+            "properties": {
+                "cluster_lan_for_members": {
+                    "type": "boolean"
+                },
+                "standalone_enabled": {
+                    "type": "boolean"
+                },
+                "vpc_enabled": {
+                    "type": "boolean"
+                },
+                "vpc_reason": {
+                    "type": "string"
                 }
             }
         },
@@ -8082,17 +8349,6 @@ const docTemplate = `{
                 }
             }
         },
-        "handlers.createSubnetRequest": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string"
-                },
-                "set_default": {
-                    "type": "boolean"
-                }
-            }
-        },
         "handlers.createTunnelRequest": {
             "type": "object",
             "properties": {
@@ -8129,7 +8385,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "bridge": {
-                    "description": "Bridge is the admin-only escape hatch — attaches the VM to a\ncluster bridge directly (e.g. \"vmbr0\"), bypassing per-user SDN.\nNon-admins setting this get a 400.",
+                    "description": "Bridge is the Cluster LAN escape hatch — when set, the VM\nlands directly on that bridge (e.g. \"vmbr0\") with a global-pool\nIP, bypassing the Networking-v1 primitives. Admins always\nallowed; non-admins gated by the cluster-LAN-for-members\nadmin toggle.",
                     "type": "string"
                 },
                 "enable_gpu": {
@@ -8139,6 +8395,10 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "hostname": {
+                    "type": "string"
+                },
+                "network_mode": {
+                    "description": "NetworkMode is the Networking-v1 dispatch:\n  \"standalone\" (default) → per-VM Simple zone with PVE SNAT\n  \"vpc\"                  → join an existing VPC (VPCID required)\n  \"\" (empty)             → standalone if wired, else legacy",
                     "type": "string"
                 },
                 "os_template": {
@@ -8163,18 +8423,23 @@ const docTemplate = `{
                 "subdomain": {
                     "type": "string"
                 },
-                "subnet_id": {
-                    "description": "SDN subnet selection. At most one set:\n  - SubnetID  → existing subnet (owner-gated)\n  - SubnetName → create a new subnet inline\n  - both empty → user's default (auto-create on first provision)",
-                    "type": "integer"
-                },
-                "subnet_name": {
-                    "type": "string"
-                },
                 "tier": {
                     "type": "string"
                 },
                 "tunnel_port": {
                     "type": "integer"
+                },
+                "vpc_id": {
+                    "description": "VPCID is required when NetworkMode == \"vpc\".",
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.createVPCRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
                 }
             }
         },
@@ -8505,6 +8770,20 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.lxcStorageView": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
         "handlers.migrateVMAcceptedResponse": {
             "type": "object",
             "properties": {
@@ -8584,6 +8863,9 @@ const docTemplate = `{
         "handlers.networkSettingsView": {
             "type": "object",
             "properties": {
+                "cluster_lan_for_members": {
+                    "type": "boolean"
+                },
                 "gateway_ip": {
                     "type": "string"
                 },
@@ -8595,6 +8877,27 @@ const docTemplate = `{
                 },
                 "prefix_len": {
                     "type": "integer"
+                }
+            }
+        },
+        "handlers.networkingV1View": {
+            "type": "object",
+            "properties": {
+                "configured": {
+                    "description": "Configured reports whether the minimum required fields\n(network_node + a complete pool range) are set. The frontend\nuses this to flip the status pill from \"needs setup\" to\n\"configured.\"",
+                    "type": "boolean"
+                },
+                "lxc_ip_pool_end": {
+                    "type": "string"
+                },
+                "lxc_ip_pool_start": {
+                    "type": "string"
+                },
+                "lxc_storage": {
+                    "type": "string"
+                },
+                "network_node": {
+                    "type": "string"
                 }
             }
         },
@@ -8846,6 +9149,9 @@ const docTemplate = `{
         "handlers.saveNetworkRequest": {
             "type": "object",
             "properties": {
+                "cluster_lan_for_members": {
+                    "type": "boolean"
+                },
                 "gateway_ip": {
                     "type": "string"
                 },
@@ -8857,6 +9163,23 @@ const docTemplate = `{
                 },
                 "prefix_len": {
                     "type": "integer"
+                }
+            }
+        },
+        "handlers.saveNetworkingV1Request": {
+            "type": "object",
+            "properties": {
+                "lxc_ip_pool_end": {
+                    "type": "string"
+                },
+                "lxc_ip_pool_start": {
+                    "type": "string"
+                },
+                "lxc_storage": {
+                    "type": "string"
+                },
+                "network_node": {
+                    "type": "string"
                 }
             }
         },
@@ -9031,44 +9354,6 @@ const docTemplate = `{
                 }
             }
         },
-        "handlers.subnetView": {
-            "type": "object",
-            "properties": {
-                "created_at": {
-                    "type": "string"
-                },
-                "gateway": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "integer"
-                },
-                "is_default": {
-                    "type": "boolean"
-                },
-                "name": {
-                    "type": "string"
-                },
-                "pool_end": {
-                    "type": "string"
-                },
-                "pool_start": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                },
-                "subnet": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string"
-                },
-                "vnet": {
-                    "type": "string"
-                }
-            }
-        },
         "handlers.suspendRequest": {
             "type": "object",
             "properties": {
@@ -9139,6 +9424,46 @@ const docTemplate = `{
                 "sourceForeign",
                 "sourceExternal"
             ]
+        },
+        "handlers.vpcStatusView": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.vpcView": {
+            "type": "object",
+            "properties": {
+                "cidr": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "gateway_lxc_id": {
+                    "type": "integer"
+                },
+                "gateway_node": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "member_count": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
         },
         "handlers.workerStatusRequest": {
             "type": "object",
@@ -9872,6 +10197,33 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "tunnel_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "vnetmgr.ResetReport": {
+            "type": "object",
+            "properties": {
+                "apply_error": {
+                    "type": "string"
+                },
+                "orphans_scrubbed": {
+                    "description": "OrphansScrubbed counts PVE vnets in the zone that weren't\ntracked in Nimbus's DB but were holding the zone hostage\n(residue from earlier failed deletes). Reset force-cleans\nthese so the zone delete can proceed.",
+                    "type": "integer"
+                },
+                "subnet_failures": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "subnets_deleted": {
+                    "type": "integer"
+                },
+                "zone_deleted": {
+                    "type": "string"
+                },
+                "zone_error": {
                     "type": "string"
                 }
             }

@@ -28,10 +28,14 @@ interface NavItem {
 }
 
 export default function InfrastructureLayout({ children }: InfrastructureLayoutProps) {
+  // Tab labels split internal vs external networking explicitly:
+  //   - "Networking (LAN)" covers the in-cluster primitives admins
+  //     configure: Standalone VMs, VPCs, Cluster LAN bridge.
+  //   - "Tunnels (WAN)" covers the public-egress side via Gopher.
   const items: NavItem[] = [
     { label: 'Email', to: '/infrastructure/email', badge: 'alpha' },
-    { label: 'Gopher Tunnels', to: '/infrastructure/gopher' },
-    { label: 'VM network', to: '/infrastructure/network' },
+    { label: 'Tunnels (WAN)', to: '/infrastructure/tunnels' },
+    { label: 'Networking (LAN)', to: '/infrastructure/networking' },
     { label: 'API docs', to: '/infrastructure/api-docs' },
     { label: 'Audit log', to: '/infrastructure/audit' },
   ]

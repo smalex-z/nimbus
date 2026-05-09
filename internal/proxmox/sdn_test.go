@@ -136,23 +136,49 @@ func TestClient_CreateSDNZone_VXLANPeers(t *testing.T) {
 	}
 }
 
-// TestClient_DeleteSDNSubnet_PVEEncoding asserts the subnet-delete
-// path encodes the CIDR with Proxmox's `/`-→-`-` quirk (10.42.0.0/24
-// → 10.42.0.0-24). Documented in the Proxmox SDN docs; easy to miss.
-func TestClient_DeleteSDNSubnet_PVEEncoding(t *testing.T) {
+// TestClient_DeleteSDNSubnet_ZonePrefixedDashID asserts the
+// subnet-delete URL uses the zone-prefixed dash form PVE actually
+// wants: "<zone>-<ip>-<prefix>" (e.g. "nimbus-10.42.0.0-24").
+//
+// Two earlier-shipped formats failed against real PVE:
+//   - URL-escaped slash form ("10.42.0.0%2F24") → 501 (Mojolicious
+//     decodes %2F back to / and the path-component count goes wrong)
+//   - Raw dash form without zone prefix ("10.42.0.0-24") → 400
+//     "invalid format - value does not look like a valid CIDR network"
+//
+// Pinning the correct format here so a future refactor doesn't
+// reintroduce one of the broken forms.
+func TestClient_DeleteSDNSubnet_ZonePrefixedDashID(t *testing.T) {
 	t.Parallel()
-	var capturedPath string
+	var capturedRawPath string
 	_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
+		capturedRawPath = r.URL.EscapedPath()
 		writeEnvelope(w, nil)
 	})
 
-	if err := c.DeleteSDNSubnet(context.Background(), "nbu1", "10.42.0.0/24"); err != nil {
+	subnetID := proxmox.FormatSDNSubnetID("nimbus", "10.42.0.0/24")
+	if err := c.DeleteSDNSubnet(context.Background(), "nbu1", subnetID); err != nil {
 		t.Fatalf("DeleteSDNSubnet: %v", err)
 	}
-	want := "/api2/json/cluster/sdn/vnets/nbu1/subnets/10.42.0.0-24"
-	if capturedPath != want {
-		t.Errorf("path = %q, want %q", capturedPath, want)
+	want := "/api2/json/cluster/sdn/vnets/nbu1/subnets/nimbus-10.42.0.0-24"
+	if capturedRawPath != want {
+		t.Errorf("path = %q, want %q", capturedRawPath, want)
+	}
+}
+
+// TestFormatSDNSubnetID pins the format helper itself.
+func TestFormatSDNSubnetID(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ zone, cidr, want string }{
+		{"nimbus", "10.42.0.0/24", "nimbus-10.42.0.0-24"},
+		{"nimbus2", "192.168.10.0/16", "nimbus2-192.168.10.0-16"},
+		{"x", "10.0.0.0/8", "x-10.0.0.0-8"},
+	}
+	for _, tc := range cases {
+		got := proxmox.FormatSDNSubnetID(tc.zone, tc.cidr)
+		if got != tc.want {
+			t.Errorf("FormatSDNSubnetID(%q, %q) = %q, want %q", tc.zone, tc.cidr, got, tc.want)
+		}
 	}
 }
 

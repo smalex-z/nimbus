@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -36,6 +37,9 @@ type SDNClient interface {
 	CreateSDNZone(ctx context.Context, z proxmox.SDNZone) error
 	ListSDNVNets(ctx context.Context) ([]proxmox.SDNVNet, error)
 	ApplySDN(ctx context.Context) error
+	// GetClusterStatus is consumed by VXLAN bootstrap to resolve
+	// per-node IPs for the zone's `peers=` field.
+	GetClusterStatus(ctx context.Context) ([]proxmox.ClusterStatusEntry, error)
 	// Subnet CRUD methods live on the same proxmox.Client; including
 	// them here lets New(...) accept one client argument and
 	// satisfy both the zone-level and subnet-level surfaces.
@@ -43,6 +47,8 @@ type SDNClient interface {
 	DeleteSDNVNet(ctx context.Context, vnet string) error
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnet string) error
+	DeleteSDNZone(ctx context.Context, zone string) error
+	ListSDNSubnets(ctx context.Context, vnet string) ([]proxmox.SDNSubnet, error)
 }
 
 // SettingsReader is the slice of internal/service.AuthService this
@@ -250,14 +256,61 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		Zone: settings.SDNZoneName,
 		Type: settings.SDNZoneType,
 	}
+	// VXLAN-specific field: peers (every cluster node IP, comma-joined).
+	// Resolved live from /cluster/status so adding a node to the cluster
+	// + re-running bootstrap reflects the new topology.
+	//
+	// We deliberately do NOT set `exitnodes` on the zone — that property
+	// is EVPN-only (PVE rejects it on plain vxlan with "unexpected
+	// property 'exitnodes'"). Pure VXLAN zones provide cross-node L2
+	// but no built-in outbound NAT; admins who need internet from
+	// VXLAN-attached VMs either run an external router or migrate to
+	// an EVPN zone (BGP controller + heavier setup, out of scope for
+	// the current Nimbus rollout).
+	if settings.SDNZoneType == "vxlan" {
+		peers, err := s.resolveVXLANPeers(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve vxlan peers: %w", err)
+		}
+		if peers == "" {
+			return errors.New("vxlan zone needs at least one online node — cluster status returned none")
+		}
+		z.Peers = peers
+	}
 	if err := s.px.CreateSDNZone(ctx, z); err != nil {
 		return fmt.Errorf("create sdn zone %q: %w", settings.SDNZoneName, err)
 	}
 	if err := s.px.ApplySDN(ctx); err != nil {
 		return fmt.Errorf("apply sdn (after creating zone %q): %w", settings.SDNZoneName, err)
 	}
-	log.Printf("vnetmgr: created SDN zone %q (type=%s) and applied", z.Zone, z.Type)
+	log.Printf("vnetmgr: created SDN zone %q (type=%s peers=%q) and applied",
+		z.Zone, z.Type, z.Peers)
 	return nil
+}
+
+// resolveVXLANPeers builds the comma-joined `peers=` list — every
+// online cluster node's advertised IP — for a VXLAN zone.
+//
+// Notes:
+//   - Offline nodes are skipped — including them in `peers` causes
+//     ifupdown2 errors during ApplySDN. Operators add them later
+//     by re-running Bootstrap once the node is back.
+//   - We use the cluster's advertised IP (corosync ring0 typically),
+//     not the management LAN IP. That's what Proxmox's own SDN UI
+//     uses and what the ifupdown2 reload expects.
+func (s *Service) resolveVXLANPeers(ctx context.Context) (string, error) {
+	entries, err := s.px.GetClusterStatus(ctx)
+	if err != nil {
+		return "", err
+	}
+	var ips []string
+	for _, e := range entries {
+		if e.Type != "node" || e.Online != 1 || e.IP == "" {
+			continue
+		}
+		ips = append(ips, e.IP)
+	}
+	return strings.Join(ips, ","), nil
 }
 
 // ErrSDNPackageMissing is returned by Bootstrap when Proxmox returns

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,6 @@ import (
 	"nimbus/internal/secrets"
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/tunnel"
-	"nimbus/internal/vnetmgr"
 )
 
 // maxVerifyAttempts caps how many times we'll re-reserve when the verifier
@@ -122,7 +122,10 @@ type Config struct {
 	CPUType string
 
 	// IPReadyTimeout caps the agent/TCP polling loop. 0 means use the default
-	// (120s, per design doc).
+	// (5 min). Cloud-init installs qemu-guest-agent via apt on first boot
+	// (see cloudinit_iso.go); through a VPC gateway LXC the apt-update +
+	// install round-trip can run 2-4 min, and qga isn't reachable until
+	// it completes. 120s was too tight for VPC VMs.
 	IPReadyTimeout time.Duration
 
 	// PollInterval controls how often we poll the agent. 0 means use 3s.
@@ -211,26 +214,71 @@ type Service struct {
 	// booting auth.
 	quota QuotaResolver
 
-	// subnetResolver resolves the user's SDN subnet at provision time.
-	// nil = SDN is disabled cluster-wide; provision falls through to
-	// the legacy global vmbr0 pool path. *vnetmgr.Service satisfies it.
-	subnetResolver SubnetResolver
+	// standaloneNet is the Networking-v1 Standalone primitive (per-VM
+	// Simple zone with PVE-native SNAT). nil = Standalone unavailable;
+	// in that mode every member-initiated provision is rejected (only
+	// admins with the bridge escape hatch can still provision).
+	standaloneNet StandaloneNetService
+
+	// vpcMgr is the Networking-v1 VPC primitive (VXLAN zone + per-VPC
+	// gateway LXC). nil means VPC mode is unavailable on this Nimbus
+	// instance (admin hasn't configured network node + gateway pool).
+	vpcMgr VPCMgrService
+
+	// clusterLANForMembers controls whether non-admin callers can use
+	// the bridge override (`req.Bridge`) to attach a VM directly to a
+	// cluster bridge. Default false — members are confined to
+	// Standalone or VPC. Live-rotated from Settings → Network.
+	clusterLANForMembers bool
 }
 
-// SubnetResolver is the small interface vnetmgr.Service satisfies for
-// the provision flow. Resolves a user's chosen subnet (existing /
-// inline-create / default) into a UserSubnet row whose VNet, Subnet,
-// Gateway are used to build cloud-init + the post-clone bridge override.
-// Returning (nil, nil) means SDN is disabled — caller uses the legacy
-// global vmbr0 pool.
-type SubnetResolver interface {
-	ResolveForProvision(ctx context.Context, ownerID uint, subnetID *uint, subnetName string) (*db.UserSubnet, error)
+// SetClusterLANForMembers controls whether non-admin callers can
+// attach a VM directly to a cluster bridge via req.Bridge. Default
+// off; admin toggles via Settings → Network.
+func (s *Service) SetClusterLANForMembers(allowed bool) {
+	s.clusterLANForMembers = allowed
 }
 
-// SetSubnetResolver wires the resolver onto the Service. Idempotent;
-// pass nil to disable per-subnet provision (every VM lands on vmbr0).
-func (s *Service) SetSubnetResolver(r SubnetResolver) {
-	s.subnetResolver = r
+// ClusterLANForMembers reports whether non-admin callers can use
+// the bridge override.
+func (s *Service) ClusterLANForMembers() bool { return s.clusterLANForMembers }
+
+// StandaloneNetService is the slice of standalonenet.Service the
+// provision flow consumes. Defined here per the "accept interfaces"
+// idiom so tests can stub without standing up the real SDN client.
+//
+// Provision is called after NextVMID (the VMID is the salt) and
+// returns the per-VM zone + IP details needed for SetVMNetwork and
+// cloud-init. Destroy reverses the PVE state on rollback or VM delete.
+type StandaloneNetService interface {
+	Provision(ctx context.Context, vmID uint, vmIdentifier, node string) (*db.StandaloneVMNetwork, error)
+	Destroy(ctx context.Context, vmID uint) error
+	Get(ctx context.Context, vmID uint) (*db.StandaloneVMNetwork, error)
+}
+
+// SetStandaloneNet wires the standalonenet service onto the Service.
+// When non-nil, new provisions default to NetworkModeStandalone (per-VM
+// Simple zone with PVE-native SNAT); when nil, provisions fall back to
+// the legacy SubnetResolver path. Idempotent; pass nil to disable.
+func (s *Service) SetStandaloneNet(svc StandaloneNetService) {
+	s.standaloneNet = svc
+}
+
+// VPCMgrService is the slice of vpcmgr.Service the provision flow
+// consumes for NetworkModeVPC. Defined here per the "accept
+// interfaces" idiom.
+type VPCMgrService interface {
+	GetVPC(ctx context.Context, vpcID, ownerID uint, isAdmin bool) (*db.VPC, error)
+	AllocateMemberIP(ctx context.Context, vpcID, vmID uint) (string, error)
+	ReleaseMember(ctx context.Context, vmID uint) error
+	GetMembership(ctx context.Context, vmID uint) (*db.VPCMembership, error)
+}
+
+// SetVPCMgr wires the vpcmgr service onto the Service. When non-nil,
+// requests with NetworkMode=vpc + VPCID set go through the VPC path.
+// nil leaves VPC mode permanently unavailable (returns 400).
+func (s *Service) SetVPCMgr(svc VPCMgrService) {
+	s.vpcMgr = svc
 }
 
 // SetQuotaResolver wires a QuotaResolver onto the Service so the
@@ -247,7 +295,7 @@ func (s *Service) SetQuotaResolver(q QuotaResolver) {
 // instances catch each other's reservations before the clone step.
 func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, keys *sshkeys.Service, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
-		cfg.IPReadyTimeout = 120 * time.Second
+		cfg.IPReadyTimeout = 5 * time.Minute
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
@@ -427,74 +475,88 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 
 	// Step 0: resolve network attachment.
 	//
-	// Bridge override (admin-only escape hatch): when req.Bridge is
-	// set, the VM lands on that bridge directly with the global IP
-	// pool, bypassing per-user SDN entirely. Used by admins for
-	// management VMs that need cluster-LAN reachability. Non-admins
-	// trying this get a 403 — isolation is enforced.
+	// Networking-v1 dispatch — three concrete paths:
 	//
-	// Otherwise: resolve the per-user SDN subnet (when SDN is enabled
-	// and the resolver is wired). Returns nil for the legacy vmbr0
-	// path. Lazy-creates a "default" subnet on first provision when
-	// neither SubnetID nor SubnetName is specified — same UX as SSH
-	// keys, where a fresh user never gets blocked at the gate.
-	var subnet *db.UserSubnet
-	bridgeOverride := ""
-	switch {
-	case req.Bridge != "":
-		if !req.RequesterIsAdmin {
-			return nil, &internalerrors.ValidationError{
-				Field:   "bridge",
-				Message: "only admins can attach a VM directly to a cluster bridge — use a subnet instead",
-			}
+	//   - Standalone (default): per-VM Simple zone with PVE-native
+	//     SNAT. IP/gateway/CIDR derive from a hash of the VMID, so
+	//     IP allocation happens AFTER NextVMID below.
+	//
+	//   - VPC (NetworkMode == "vpc"): VXLAN zone with shared gateway
+	//     LXC. Member IP allocated from the VPC's /16 after NextVMID.
+	//
+	//   - Cluster LAN (Bridge set): admin escape hatch by default;
+	//     non-admins need the cluster-LAN-for-members toggle on.
+	//     Uses the global vmbr0 IP pool.
+	useVPC := req.NetworkMode == NetworkModeVPC
+	if useVPC && s.vpcMgr == nil {
+		return nil, &internalerrors.ValidationError{
+			Field:   "network_mode",
+			Message: "VPC networking is not configured on this Nimbus instance",
 		}
-		bridgeOverride = req.Bridge
-		// Admin override: skip subnet resolution. Falls through to
-		// the legacy global pool + cloud-init gateway path.
-	case s.subnetResolver != nil && req.OwnerID != nil:
-		subnet, err = s.subnetResolver.ResolveForProvision(ctx, *req.OwnerID, req.SubnetID, req.SubnetName)
+	}
+	if useVPC && req.VPCID == nil {
+		return nil, &internalerrors.ValidationError{
+			Field:   "vpc_id",
+			Message: "vpc_id is required when network_mode=vpc",
+		}
+	}
+	// Validate the VPC up-front (existence + ownership) so we fail
+	// fast before any IP / clone work.
+	var vpc *db.VPC
+	if useVPC {
+		ownerID := uint(0)
+		if req.OwnerID != nil {
+			ownerID = *req.OwnerID
+		}
+		v, err := s.vpcMgr.GetVPC(ctx, *req.VPCID, ownerID, req.RequesterIsAdmin)
 		if err != nil {
 			return nil, err
 		}
+		vpc = v
 	}
 
-	// Step 1: reserve IP. SDN path uses the per-subnet pool (scoped
-	// to one user-subnet's CIDR); legacy path uses the global pool.
-	// defer release on any later failure — same shape both paths.
-	var ip string
-	if subnet != nil {
-		ip, err = s.pool.ReserveInSubnet(ctx, subnet.VNet, req.Hostname)
-	} else {
-		ip, err = s.pool.Reserve(ctx, req.Hostname)
-	}
-	if err != nil {
-		if errors.Is(err, ippool.ErrPoolExhausted) {
-			return nil, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
-		}
-		return nil, fmt.Errorf("reserve ip: %w", err)
-	}
-	released := false
-	defer func() {
-		if !released {
-			if subnet != nil {
-				_ = s.pool.ReleaseInSubnet(context.Background(), subnet.VNet, ip)
-			} else {
-				_ = s.pool.Release(context.Background(), ip)
+	bridgeOverride := ""
+	if !useVPC && req.Bridge != "" {
+		if !req.RequesterIsAdmin && !s.clusterLANForMembers {
+			return nil, &internalerrors.ValidationError{
+				Field:   "bridge",
+				Message: "Cluster LAN attachment is admin-only on this Nimbus — pick Standalone or a VPC instead",
 			}
 		}
-	}()
+		bridgeOverride = req.Bridge
+	}
 
-	// Step 1b: verify the picked IP is not already held by a VM elsewhere on
-	// the cluster (catches the cross-instance race where two Nimbus instances
-	// each picked the same lowest-free IP from their independent SQLite caches).
-	// On race-loss, releases the local reservation and tries the next free IP,
-	// up to maxVerifyAttempts.
-	//
-	// Skipped for SDN VMs — per-subnet pools are scoped per user and
-	// drawn from a non-overlapping carve of the supernet, so the
-	// cross-Nimbus-instance race verifyAndRetryReserve guards against
-	// can't fire there.
-	if subnet == nil {
+	// useStandalone fires when no explicit primitive was picked AND
+	// the Standalone service is wired. When standaloneNet is nil
+	// (admin disabled it, or the CIDR config failed to parse), we
+	// silently fall back to the Cluster LAN / global-pool path —
+	// otherwise the cluster would be unprovisionable. In production
+	// Standalone is always wired with the default 10.128.0.0/9.
+	useStandalone := !useVPC && bridgeOverride == "" && s.standaloneNet != nil
+
+	// Step 1: reserve IP — for the Cluster LAN paths (explicit
+	// Bridge override or standaloneNet-not-wired fallback). Standalone
+	// and VPC defer allocation until after NextVMID (each derives
+	// its IP deterministically from VMID/membership).
+	useGlobalPool := !useStandalone && !useVPC
+	var ip string
+	released := false
+	if useGlobalPool {
+		ip, err = s.pool.Reserve(ctx, req.Hostname)
+		if err != nil {
+			if errors.Is(err, ippool.ErrPoolExhausted) {
+				return nil, &internalerrors.ConflictError{Message: "no free IP addresses in pool"}
+			}
+			return nil, fmt.Errorf("reserve ip: %w", err)
+		}
+		defer func() {
+			if !released {
+				_ = s.pool.Release(context.Background(), ip)
+			}
+		}()
+
+		// Step 1b: verify the picked IP is not already held by a VM
+		// elsewhere on the cluster (cross-Nimbus-instance race guard).
 		ip, err = s.verifyAndRetryReserve(ctx, ip, req.Hostname)
 		if err != nil {
 			return nil, err
@@ -561,6 +623,52 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		return nil, fmt.Errorf("nextid: %w", err)
 	}
 
+	// Step 3a: provision the per-VM Standalone network OR allocate
+	// the VPC member IP, depending on the dispatch. We do this BEFORE
+	// the clone so SetVMNetwork has a VNet to point at and cloud-init
+	// has gateway/IP/prefix. Failure tears down any partial state
+	// inline; the deferred cleanup below fires if a later step fails.
+	var standaloneRow *db.StandaloneVMNetwork
+	var vpcMemberIP string
+	switch {
+	case useStandalone:
+		standaloneRow, err = s.standaloneNet.Provision(ctx, uint(newVMID), fmt.Sprintf("vm-%d", newVMID), target)
+		if err != nil {
+			return nil, fmt.Errorf("provision standalone network: %w", err)
+		}
+		ip = standaloneRow.VMIP
+	case useVPC:
+		vpcMemberIP, err = s.vpcMgr.AllocateMemberIP(ctx, vpc.ID, uint(newVMID))
+		if err != nil {
+			return nil, fmt.Errorf("allocate vpc member ip: %w", err)
+		}
+		ip = vpcMemberIP
+	}
+	standaloneToDestroy := uint(0)
+	if standaloneRow != nil {
+		standaloneToDestroy = standaloneRow.VMID
+	}
+	vpcMemberToRelease := uint(0)
+	if vpcMemberIP != "" {
+		vpcMemberToRelease = uint(newVMID)
+	}
+	defer func() {
+		if standaloneToDestroy != 0 && s.standaloneNet != nil {
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.standaloneNet.Destroy(cleanCtx, standaloneToDestroy); err != nil {
+				log.Printf("provision cleanup: destroy standalone network for vmid=%d failed: %v", standaloneToDestroy, err)
+			}
+		}
+		if vpcMemberToRelease != 0 && s.vpcMgr != nil {
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.vpcMgr.ReleaseMember(cleanCtx, vpcMemberToRelease); err != nil {
+				log.Printf("provision cleanup: release vpc membership for vmid=%d failed: %v", vpcMemberToRelease, err)
+			}
+		}
+	}()
+
 	// Source and target node are the same — the template lives on the picked
 	// node by definition (pickNode only returns nodes that have a template
 	// row in the DB for this OS). Local clones are fast.
@@ -598,17 +706,22 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}()
 
 	// Bridge / VNet override: clones inherit the template's
-	// `net0=virtio,bridge=vmbr0`. Switch to the user's subnet VNet
-	// (or the admin's chosen bridge) before configuring cloud-init.
-	// vmbr0 is what the template already has, so we only call
-	// SetVMNetwork when the target bridge actually differs. Proxmox
-	// auto-generates a fresh MAC when net0 is rewritten without a
-	// macaddr= component, so two cloned VMs never share a MAC across
-	// isolated VLANs (no L2 collision, but surprising during debug).
+	// `net0=virtio,bridge=vmbr0`. Switch to the user's standalone
+	// VNet, legacy subnet VNet, or admin bridge before configuring
+	// cloud-init. vmbr0 is what the template already has, so we only
+	// call SetVMNetwork when the target bridge actually differs.
+	// Proxmox auto-generates a fresh MAC when net0 is rewritten
+	// without a macaddr= component, so two cloned VMs never share a
+	// MAC across isolated VLANs (no L2 collision, but surprising
+	// during debug).
 	switch {
-	case subnet != nil:
-		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", subnet.VNet); err != nil {
-			return nil, fmt.Errorf("set vm network to %s: %w", subnet.VNet, err)
+	case standaloneRow != nil:
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", standaloneRow.VNetName); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", standaloneRow.VNetName, err)
+		}
+	case useVPC:
+		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", vpc.VNetName); err != nil {
+			return nil, fmt.Errorf("set vm network to %s: %w", vpc.VNetName, err)
 		}
 	case bridgeOverride != "" && bridgeOverride != "vmbr0":
 		if err := s.px.SetVMNetwork(ctx, target, newVMID, "net0", bridgeOverride); err != nil {
@@ -616,13 +729,21 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 4: cloud-init. Per-subnet path uses the subnet's gateway +
-	// CIDR prefix; legacy path uses the cluster-wide values from
-	// NetworkSettings.
+	// Step 4: cloud-init. Standalone uses the per-VM /24's gateway
+	// + prefix; VPC uses the VPC subnet's .1 (gateway-LXC eth1 IP);
+	// Cluster LAN uses cluster-wide values from NetworkSettings.
 	gatewayIP, prefixLen := s.GatewayIP(), s.PrefixLen()
-	if subnet != nil {
-		gatewayIP = subnet.Gateway
-		prefixLen = vnetmgr.PrefixLenOf(subnet)
+	switch {
+	case standaloneRow != nil:
+		gatewayIP = standaloneRow.GatewayIP
+		prefixLen = prefixLenFromCIDR(standaloneRow.SubnetCIDR)
+	case useVPC:
+		gw, _, gerr := splitVPCGateway(vpc.CIDR)
+		if gerr != nil {
+			return nil, fmt.Errorf("derive vpc gateway: %w", gerr)
+		}
+		gatewayIP = gw
+		prefixLen = prefixLenFromCIDR(vpc.CIDR)
 	}
 	username := proxmox.TemplateUsername(req.OSTemplate)
 
@@ -795,20 +916,24 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 
-	// Step 8: commit. IP transitions reserved -> allocated; VM row written.
-	// SDN path uses the per-subnet pool variant; legacy path uses the
-	// global one. Either way, mark-allocated semantics are identical.
-	if subnet != nil {
-		if err := s.pool.MarkAllocatedInSubnet(ctx, subnet.VNet, ip, newVMID); err != nil {
-			return nil, fmt.Errorf("mark allocated: %w", err)
-		}
-	} else {
+	// Step 8: commit. Standalone + VPC paths skip the pool — their
+	// respective rows (StandaloneVMNetwork / VPCMembership) are the
+	// allocation records, hard-deleted on cleanup. Cluster LAN uses
+	// the global pool.
+	switch {
+	case standaloneRow != nil:
+		// no pool involvement
+	case useVPC:
+		// no pool involvement; membership row persisted by vpcMgr.AllocateMemberIP
+	default:
 		if err := s.pool.MarkAllocated(ctx, ip, newVMID); err != nil {
 			return nil, fmt.Errorf("mark allocated: %w", err)
 		}
 	}
-	released = true // success path — do NOT run the deferred release
-	cleanupVMID = 0 // success path — keep the Proxmox VM
+	released = true         // success path — do NOT run the deferred release
+	cleanupVMID = 0         // success path — keep the Proxmox VM
+	standaloneToDestroy = 0 // success path — keep the standalone PVE state
+	vpcMemberToRelease = 0  // success path — keep the VPC membership
 
 	// The encrypted private key (if any) lives on the ssh_keys row referenced
 	// by SSHKeyID — not on the VM itself anymore.
@@ -827,10 +952,6 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		KeyName:      keyName,
 		SSHPubKey:    sshPubKey,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
-	}
-	if subnet != nil {
-		sid := subnet.ID
-		vm.SubnetID = &sid
 	}
 	if machineObj != nil {
 		vm.TunnelID = machineObj.ID
@@ -859,13 +980,45 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		TunnelURL:     tunnelURL,
 		TunnelError:   tunnelError,
 	}
-	if subnet != nil {
-		res.SubnetName = subnet.Name
-		res.SubnetCIDR = subnet.Subnet
+	switch {
+	case standaloneRow != nil:
+		res.SubnetName = fmt.Sprintf("standalone-vm%d", newVMID)
+		res.SubnetCIDR = standaloneRow.SubnetCIDR
+	case useVPC:
+		res.SubnetName = vpc.Name
+		res.SubnetCIDR = vpc.CIDR
 	}
 	res.ConsolePassword = cidata.ConsolePassword
 	res.CloudInitError = cidata.Error
 	return res, nil
+}
+
+// prefixLenFromCIDR returns the netmask length of a CIDR string, or 0
+// on parse failure. Used to populate cloud-init ipconfig0's prefix
+// from a Standalone VM's auto-allocated /24.
+func prefixLenFromCIDR(cidr string) int {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return 0
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ones
+}
+
+// splitVPCGateway returns (gateway=.1, host=.10) of a VPC CIDR.
+// VPC convention is gateway-LXC eth1 IP = .1, members start at .10.
+func splitVPCGateway(cidr string) (gateway, host string, err error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", "", fmt.Errorf("parse cidr %q: %w", cidr, err)
+	}
+	base := ipnet.IP.To4()
+	if base == nil {
+		return "", "", fmt.Errorf("not an ipv4 cidr: %s", cidr)
+	}
+	gw := net.IPv4(base[0], base[1], base[2], base[3]+1).To4()
+	hi := net.IPv4(base[0], base[1], base[2], base[3]+10).To4()
+	return gw.String(), hi.String(), nil
 }
 
 // BackfillNimbusMetadata walks every persisted VM row and ensures the Proxmox
@@ -1365,7 +1518,36 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 		}
 	}
 
-	if vm.IP != "" {
+	// Networking-v1 teardown. Either a Standalone VM (per-VM zone +
+	// VNet + subnet are Nimbus-owned) or a VPC member (membership
+	// row + IP are Nimbus-owned). Both cases skip the IP-pool release
+	// — the per-network row IS the allocation record.
+	standaloneOwned := false
+	if s.standaloneNet != nil {
+		row, err := s.standaloneNet.Get(ctx, uint(vm.VMID))
+		if err != nil {
+			log.Printf("delete vm %d: lookup standalone network: %v", vm.VMID, err)
+		} else if row != nil {
+			standaloneOwned = true
+			if err := s.standaloneNet.Destroy(ctx, uint(vm.VMID)); err != nil {
+				log.Printf("delete vm %d: destroy standalone network: %v", vm.VMID, err)
+			}
+		}
+	}
+	vpcOwned := false
+	if s.vpcMgr != nil {
+		mem, err := s.vpcMgr.GetMembership(ctx, uint(vm.VMID))
+		if err != nil {
+			log.Printf("delete vm %d: lookup vpc membership: %v", vm.VMID, err)
+		} else if mem != nil {
+			vpcOwned = true
+			if err := s.vpcMgr.ReleaseMember(ctx, uint(vm.VMID)); err != nil {
+				log.Printf("delete vm %d: release vpc membership: %v", vm.VMID, err)
+			}
+		}
+	}
+
+	if vm.IP != "" && !standaloneOwned && !vpcOwned {
 		if err := s.releaseVMIP(ctx, vm); err != nil {
 			log.Printf("delete vm %d: release ip %s: %v", vm.VMID, vm.IP, err)
 		}
@@ -1382,22 +1564,10 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	return nil
 }
 
-// releaseVMIP returns the VM's IP to the right pool — per-subnet for
-// SDN VMs (vm.SubnetID set), global for legacy vmbr0 VMs. Looking up
-// the subnet by id gives us the VNet name needed by ReleaseInSubnet.
-// Soft-failure (logged, not propagated) on a missing subnet — the row
-// might have been deleted concurrently and the IP still needs freeing.
+// releaseVMIP returns the VM's IP to the global pool. Standalone +
+// VPC VMs are caught by the standaloneOwned/vpcOwned check earlier
+// in deleteVM, so this path only runs for Cluster LAN bridge VMs.
 func (s *Service) releaseVMIP(ctx context.Context, vm *db.VM) error {
-	if vm.SubnetID != nil {
-		var sub db.UserSubnet
-		if err := s.db.WithContext(ctx).First(&sub, *vm.SubnetID).Error; err == nil {
-			return s.pool.ReleaseInSubnet(ctx, sub.VNet, vm.IP)
-		}
-		// Subnet row gone — fall through to global release as a
-		// last-ditch attempt. Doesn't free the per-subnet row but
-		// keeps "delete is idempotent" the contract.
-		log.Printf("delete vm %d: subnet %d missing during release; falling back to global pool", vm.VMID, *vm.SubnetID)
-	}
 	return s.pool.Release(ctx, vm.IP)
 }
 
@@ -1497,7 +1667,7 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 		return row, "", nil
 
 	case req.GenerateKey:
-		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+		row, err := s.createSSHKeyRetryName(ctx, sshkeys.CreateRequest{
 			Name:     "nimbus-" + req.Hostname,
 			Generate: true,
 			OwnerID:  req.OwnerID,
@@ -1513,7 +1683,7 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 		return row, priv, nil
 
 	case req.SSHPubKey != "":
-		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+		row, err := s.createSSHKeyRetryName(ctx, sshkeys.CreateRequest{
 			Name:       "nimbus-" + req.Hostname,
 			PublicKey:  req.SSHPubKey,
 			PrivateKey: req.SSHPrivKey,
@@ -1539,6 +1709,40 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 			return nil, "", err
 		}
 		return row, "", nil
+	}
+}
+
+// createSSHKeyRetryName wraps sshkeys.Service.Create with a name-
+// collision retry: if the requested name is already taken, it
+// appends `-2`, `-3`, … until either a Create succeeds or we give
+// up. Reuses the same key vault for each attempt; the OwnerID and
+// generate/import knobs come from req.
+//
+// Why: provision retries (e.g. after a VPC bootstrap failure) ran
+// against the same hostname → same default name (`nimbus-<hostname>`)
+// → ConflictError on the second attempt. The first attempt's key
+// stays in the vault because the cleanup defers don't touch it
+// (key creation happens before any reservation that might need
+// rolling back). Suffixing keeps the retry path working without
+// nuking a possibly-useful key.
+func (s *Service) createSSHKeyRetryName(ctx context.Context, req sshkeys.CreateRequest) (*db.SSHKey, error) {
+	const maxAttempts = 16
+	base := req.Name
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			req.Name = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		row, err := s.keys.Create(ctx, req)
+		if err == nil {
+			return row, nil
+		}
+		var conflict *internalerrors.ConflictError
+		if !errors.As(err, &conflict) {
+			return nil, err
+		}
+	}
+	return nil, &internalerrors.ConflictError{
+		Message: fmt.Sprintf("ssh key name %q and %d numeric suffixes are all taken", base, maxAttempts-1),
 	}
 }
 

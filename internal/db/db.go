@@ -44,5 +44,70 @@ func New(path string, models ...any) (*DB, error) {
 		}
 	}
 
+	// Partial unique indexes for soft-deletable models. GORM struct
+	// tags can't express `WHERE deleted_at IS NULL`, but the
+	// reconciler soft-deletes vm rows on purpose (preserve history,
+	// allow recovery), and a plain unique index would keep tombstoned
+	// vmids/hostnames "taken" forever — blocking VMID reuse after
+	// Proxmox recycles the slot. Drop any AutoMigrate-created plain
+	// unique indexes first, then create the partial ones.
+	//
+	// Per-table guard: tests sometimes open a DB without the vms
+	// model (only the slice of tables they care about). Skip the
+	// migration entirely when the parent table isn't present.
+	if gormDB.Migrator().HasTable(&VM{}) {
+		// idx_vms_vm_id (not _vmid) is what GORM auto-named the
+		// unique index — VMID's camelCase splits to v_m_i_d-ish per
+		// the CLAUDE.md naming-convention gotcha. Drop both spellings
+		// to be safe across whatever historical builds put on disk.
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_vms_vm_id`,
+			`DROP INDEX IF EXISTS idx_vms_vmid`,
+			`DROP INDEX IF EXISTS idx_vms_hostname`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_vmid_alive ON vms(vmid) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_hostname_alive ON vms(hostname) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+
+	// Same partial-unique pattern for the per-VM network tables. PVE
+	// recycles vmids handed out by /cluster/nextid, so any unique
+	// index on vm_id that doesn't filter on deleted_at would let a
+	// tombstone block the next allocation that draws the same id.
+	if gormDB.Migrator().HasTable(&VPCMembership{}) {
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_vpc_memberships_vm_id`,
+			`DROP INDEX IF EXISTS idx_vpcmem_vpc_vm`,
+			`DROP INDEX IF EXISTS idx_vpcmem_vpc_ip`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vm_id_alive ON vpc_memberships(vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vpc_vm_alive ON vpc_memberships(vpc_id, vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_vpcmem_vpc_ip_alive ON vpc_memberships(vpc_id, vm_ip) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+	if gormDB.Migrator().HasTable(&StandaloneVMNetwork{}) {
+		migrations := []string{
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_vm_id`,
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_zone_name`,
+			`DROP INDEX IF EXISTS idx_standalone_vm_networks_vnet_name`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_vm_id_alive ON standalone_vm_networks(vm_id) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_zone_name_alive ON standalone_vm_networks(zone_name) WHERE deleted_at IS NULL`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_vnet_name_alive ON standalone_vm_networks(vnet_name) WHERE deleted_at IS NULL`,
+		}
+		for _, stmt := range migrations {
+			if err := gormDB.Exec(stmt).Error; err != nil {
+				return nil, fmt.Errorf("post-migrate %q: %w", stmt, err)
+			}
+		}
+	}
+
 	return &DB{gormDB}, nil
 }

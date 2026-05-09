@@ -318,10 +318,19 @@ type GPUJob struct {
 func (GPUJob) TableName() string { return "gpu_jobs" }
 
 // VM is the canonical record for a provisioned virtual machine.
+//
+// IMPORTANT: vmid and hostname are uniqueness-enforced via PARTIAL
+// unique indexes (see db.New's post-AutoMigrate step), NOT via
+// `uniqueIndex` struct tags. The reconciler soft-deletes rows (via
+// gorm.DeletedAt) to preserve VM history; a plain unique index would
+// keep tombstoned vmids/hostnames "taken" forever and block VMID
+// reuse after Proxmox recycles the slot. Partial indexes scoped to
+// `deleted_at IS NULL` are SQLite's solution. The struct just keeps
+// non-unique `index`es for query performance.
 type VM struct {
 	gorm.Model
-	VMID     int    `gorm:"column:vmid;uniqueIndex;not null"        json:"vmid"`
-	Hostname string `gorm:"column:hostname;uniqueIndex;not null"    json:"hostname"`
+	VMID     int    `gorm:"column:vmid;index;not null"              json:"vmid"`
+	Hostname string `gorm:"column:hostname;index;not null"          json:"hostname"`
 	IP       string `gorm:"column:ip;index;not null"                json:"ip"`
 	Node     string `gorm:"column:node;not null"                    json:"node"`
 	Tier     string `gorm:"column:tier;not null"                    json:"tier"`
@@ -690,6 +699,12 @@ type NetworkSettings struct {
 	// Subnet size carved per user (default /24, ~250 usable hosts).
 	SDNSubnetSize int    `gorm:"column:sdn_subnet_size;default:24"`
 	SDNDNSServer  string `gorm:"column:sdn_dns_server;default:''"`
+
+	// ClusterLANForMembers controls whether non-admin users can pick
+	// "Cluster LAN" at provision time (the Bridge override path).
+	// Default false — members are confined to Standalone or VPC.
+	// Admins always retain the escape hatch.
+	ClusterLANForMembers bool `gorm:"column:cluster_lan_for_members;default:false"`
 }
 
 // UserSubnet — one row per user-owned SDN subnet. Multiple subnets per
@@ -736,4 +751,141 @@ type UserSubnet struct {
 	// Status reports operational state. "active" = ready; "error" =
 	// Proxmox-side create failed mid-flight (admin can retry-or-delete).
 	Status string `gorm:"column:status;not null;default:'active'"`
+}
+
+// ── Networking v1 — Standalone VMs and VPCs ─────────────────────────
+//
+// Two user-facing networking primitives, replacing the per-user
+// UserSubnet model:
+//
+//   - StandaloneVMNetwork: 1:1 with a VM, backed by a per-VM Proxmox
+//     SDN Simple zone. PVE handles SNAT natively via subnet.snat=1.
+//     No gateway LXC needed; the zone is host-local by design.
+//   - VPC + VPCMembership: many VMs share a VXLAN zone with cross-node
+//     L2. PVE doesn't honor subnet.snat=1 on VXLAN, so a per-VPC
+//     gateway LXC handles MASQUERADE. The gateway LXC's vmbr0-side IP
+//     comes from a Nimbus-managed pool (GatewayLXCIP).
+//
+// UserSubnet is left in place but read-only — Nimbus stops creating
+// new rows under that schema. After v1.0 ships, it's dropped in v1.1.
+
+// StandaloneVMNetwork is the per-VM Simple zone backing a Standalone
+// VM. Created at provision time, destroyed at VM deletion. Every
+// Standalone VM owns its own zone+vnet+subnet — collisions across
+// nodes are impossible because Simple zones are host-local.
+//
+// IMPORTANT: vm_id, zone_name, and vnet_name are uniqueness-enforced
+// via PARTIAL unique indexes (see db.New's post-AutoMigrate step), NOT
+// via `uniqueIndex` struct tags — same reasoning as db.VM. PVE recycles
+// vmids handed out by /cluster/nextid, and Destroy-failures leave
+// soft-deleted rows whose unique columns would otherwise stay "taken"
+// forever. Plain `index` tags here keep the columns searchable.
+type StandaloneVMNetwork struct {
+	gorm.Model
+	// VMID is the foreign key to db.VM. Unique among live rows because
+	// each Standalone VM has exactly one network record.
+	VMID uint `gorm:"column:vm_id;not null;index"`
+	// ZoneName is the Proxmox SDN zone name. Format "s<7 hex>" derived
+	// from sha256(vm.UUID); guaranteed lowercase alphanumeric and 8
+	// chars (Proxmox's hard cap on zone IDs).
+	ZoneName string `gorm:"column:zone_name;not null;index"`
+	// VNetName is the Proxmox VNet name. We use the same string as
+	// ZoneName since both have the same constraints; a single VNet
+	// per Standalone VM zone is sufficient.
+	VNetName string `gorm:"column:vnet_name;not null;index"`
+	// SubnetCIDR is the per-VM /24 carved from the Standalone pool
+	// (default 10.128.0.0/9). E.g. "10.128.42.0/24".
+	SubnetCIDR string `gorm:"column:subnet_cidr;not null"`
+	// GatewayIP is .1 of SubnetCIDR — lives on the local PVE host's
+	// bridge, no anycast conflicts because the bridge is host-local.
+	GatewayIP string `gorm:"column:gateway_ip;not null"`
+	// VMIP is .10 of SubnetCIDR. We reserve .2..-.9 for future use
+	// (DHCP servers, anycast services, etc.).
+	VMIP string `gorm:"column:vm_ip;not null"`
+	// Node is the PVE host the VM (and therefore the Simple zone) lives on.
+	Node string `gorm:"column:node;not null"`
+}
+
+// VPC is a private virtual network: a VXLAN zone + VNet + subnet plus
+// a dedicated gateway LXC for NAT egress. VMs in the VPC can reach
+// each other at L2 across nodes. VMs in different VPCs cannot reach
+// each other (peering is a future feature).
+type VPC struct {
+	gorm.Model
+	// OwnerID is the user who created the VPC. Composite-unique with
+	// Name so each user has their own namespace; admins can see all.
+	OwnerID uint `gorm:"column:owner_id;not null;index;uniqueIndex:idx_vpc_owner_name"`
+	// Name is the user-facing label. Unique per user.
+	Name string `gorm:"column:name;not null;uniqueIndex:idx_vpc_owner_name"`
+	// CIDR is the /16 carved from the VPC pool (default 10.0.0.0/9).
+	// E.g. "10.42.0.0/16". Returned to the pool on delete.
+	CIDR string `gorm:"column:cidr;not null;uniqueIndex"`
+	// ZoneName is "v<7 hex>" from sha256(vpc.UUID). 8-char Proxmox cap.
+	ZoneName string `gorm:"column:zone_name;not null;uniqueIndex"`
+	// VNetName mirrors ZoneName (single VNet per VPC in v1).
+	VNetName string `gorm:"column:vnet_name;not null;uniqueIndex"`
+	// GatewayLXCID is the Proxmox VMID of the per-VPC gateway LXC.
+	// Pointer because it's nullable during provisioning + after a
+	// gateway-LXC failure.
+	GatewayLXCID *int `gorm:"column:gateway_lxc_id"`
+	// GatewayNode is the PVE node hosting the gateway LXC. Set from
+	// the cluster-wide NIMBUS_NETWORK_NODE config at create time.
+	GatewayNode string `gorm:"column:gateway_node"`
+	// Status reports operational state. provisioning → active. If the
+	// gateway LXC dies, the health-check loop flips this to "degraded";
+	// after manual intervention or restart, back to "active". "error"
+	// means create failed mid-flight.
+	Status string `gorm:"column:status;not null;default:'provisioning'"`
+}
+
+// VPCMembership joins a VM to a VPC with its assigned IP from the
+// VPC's CIDR.
+//
+// IMPORTANT: uniqueness on vm_id (a VM is in at most one VPC),
+// (vpc_id, vm_id), and (vpc_id, vm_ip) is enforced via PARTIAL unique
+// indexes (see db.New's post-AutoMigrate step), NOT `uniqueIndex` struct
+// tags — same reasoning as db.VM. PVE recycles vmids and a stale
+// tombstoned membership row would otherwise keep a recycled vmid (or
+// IP) "taken." Plain `index` tags here keep vpc_id and vm_id searchable.
+type VPCMembership struct {
+	gorm.Model
+	VPCID uint   `gorm:"column:vpc_id;not null;index"`
+	VMID  uint   `gorm:"column:vm_id;not null;index"`
+	VMIP  string `gorm:"column:vm_ip;not null"`
+}
+
+// GatewayLXCIP is one row in the Nimbus-managed pool of vmbr0-side
+// IPs for VPC gateway LXCs. Seeded from NIMBUS_GATEWAY_LXC_IP_POOL
+// (a range like "192.168.1.200-192.168.1.250") at startup.
+//
+// Lifecycle mirrors ippool.IPAllocation: free → reserved (during
+// provisioning) → allocated (LXC running) → free again on destroy.
+// VPCID is null when the row is free; populated when reserved or
+// allocated. We don't reuse internal/ippool.Pool directly because
+// that pool's Reserve semantics are scoped to provisioning races we
+// don't have here — gateway LXC provisioning is serialized through
+// vpcmgr already.
+type GatewayLXCIP struct {
+	gorm.Model
+	IP     string `gorm:"column:ip;not null;uniqueIndex"`
+	VPCID  *uint  `gorm:"column:vpc_id;index"`
+	Status string `gorm:"column:status;not null;default:'free'"`
+}
+
+// NetworkingV1Settings is the singleton (ID=1) holding the
+// admin-editable VPC + gateway-LXC config. Mirrors the Gopher /
+// GPU pattern: env vars seed-once on first boot, after that the
+// Settings → Network page is the source of truth and live-rotates
+// without a server restart.
+//
+// The OS image is intentionally not in here — the gateway service
+// auto-picks the latest debian-12-standard via PVE's aplinfo, and
+// the bootstrap script assumes that family. (An old `lxc_template`
+// column may still exist on upgraded DBs; it is unread.)
+type NetworkingV1Settings struct {
+	ID             uint   `gorm:"primaryKey"`
+	NetworkNode    string `gorm:"column:network_node;default:''"`
+	LXCIPPoolStart string `gorm:"column:lxc_ip_pool_start;default:''"`
+	LXCIPPoolEnd   string `gorm:"column:lxc_ip_pool_end;default:''"`
+	LXCStorage     string `gorm:"column:lxc_storage;default:'local-lvm'"`
 }

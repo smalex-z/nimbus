@@ -48,6 +48,35 @@ type Config struct {
 	// or "x86-64-v2-AES" if any cluster node predates Haswell.
 	VMCPUType string
 
+	// StandalonePoolCIDR is the supernet from which Networking-v1
+	// Standalone-mode VMs carve per-VM /24s. Default 10.128.0.0/9.
+	// Each Standalone VM gets its own host-local Simple zone with PVE
+	// SNAT — the /24 only exists on one node's bridge, so cross-node
+	// IP collisions don't matter. Override via NIMBUS_STANDALONE_POOL_CIDR
+	// when 10.128.0.0/9 conflicts with cluster-LAN routing.
+	StandalonePoolCIDR string
+
+	// VPCPoolCIDR is the supernet from which VPC /16s carve. Default
+	// 10.0.0.0/9 (32K /16s — overkill but matches AWS/OpenStack
+	// expectations of "lots of room"). Override via NIMBUS_VPC_POOL_CIDR.
+	VPCPoolCIDR string
+
+	// NetworkNode is the PVE host on which every VPC's gateway LXC
+	// is provisioned. Required when VPCs are enabled. v1 limitation;
+	// HA-VRRP across nodes is a future phase.
+	NetworkNode string
+
+	// GatewayLXCIPPool is the comma-separated list of IPv4 ranges
+	// (e.g. "192.168.1.200-192.168.1.250") Nimbus allocates from for
+	// the host-network side of each VPC gateway LXC. Seeded into
+	// db.GatewayLXCIP at startup; admin can re-seed by widening the
+	// range and restarting (existing rows are not clobbered).
+	GatewayLXCIPPool string
+
+	// GatewayLXCStorage names the PVE storage pool for the gateway
+	// LXC's rootfs. Default "local-lvm".
+	GatewayLXCStorage string
+
 	// Cross-instance IP reconciliation. Defaults are tuned for the typical
 	// "two operators sharing one Proxmox cluster" deployment; raise the
 	// vacate threshold if your cluster has long-running migrations.
@@ -129,6 +158,11 @@ func Load() (*Config, error) {
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
 		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v3"),
+		StandalonePoolCIDR:      getEnv("NIMBUS_STANDALONE_POOL_CIDR", "10.128.0.0/9"),
+		VPCPoolCIDR:             getEnv("NIMBUS_VPC_POOL_CIDR", "10.0.0.0/9"),
+		NetworkNode:             os.Getenv("NIMBUS_NETWORK_NODE"),
+		GatewayLXCIPPool:        os.Getenv("NIMBUS_GATEWAY_LXC_IP_POOL"),
+		GatewayLXCStorage:       getEnv("NIMBUS_GATEWAY_LXC_STORAGE", "local-lvm"),
 
 		ReconcileIntervalSeconds: getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),
 		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
