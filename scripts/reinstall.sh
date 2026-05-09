@@ -31,6 +31,18 @@ else
   systemctl stop "$APP_NAME"
   cp "$ROOT/$APP_NAME" "$INSTALL_DIR/$APP_NAME"
   chown "$APP_NAME:$APP_NAME" "$INSTALL_DIR/$APP_NAME"
+
+  # Idempotent: ensure the gopher-bootstrap helper unit is present.
+  # Drives the cloud-tunnel install path which can't run inside the
+  # main hardened nimbus.service. Letting `nimbus install --upgrade`
+  # write the units would re-run the full install pipeline; calling
+  # it directly stays scoped to the helper unit on hot-swap reinstalls.
+  HELPER_PATH="/etc/systemd/system/nimbus-gopher-bootstrap.path"
+  if [ ! -f "$HELPER_PATH" ]; then
+    echo "Installing gopher-bootstrap helper unit..."
+    "$INSTALL_DIR/$APP_NAME" install --upgrade
+  fi
+
   systemctl start "$APP_NAME"
 fi
 

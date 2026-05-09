@@ -89,6 +89,19 @@ func main() {
 		return
 	}
 
+	// `nimbus gopher-bootstrap` is the systemd-path-triggered helper. It
+	// reads /var/lib/nimbus/bootstrap-pending.json, runs the Gopher
+	// install (curl | bash from the gateway), writes the result back
+	// to /var/lib/nimbus/bootstrap-result.json, and exits. Nimbus's
+	// main service polls the result file. Delegated to selftunnel so
+	// the helper file paths + JSON shape have one source of truth.
+	if len(os.Args) > 1 && os.Args[1] == "gopher-bootstrap" {
+		if err := selftunnel.RunHelper(); err != nil {
+			log.Fatalf("gopher-bootstrap helper failed: %v", err)
+		}
+		return
+	}
+
 	flags := flag.NewFlagSet("nimbus", flag.ExitOnError)
 	port := flags.String("port", "", "server port (overrides PORT env var)")
 	dbPath := flags.String("db", "", "database path (overrides DB_PATH env var)")
