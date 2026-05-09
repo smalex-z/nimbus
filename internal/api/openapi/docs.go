@@ -1247,7 +1247,7 @@ const docTemplate = `{
                         "cookieAuth": []
                     }
                 ],
-                "description": "Tries live migration when the VM is running. On rejection,\nresponds 409 with ` + "`" + `code: \"online_migration_failed\"` + "`" + ` so the\nSPA can prompt the operator. Re-POST with\n` + "`" + `allow_offline: true` + "`" + ` to fall back to a stop → migrate →\nrestart cycle. Stopped VMs migrate offline directly. Foreign\n/ external VMs (no DB row) 404 here.",
+                "description": "Async: returns 202 + operation_id; poll /operations/{id}\nfor progress. On online failure the operation lands\nfailed with details.failure_code = online_migration_failed\nso the SPA can prompt for offline retry (start a new\nmigrate operation with allow_offline=true).",
                 "consumes": [
                     "application/json"
                 ],
@@ -1289,6 +1289,24 @@ const docTemplate = `{
                                     "properties": {
                                         "data": {
                                             "$ref": "#/definitions/handlers.migrateVMResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.migrateVMAcceptedResponse"
                                         }
                                     }
                                 }
@@ -3388,6 +3406,151 @@ const docTemplate = `{
                     },
                     "409": {
                         "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/operations": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Long-running tasks (migrate, provision, ...) start\nOperation rows that survive the originating HTTP\nrequest. Default narrows to in-flight; pass\ninclude_finished=1 for the historical view.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "operations"
+                ],
+                "summary": "List background operations",
+                "parameters": [
+                    {
+                        "enum": [
+                            "queued",
+                            "running",
+                            "succeeded",
+                            "failed",
+                            "cancelled"
+                        ],
+                        "type": "string",
+                        "description": "filter by state",
+                        "name": "state",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "filter by operation type (e.g. vm.migrate)",
+                        "name": "type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "include terminal rows (0/1, default 0)",
+                        "name": "include_finished",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (1-500, default 100)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.operationsListResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/operations/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "operations"
+                ],
+                "summary": "Read one background operation",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "operation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.operationView"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/handlers.EnvelopeError"
                         }
@@ -8399,7 +8562,12 @@ const docTemplate = `{
                     "description": "CloudSubdomain is the *effective* leftmost label of the public URL —\nempty in the DB collapses to selftunnel.DefaultCloudSubdomain (\"cloud\")\nhere so the UI never has to guess the fallback.",
                     "type": "string"
                 },
-                "configured": {
+                "credentials_saved": {
+                    "description": "CredentialsSaved is true when both api_url and api_key are populated\nin the DB. Used by the SPA to decide whether to auto-open the\nbootstrap modal after a save and to render the \"leave blank to\nkeep\" placeholder on the API-key input.",
+                    "type": "boolean"
+                },
+                "tunnel_active": {
+                    "description": "TunnelActive is true only when the self-bootstrap finished\nend-to-end and a public URL is live. The SPA's \"Configured\" pill\nreads this — credentials saved with a failed (or never-attempted)\nbootstrap reads as not-configured.",
                     "type": "boolean"
                 }
             }
@@ -8616,6 +8784,19 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.migrateVMAcceptedResponse": {
+            "type": "object",
+            "properties": {
+                "operation_id": {
+                    "type": "integer",
+                    "example": 42
+                },
+                "target_node": {
+                    "type": "string",
+                    "example": "pve-2"
+                }
+            }
+        },
         "handlers.migrateVMRequest": {
             "type": "object",
             "properties": {
@@ -8771,6 +8952,70 @@ const docTemplate = `{
                 "success": {
                     "type": "boolean",
                     "example": false
+                }
+            }
+        },
+        "handlers.operationView": {
+            "type": "object",
+            "properties": {
+                "actor_email": {
+                    "type": "string"
+                },
+                "actor_id": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "details_json": {
+                    "type": "string"
+                },
+                "finished_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "last_heartbeat_at": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "target_id": {
+                    "type": "string"
+                },
+                "target_label": {
+                    "type": "string"
+                },
+                "target_type": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "handlers.operationsListResponse": {
+            "type": "object",
+            "properties": {
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.operationView"
+                    }
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },

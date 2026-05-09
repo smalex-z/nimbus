@@ -18,9 +18,11 @@ package selftunnel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -89,6 +91,7 @@ const machineConnectTimeout = 90 * time.Second
 type settingsStore interface {
 	GetGopherSettings() (*db.GopherSettings, error)
 	SaveCloudTunnelState(state db.GopherSettings) error
+	WipeGopherSettings() error
 }
 
 // gopherClient is the slice of tunnel.Client we need.
@@ -177,15 +180,6 @@ func (s *Service) Start(ctx context.Context) error {
 	s.inflight = true
 	s.mu.Unlock()
 
-	// Pre-flight: bootstrap script needs sudo for apt-install + systemd.
-	// Surfacing this as a state-machine failure rather than letting the
-	// bootstrap exit with a confusing apt error mid-run.
-	if err := s.checkSudo(ctx); err != nil {
-		s.markFailed(fmt.Sprintf("passwordless sudo required to install rathole on the Nimbus host: %v", err))
-		s.clearInflight()
-		return err
-	}
-
 	// Long-running: detach. The HTTP handler returns 202 Accepted and the
 	// modal polls Status. We use a fresh context so the request lifetime
 	// doesn't kill the bootstrap mid-flight.
@@ -233,16 +227,14 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		return fmt.Errorf("persist machine id: %w", err)
 	}
 
-	// Step 2 — run the bootstrap script locally. Hostname goes via
-	// GOPHER_MACHINE_NAME so the script's interactive prompt is skipped.
+	// Step 2 — delegate the install to the unhardened helper unit
+	// (nimbus-gopher-bootstrap.service, fired by the .path watcher).
+	// Sudo from the main service is blocked by NoNewPrivileges + the
+	// hardened systemd ProtectSystem=strict, so we hand off via the
+	// shared file-IPC: write pending → touch trigger → poll result.
 	hostname := readHostname()
-	cmd := fmt.Sprintf(
-		"curl -fsSL %s | GOPHER_MACHINE_NAME=%s sudo -E bash",
-		shellQuote(machine.BootstrapURL), shellQuote(hostname),
-	)
-	out, runErr := s.run(ctx, "bash", "-c", cmd)
-	if runErr != nil {
-		return fmt.Errorf("bootstrap script failed: %w (output: %s)", runErr, truncate(string(out), 4096))
+	if err := dispatchHelper(ctx, machine.BootstrapURL, hostname); err != nil {
+		return fmt.Errorf("bootstrap script failed: %w", err)
 	}
 
 	// Step 3 — wait for Gopher to flip the machine to connected.
@@ -307,17 +299,90 @@ func (s *Service) waitConnected(ctx context.Context, machineID string) error {
 	}
 }
 
-// checkSudo pre-flights `sudo -n true` so we fail fast with a clear error
-// rather than partway through the bootstrap. Cancellable via ctx.
-func (s *Service) checkSudo(ctx context.Context) error {
-	out, err := s.run(ctx, "sudo", "-n", "true")
-	if err != nil {
-		return fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
+// dispatchHelper hands the install off to the path-triggered helper
+// unit (nimbus-gopher-bootstrap.path). Writes the pending payload,
+// removes any stale result, touches the trigger file, then polls
+// /var/lib/nimbus/bootstrap-result.json until populated or timeout.
+//
+// The helper service runs as root with no hardening — that's the
+// whole point of the path-triggered split. The main nimbus.service
+// stays locked down (NoNewPrivileges + ProtectSystem=strict);
+// privilege boundary is the trigger file, not a sudoers entry.
+//
+// Timeout is 5 minutes — generous; the bootstrap typically completes
+// in 30-90s but apt + slow networks can push it longer.
+func dispatchHelper(ctx context.Context, bootstrapURL, machineName string) error {
+	// Stale result from a previous run would be picked up by the
+	// poll loop below before the helper even starts. Best-effort
+	// remove; missing-file is fine.
+	_ = os.Remove(resultPath)
+
+	pending := helperPending{
+		InstanceID:   "default",
+		BootstrapURL: bootstrapURL,
+		MachineName:  machineName,
 	}
-	return nil
+	buf, err := json.Marshal(pending)
+	if err != nil {
+		return fmt.Errorf("marshal pending: %w", err)
+	}
+	if err := os.WriteFile(pendingPath, buf, 0644); err != nil {
+		return fmt.Errorf("write pending: %w", err)
+	}
+	// Touch the trigger file (create if absent, update mtime if not)
+	// to fire the systemd path unit. The helper service deletes it
+	// on completion (ExecStartPost) so the next run re-triggers
+	// cleanly.
+	now := time.Now()
+	if err := os.WriteFile(triggerPath, []byte("trigger\n"), 0644); err != nil {
+		return fmt.Errorf("write trigger: %w", err)
+	}
+	_ = os.Chtimes(triggerPath, now, now)
+
+	deadline := time.Now().Add(5 * time.Minute)
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		raw, err := os.ReadFile(resultPath)
+		if err == nil {
+			var res helperResult
+			if jerr := json.Unmarshal(raw, &res); jerr != nil {
+				return fmt.Errorf("parse helper result: %w", jerr)
+			}
+			if !res.Success {
+				return fmt.Errorf("helper reported failure: %s (output: %s)",
+					res.Error, truncate(res.Output, 4096))
+			}
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("read result: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("helper timed out after 5 minutes — check `journalctl -u nimbus-gopher-bootstrap`")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
-// markFailed writes the failed state + error message to the DB.
+// markFailed records the failure on the DB row, then runs the
+// clean-slate cleanup so the operator isn't left with a half-registered
+// Gopher machine and stale API credentials they have to manually undo.
+//
+// Sequencing matters:
+//  1. Write StateFailed + error message — so the modal renders the
+//     reason even if cleanup races a still-polling SPA refresh.
+//  2. cleanupAfterFailure deletes any registered Gopher machine
+//     (cascades to tunnels) and wipes every Gopher column on the row.
+//  3. Drop the in-memory tunnel.Client — credentials are gone, the
+//     client can no longer authenticate. Re-saving from the SPA
+//     rebuilds it via the TunnelClientApplier path.
+//
+// All steps are best-effort: a stale row is preferable to a panic, and
+// the operator still has the SPA + Gopher web UI to clean up by hand.
 func (s *Service) markFailed(msg string) {
 	existing, err := s.store.GetGopherSettings()
 	if err != nil {
@@ -330,6 +395,44 @@ func (s *Service) markFailed(msg string) {
 	if err := s.store.SaveCloudTunnelState(state); err != nil {
 		log.Printf("self-bootstrap: failed to persist failure: %v", err)
 	}
+	s.cleanupAfterFailure(existing)
+}
+
+// cleanupAfterFailure tears down Gopher-side artifacts and wipes the
+// local DB row. Best-effort throughout — the goal is "no partial state
+// the operator can stumble into," not transactional certainty. Errors
+// are logged.
+//
+// Called from markFailed only. Reads the pre-failure settings (passed
+// in) since we'll wipe them mid-flow.
+func (s *Service) cleanupAfterFailure(pre *db.GopherSettings) {
+	if pre == nil {
+		return
+	}
+	// 1. Best-effort delete the machine on Gopher. DeleteMachine
+	//    cascades to all child tunnels so we don't need a separate
+	//    DeleteTunnel call. Fresh ctx — markFailed may be called from
+	//    a cancelled bootstrap ctx, but the cleanup HTTP call should
+	//    still get a fair shot.
+	if pre.CloudMachineID != "" && s.gopher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.gopher.DeleteMachine(ctx, pre.CloudMachineID); err != nil {
+			log.Printf("self-bootstrap cleanup: delete machine %s: %v", pre.CloudMachineID, err)
+		}
+		cancel()
+	}
+	// 2. Wipe every Gopher column. The user's choice — partial state is
+	//    confusing, force re-paste on retry.
+	if err := s.store.WipeGopherSettings(); err != nil {
+		log.Printf("self-bootstrap cleanup: wipe gopher settings: %v", err)
+	}
+	// 3. Drop the in-memory tunnel.Client. Credentials are gone; any
+	//    further calls would 401 against Gopher. Other appliers
+	//    (provision.Service, admin tunnels handler) hold their own
+	//    clients — they self-heal when the operator next saves creds.
+	s.mu.Lock()
+	s.gopher = nil
+	s.mu.Unlock()
 }
 
 // persist merges `update` onto the current row and writes it back. Only
@@ -372,12 +475,6 @@ func readHostname() string {
 		}
 	}
 	return "nimbus"
-}
-
-// shellQuote wraps s in single quotes for safe interpolation into a
-// `bash -c "..."` command line. Mirrors the pattern in provision/tunnel.go.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // truncate keeps the head of s when it exceeds n bytes. Used to bound

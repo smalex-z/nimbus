@@ -51,6 +51,7 @@ import (
 	"nimbus/internal/ippool"
 	"nimbus/internal/netscan"
 	"nimbus/internal/nodemgr"
+	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/s3storage"
@@ -90,6 +91,19 @@ func main() {
 	// the systemd unit, and starts the service. Re-execs via sudo when not root.
 	if len(os.Args) > 1 && os.Args[1] == "install" {
 		install.Run(os.Args[2:])
+		return
+	}
+
+	// `nimbus gopher-bootstrap` is the systemd-path-triggered helper. It
+	// reads /var/lib/nimbus/bootstrap-pending.json, runs the Gopher
+	// install (curl | bash from the gateway), writes the result back
+	// to /var/lib/nimbus/bootstrap-result.json, and exits. Nimbus's
+	// main service polls the result file. Delegated to selftunnel so
+	// the helper file paths + JSON shape have one source of truth.
+	if len(os.Args) > 1 && os.Args[1] == "gopher-bootstrap" {
+		if err := selftunnel.RunHelper(); err != nil {
+			log.Fatalf("gopher-bootstrap helper failed: %v", err)
+		}
 		return
 	}
 
@@ -154,6 +168,7 @@ func main() {
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
 		&db.AuditEvent{},
+		&db.Operation{},
 		&db.UserSubnet{},
 		// Networking v1: Standalone VMs and VPCs. UserSubnet stays
 		// in the migrate list during the v1.0 deprecation window so
@@ -614,6 +629,20 @@ func main() {
 		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 	}
 
+	// Background-task registry: Operation rows survive an HTTP request
+	// so the SPA can close a tab and re-attach. On every startup, reap
+	// any non-terminal rows whose work goroutine died with a previous
+	// nimbus process — without this they'd stay "running" forever and
+	// the SPA's poll would never observe a final state. One-hour
+	// staleness is generous: provision is ~10 min worst-case, migrate
+	// 30 min for a busy VM.
+	opsSvc := operations.New(database.DB)
+	if reaped, err := opsSvc.ReapStuck(context.Background(), time.Hour); err != nil {
+		log.Printf("warning: reap stuck operations: %v", err)
+	} else if reaped > 0 {
+		log.Printf("startup: reaped %d stuck operation(s)", reaped)
+	}
+
 	// Networking-v1 Standalone primitive — per-VM Simple zone with
 	// PVE-native SNAT. Wired before the legacy vnetmgr so new
 	// provisions default to it; legacy SubnetResolver path remains
@@ -820,6 +849,7 @@ func main() {
 		GX10Assets:        gx10AssetsFS,
 		NodeMgr:           nodeMgrSvc,
 		Audit:             auditSvc,
+		Operations:        opsSvc,
 		VNetMgr:           vnetMgr,
 		VPCMgr:            vpcMgrSvc,
 		VPCsHandler:       vpcsHandler,

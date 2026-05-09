@@ -634,7 +634,19 @@ definitions:
           empty in the DB collapses to selftunnel.DefaultCloudSubdomain ("cloud")
           here so the UI never has to guess the fallback.
         type: string
-      configured:
+      credentials_saved:
+        description: |-
+          CredentialsSaved is true when both api_url and api_key are populated
+          in the DB. Used by the SPA to decide whether to auto-open the
+          bootstrap modal after a save and to render the "leave blank to
+          keep" placeholder on the API-key input.
+        type: boolean
+      tunnel_active:
+        description: |-
+          TunnelActive is true only when the self-bootstrap finished
+          end-to-end and a public URL is live. The SPA's "Configured" pill
+          reads this — credentials saved with a failed (or never-attempted)
+          bootstrap reads as not-configured.
         type: boolean
     type: object
   handlers.gpuJobView:
@@ -776,6 +788,15 @@ definitions:
       type:
         type: string
     type: object
+  handlers.migrateVMAcceptedResponse:
+    properties:
+      operation_id:
+        example: 42
+        type: integer
+      target_node:
+        example: pve-2
+        type: string
+    type: object
   handlers.migrateVMRequest:
     properties:
       allow_offline:
@@ -897,6 +918,48 @@ definitions:
       success:
         example: false
         type: boolean
+    type: object
+  handlers.operationView:
+    properties:
+      actor_email:
+        type: string
+      actor_id:
+        type: integer
+      created_at:
+        type: string
+      details_json:
+        type: string
+      finished_at:
+        type: string
+      id:
+        type: integer
+      last_heartbeat_at:
+        type: string
+      message:
+        type: string
+      started_at:
+        type: string
+      state:
+        type: string
+      target_id:
+        type: string
+      target_label:
+        type: string
+      target_type:
+        type: string
+      type:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handlers.operationsListResponse:
+    properties:
+      operations:
+        items:
+          $ref: '#/definitions/handlers.operationView'
+        type: array
+      total:
+        type: integer
     type: object
   handlers.pairingView:
     properties:
@@ -2602,12 +2665,11 @@ paths:
       consumes:
       - application/json
       description: |-
-        Tries live migration when the VM is running. On rejection,
-        responds 409 with `code: "online_migration_failed"` so the
-        SPA can prompt the operator. Re-POST with
-        `allow_offline: true` to fall back to a stop → migrate →
-        restart cycle. Stopped VMs migrate offline directly. Foreign
-        / external VMs (no DB row) 404 here.
+        Async: returns 202 + operation_id; poll /operations/{id}
+        for progress. On online failure the operation lands
+        failed with details.failure_code = online_migration_failed
+        so the SPA can prompt for offline retry (start a new
+        migrate operation with allow_offline=true).
       parameters:
       - description: Nimbus VM DB id
         in: path
@@ -2631,6 +2693,15 @@ paths:
             - properties:
                 data:
                   $ref: '#/definitions/handlers.migrateVMResponse'
+              type: object
+        "202":
+          description: Accepted
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.migrateVMAcceptedResponse'
               type: object
         "400":
           description: Bad Request
@@ -3988,6 +4059,98 @@ paths:
       summary: Lift the cordon on a node (admin)
       tags:
       - nodes
+  /operations:
+    get:
+      description: |-
+        Long-running tasks (migrate, provision, ...) start
+        Operation rows that survive the originating HTTP
+        request. Default narrows to in-flight; pass
+        include_finished=1 for the historical view.
+      parameters:
+      - description: filter by state
+        enum:
+        - queued
+        - running
+        - succeeded
+        - failed
+        - cancelled
+        in: query
+        name: state
+        type: string
+      - description: filter by operation type (e.g. vm.migrate)
+        in: query
+        name: type
+        type: string
+      - description: include terminal rows (0/1, default 0)
+        in: query
+        name: include_finished
+        type: integer
+      - description: page size (1-500, default 100)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.operationsListResponse'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List background operations
+      tags:
+      - operations
+  /operations/{id}:
+    get:
+      parameters:
+      - description: operation id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.operationView'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Read one background operation
+      tags:
+      - operations
   /proxmox/binding:
     get:
       description: |-

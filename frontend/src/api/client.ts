@@ -214,10 +214,14 @@ export class ProvisionError extends Error {
 // stream, invoking onProgress as each backend phase completes. Resolves with
 // the final ProvisionResult or rejects with a ProvisionError naming the
 // step that failed (when known).
+// onOperationID, when provided, fires once with the backend's tracking
+// id as the first NDJSON event. The SPA captures it so a navigation
+// away mid-provision can re-attach via the Tasks panel poll.
 export async function provisionVMStreaming(
   req: ProvisionRequest,
   onProgress: (evt: ProvisionProgress) => void,
   signal?: AbortSignal,
+  onOperationID?: (id: number) => void,
 ): Promise<ProvisionResult> {
   const resp = await fetch('/api/vms', {
     method: 'POST',
@@ -268,14 +272,24 @@ export async function provisionVMStreaming(
       nl = buffer.indexOf('\n')
       if (!line) continue
 
-      let evt: { type?: string; step?: ProvisionStep; label?: string; data?: ProvisionResult; code?: ProvisionError['code']; message?: string }
+      let evt: {
+        type?: string
+        step?: ProvisionStep
+        label?: string
+        data?: ProvisionResult
+        code?: ProvisionError['code']
+        message?: string
+        operation_id?: number
+      }
       try {
         evt = JSON.parse(line)
       } catch {
         continue // ignore malformed line, keep streaming
       }
 
-      if (evt.type === 'progress' && evt.step && evt.label) {
+      if (evt.type === 'operation_id' && typeof evt.operation_id === 'number') {
+        onOperationID?.(evt.operation_id)
+      } else if (evt.type === 'progress' && evt.step && evt.label) {
         lastProgress = evt.step
         onProgress({ step: evt.step, label: evt.label })
       } else if (evt.type === 'result' && evt.data) {
@@ -351,11 +365,30 @@ export async function adminVMLifecycle(
 
 export type MigrateMode = 'online' | 'offline'
 
+// MigrateResponse — synchronous shape returned by the legacy 200 path
+// (test routers + setup wizard, which don't have an operations service
+// wired). The async path returns MigrateAcceptedResponse instead.
 export interface MigrateResponse {
   mode: MigrateMode
   target_node: string
   was_stopped: boolean
 }
+
+// MigrateAcceptedResponse — what the async path returns (HTTP 202).
+// Carries the operation id the SPA polls via getOperation(id) for
+// progress and terminal state.
+export interface MigrateAcceptedResponse {
+  operation_id: number
+  target_node: string
+}
+
+// MigrateDispatchResult discriminates between the two backend
+// response shapes so the SPA's call-site can branch on `kind`.
+// The async branch is the path the SPA actually exercises against
+// production; the sync branch is preserved for older deployments.
+export type MigrateDispatchResult =
+  | { kind: 'accepted'; operationID: number; targetNode: string }
+  | { kind: 'completed'; mode: MigrateMode; targetNode: string; wasStopped: boolean }
 
 // MigratePlanEligibleTarget mirrors nodemgr.EligibleTarget — reused for
 // the migrate modal's destination dropdown. Score is the raw nodescore
@@ -405,26 +438,43 @@ export class OnlineMigrationFailedError extends Error {
   }
 }
 
-// adminMigrateVM moves a Nimbus-managed VM to a different cluster node.
-// Two-step UX: the first call (allowOffline=false) tries an online
-// migration when the VM is running; on rejection the server responds
-// 409 with `code: "online_migration_failed"` and we throw
-// OnlineMigrationFailedError so the SPA can confirm with the operator.
-// A second call with allowOffline=true runs a stop → migrate → start
-// cycle and is what the SPA submits after the operator clicks
-// Continue offline.
+// adminMigrateVM dispatches a migration to a different cluster node.
+//
+// Backend behaviour: when an operations service is wired (production),
+// the endpoint returns 202 + an operation_id; the SPA polls
+// getOperation(id) for state and surfaces a terminal failure with
+// details.failure_code = "online_migration_failed" the same way the
+// pre-async sync path returned a 409 with code = same. On older
+// deployments the endpoint stays synchronous and returns 200 with the
+// full result (or 409 → OnlineMigrationFailedError) — we keep handling
+// both shapes here so a SPA build doesn't lock-step with a backend
+// upgrade.
 export async function adminMigrateVM(
   id: number,
   targetNode: string,
   allowOffline = false,
-): Promise<MigrateResponse> {
+): Promise<MigrateDispatchResult> {
   try {
-    const { data } = await api.post<MigrateResponse>(
+    const { data, status } = await api.post(
       `/cluster/vms/${id}/migrate`,
       { target_node: targetNode, allow_offline: allowOffline },
       { timeout: 35 * 60 * 1000 },
     )
-    return data
+    if (status === 202 && data && typeof data === 'object' && 'operation_id' in data) {
+      const accepted = data as MigrateAcceptedResponse
+      return {
+        kind: 'accepted',
+        operationID: accepted.operation_id,
+        targetNode: accepted.target_node,
+      }
+    }
+    const sync = data as MigrateResponse
+    return {
+      kind: 'completed',
+      mode: sync.mode,
+      targetNode: sync.target_node,
+      wasStopped: sync.was_stopped,
+    }
   } catch (err) {
     const e = err as Error & {
       status?: number
@@ -435,6 +485,69 @@ export async function adminMigrateVM(
     }
     throw err
   }
+}
+
+// Operation — one row in the background-task registry. Mirrors the
+// backend operationView wire shape. Timestamps are RFC3339 strings;
+// optional ones collapse to empty when not yet populated.
+export type OperationState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+
+export interface Operation {
+  id: number
+  created_at: string
+  updated_at: string
+  type: string
+  state: OperationState
+  actor_id?: number
+  actor_email?: string
+  target_type?: string
+  target_id?: string
+  target_label?: string
+  message?: string
+  details_json?: string
+  started_at?: string
+  finished_at?: string
+  last_heartbeat_at: string
+}
+
+export interface OperationListResponse {
+  operations: Operation[]
+  total: number
+}
+
+// listOperations fetches the in-flight task list. Pass
+// includeFinished=true to get terminal rows too (Activity-page view).
+export async function listOperations(opts?: {
+  state?: OperationState
+  type?: string
+  includeFinished?: boolean
+  limit?: number
+}): Promise<OperationListResponse> {
+  const params: Record<string, string | number> = {}
+  if (opts?.state) params.state = opts.state
+  if (opts?.type) params.type = opts.type
+  if (opts?.includeFinished) params.include_finished = 1
+  if (opts?.limit) params.limit = opts.limit
+  const { data } = await api.get<OperationListResponse>('/operations', { params })
+  return data
+}
+
+// getOperation fetches a single operation by id. Used by modals that
+// poll a specific in-flight task they kicked off.
+export async function getOperation(id: number): Promise<Operation> {
+  const { data } = await api.get<Operation>(`/operations/${id}`)
+  return data
+}
+
+// isTerminalOperationState — small helper so polling code reads cleanly
+// (`if (isTerminal(op.state)) { stop() }`).
+export function isTerminalOperationState(s: OperationState): boolean {
+  return s === 'succeeded' || s === 'failed' || s === 'cancelled'
 }
 
 export interface VMTunnel {
@@ -526,7 +639,13 @@ export interface GopherSettingsView {
   // Effective subdomain — the backend collapses an empty stored value to
   // the default ("cloud") here so the UI never has to know the fallback.
   cloud_subdomain: string
-  configured: boolean
+  // credentials_saved is true when api_url + api_key are both populated.
+  // Drives the modal-after-save and password-placeholder UI states.
+  credentials_saved: boolean
+  // tunnel_active is true only when the self-bootstrap finished and a
+  // public URL is live. Drives the "Configured" pill — saved-but-failed
+  // creds reads as not-configured (match the user-facing meaning).
+  tunnel_active: boolean
 }
 
 export interface SaveGopherSettingsRequest {

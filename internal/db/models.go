@@ -615,6 +615,60 @@ type AuditEvent struct {
 // — readers query the table name directly during incident triage.
 func (AuditEvent) TableName() string { return "audit_events" }
 
+// Operation tracks a long-running background task — the kind that used
+// to block an HTTP request for minutes. Migrate, provision, and any
+// future similar flow create an Operation row up front, fire a
+// goroutine, and return 202 + the operation id immediately so the SPA
+// can close its tab and re-attach later.
+//
+// State transitions (linear, no retries today):
+//
+//	queued → running → succeeded | failed | cancelled
+//
+// Field shapes:
+//   - Type: dotted identifier matching the audit-event vocabulary
+//     (`vm.migrate`, `vm.provision`). Stable — operators filter
+//     against it.
+//   - State: the four terminal values plus the two transient ones
+//     above. Empty == invalid.
+//   - ActorID: who started it (denorm'd to ActorEmail too so a row
+//     survives user deletion the same way audit events do).
+//   - Target*: same shape as audit events for symmetry. TargetID is a
+//     stringified int (Proxmox VMID) so it cross-references with
+//     audit_events.target_id without a type juggle.
+//   - Message: short human-readable status. Updated as the work
+//     progresses ("waiting for migrate task...", "starting on
+//     target..."). Errors land here too on terminal failure.
+//   - DetailsJSON: op-specific structured data (e.g. for migrate:
+//     {"source_node": "alpha", "target_node": "beta", "mode":
+//     "online"}). Always valid JSON or empty.
+//   - StartedAt / FinishedAt: wall-clock bounds. FinishedAt is nil
+//     until terminal.
+//   - LastHeartbeatAt: bumped on every UpdateMessage call. The
+//     stuck-op reaper uses it to detect rows orphaned by a Nimbus
+//     restart mid-run.
+type Operation struct {
+	ID              uint       `gorm:"primaryKey"                              json:"id"`
+	CreatedAt       time.Time  `gorm:"column:created_at;index"                 json:"created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"                       json:"updated_at"`
+	Type            string     `gorm:"column:type;index;not null"              json:"type"`
+	State           string     `gorm:"column:state;index;not null"             json:"state"`
+	ActorID         *uint      `gorm:"column:actor_id;index"                   json:"actor_id,omitempty"`
+	ActorEmail      string     `gorm:"column:actor_email;default:''"           json:"actor_email,omitempty"`
+	TargetType      string     `gorm:"column:target_type;default:''"           json:"target_type,omitempty"`
+	TargetID        string     `gorm:"column:target_id;index;default:''"       json:"target_id,omitempty"`
+	TargetLabel     string     `gorm:"column:target_label;default:''"          json:"target_label,omitempty"`
+	Message         string     `gorm:"column:message;default:''"               json:"message,omitempty"`
+	DetailsJSON     string     `gorm:"column:details_json;default:''"          json:"details_json,omitempty"`
+	StartedAt       *time.Time `gorm:"column:started_at"                       json:"started_at,omitempty"`
+	FinishedAt      *time.Time `gorm:"column:finished_at"                      json:"finished_at,omitempty"`
+	LastHeartbeatAt time.Time  `gorm:"column:last_heartbeat_at;index"          json:"last_heartbeat_at"`
+}
+
+// TableName pins the GORM table to "operations" — same explicit-name
+// reasoning as AuditEvent: operators query directly by table name.
+func (Operation) TableName() string { return "operations" }
+
 // NetworkSettings stores the runtime-editable IP pool range and gateway. Only a
 // single row (ID=1) is used. The columns mirror the env vars they replace
 // (IP_POOL_START / IP_POOL_END / GATEWAY_IP / VM_PREFIX_LEN) — env vars now
