@@ -122,7 +122,10 @@ type Config struct {
 	CPUType string
 
 	// IPReadyTimeout caps the agent/TCP polling loop. 0 means use the default
-	// (120s, per design doc).
+	// (5 min). Cloud-init installs qemu-guest-agent via apt on first boot
+	// (see cloudinit_iso.go); through a VPC gateway LXC the apt-update +
+	// install round-trip can run 2-4 min, and qga isn't reachable until
+	// it completes. 120s was too tight for VPC VMs.
 	IPReadyTimeout time.Duration
 
 	// PollInterval controls how often we poll the agent. 0 means use 3s.
@@ -292,7 +295,7 @@ func (s *Service) SetQuotaResolver(q QuotaResolver) {
 // instances catch each other's reservations before the clone step.
 func New(px ProxmoxClient, pool *ippool.Pool, database *gorm.DB, cipher *secrets.Cipher, keys *sshkeys.Service, cfg Config) *Service {
 	if cfg.IPReadyTimeout == 0 {
-		cfg.IPReadyTimeout = 120 * time.Second
+		cfg.IPReadyTimeout = 5 * time.Minute
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 3 * time.Second
