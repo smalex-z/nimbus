@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { adminDeleteVM, adminVMLifecycle, getClusterStats, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { useSearchParams } from 'react-router-dom'
+import { adminDeleteVM, adminVMLifecycle, getClusterStats, getOperation, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -660,6 +661,10 @@ function VMTable({
   const [tunnelsTarget, setTunnelsTarget] = useState<{ vmId: number; hostname: string } | null>(null)
   const [editTarget, setEditTarget] = useState<ClusterVM | null>(null)
   const [migrateTarget, setMigrateTarget] = useState<ClusterVM | null>(null)
+  // reattachOpID is set when the user lands on /admin?op=<id> from
+  // the Tasks dropdown. Triggers MigrateVMModal in re-attach mode
+  // so the operator picks up the live state without re-dispatching.
+  const [reattachOpID, setReattachOpID] = useState<number | null>(null)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   // VMID column doubles as the sort control. Default desc so the most
@@ -682,6 +687,51 @@ function VMTable({
     const maxPage = Math.max(0, Math.ceil(sortedVMs.length / pageSize) - 1)
     if (page > maxPage) setPage(maxPage)
   }, [sortedVMs.length, pageSize, page])
+
+  // Re-attach effect: when the URL carries ?op=<id> (Tasks dropdown
+  // deep-link), look up the operation, find the matching VM in the
+  // loaded list, and open MigrateVMModal in re-attach mode. Clear
+  // the param after consuming so a refresh doesn't re-trigger.
+  const [searchParams, setSearchParams] = useSearchParams()
+  useEffect(() => {
+    const opStr = searchParams.get('op')
+    if (!opStr) return
+    if (allVMs.length === 0) return // wait for cluster fetch
+    const opID = Number(opStr)
+    if (!Number.isFinite(opID) || opID <= 0) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const op = await getOperation(opID)
+        if (cancelled) return
+        if (op.type !== 'vm.migrate') return
+        // target_id stores the Proxmox VMID as a string; match it
+        // against allVMs to find the row to open the modal against.
+        const vmid = Number(op.target_id ?? '')
+        if (!Number.isFinite(vmid)) return
+        const row = allVMs.find((v) => v.vmid === vmid)
+        if (!row) return
+        setMigrateTarget(row)
+        setReattachOpID(opID)
+      } finally {
+        // Drop the query param even on error so refreshing doesn't
+        // get stuck on a stale ?op=.
+        if (!cancelled) {
+          setSearchParams(
+            (prev) => {
+              const next = new URLSearchParams(prev)
+              next.delete('op')
+              return next
+            },
+            { replace: true },
+          )
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [searchParams, allVMs, setSearchParams])
 
   const pagedVMs = useMemo(
     () => sortedVMs.slice(page * pageSize, (page + 1) * pageSize),
@@ -940,13 +990,18 @@ function VMTable({
             tier: migrateTarget.tier,
             status: migrateTarget.status,
           }}
-          onClose={() => setMigrateTarget(null)}
+          initialOpID={reattachOpID ?? undefined}
+          onClose={() => {
+            setMigrateTarget(null)
+            setReattachOpID(null)
+          }}
           onMigrated={(newNode) => {
             // Optimistic update — patch the row's node so the operator
             // sees the move land immediately. The 15 s /cluster/vms
             // poll reconciles any drift from the canonical Proxmox state.
             const id = migrateTarget.id!
             setMigrateTarget(null)
+            setReattachOpID(null)
             onVMMigrated(id, newNode)
           }}
         />

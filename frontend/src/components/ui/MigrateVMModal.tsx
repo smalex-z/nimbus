@@ -42,6 +42,12 @@ type Props = {
     tier: TierName
     status: 'running' | 'stopped' | 'paused' | 'unknown'
   }
+  // initialOpID, when set, opens the modal directly in the polling
+  // state — used when re-attaching to an in-flight migrate via the
+  // Tasks dropdown deep-link. Skips the picker UI entirely; the
+  // modal's only job is to render the live operation message and
+  // terminal result.
+  initialOpID?: number
   onClose: () => void
   onMigrated: (newNode: string) => void
 }
@@ -55,8 +61,8 @@ interface Projection {
   severity: 'ok' | 'caution' | 'high'
 }
 
-export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
-  const [view, setView] = useState<View>('picker')
+export default function MigrateVMModal({ vm, initialOpID, onClose, onMigrated }: Props) {
+  const [view, setView] = useState<View>(initialOpID ? 'busy' : 'picker')
   const [target, setTarget] = useState('')
   const [plan, setPlan] = useState<MigratePlan | null>(null)
   const [nodes, setNodes] = useState<NodeView[] | null>(null)
@@ -188,6 +194,48 @@ export default function MigrateVMModal({ vm, onClose, onMigrated }: Props) {
       void tick()
       pollIntervalRef.current = setInterval(tick, 2000)
     })
+
+  // Re-attach mode: when initialOpID is set, jump straight to polling
+  // the existing operation row. The Tasks dropdown deep-link uses
+  // this so re-opening from a different tab picks up exactly where
+  // the original dispatch left off — same target, same fail-handling
+  // (online_migration_failed → confirm-offline view).
+  useEffect(() => {
+    if (!initialOpID) return
+    setProgressMsg('re-attaching to in-flight migration…')
+    void (async () => {
+      try {
+        const op = await pollOperation(initialOpID)
+        if (op.state === 'succeeded') {
+          // details_json carries target_node on success; fall back to
+          // op.target_label / vm.node if for some reason it's absent.
+          let targetNode = vm.node
+          try {
+            const d = JSON.parse(op.details_json ?? '{}') as { target_node?: string }
+            if (d.target_node) targetNode = d.target_node
+          } catch {
+            // ignore
+          }
+          onMigrated(targetNode)
+          return
+        }
+        const reason = parseFailureReason(op.details_json)
+        if (reason) {
+          setOfflineReason(reason)
+          setView('confirm-offline')
+          return
+        }
+        setError(op.message || 'migration failed')
+        setView('error')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'failed to re-attach')
+        setView('error')
+      }
+    })()
+    // initialOpID is captured at modal-open time; subsequent renders
+    // shouldn't restart polling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const submit = async (allowOffline: boolean) => {
     if (!target) return
