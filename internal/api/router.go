@@ -92,6 +92,7 @@ func NewRouter(d Deps) http.Handler {
 		WithNetworkAppliers(d.Provision).
 		WithNetworkOps(d.Provision).
 		WithNetworkingV1Applier(d.V1Applier).
+		WithNodeIfaceInspector(d.Proxmox.GetNodeNetworkInterface).
 		WithPoolReseeder(d.Pool)
 	if d.VNetMgr != nil {
 		settingsBuilder = settingsBuilder.WithSDNBootstrapper(d.VNetMgr)

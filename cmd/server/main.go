@@ -487,6 +487,17 @@ func main() {
 	}
 	ownerBackfillCancel()
 
+	// Hard-delete pre-existing soft-deleted vms rows. Older builds
+	// of deleteVM left tombstoned rows whose `vmid` still occupied
+	// the unique index — the next provision that landed on the same
+	// PVE-recycled VMID failed with `UNIQUE constraint failed: vms.vmid`.
+	// One-shot cleanup; idempotent.
+	if n, err := provSvc.HardDeleteSoftDeletedVMs(); err != nil {
+		log.Printf("warning: stale vm-row cleanup failed: %v", err)
+	} else if n > 0 {
+		log.Printf("backfill: hard-deleted %d soft-deleted VM row(s) (freed vmid unique index)", n)
+	}
+
 	// Same backfill for ssh_keys: legacy rows (created before ownership
 	// tracking, or migrated from VMs that had NULL owner_id) get bound to
 	// the lowest-ID admin so the Keys page shows them on that admin's account
@@ -735,6 +746,37 @@ func main() {
 	// the freshly-persisted row and rebuilds the gateway + vpcmgr
 	// stack so live config takes effect without a server restart.
 	v1Applier := handlers.NetworkingV1Applier(rebuildVPCStack)
+
+	// Background sweep: every reconcile-interval, release stale
+	// `reserved` gateway-LXC IPs (Nimbus-crashed-mid-provision
+	// orphans) and flip VPC.Status to `degraded` when the gateway
+	// LXC isn't running. Runs only when the VPC stack is wired.
+	go func() {
+		interval := time.Duration(cfg.ReconcileIntervalSeconds) * time.Second
+		if interval <= 0 {
+			return
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if vpcStackCurrent == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
+				if _, err := vpcStackCurrent.gw.SweepStaleReservations(ctx); err != nil {
+					log.Printf("gateway sweep: stale reservations: %v", err)
+				}
+				if err := vpcStackCurrent.gw.SweepHealth(ctx, pveClient); err != nil {
+					log.Printf("gateway sweep: health: %v", err)
+				}
+				cancel()
+			}
+		}
+	}()
 
 	// Legacy SDN manager. Networking-v1 doesn't dispatch through
 	// vnetmgr at provision time anymore — Standalone + VPC primitives

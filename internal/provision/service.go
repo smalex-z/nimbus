@@ -1188,6 +1188,24 @@ func (s *Service) BackfillOwnership(ctx context.Context) (int64, error) {
 	return res.RowsAffected, nil
 }
 
+// HardDeleteSoftDeletedVMs purges any vms rows with deleted_at IS
+// NOT NULL. Pre-existing soft-deleted rows from before deleteVM
+// switched to Unscoped().Delete still hold their `vmid` in the
+// unique index, blocking new provisions from re-using those VMIDs
+// after PVE recycles them. Idempotent: a no-op when nothing's stale.
+//
+// Returns the number of rows hard-deleted. Run from main.go at
+// startup; safe to call repeatedly.
+func (s *Service) HardDeleteSoftDeletedVMs() (int64, error) {
+	res := s.db.Unscoped().
+		Where("deleted_at IS NOT NULL").
+		Delete(&db.VM{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("hard-delete soft-deleted vms: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // GetPrivateKey returns the decrypted private key for a VM, if one is
 // available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound
 // when the VM has no linked key, or the linked key has no vaulted private
@@ -1648,7 +1666,7 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 		return row, "", nil
 
 	case req.GenerateKey:
-		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+		row, err := s.createSSHKeyRetryName(ctx, sshkeys.CreateRequest{
 			Name:     "nimbus-" + req.Hostname,
 			Generate: true,
 			OwnerID:  req.OwnerID,
@@ -1664,7 +1682,7 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 		return row, priv, nil
 
 	case req.SSHPubKey != "":
-		row, err := s.keys.Create(ctx, sshkeys.CreateRequest{
+		row, err := s.createSSHKeyRetryName(ctx, sshkeys.CreateRequest{
 			Name:       "nimbus-" + req.Hostname,
 			PublicKey:  req.SSHPubKey,
 			PrivateKey: req.SSHPrivKey,
@@ -1690,6 +1708,40 @@ func (s *Service) resolveSSHKey(ctx context.Context, req Request) (*db.SSHKey, s
 			return nil, "", err
 		}
 		return row, "", nil
+	}
+}
+
+// createSSHKeyRetryName wraps sshkeys.Service.Create with a name-
+// collision retry: if the requested name is already taken, it
+// appends `-2`, `-3`, … until either a Create succeeds or we give
+// up. Reuses the same key vault for each attempt; the OwnerID and
+// generate/import knobs come from req.
+//
+// Why: provision retries (e.g. after a VPC bootstrap failure) ran
+// against the same hostname → same default name (`nimbus-<hostname>`)
+// → ConflictError on the second attempt. The first attempt's key
+// stays in the vault because the cleanup defers don't touch it
+// (key creation happens before any reservation that might need
+// rolling back). Suffixing keeps the retry path working without
+// nuking a possibly-useful key.
+func (s *Service) createSSHKeyRetryName(ctx context.Context, req sshkeys.CreateRequest) (*db.SSHKey, error) {
+	const maxAttempts = 16
+	base := req.Name
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			req.Name = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		row, err := s.keys.Create(ctx, req)
+		if err == nil {
+			return row, nil
+		}
+		var conflict *internalerrors.ConflictError
+		if !errors.As(err, &conflict) {
+			return nil, err
+		}
+	}
+	return nil, &internalerrors.ConflictError{
+		Message: fmt.Sprintf("ssh key name %q and %d numeric suffixes are all taken", base, maxAttempts-1),
 	}
 }
 

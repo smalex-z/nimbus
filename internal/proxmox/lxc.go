@@ -135,6 +135,20 @@ func (c *Client) CreateLXC(ctx context.Context, node string, opts LXCCreateOpts)
 	return taskID, nil
 }
 
+// LXCStatus returns the live `status` field for a single container,
+// e.g. "running" / "stopped". Used by gateway.Service.SweepHealth
+// to flip a VPC to `degraded` when its gateway LXC isn't running.
+func (c *Client) LXCStatus(ctx context.Context, node string, vmid int) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	path := fmt.Sprintf("/nodes/%s/lxc/%d/status/current", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
+}
+
 // StartLXC powers on a stopped container. Returns the task UPID.
 func (c *Client) StartLXC(ctx context.Context, node string, vmid int) (string, error) {
 	var taskID string

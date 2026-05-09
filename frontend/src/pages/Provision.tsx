@@ -250,6 +250,11 @@ export default function Provision() {
     if (form.tier === 'xl') return false
     if (form.keyMode === 'byo' && form.pubKey.trim().length === 0) return false
     if (form.keyMode === 'saved' && form.savedKeyId === null) return false
+    // VPC mode requires an actually-selected VPC. The chip is
+    // disabled when no VPCs exist, but selectedVPCId can still be
+    // null if the listVPCs() call hasn't returned yet — block
+    // submit so the backend doesn't 400 on missing vpc_id.
+    if (form.subnetMode === 'vpc' && form.selectedVPCId === null) return false
     return true
   }, [form])
 
@@ -263,6 +268,28 @@ export default function Provision() {
     setErrorStep(undefined)
     setCurrentStep(undefined)
     setView('form')
+    // Re-fetch saved keys + VPCs so any items created by the prior
+    // provision (auto-generated key, freshly-attached VPC) show up
+    // in the picker without a page reload. Keeps the form's
+    // savedKeyId / selectedVPCId from referencing rows that aren't
+    // in the local snapshot.
+    listKeys()
+      .then((rows) => {
+        setSavedKeys(rows)
+        const defaultKey = rows.find((k) => k.is_default) ?? rows[0]
+        if (defaultKey) {
+          setForm((prev) => ({ ...prev, keyMode: 'saved', savedKeyId: defaultKey.id }))
+        }
+      })
+      .catch(() => undefined)
+    listVPCs()
+      .then((rows) => {
+        setSavedVPCs(rows)
+        if (rows.length > 0) {
+          setForm((prev) => ({ ...prev, selectedVPCId: rows[0].id }))
+        }
+      })
+      .catch(() => undefined)
   }
 
   const submit = async () => {

@@ -453,12 +453,17 @@ func (s *Service) bootstrapNAT(ctx context.Context, gwIP string, key *EphemeralK
 	const script = `set -e
 export DEBIAN_FRONTEND=noninteractive
 
-# Persist ip_forward (also enable now via sysctl --system).
+# Persist ip_forward (drop-in is read by systemd-sysctl on next boot).
 cat > /etc/sysctl.d/99-nimbus.conf <<'EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
-sysctl --system >/dev/null
+# Apply NOW. We can't use 'sysctl --system' here because unprivileged
+# LXCs deny writes to host-owned keys (kernel.pid_max, fs.protected_*),
+# which makes the whole call exit non-zero even though the keys we
+# care about are writable. Apply only our keys.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
 
 # iptables-persistent flushes/restores rules at boot via the
 # netfilter-persistent service. Pre-seed answers so apt doesn't
@@ -654,4 +659,83 @@ func isAlreadyGone(err error) bool {
 		return true
 	}
 	return false
+}
+
+// staleReservationCutoff is how long a `reserved` (not yet
+// `allocated`) host-IP row sits before the reaper releases it. A
+// VPC create takes ~30-90 s including template download; 5 minutes
+// is comfortably past that. Anything older is almost certainly a
+// crash-mid-Provision orphan.
+const staleReservationCutoff = 5 * time.Minute
+
+// SweepStaleReservations releases gateway-LXC IP rows that are stuck
+// in `reserved` state past staleReservationCutoff — the orphan
+// pattern that happens when Nimbus crashes (or the operator stops
+// the service) between reserveHostIP and markHostIPAllocated.
+//
+// Idempotent. Returns the number of rows released. Safe to call
+// concurrently with Provision: the WHERE clause matches only stale
+// rows, so an in-flight Provision (which writes `reserved` and
+// quickly transitions to `allocated`) doesn't get clobbered.
+func (s *Service) SweepStaleReservations(ctx context.Context) (int, error) {
+	cutoff := time.Now().Add(-staleReservationCutoff)
+	res := s.db.WithContext(ctx).Model(&db.GatewayLXCIP{}).
+		Where("status = ? AND updated_at < ?", "reserved", cutoff).
+		Updates(map[string]any{"status": "free", "vpc_id": nil})
+	if res.Error != nil {
+		return 0, fmt.Errorf("sweep stale reservations: %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("gateway: released %d stale gateway-LXC IP reservation(s)", res.RowsAffected)
+	}
+	return int(res.RowsAffected), nil
+}
+
+// LXCStatusGetter is the minimum surface SweepHealth needs to ask
+// PVE for an LXC's status. *proxmox.Client implements this via
+// LXCStatus. Defined here as a slim interface so tests can stub.
+type LXCStatusGetter interface {
+	LXCStatus(ctx context.Context, node string, vmid int) (string, error)
+}
+
+// SweepHealth walks every active VPC, queries its gateway LXC's
+// status, and flips db.VPC.Status to `degraded` when the LXC isn't
+// running (stopped, crashed, manually paused). Symmetric back to
+// `active` if the LXC is running again.
+//
+// Best-effort: per-VPC PVE failures log and continue so one bad
+// node doesn't poison the whole sweep.
+func (s *Service) SweepHealth(ctx context.Context, lxcStatus LXCStatusGetter) error {
+	if lxcStatus == nil {
+		return nil
+	}
+	var vpcs []db.VPC
+	if err := s.db.WithContext(ctx).Find(&vpcs).Error; err != nil {
+		return fmt.Errorf("list vpcs: %w", err)
+	}
+	for i := range vpcs {
+		v := &vpcs[i]
+		if v.GatewayLXCID == nil || v.GatewayNode == "" {
+			continue
+		}
+		status, err := lxcStatus.LXCStatus(ctx, v.GatewayNode, *v.GatewayLXCID)
+		if err != nil {
+			log.Printf("gateway-health: vpc %d (%s) status lookup failed: %v", v.ID, v.Name, err)
+			continue
+		}
+		want := "active"
+		if status != "running" {
+			want = "degraded"
+		}
+		if v.Status != want {
+			if err := s.db.WithContext(ctx).Model(v).
+				Update("status", want).Error; err != nil {
+				log.Printf("gateway-health: vpc %d update %s -> %s: %v", v.ID, v.Status, want, err)
+				continue
+			}
+			log.Printf("gateway-health: vpc %d (%s) %s -> %s (lxc=%d on %s)",
+				v.ID, v.Name, v.Status, want, *v.GatewayLXCID, v.GatewayNode)
+		}
+	}
+	return nil
 }

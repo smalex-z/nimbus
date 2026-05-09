@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/db"
 	"nimbus/internal/provision"
+	"nimbus/internal/proxmox"
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
 	"nimbus/internal/tunnel"
@@ -57,6 +58,12 @@ type NetworkApplier interface {
 // closure that swaps the live services and rebinds them to
 // provision.Service.
 type NetworkingV1Applier func(db.NetworkingV1Settings)
+
+// NodeIfaceInspector reads a single network interface's live config
+// from a PVE node — we use it to validate that an admin-supplied
+// gateway-LXC IP pool falls inside the network node's vmbr0 CIDR
+// before we let the save through. Implemented by *proxmox.Client.
+type NodeIfaceInspector func(ctx context.Context, node, iface string) (*proxmox.NodeNetworkInterface, error)
 
 // NetworkOps performs the disruptive renumber + force-gateway batch ops.
 // provision.Service satisfies this; the handler keeps it as an interface so
@@ -116,6 +123,7 @@ type Settings struct {
 	pool            PoolReseeder
 	sdn             SDNBootstrapper
 	v1Applier       NetworkingV1Applier
+	ifaceInspector  NodeIfaceInspector
 }
 
 func NewSettings(auth *service.AuthService) *Settings {
@@ -187,6 +195,16 @@ func (s *Settings) WithNetworkOps(o NetworkOps) *Settings {
 // won't reflect them until restart.
 func (s *Settings) WithNetworkingV1Applier(a NetworkingV1Applier) *Settings {
 	s.v1Applier = a
+	return s
+}
+
+// WithNodeIfaceInspector wires the per-node interface reader the
+// SaveNetworkingV1 handler uses to validate that a gateway-LXC IP
+// pool falls inside vmbr0's actual CIDR. nil inspector skips the
+// check (saves go through without validation — strictly worse UX
+// but never blocks a deploy).
+func (s *Settings) WithNodeIfaceInspector(f NodeIfaceInspector) *Settings {
+	s.ifaceInspector = f
 	return s
 }
 
@@ -1596,6 +1614,30 @@ func (s *Settings) SaveNetworkingV1(w http.ResponseWriter, r *http.Request) {
 		if compareIPv4(start, end) > 0 {
 			response.BadRequest(w, "lxc_ip_pool_end must be >= lxc_ip_pool_start")
 			return
+		}
+		// Cross-check against the network node's vmbr0 CIDR. The
+		// gateway LXC's eth0 sits on vmbr0 — if the pool isn't
+		// inside that subnet, the LXC's gateway is unroutable, the
+		// SSH bootstrap times out, and the operator gets a confusing
+		// "context canceled" error from a 90s timeout. Catch it here
+		// instead.
+		if node := strings.TrimSpace(req.NetworkNode); node != "" && s.ifaceInspector != nil {
+			ifaceCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			iface, err := s.ifaceInspector(ifaceCtx, node, "vmbr0")
+			if err != nil {
+				log.Printf("save networking-v1: vmbr0 lookup on %s failed (%v) — skipping pool-CIDR check", node, err)
+			} else if cidr := iface.CIDR; cidr != "" {
+				_, ipnet, perr := net.ParseCIDR(cidr)
+				if perr == nil {
+					if !ipnet.Contains(net.ParseIP(start)) || !ipnet.Contains(net.ParseIP(end)) {
+						response.BadRequest(w, fmt.Sprintf(
+							"lxc_ip_pool [%s..%s] is outside vmbr0's CIDR (%s) on %s — pick a slice inside the cluster LAN",
+							start, end, cidr, node))
+						return
+					}
+				}
+			}
 		}
 	}
 	if err := s.auth.SaveNetworkingV1Settings(db.NetworkingV1Settings{
