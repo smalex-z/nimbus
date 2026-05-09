@@ -540,7 +540,16 @@ type gopherSettingsView struct {
 	// empty in the DB collapses to selftunnel.DefaultCloudSubdomain ("cloud")
 	// here so the UI never has to guess the fallback.
 	CloudSubdomain string `json:"cloud_subdomain"`
-	Configured     bool   `json:"configured"`
+	// CredentialsSaved is true when both api_url and api_key are populated
+	// in the DB. Used by the SPA to decide whether to auto-open the
+	// bootstrap modal after a save and to render the "leave blank to
+	// keep" placeholder on the API-key input.
+	CredentialsSaved bool `json:"credentials_saved"`
+	// TunnelActive is true only when the self-bootstrap finished
+	// end-to-end and a public URL is live. The SPA's "Configured" pill
+	// reads this — credentials saved with a failed (or never-attempted)
+	// bootstrap reads as not-configured.
+	TunnelActive bool `json:"tunnel_active"`
 }
 
 // GetGopher handles GET /api/settings/gopher (admin only). The API key is
@@ -562,9 +571,10 @@ func (s *Settings) GetGopher(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	response.Success(w, gopherSettingsView{
-		APIURL:         settings.APIURL,
-		CloudSubdomain: selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
-		Configured:     settings.APIURL != "" && settings.APIKey != "",
+		APIURL:           settings.APIURL,
+		CloudSubdomain:   selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
+		CredentialsSaved: settings.APIURL != "" && settings.APIKey != "",
+		TunnelActive:     settings.CloudTunnelURL != "" && settings.CloudBootstrapState == selftunnel.StateActive,
 	})
 }
 
@@ -715,10 +725,16 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 		},
 		Success: true,
 	})
+	// On the SaveGopher response: credentials are freshly saved so
+	// CredentialsSaved == (client built without error). TunnelActive is
+	// always false here — the bootstrap was just kicked off and won't
+	// finish for 60-90 s. The SPA polls /settings/gopher/self-bootstrap
+	// for the live state.
 	response.Success(w, gopherSettingsView{
-		APIURL:         settings.APIURL,
-		CloudSubdomain: selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
-		Configured:     client != nil,
+		APIURL:           settings.APIURL,
+		CloudSubdomain:   selftunnel.EffectiveCloudSubdomain(settings.CloudSubdomain),
+		CredentialsSaved: client != nil,
+		TunnelActive:     settings.CloudTunnelURL != "" && settings.CloudBootstrapState == selftunnel.StateActive,
 	})
 }
 

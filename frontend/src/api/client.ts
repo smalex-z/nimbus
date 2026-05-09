@@ -526,7 +526,13 @@ export interface GopherSettingsView {
   // Effective subdomain — the backend collapses an empty stored value to
   // the default ("cloud") here so the UI never has to know the fallback.
   cloud_subdomain: string
-  configured: boolean
+  // credentials_saved is true when api_url + api_key are both populated.
+  // Drives the modal-after-save and password-placeholder UI states.
+  credentials_saved: boolean
+  // tunnel_active is true only when the self-bootstrap finished and a
+  // public URL is live. Drives the "Configured" pill — saved-but-failed
+  // creds reads as not-configured (match the user-facing meaning).
+  tunnel_active: boolean
 }
 
 export interface SaveGopherSettingsRequest {
