@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   listOperations,
   isTerminalOperationState,
@@ -129,34 +130,60 @@ export default function TasksDropdown() {
   )
 }
 
-function OpRow({ op, onClose: _onClose }: { op: Operation; onClose: () => void }) {
+function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
   const stateLabel = labelForState(op.state)
   const dotColor = colorForState(op.state)
   const ago = relativeTime(op.last_heartbeat_at)
-  return (
-    <li className="px-4 py-3 border-b border-line last:border-b-0 hover:bg-[rgba(27,23,38,0.03)]">
-      <div className="flex items-start gap-2">
-        <span
-          className="w-2 h-2 rounded-full mt-1.5"
-          style={{ background: dotColor }}
-          aria-hidden="true"
-        />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-[13px] truncate">
-              {labelForType(op.type)}
-              {op.target_label ? ` ${op.target_label}` : ''}
-            </span>
-            <span className="text-[11px] text-ink-3 whitespace-nowrap">
-              {stateLabel}
-            </span>
-          </div>
-          {op.message && (
-            <div className="text-[12px] text-ink-2 truncate">{op.message}</div>
-          )}
-          <div className="text-[11px] text-ink-3 mt-0.5">{ago}</div>
+  // Deep-link target. Migrate rows take the operator to the Admin
+  // page with ?op=<id> so the Admin mount-time handler can open
+  // MigrateVMModal in re-attach mode. Provision rows go to the
+  // Provision page where the existing ReattachBanner detects the
+  // in-flight op on its own. Unknown types fall back to the dropdown
+  // (no nav).
+  const href = (() => {
+    if (op.type === 'vm.migrate') return `/admin?op=${op.id}`
+    if (op.type === 'vm.provision') return '/provision'
+    return null
+  })()
+
+  const inner = (
+    <div className="flex items-start gap-2">
+      <span
+        className="w-2 h-2 rounded-full mt-1.5"
+        style={{ background: dotColor }}
+        aria-hidden="true"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-mono text-[13px] truncate">
+            {labelForType(op.type)}
+            {op.target_label ? ` ${op.target_label}` : ''}
+          </span>
+          <span className="text-[11px] text-ink-3 whitespace-nowrap">
+            {stateLabel}
+          </span>
         </div>
+        {op.message && (
+          <div className="text-[12px] text-ink-2 truncate">{op.message}</div>
+        )}
+        <div className="text-[11px] text-ink-3 mt-0.5">{ago}</div>
       </div>
+    </div>
+  )
+
+  return (
+    <li className="border-b border-line last:border-b-0 hover:bg-[rgba(27,23,38,0.03)]">
+      {href ? (
+        <Link
+          to={href}
+          onClick={onClose}
+          className="block px-4 py-3 no-underline text-ink"
+        >
+          {inner}
+        </Link>
+      ) : (
+        <div className="px-4 py-3">{inner}</div>
+      )}
     </li>
   )
 }
