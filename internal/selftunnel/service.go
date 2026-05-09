@@ -89,6 +89,7 @@ const machineConnectTimeout = 90 * time.Second
 type settingsStore interface {
 	GetGopherSettings() (*db.GopherSettings, error)
 	SaveCloudTunnelState(state db.GopherSettings) error
+	WipeGopherSettings() error
 }
 
 // gopherClient is the slice of tunnel.Client we need.
@@ -317,7 +318,21 @@ func (s *Service) checkSudo(ctx context.Context) error {
 	return nil
 }
 
-// markFailed writes the failed state + error message to the DB.
+// markFailed records the failure on the DB row, then runs the
+// clean-slate cleanup so the operator isn't left with a half-registered
+// Gopher machine and stale API credentials they have to manually undo.
+//
+// Sequencing matters:
+//  1. Write StateFailed + error message — so the modal renders the
+//     reason even if cleanup races a still-polling SPA refresh.
+//  2. cleanupAfterFailure deletes any registered Gopher machine
+//     (cascades to tunnels) and wipes every Gopher column on the row.
+//  3. Drop the in-memory tunnel.Client — credentials are gone, the
+//     client can no longer authenticate. Re-saving from the SPA
+//     rebuilds it via the TunnelClientApplier path.
+//
+// All steps are best-effort: a stale row is preferable to a panic, and
+// the operator still has the SPA + Gopher web UI to clean up by hand.
 func (s *Service) markFailed(msg string) {
 	existing, err := s.store.GetGopherSettings()
 	if err != nil {
@@ -330,6 +345,44 @@ func (s *Service) markFailed(msg string) {
 	if err := s.store.SaveCloudTunnelState(state); err != nil {
 		log.Printf("self-bootstrap: failed to persist failure: %v", err)
 	}
+	s.cleanupAfterFailure(existing)
+}
+
+// cleanupAfterFailure tears down Gopher-side artifacts and wipes the
+// local DB row. Best-effort throughout — the goal is "no partial state
+// the operator can stumble into," not transactional certainty. Errors
+// are logged.
+//
+// Called from markFailed only. Reads the pre-failure settings (passed
+// in) since we'll wipe them mid-flow.
+func (s *Service) cleanupAfterFailure(pre *db.GopherSettings) {
+	if pre == nil {
+		return
+	}
+	// 1. Best-effort delete the machine on Gopher. DeleteMachine
+	//    cascades to all child tunnels so we don't need a separate
+	//    DeleteTunnel call. Fresh ctx — markFailed may be called from
+	//    a cancelled bootstrap ctx, but the cleanup HTTP call should
+	//    still get a fair shot.
+	if pre.CloudMachineID != "" && s.gopher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.gopher.DeleteMachine(ctx, pre.CloudMachineID); err != nil {
+			log.Printf("self-bootstrap cleanup: delete machine %s: %v", pre.CloudMachineID, err)
+		}
+		cancel()
+	}
+	// 2. Wipe every Gopher column. The user's choice — partial state is
+	//    confusing, force re-paste on retry.
+	if err := s.store.WipeGopherSettings(); err != nil {
+		log.Printf("self-bootstrap cleanup: wipe gopher settings: %v", err)
+	}
+	// 3. Drop the in-memory tunnel.Client. Credentials are gone; any
+	//    further calls would 401 against Gopher. Other appliers
+	//    (provision.Service, admin tunnels handler) hold their own
+	//    clients — they self-heal when the operator next saves creds.
+	s.mu.Lock()
+	s.gopher = nil
+	s.mu.Unlock()
 }
 
 // persist merges `update` onto the current row and writes it back. Only

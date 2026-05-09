@@ -1352,6 +1352,29 @@ func (s *AuthService) SaveGopherSettings(next db.GopherSettings) error {
 	}).Error
 }
 
+// WipeGopherSettings clears every column on the singleton GopherSettings
+// row. Used by selftunnel after a failed bootstrap so the operator gets a
+// clean slate on retry rather than discovering stale machine_id /
+// tunnel_id / API key state mid-debug. Both credentials and self-bootstrap
+// state are wiped — see selftunnel.Service.cleanupAfterFailure for why
+// (a partial install isn't reusable; either it works end-to-end or
+// nothing about it should remain).
+func (s *AuthService) WipeGopherSettings() error {
+	if _, err := s.GetGopherSettings(); err != nil {
+		return err
+	}
+	return s.db.Model(&db.GopherSettings{}).Where("id = ?", 1).Updates(map[string]any{
+		"api_url":               "",
+		"api_key":               "",
+		"cloud_subdomain":       "",
+		"cloud_machine_id":      "",
+		"cloud_tunnel_id":       "",
+		"cloud_tunnel_url":      "",
+		"cloud_bootstrap_state": "",
+		"cloud_bootstrap_error": "",
+	}).Error
+}
+
 // SaveCloudTunnelState updates only the self-bootstrap columns on the
 // GopherSettings row. Used by selftunnel.Service to persist progress
 // (machine_id, tunnel_id, URL, state, error) without racing

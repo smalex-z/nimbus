@@ -8127,7 +8127,12 @@
                     "description": "CloudSubdomain is the *effective* leftmost label of the public URL —\nempty in the DB collapses to selftunnel.DefaultCloudSubdomain (\"cloud\")\nhere so the UI never has to guess the fallback.",
                     "type": "string"
                 },
-                "configured": {
+                "credentials_saved": {
+                    "description": "CredentialsSaved is true when both api_url and api_key are populated\nin the DB. Used by the SPA to decide whether to auto-open the\nbootstrap modal after a save and to render the \"leave blank to\nkeep\" placeholder on the API-key input.",
+                    "type": "boolean"
+                },
+                "tunnel_active": {
+                    "description": "TunnelActive is true only when the self-bootstrap finished\nend-to-end and a public URL is live. The SPA's \"Configured\" pill\nreads this — credentials saved with a failed (or never-attempted)\nbootstrap reads as not-configured.",
                     "type": "boolean"
                 }
             }

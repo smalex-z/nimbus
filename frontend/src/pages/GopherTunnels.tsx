@@ -74,8 +74,10 @@ function GopherPanel() {
       setTimeout(() => setSaved(false), 2500)
       // SaveGopher kicks off self-bootstrap server-side when creds are
       // valid; pop the modal so the admin sees the phase indicator and
-      // (on success) gets redirected to the cloud URL.
-      if (next.configured) setBootstrapOpen(true)
+      // (on success) gets redirected to the cloud URL. Gate on
+      // credentials_saved (not tunnel_active — the bootstrap hasn't run
+      // yet, the modal is what the admin watches it run *in*).
+      if (next.credentials_saved) setBootstrapOpen(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
     } finally {
@@ -83,7 +85,12 @@ function GopherPanel() {
     }
   }
 
-  const configured = settings?.configured ?? false
+  // credentialsSaved gates the password "leave blank to keep" hint and
+  // the Save→modal flow above. tunnelActive drives the visible
+  // "Configured" pill — saved creds with a failed bootstrap reads as
+  // not-configured per the explicit user-facing meaning.
+  const credentialsSaved = settings?.credentials_saved ?? false
+  const tunnelActive = settings?.tunnel_active ?? false
 
   return (
     <div
@@ -94,7 +101,7 @@ function GopherPanel() {
         <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
           Gopher tunnels
         </span>
-        {configured ? (
+        {tunnelActive ? (
           <span className="n-pill n-pill-ok">
             <span className="n-pill-dot" />
             configured
@@ -134,7 +141,7 @@ function GopherPanel() {
         <div className="n-field">
           <label className="n-label" htmlFor="gopher-api-key">
             API key
-            {configured && (
+            {credentialsSaved && (
               <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--ink-mute)', fontWeight: 400 }}>
                 (leave blank to keep existing)
               </span>
@@ -144,7 +151,7 @@ function GopherPanel() {
             id="gopher-api-key"
             className="n-input"
             type="password"
-            placeholder={configured ? '••••••••' : 'Paste your Gopher API key'}
+            placeholder={credentialsSaved ? '••••••••' : 'Paste your Gopher API key'}
             value={apiKey}
             onChange={(e) => setAPIKey(e.target.value)}
           />

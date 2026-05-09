@@ -622,7 +622,19 @@ definitions:
           empty in the DB collapses to selftunnel.DefaultCloudSubdomain ("cloud")
           here so the UI never has to guess the fallback.
         type: string
-      configured:
+      credentials_saved:
+        description: |-
+          CredentialsSaved is true when both api_url and api_key are populated
+          in the DB. Used by the SPA to decide whether to auto-open the
+          bootstrap modal after a save and to render the "leave blank to
+          keep" placeholder on the API-key input.
+        type: boolean
+      tunnel_active:
+        description: |-
+          TunnelActive is true only when the self-bootstrap finished
+          end-to-end and a public URL is live. The SPA's "Configured" pill
+          reads this — credentials saved with a failed (or never-attempted)
+          bootstrap reads as not-configured.
         type: boolean
     type: object
   handlers.gpuJobView:
