@@ -5,6 +5,7 @@ import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
 import MigrateVMModal from '@/components/ui/MigrateVMModal'
+import MultiMigrateModal from '@/components/ui/MultiMigrateModal'
 import OSIcon from '@/components/ui/OSIcon'
 import Pagination from '@/components/ui/Pagination'
 import SSHDetailsModal, { type SSHTarget } from '@/components/ui/SSHDetailsModal'
@@ -665,6 +666,13 @@ function VMTable({
   // the Tasks dropdown. Triggers MigrateVMModal in re-attach mode
   // so the operator picks up the live state without re-dispatching.
   const [reattachOpID, setReattachOpID] = useState<number | null>(null)
+  // Multi-migrate: bulk-select state. selectedIDs is the set of
+  // db.VM.id values currently checked. Only rows for `local` VMs with
+  // a non-undefined id are selectable (foreign + external rows have no
+  // backend id to migrate against). bulkMigrateOpen drives the
+  // multi-target picker modal.
+  const [selectedIDs, setSelectedIDs] = useState<Set<number>>(new Set())
+  const [bulkMigrateOpen, setBulkMigrateOpen] = useState(false)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   // VMID column doubles as the sort control. Default desc so the most
@@ -788,6 +796,30 @@ function VMTable({
             Clear filters
           </Button>
         )}
+        {/* Bulk-actions toolbar: appears whenever ≥1 VM is checked.
+            Sits on the same row as the filter selects so the operator
+            can keep filtering down the candidate set while building
+            the selection. */}
+        {selectedIDs.size > 0 && (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-[12px] text-ink-2">
+              {selectedIDs.size} selected
+            </span>
+            <Button
+              size="small"
+              onClick={() => setBulkMigrateOpen(true)}
+            >
+              Migrate selected
+            </Button>
+            <Button
+              variant="ghost"
+              size="small"
+              onClick={() => setSelectedIDs(new Set())}
+            >
+              Clear
+            </Button>
+          </div>
+        )}
       </div>
 
       {vms.length === 0 ? (
@@ -803,6 +835,34 @@ function VMTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line">
+                {/* Bulk-select header: "Select all on this page".
+                    Toggling adds/removes every selectable row's id
+                    (local + has db id) for the current page only —
+                    avoids the surprise of page-1's "select all" also
+                    selecting unseen rows on later pages. */}
+                <th className={headerCellClass} style={{ width: 32 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all on page"
+                    checked={(() => {
+                      const sel = pagedVMs.filter(
+                        (v) => v.source === 'local' && v.id !== undefined,
+                      )
+                      return sel.length > 0 && sel.every((v) => selectedIDs.has(v.id!))
+                    })()}
+                    onChange={(e) => {
+                      setSelectedIDs((prev) => {
+                        const next = new Set(prev)
+                        const ids = pagedVMs
+                          .filter((v) => v.source === 'local' && v.id !== undefined)
+                          .map((v) => v.id!)
+                        if (e.target.checked) ids.forEach((id) => next.add(id))
+                        else ids.forEach((id) => next.delete(id))
+                        return next
+                      })
+                    }}
+                  />
+                </th>
                 {['Name'].map((col) => (
                   <th key={col} className={headerCellClass}>{col}</th>
                 ))}
@@ -835,8 +895,26 @@ function VMTable({
                   ostype: vm.os_template, // external VMs put raw ostype here
                 })
                 const osLabel = osLabelFor(vm)
+                const selectable = vm.source === 'local' && vm.id !== undefined
                 return (
                   <tr key={`${vm.node}-${vm.vmid}`} className="border-t border-line hover:bg-[rgba(27,23,38,0.02)]">
+                    <td className="px-4 py-3" style={{ width: 32 }}>
+                      {selectable && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${vm.hostname || vm.name}`}
+                          checked={selectedIDs.has(vm.id!)}
+                          onChange={(e) => {
+                            setSelectedIDs((prev) => {
+                              const next = new Set(prev)
+                              if (e.target.checked) next.add(vm.id!)
+                              else next.delete(vm.id!)
+                              return next
+                            })
+                          }}
+                        />
+                      )}
+                    </td>
                     <td className="px-4 py-3 font-display font-medium whitespace-nowrap">
                       <VMDetailsPopover vm={vm}>{displayName}</VMDetailsPopover>
                     </td>
@@ -1004,6 +1082,26 @@ function VMTable({
             setReattachOpID(null)
             onVMMigrated(id, newNode)
           }}
+        />
+      )}
+      {bulkMigrateOpen && selectedIDs.size > 0 && (
+        <MultiMigrateModal
+          selectedVMs={(() => {
+            // Resolve the selection set to the full row list at modal-
+            // open time. Filtering on `vms` (already paginated/filtered)
+            // would lose selections from earlier pages — use allVMs.
+            const map = new Map(allVMs.map((v) => [v.id, v]))
+            return Array.from(selectedIDs)
+              .map((id) => map.get(id))
+              .filter((v): v is ClusterVM => v !== undefined && v.id !== undefined)
+              .map((v) => ({
+                id: v.id!,
+                hostname: v.hostname || v.name,
+                node: v.node,
+              }))
+          })()}
+          onClose={() => setBulkMigrateOpen(false)}
+          onDispatched={() => setSelectedIDs(new Set())}
         />
       )}
     </div>
