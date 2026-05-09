@@ -1319,6 +1319,22 @@ export async function getNetworkingInfo(): Promise<NetworkingInfo> {
   return data
 }
 
+// LXCStorageOption is one entry in the gateway-LXC storage dropdown.
+// Backend filters to storages on the chosen network node that accept
+// rootdir content (i.e. can host an LXC's rootfs).
+export interface LXCStorageOption {
+  name: string
+  type: string
+  active: boolean
+}
+
+export async function listLXCStorages(node: string): Promise<LXCStorageOption[]> {
+  const { data } = await api.get<LXCStorageOption[]>('/networking/lxc-storages', {
+    params: { node },
+  })
+  return data
+}
+
 // NetworkingV1Settings is the admin-editable VPC + gateway-LXC
 // config. Mirrors the GopherSettings / GPUSettings shape: GET
 // returns the persisted state, PUT writes and live-rotates the

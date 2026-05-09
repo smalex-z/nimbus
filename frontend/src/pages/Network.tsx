@@ -4,6 +4,7 @@ import {
   getNetworkSettings,
   getNetworkingInfo,
   getNetworkingV1Settings,
+  listLXCStorages,
   listNodes,
   reconcileVMs,
   renumberAllVMs,
@@ -11,6 +12,7 @@ import {
   saveNetworkingV1Settings,
 } from '@/api/client'
 import type {
+  LXCStorageOption,
   NetworkOpReport,
   NetworkSettingsView,
   NetworkingInfo,
@@ -92,6 +94,8 @@ function VPCConfigPanel() {
   const [ipPoolStart, setIPPoolStart] = useState('')
   const [ipPoolEnd, setIPPoolEnd] = useState('')
   const [storage, setStorage] = useState('local-lvm')
+  const [storageOptions, setStorageOptions] = useState<LXCStorageOption[]>([])
+  const [storageLoading, setStorageLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -110,6 +114,20 @@ function VPCConfigPanel() {
         setError(e instanceof Error ? e.message : String(e)),
       )
   }, [])
+
+  // Refetch the LXC-rootfs-capable storage list whenever the network
+  // node changes — different nodes have different storage layouts.
+  useEffect(() => {
+    if (!networkNode) {
+      setStorageOptions([])
+      return
+    }
+    setStorageLoading(true)
+    listLXCStorages(networkNode)
+      .then((opts) => setStorageOptions(opts))
+      .catch(() => setStorageOptions([]))
+      .finally(() => setStorageLoading(false))
+  }, [networkNode])
 
   const dirty = useMemo(() => {
     if (!settings) return false
@@ -193,14 +211,37 @@ function VPCConfigPanel() {
           </Field>
 
           <Field label="LXC storage">
-            <input
+            <select
               value={storage}
               onChange={(e) => setStorage(e.target.value)}
-              placeholder="local-lvm"
+              disabled={!networkNode || storageLoading}
               className="n-input font-mono"
-            />
+            >
+              {!networkNode ? (
+                <option value="">— pick a network node first —</option>
+              ) : storageLoading ? (
+                <option value="">loading…</option>
+              ) : storageOptions.length === 0 ? (
+                <option value="">no rootdir-capable storage found</option>
+              ) : (
+                <>
+                  <option value="">— pick a storage —</option>
+                  {storageOptions.map((s) => (
+                    <option
+                      key={s.name}
+                      value={s.name}
+                      disabled={!s.active}
+                    >
+                      {s.name} ({s.type})
+                      {s.active ? '' : ' — inactive'}
+                    </option>
+                  ))}
+                </>
+              )}
+            </select>
             <p className="mt-1 text-[11px] text-ink-3">
               Storage pool on the network node for the gateway LXC's rootfs.
+              Only pools with <code>rootdir</code> content are listed.
             </p>
           </Field>
         </div>

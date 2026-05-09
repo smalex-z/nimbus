@@ -1188,7 +1188,6 @@ func (s *Service) BackfillOwnership(ctx context.Context) (int64, error) {
 	return res.RowsAffected, nil
 }
 
-
 // GetPrivateKey returns the decrypted private key for a VM, if one is
 // available. Reads through the ssh_keys vault via SSHKeyID. Returns NotFound
 // when the VM has no linked key, or the linked key has no vaulted private

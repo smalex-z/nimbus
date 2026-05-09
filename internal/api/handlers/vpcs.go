@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +13,7 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
+	"nimbus/internal/proxmox"
 	"nimbus/internal/vpcmgr"
 )
 
@@ -105,13 +108,19 @@ type NetworkingInfoSource interface {
 	ClusterLANForMembers() bool
 }
 
+// NodeStorageLister fetches the storages available on a PVE node.
+// Implemented by *proxmox.Client.GetStorages in production. Used by
+// the LXC-storages dropdown the VPC settings form populates.
+type NodeStorageLister func(ctx context.Context, node string) ([]proxmox.Storage, error)
+
 // Networking is the public networking-info handler. The VPC source
 // is swappable via SetVPCSource so the Settings → Network save can
 // flip the picker chip without a Nimbus restart.
 type Networking struct {
-	mu  sync.RWMutex
-	vpc NetworkingVPCSource
-	src NetworkingInfoSource
+	mu       sync.RWMutex
+	vpc      NetworkingVPCSource
+	src      NetworkingInfoSource
+	storages NodeStorageLister
 }
 
 // NetworkingVPCSource is the slice of vpcmgr.Service that the
@@ -134,6 +143,79 @@ func (h *Networking) SetVPCSource(vpc NetworkingVPCSource) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.vpc = vpc
+}
+
+// SetStorageLister wires the per-node storage fetcher used by
+// /api/networking/lxc-storages. Set once at construction in router.go.
+func (h *Networking) SetStorageLister(f NodeStorageLister) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.storages = f
+}
+
+// lxcStorageView is one entry in the response of
+// /api/networking/lxc-storages — the slim shape the form needs.
+type lxcStorageView struct {
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Active bool   `json:"active"`
+}
+
+// ListLXCStorages handles GET /api/networking/lxc-storages?node=<n>.
+// Returns storages on the node that accept rootdir (LXC rootfs)
+// content, filtered to enabled rows. The VPC settings form uses
+// this to populate its storage dropdown.
+//
+// @Summary     List LXC-rootfs-capable storages on a node
+// @Tags        networking
+// @Security    cookieAuth
+// @Produce     json
+// @Param       node query string true "PVE node name"
+// @Success     200  {object} EnvelopeOK{data=[]lxcStorageView}
+// @Failure     400  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /networking/lxc-storages [get]
+func (h *Networking) ListLXCStorages(w http.ResponseWriter, r *http.Request) {
+	node := strings.TrimSpace(r.URL.Query().Get("node"))
+	if node == "" {
+		response.BadRequest(w, "node query parameter is required")
+		return
+	}
+	h.mu.RLock()
+	lister := h.storages
+	h.mu.RUnlock()
+	if lister == nil {
+		response.InternalError(w, "storage lister not wired")
+		return
+	}
+	storages, err := lister(r.Context(), node)
+	if err != nil {
+		response.InternalError(w, "list storages on "+node+": "+err.Error())
+		return
+	}
+	out := make([]lxcStorageView, 0, len(storages))
+	for _, s := range storages {
+		if s.Enabled == 0 {
+			continue
+		}
+		// Content is comma-separated — match against rootdir.
+		hasRootdir := false
+		for _, c := range strings.Split(s.Content, ",") {
+			if strings.TrimSpace(c) == "rootdir" {
+				hasRootdir = true
+				break
+			}
+		}
+		if !hasRootdir {
+			continue
+		}
+		out = append(out, lxcStorageView{
+			Name:   s.Storage,
+			Type:   s.Type,
+			Active: s.Active != 0,
+		})
+	}
+	response.Success(w, out)
 }
 
 // GetInfo handles GET /api/networking/info.

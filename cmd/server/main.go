@@ -489,7 +489,6 @@ func main() {
 	}
 	ownerBackfillCancel()
 
-
 	// Same backfill for ssh_keys: legacy rows (created before ownership
 	// tracking, or migrated from VMs that had NULL owner_id) get bound to
 	// the lowest-ID admin so the Keys page shows them on that admin's account
@@ -674,7 +673,11 @@ func main() {
 		vpcMgrSvc         *vpcmgr.Service
 		vpcStackCurrent   *vpcStack
 		vpcsHandler       = handlers.NewVPCs(nil)
-		networkingHandler = handlers.NewNetworking(nil, provSvc)
+		networkingHandler = func() *handlers.Networking {
+			h := handlers.NewNetworking(nil, provSvc)
+			h.SetStorageLister(pveClient.GetStorages)
+			return h
+		}()
 	)
 	// disableVPCs is called from every error path in rebuildVPCStack.
 	// Centralizes the four places state has to be unwound so we can't

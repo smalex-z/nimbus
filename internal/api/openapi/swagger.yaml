@@ -767,6 +767,15 @@ definitions:
       password:
         type: string
     type: object
+  handlers.lxcStorageView:
+    properties:
+      active:
+        type: boolean
+      name:
+        type: string
+      type:
+        type: string
+    type: object
   handlers.migrateVMRequest:
     properties:
       allow_offline:
@@ -3531,6 +3540,41 @@ paths:
       security:
       - cookieAuth: []
       summary: Networking-v1 availability snapshot
+      tags:
+      - networking
+  /networking/lxc-storages:
+    get:
+      parameters:
+      - description: PVE node name
+        in: query
+        name: node
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/handlers.lxcStorageView'
+                  type: array
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List LXC-rootfs-capable storages on a node
       tags:
       - networking
   /nodes:

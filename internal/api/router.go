@@ -46,10 +46,10 @@ type Deps struct {
 	UserBuckets   *s3storage.UserBucketService
 	GPU           *gpu.Service // optional: nil disables /api/gpu/* routes
 	GX10Assets    fs.FS        // embedded scripts + worker binary, served via /api/gpu/scripts/{name}
-	NodeMgr *nodemgr.Service
-	Audit   *audit.Service   // nil-safe — handlers and emit sites no-op when unset
-	VNetMgr *vnetmgr.Service // legacy: per-user-subnet path during deprecation
-	VPCMgr  *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	NodeMgr       *nodemgr.Service
+	Audit         *audit.Service   // nil-safe — handlers and emit sites no-op when unset
+	VNetMgr       *vnetmgr.Service // legacy: per-user-subnet path during deprecation
+	VPCMgr        *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
 	// VPCsHandler and NetworkingHandler are pre-constructed in main.go
 	// so the rebuildVPCStack closure can call SetSvc / SetVPCSource on
 	// them after every Settings → Network save (live-rotate without a
@@ -449,6 +449,7 @@ func NewRouter(d Deps) http.Handler {
 				// the Provision page picker (which chips are
 				// available, with reasons when disabled).
 				r.Get("/networking/info", networking.GetInfo)
+				r.Get("/networking/lxc-storages", networking.ListLXCStorages)
 
 				// Networking-v1 VPCs. Always mounted — when the
 				// admin hasn't configured the gateway-LXC env, every
