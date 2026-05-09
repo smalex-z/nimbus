@@ -214,10 +214,14 @@ export class ProvisionError extends Error {
 // stream, invoking onProgress as each backend phase completes. Resolves with
 // the final ProvisionResult or rejects with a ProvisionError naming the
 // step that failed (when known).
+// onOperationID, when provided, fires once with the backend's tracking
+// id as the first NDJSON event. The SPA captures it so a navigation
+// away mid-provision can re-attach via the Tasks panel poll.
 export async function provisionVMStreaming(
   req: ProvisionRequest,
   onProgress: (evt: ProvisionProgress) => void,
   signal?: AbortSignal,
+  onOperationID?: (id: number) => void,
 ): Promise<ProvisionResult> {
   const resp = await fetch('/api/vms', {
     method: 'POST',
@@ -268,14 +272,24 @@ export async function provisionVMStreaming(
       nl = buffer.indexOf('\n')
       if (!line) continue
 
-      let evt: { type?: string; step?: ProvisionStep; label?: string; data?: ProvisionResult; code?: ProvisionError['code']; message?: string }
+      let evt: {
+        type?: string
+        step?: ProvisionStep
+        label?: string
+        data?: ProvisionResult
+        code?: ProvisionError['code']
+        message?: string
+        operation_id?: number
+      }
       try {
         evt = JSON.parse(line)
       } catch {
         continue // ignore malformed line, keep streaming
       }
 
-      if (evt.type === 'progress' && evt.step && evt.label) {
+      if (evt.type === 'operation_id' && typeof evt.operation_id === 'number') {
+        onOperationID?.(evt.operation_id)
+      } else if (evt.type === 'progress' && evt.step && evt.label) {
         lastProgress = evt.step
         onProgress({ step: evt.step, label: evt.label })
       } else if (evt.type === 'result' && evt.data) {
