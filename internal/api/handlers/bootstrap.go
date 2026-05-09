@@ -7,16 +7,21 @@ import (
 	"time"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 )
 
 // Bootstrap wraps long-running admin operations (template bootstrap today;
 // re-bootstrap, template refresh, etc. later).
 type Bootstrap struct {
-	svc *bootstrap.Service
+	svc   *bootstrap.Service
+	audit *audit.Service
 }
 
 func NewBootstrap(svc *bootstrap.Service) *Bootstrap { return &Bootstrap{svc: svc} }
+
+// WithAudit installs the audit-log sink. Nil disables emission.
+func (h *Bootstrap) WithAudit(a *audit.Service) *Bootstrap { h.audit = a; return h }
 
 type bootstrapRequest struct {
 	Nodes []string `json:"nodes,omitempty"`
@@ -94,8 +99,26 @@ func (h *Bootstrap) BootstrapTemplates(w http.ResponseWriter, r *http.Request) {
 		Force: req.Force,
 	})
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:   "bootstrap.templates",
+			Details:  map[string]any{"nodes": req.Nodes, "os": req.OS, "force": req.Force},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action: "bootstrap.templates",
+		Details: map[string]any{
+			"nodes":   req.Nodes,
+			"os":      req.OS,
+			"force":   req.Force,
+			"created": len(res.Created),
+			"skipped": len(res.Skipped),
+			"failed":  len(res.Failed),
+		},
+		Success: true,
+	})
 	response.Success(w, res)
 }

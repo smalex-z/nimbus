@@ -37,6 +37,7 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
     { label: 'Tunnels (WAN)', to: '/infrastructure/tunnels' },
     { label: 'Networking (LAN)', to: '/infrastructure/networking' },
     { label: 'API docs', to: '/infrastructure/api-docs' },
+    { label: 'Audit log', to: '/infrastructure/audit' },
   ]
 
   return (

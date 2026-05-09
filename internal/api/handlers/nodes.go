@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/config"
 	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
@@ -28,6 +29,7 @@ type Nodes struct {
 	mgr     *nodemgr.Service
 	cfg     *config.Config
 	restart func()
+	audit   *audit.Service
 }
 
 // NewNodes constructs a Nodes handler. mgr is the shared nodemgr.Service;
@@ -39,6 +41,11 @@ type Nodes struct {
 func NewNodes(mgr *nodemgr.Service, cfg *config.Config, restart func()) *Nodes {
 	return &Nodes{mgr: mgr, cfg: cfg, restart: restart}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil and production wires d.Audit. Returns the receiver so it
+// chains after NewNodes.
+func (h *Nodes) WithAudit(a *audit.Service) *Nodes { h.audit = a; return h }
 
 // List handles GET /api/nodes. Returns one row per Proxmox node with live
 // telemetry merged with persistent fields (lock state, tags, lock context).
@@ -189,9 +196,24 @@ func (h *Nodes) Cordon(w http.ResponseWriter, r *http.Request) {
 		NodeName: name, Reason: body.Reason, ActorID: actor,
 	})
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "node.cordon",
+			TargetType:  "node",
+			TargetLabel: name,
+			Details:     map[string]any{"reason": body.Reason},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		writeNodeMutationError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.cordon",
+		TargetType:  "node",
+		TargetLabel: name,
+		Details:     map[string]any{"reason": body.Reason},
+		Success:     true,
+	})
 	response.Success(w, row)
 }
 
@@ -215,9 +237,22 @@ func (h *Nodes) Uncordon(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	row, err := h.mgr.Uncordon(r.Context(), name)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "node.uncordon",
+			TargetType:  "node",
+			TargetLabel: name,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		writeNodeMutationError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.uncordon",
+		TargetType:  "node",
+		TargetLabel: name,
+		Success:     true,
+	})
 	response.Success(w, row)
 }
 
@@ -254,9 +289,24 @@ func (h *Nodes) SetTags(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := h.mgr.SetTags(r.Context(), name, body.Tags)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "node.tags.set",
+			TargetType:  "node",
+			TargetLabel: name,
+			Details:     map[string]any{"tags": body.Tags},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		writeNodeMutationError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.tags.set",
+		TargetType:  "node",
+		TargetLabel: name,
+		Details:     map[string]any{"tags": body.Tags},
+		Success:     true,
+	})
 	response.Success(w, row)
 }
 
@@ -354,17 +404,44 @@ func (h *Nodes) Drain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Record drain start once — completion is async (NDJSON streamed).
+	// A "node.drain.complete" follow-up could fire post-Execute, but
+	// that adds complexity for a minor signal; the start event +
+	// per-VM migrate events recorded by the executor (future work)
+	// cover the operator's "what just happened" question.
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.drain.start",
+		TargetType:  "node",
+		TargetLabel: name,
+		Details:     map[string]any{"choices": req.Choices},
+		Success:     true,
+	})
+
 	if err := h.mgr.Execute(r.Context(), nodemgr.ExecuteRequest{
 		SourceNode: name,
 		Choices:    choices,
 	}, report); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "node.drain.complete",
+			TargetType:  "node",
+			TargetLabel: name,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		// Stream a terminal error event so the SPA can surface it.
 		// Already-ack'd HTTP 200; can't change the status code now.
 		_ = enc.Encode(nodemgr.DrainEvent{Type: "error", Error: err.Error()})
 		if flusher != nil {
 			flusher.Flush()
 		}
+		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.drain.complete",
+		TargetType:  "node",
+		TargetLabel: name,
+		Success:     true,
+	})
 }
 
 // removeNodeResponse is the body of DELETE /api/nodes/{name}.
@@ -393,9 +470,22 @@ type removeNodeResponse struct {
 func (h *Nodes) Remove(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := h.mgr.Remove(r.Context(), name); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "node.remove",
+			TargetType:  "node",
+			TargetLabel: name,
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		writeNodeMutationError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "node.remove",
+		TargetType:  "node",
+		TargetLabel: name,
+		Success:     true,
+	})
 	response.Success(w, removeNodeResponse{Message: "node removed"})
 }
 
@@ -545,6 +635,15 @@ func (h *Nodes) ChangeBinding(w http.ResponseWriter, r *http.Request) {
 	_ = os.Setenv("PROXMOX_TOKEN_ID", req.ProxmoxTokenID)
 	_ = os.Setenv("PROXMOX_TOKEN_SECRET", secret)
 
+	h.audit.Record(r.Context(), audit.Event{
+		Action: "settings.proxmox.update",
+		Details: map[string]any{
+			"host":     req.ProxmoxHost,
+			"token_id": req.ProxmoxTokenID,
+			// secret never leaves the server boundary in audit
+		},
+		Success: true,
+	})
 	response.Success(w, changeBindingResponse{
 		Message: "Proxmox connection updated. Reloading Nimbus…",
 	})
@@ -621,9 +720,20 @@ func (h *Nodes) SaveSchedulingSettings(w http.ResponseWriter, r *http.Request) {
 		DiskAllocationRatio: req.DiskAllocationRatio,
 	})
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:   "settings.scheduling.update",
+			Details:  req,
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
 		response.InternalError(w, err.Error())
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:  "settings.scheduling.update",
+		Details: out,
+		Success: true,
+	})
 	response.Success(w, out)
 }
 

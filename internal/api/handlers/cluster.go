@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"nimbus/internal/api/response"
+	"nimbus/internal/audit"
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodemgr"
@@ -21,11 +22,16 @@ type Cluster struct {
 	px      *proxmox.Client
 	svc     *provision.Service
 	nodeMgr *nodemgr.Service
+	audit   *audit.Service
 }
 
 func NewCluster(px *proxmox.Client, svc *provision.Service, nodeMgr *nodemgr.Service) *Cluster {
 	return &Cluster{px: px, svc: svc, nodeMgr: nodeMgr}
 }
+
+// WithAudit installs the audit-log sink. Nil disables emission; tests
+// pass nil and production wires d.Audit.
+func (h *Cluster) WithAudit(a *audit.Service) *Cluster { h.audit = a; return h }
 
 // vmSource describes which Nimbus instance (if any) provisioned a VM.
 //   - "local"    — created by this Nimbus instance (in the local DB)
@@ -263,10 +269,31 @@ func (h *Cluster) DeleteVM(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid id")
 		return
 	}
+	// Pre-lookup so the audit row carries Proxmox VMID + hostname
+	// rather than the (meaningless to operators) Nimbus DB row id.
+	// nil requester == admin path, no owner gate.
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, uint(id), nil)
 	if err := h.svc.AdminDelete(r.Context(), uint(id)); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.admin.delete",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.admin.delete",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details:     map[string]any{"db_id": dbID},
+		Success:     true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -381,8 +408,18 @@ func (h *Cluster) MigrateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vmid, hostname, dbID := resolveVMTarget(r.Context(), h.svc, uint(id), nil)
 	res, err := h.svc.MigrateAdmin(r.Context(), uint(id), req.TargetNode, req.AllowOffline)
 	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.migrate",
+			TargetType:  "vm",
+			TargetID:    vmid,
+			TargetLabel: hostname,
+			Details:     map[string]any{"db_id": dbID, "target_node": req.TargetNode, "allow_offline": req.AllowOffline},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		var onlineFail *internalerrors.OnlineMigrationFailedError
 		if errors.As(err, &onlineFail) {
 			response.JSON(w, http.StatusConflict, onlineMigrationFailedResponse{
@@ -397,6 +434,19 @@ func (h *Cluster) MigrateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.migrate",
+		TargetType:  "vm",
+		TargetID:    vmid,
+		TargetLabel: hostname,
+		Details: map[string]any{
+			"db_id":       dbID,
+			"target_node": res.TargetNode,
+			"mode":        res.Mode,
+			"was_stopped": res.WasStopped,
+		},
+		Success: true,
+	})
 	response.Success(w, migrateVMResponse{
 		Mode:       res.Mode,
 		TargetNode: res.TargetNode,
@@ -434,9 +484,33 @@ func (h *Cluster) VMLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := provision.VMLifecycleOp(chi.URLParam(r, "op"))
+	// Best-effort hostname lookup. Foreign + external VMs aren't in
+	// the Nimbus DB so the lookup legitimately misses; we just emit
+	// the row without a label in those cases.
+	var hostname string
+	if vm, err := h.svc.FindByVMID(r.Context(), vmid); err == nil && vm != nil {
+		hostname = vm.Hostname
+	}
 	if err := h.svc.AdminLifecycleByVMID(r.Context(), node, vmid, op); err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:      "vm.admin." + string(op),
+			TargetType:  "vm",
+			TargetID:    vmidStr,
+			TargetLabel: hostname,
+			Details:     map[string]any{"node": node},
+			Success:     false,
+			ErrorMsg:    err.Error(),
+		})
 		response.FromError(w, err)
 		return
 	}
+	h.audit.Record(r.Context(), audit.Event{
+		Action:      "vm.admin." + string(op),
+		TargetType:  "vm",
+		TargetID:    vmidStr,
+		TargetLabel: hostname,
+		Details:     map[string]any{"node": node},
+		Success:     true,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"nimbus/internal/db"
 )
@@ -42,6 +43,14 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 	if len(managed) > 0 {
 		return fmt.Errorf("%d managed vm(s) reappeared on this node — re-drain before removing", len(managed))
 	}
+	// Destroy template VMs before pvecm delnode — once the node is out
+	// of the cluster, its qemu API is unreachable from the rest of the
+	// cluster and the templates would orphan as ghost VMIDs.
+	// Best-effort: a Proxmox failure here is logged but doesn't block
+	// the removal — the operator can clean up stragglers manually, and
+	// the dangling node_templates rows are cleared regardless so a
+	// future re-add re-bootstraps cleanly.
+	s.destroyNodeTemplates(ctx, name)
 	if err := s.px.DeleteNode(ctx, name); err != nil {
 		return fmt.Errorf("proxmox delete node: %w", err)
 	}
@@ -54,4 +63,38 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 		return fmt.Errorf("delete db row: %w", err)
 	}
 	return nil
+}
+
+// destroyNodeTemplates removes every template VM Nimbus provisioned onto
+// `name` and clears the node_templates rows. Best-effort — individual
+// DestroyVM failures are logged and the loop continues, so a single
+// misbehaving template VM doesn't strand the whole removal flow.
+func (s *Service) destroyNodeTemplates(ctx context.Context, name string) {
+	var rows []db.NodeTemplate
+	if err := s.db.WithContext(ctx).
+		Where("node = ?", name).
+		Find(&rows).Error; err != nil {
+		log.Printf("nodemgr.Remove(%s): list templates: %v", name, err)
+		return
+	}
+	for _, r := range rows {
+		taskID, err := s.px.DestroyVM(ctx, name, r.VMID)
+		if err != nil {
+			log.Printf("nodemgr.Remove(%s): destroy template vmid=%d os=%s: %v",
+				name, r.VMID, r.OS, err)
+			continue
+		}
+		if taskID != "" {
+			if err := s.px.WaitForTask(ctx, name, taskID, s.cfg.TaskPollInterval); err != nil {
+				log.Printf("nodemgr.Remove(%s): wait destroy task vmid=%d: %v",
+					name, r.VMID, err)
+				// fall through to row delete — Proxmox accepted the call
+			}
+		}
+	}
+	if err := s.db.WithContext(ctx).
+		Where("node = ?", name).
+		Delete(&db.NodeTemplate{}).Error; err != nil {
+		log.Printf("nodemgr.Remove(%s): clear node_templates rows: %v", name, err)
+	}
 }

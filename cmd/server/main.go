@@ -40,6 +40,7 @@ import (
 
 	"nimbus/internal/api"
 	"nimbus/internal/api/handlers"
+	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/build"
 	"nimbus/internal/config"
@@ -152,6 +153,7 @@ func main() {
 		&db.VM{}, &db.NodeTemplate{}, &db.SSHKey{}, &db.S3Storage{},
 		&db.S3ServiceAccount{}, &db.S3Bucket{},
 		&db.Node{},
+		&db.AuditEvent{},
 		&db.UserSubnet{},
 		// Networking v1: Standalone VMs and VPCs. UserSubnet stays
 		// in the migrate list during the v1.0 deprecation window so
@@ -594,11 +596,24 @@ func main() {
 		SelfHostName:        selfHost,
 		VMDiskStorage:       cfg.VMDiskStorage,
 	})
+	// Auto-bootstrap templates onto newly-observed nodes. The reconcile
+	// loop checks each online node's template count and fires
+	// bootstrapSvc.Bootstrap async for any node with a deficit. Slow
+	// (~10-20 min for the full 4-OS catalog) so an in-flight guard
+	// inside nodemgr prevents the every-60 s tick from stacking calls.
+	nodeMgrSvc.SetTemplateBootstrapper(bootstrapSvc)
 	// Background reconcile: same cadence as the IP pool's. Observed
 	// nodes upsert + LastSeenAt bump; unobserved nodes prune after the
 	// miss threshold, mirroring the ippool pattern. Failures are logged
 	// and the next cycle retries.
 	go runNodeReconcileLoop(bgCtx, nodeMgrSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
+	// Audit log writer + retention reaper. Prune rows older than
+	// NIMBUS_AUDIT_RETENTION_DAYS (default 90); zero disables.
+	auditSvc := audit.New(database.DB)
+	if cfg.AuditRetentionDays > 0 {
+		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
+	}
 
 	// Networking-v1 Standalone primitive — per-VM Simple zone with
 	// PVE-native SNAT. Wired before the legacy vnetmgr so new
@@ -801,6 +816,7 @@ func main() {
 		GPU:               gpuSvc,
 		GX10Assets:        gx10AssetsFS,
 		NodeMgr:           nodeMgrSvc,
+		Audit:             auditSvc,
 		VNetMgr:           vnetMgr,
 		VPCMgr:            vpcMgrSvc,
 		VPCsHandler:       vpcsHandler,
@@ -1095,6 +1111,36 @@ func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interv
 			if len(rep.Adopted) > 0 || len(rep.Conflicts) > 0 || len(rep.Freed) > 0 || len(rep.Vacated) > 0 {
 				log.Printf("background reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
 					len(rep.Adopted), len(rep.Conflicts), len(rep.Freed), len(rep.Vacated))
+			}
+		}
+	}
+}
+
+// runAuditReapLoop deletes audit_events rows older than maxAge once
+// per day. Cheap (single SQL DELETE with an index on created_at) and
+// keeps the table from growing unbounded under high-traffic clusters.
+// Operators who want unbounded retention set
+// NIMBUS_AUDIT_RETENTION_DAYS=0 — main skips the goroutine entirely.
+func runAuditReapLoop(ctx context.Context, svc *audit.Service, maxAge time.Duration) {
+	// Daily cadence: audit writes are append-only and cheap, so even
+	// large clusters can wait a day between sweeps. Faster cadences
+	// add SQLite write churn for no operator-visible benefit.
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			pruned, err := svc.Prune(runCtx, maxAge)
+			cancel()
+			if err != nil {
+				log.Printf("audit reap error: %v", err)
+				continue
+			}
+			if pruned > 0 {
+				log.Printf("audit reap: pruned=%d (older than %s)", pruned, maxAge)
 			}
 		}
 	}

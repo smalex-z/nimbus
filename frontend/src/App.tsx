@@ -9,6 +9,7 @@ import RequireVerified from '@/components/RequireVerified'
 import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
 import ApiDocs from '@/pages/ApiDocs'
+import Audit from '@/pages/Audit'
 import Authentication from '@/pages/Authentication'
 import Email from '@/pages/Email'
 import InfrastructureLayout from '@/components/InfrastructureLayout'
@@ -131,6 +132,7 @@ export default function App() {
                           /network — redirect to their /infrastructure/*
                           counterparts so bookmarks still resolve. */}
                       <Route path="/infrastructure" element={<Navigate to="/infrastructure/email" replace />} />
+                      <Route path="/infrastructure/audit" element={<RequireAdmin><InfrastructureLayout><Audit /></InfrastructureLayout></RequireAdmin>} />
                       <Route path="/infrastructure/email" element={<RequireAdmin><InfrastructureLayout><Email /></InfrastructureLayout></RequireAdmin>} />
                       {/* Networking-v1 routes: /tunnels (WAN egress
                           via Gopher) and /networking (LAN — Standalone,
