@@ -66,7 +66,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(rateLimiter(100, 200))
 
 	health := handlers.NewHealth(d.Proxmox)
-	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit)
+	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit).WithOperations(d.Operations)
 	keys := handlers.NewKeys(d.Keys).WithAudit(d.Audit)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)

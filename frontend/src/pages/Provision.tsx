@@ -11,7 +11,11 @@ import {
   listSubnets,
   getTunnelInfo,
   getGPUInference,
+  listOperations,
+  getOperation,
+  isTerminalOperationState,
   type BootstrapResult,
+  type Operation,
   type PublicSDNStatus,
   type Subnet,
   type TunnelInfo,
@@ -106,6 +110,13 @@ export default function Provision() {
   // Undefined means "nothing completed yet" — first phase is active.
   const [currentStep, setCurrentStep] = useState<ProvisionStep | undefined>()
 
+  // reattachOp — populated when the page mounts and detects an
+  // in-flight vm.provision operation owned by the current user. Drives
+  // the re-attach banner that polls the operation until terminal.
+  // Distinct from activeOpID (which tracks an op started in *this*
+  // browser tab via the NDJSON stream).
+  const [reattachOp, setReattachOp] = useState<Operation | null>(null)
+
   const [bootstrapped, setBootstrapped] = useState<boolean | null>(null)
   const [bootstrapRunning, setBootstrapRunning] = useState(false)
   const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null)
@@ -163,6 +174,51 @@ export default function Provision() {
     getBootstrapStatus()
       .then((s) => setBootstrapped(s.bootstrapped))
       .catch(() => setBootstrapped(false))
+  }, [])
+
+  // On mount, check for an in-flight provision the user kicked off in
+  // a previous tab. Surfaces as a banner above the form so the
+  // operator knows their work is still progressing and can watch it
+  // here without re-submitting. Polls every 2s until terminal; on
+  // terminal, the banner sticks around as a result/error chip the
+  // user can dismiss.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const tick = async (id: number) => {
+      try {
+        const op = await getOperation(id)
+        if (cancelled) return
+        setReattachOp(op)
+        if (!isTerminalOperationState(op.state)) {
+          timer = setTimeout(() => tick(id), 2000)
+        }
+      } catch {
+        // 404 / network error — drop the banner.
+        if (!cancelled) setReattachOp(null)
+      }
+    }
+
+    listOperations({ type: 'vm.provision' })
+      .then((res) => {
+        if (cancelled) return
+        const inflight = res.operations.find(
+          (o) => !isTerminalOperationState(o.state),
+        )
+        if (inflight) {
+          setReattachOp(inflight)
+          timer = setTimeout(() => tick(inflight.id), 2000)
+        }
+      })
+      .catch(() => {
+        // Non-fatal — the banner just doesn't render.
+      })
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -363,6 +419,10 @@ export default function Provision() {
         </div>
       </div>
 
+      {reattachOp && (
+        <ReattachBanner op={reattachOp} onDismiss={() => setReattachOp(null)} />
+      )}
+
       {bootstrapped === null && (
         <div className="mt-12 grid place-items-center">
           <div className="w-4 h-4 border-[1.5px] border-ink-3 border-t-ink rounded-full animate-spin" />
@@ -443,6 +503,93 @@ const OS_TEMPLATES = [
   { os: 'Debian 12', vmid: 9002 },
   { os: 'Debian 11', vmid: 9003 },
 ]
+
+// ReattachBanner — surfaces an in-flight (or recently-completed)
+// vm.provision operation when the user lands back on the Provision
+// page. Renders as a full-width card above the form so the operator
+// is reminded their previous build is still progressing without
+// having to remember which tab it was in.
+//
+// When the op is running, shows the live message + a spinner; when
+// terminal, swaps to a result/error chip with a link to the relevant
+// surface (My machines on success, dismiss-to-retry on failure).
+function ReattachBanner({
+  op,
+  onDismiss,
+}: {
+  op: Operation
+  onDismiss: () => void
+}) {
+  const terminal = isTerminalOperationState(op.state)
+  const failed = op.state === 'failed' || op.state === 'cancelled'
+  const succeeded = op.state === 'succeeded'
+
+  // Pull a few summary fields from details_json on success so the
+  // banner can deep-link to the right VM.
+  let dbID: number | undefined
+  let vmid: number | undefined
+  try {
+    if (succeeded && op.details_json) {
+      const d = JSON.parse(op.details_json) as { db_id?: number; vmid?: number }
+      dbID = d.db_id
+      vmid = d.vmid
+    }
+  } catch {
+    // ignore malformed details
+  }
+
+  const bg = failed
+    ? 'rgba(184,58,58,0.06)'
+    : succeeded
+      ? 'rgba(47,143,85,0.06)'
+      : 'rgba(248,175,130,0.10)'
+  const border = failed
+    ? 'rgba(184,58,58,0.25)'
+    : succeeded
+      ? 'rgba(47,143,85,0.25)'
+      : 'rgba(248,175,130,0.4)'
+
+  return (
+    <div
+      className="mt-4 mb-4 p-4 rounded-[12px] flex items-center gap-3"
+      style={{ background: bg, border: `1px solid ${border}` }}
+    >
+      {!terminal && (
+        <div className="w-4 h-4 border-[1.5px] border-ink-3 border-t-ink rounded-full animate-spin" />
+      )}
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-ink">
+          {failed
+            ? `Provision failed: ${op.target_label ?? 'machine'}`
+            : succeeded
+              ? `Provisioned ${op.target_label ?? 'machine'}`
+              : `Provisioning ${op.target_label ?? 'machine'}…`}
+        </div>
+        {op.message && (
+          <div className="text-[12px] text-ink-2 mt-0.5 truncate">
+            {op.message}
+          </div>
+        )}
+      </div>
+      {succeeded && (dbID || vmid) && (
+        <Link
+          to="/vms"
+          className="text-[13px] font-medium text-ink no-underline hover:underline"
+        >
+          View →
+        </Link>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        className="text-ink-3 hover:text-ink text-[18px] leading-none px-1.5 cursor-pointer"
+      >
+        ×
+      </button>
+    </div>
+  )
+}
 
 function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGateProps) {
   const fmt = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`)

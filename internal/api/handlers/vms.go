@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,6 +17,7 @@ import (
 	"nimbus/internal/ctxutil"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
+	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
 	"nimbus/internal/service"
@@ -28,6 +31,7 @@ var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 type VMs struct {
 	svc   *provision.Service
 	audit *audit.Service
+	ops   *operations.Service
 }
 
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
@@ -36,6 +40,12 @@ func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
 // pass nil and production wires d.Audit. Returns the receiver so it
 // chains after NewVMs.
 func (h *VMs) WithAudit(a *audit.Service) *VMs { h.audit = a; return h }
+
+// WithOperations installs the background-task registry so Create can
+// detach the long-running provision from the request ctx (the SPA can
+// close its tab and re-attach via the Tasks panel). Nil keeps the
+// pre-async behaviour where the work is bound to the request lifetime.
+func (h *VMs) WithOperations(o *operations.Service) *VMs { h.ops = o; return h }
 
 type createVMRequest struct {
 	Hostname string `json:"hostname"`
@@ -128,14 +138,6 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	reporter := func(evt provision.ProgressEvent) {
-		writeLine(map[string]any{
-			"type":  "progress",
-			"step":  evt.Step,
-			"label": evt.Label,
-		})
-	}
-
 	// Stamp the creator's user ID so the VM shows up in their My Machines and
 	// is the only person who can delete it later. Pre-existing VMs without an
 	// owner remain visible to everyone (see service.List) but immutable
@@ -151,7 +153,63 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		requesterIsAdmin = user.IsAdmin
 	}
 
-	res, err := h.svc.Provision(r.Context(), provision.Request{
+	// Create a tracking operation row so the SPA can re-attach after a
+	// tab close. nil-safe: pre-ops deployments skip this and the work
+	// stays bound to the request ctx.
+	var opID uint
+	if h.ops != nil {
+		op, err := h.ops.Create(r.Context(), operations.CreateInput{
+			Type:        "vm.provision",
+			TargetType:  "vm",
+			TargetLabel: req.Hostname,
+			Message:     "queued",
+			Details: map[string]any{
+				"tier":          req.Tier,
+				"os":            req.OSTemplate,
+				"public_tunnel": req.PublicTunnel,
+				"gpu":           req.EnableGPU,
+			},
+		})
+		if err == nil {
+			opID = op.ID
+			// Surface the id as the first NDJSON line so the SPA can
+			// store it for re-attach. Fast clients see it before the
+			// first progress event lands.
+			writeLine(map[string]any{
+				"type":         "operation_id",
+				"operation_id": op.ID,
+			})
+			_ = h.ops.Start(r.Context(), op.ID)
+		}
+	}
+
+	// Detach the provision from the request ctx so a tab close doesn't
+	// kill the work. The reporter writes to BOTH the NDJSON stream
+	// (best-effort while the request is open) and the op row (so the
+	// re-attach poll has a current message regardless of stream state).
+	// 30-min cap matches the worst-case provision (4-OS image download
+	// on a slow link + cloud-init + tunnel bootstrap).
+	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	reqCtx := r.Context()
+	reporter := func(evt provision.ProgressEvent) {
+		if h.ops != nil && opID > 0 {
+			_ = h.ops.UpdateMessage(bgCtx, opID, evt.Label)
+		}
+		// Best-effort NDJSON push — the underlying socket may be
+		// closed if the client tab went away. The Encode call
+		// silently fails in that case, which is what we want.
+		if reqCtx.Err() == nil {
+			writeLine(map[string]any{
+				"type":  "progress",
+				"step":  evt.Step,
+				"label": evt.Label,
+			})
+		}
+	}
+
+	res, err := h.svc.Provision(bgCtx, provision.Request{
 		Hostname:         req.Hostname,
 		Tier:             req.Tier,
 		RequiredTags:     req.RequiredTags,
@@ -184,11 +242,25 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 			Success:  false,
 			ErrorMsg: err.Error(),
 		})
-		writeLine(map[string]any{
-			"type":    "error",
-			"code":    classifyProvisionError(err),
-			"message": err.Error(),
-		})
+		if h.ops != nil && opID > 0 {
+			// Persist the structured failure code BEFORE Finish so the
+			// SPA's terminal-state read sees both the human message
+			// and the machine-readable code.
+			if buf, jerr := json.Marshal(map[string]any{
+				"failure_code":    classifyProvisionError(err),
+				"failure_message": err.Error(),
+			}); jerr == nil {
+				_ = h.ops.UpdateDetails(bgCtx, opID, string(buf))
+			}
+			_ = h.ops.Finish(bgCtx, opID, operations.StateFailed, err.Error())
+		}
+		if reqCtx.Err() == nil {
+			writeLine(map[string]any{
+				"type":    "error",
+				"code":    classifyProvisionError(err),
+				"message": err.Error(),
+			})
+		}
 		return
 	}
 	h.audit.Record(r.Context(), audit.Event{
@@ -205,10 +277,32 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		},
 		Success: true,
 	})
-	writeLine(map[string]any{
-		"type": "result",
-		"data": res,
-	})
+	if h.ops != nil && opID > 0 {
+		// Bake a redacted view of the result into details so a
+		// re-attach poll has the summary fields without re-fetching
+		// the VM. SSHPrivateKey is intentionally omitted — it's
+		// one-time-show only and re-attach must not surface it.
+		if buf, jerr := json.Marshal(map[string]any{
+			"db_id":    res.ID,
+			"vmid":     res.VMID,
+			"hostname": res.Hostname,
+			"ip":       res.IP,
+			"node":     res.Node,
+			"tier":     res.Tier,
+			"os":       res.OS,
+			"warning":  res.Warning,
+		}); jerr == nil {
+			_ = h.ops.UpdateDetails(bgCtx, opID, string(buf))
+		}
+		_ = h.ops.Finish(bgCtx, opID, operations.StateSucceeded,
+			fmt.Sprintf("provisioned %s on %s", res.Hostname, res.Node))
+	}
+	if reqCtx.Err() == nil {
+		writeLine(map[string]any{
+			"type": "result",
+			"data": res,
+		})
+	}
 }
 
 // classifyProvisionError tags the failure for the frontend so it can
