@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
+import NodeImpactPanel, {
+  type NodeProjectionRow,
+} from '@/components/ui/NodeImpactPanel'
+import { pct, severityOf } from '@/lib/nodeImpact'
 import {
   adminMigrateVM,
   getMigratePlan,
@@ -54,12 +58,11 @@ type Props = {
 
 type View = 'picker' | 'busy' | 'confirm-offline' | 'error'
 
-interface Projection {
-  node: string
-  currentRamPct: number
-  plannedRamPct: number
-  severity: 'ok' | 'caution' | 'high'
-}
+// Projection — shape consumed by NodeImpactPanel. Aliased so the
+// rest of the file reads naturally; kept distinct from the shared
+// type only because the migrate-specific math here doesn't need
+// vmDelta (always ±1, baked into the panel call site).
+type Projection = NodeProjectionRow
 
 export default function MigrateVMModal({ vm, initialOpID, onClose, onMigrated }: Props) {
   const [view, setView] = useState<View>(initialOpID ? 'busy' : 'picker')
@@ -456,7 +459,12 @@ function PickerBody({
       )}
 
       {target && sourceProjection && targetProjection && (
-        <NodeImpactPanel source={sourceProjection} target={targetProjection} />
+        <NodeImpactPanel
+          rows={[
+            { ...sourceProjection, vmDelta: -1 },
+            { ...targetProjection, vmDelta: 1 },
+          ]}
+        />
       )}
 
       {busy && (
@@ -482,56 +490,6 @@ function PickerBody({
         </Button>
       </div>
     </>
-  )
-}
-
-// NodeImpactPanel renders a two-row "source loses, target gains"
-// summary styled like the drain plan's AggregatePanel — same visual
-// vocabulary so operators reading the migrate modal recognize the
-// pattern from drain. Severity coloring (high/caution/ok) matches the
-// backend's >85 / >60 thresholds.
-function NodeImpactPanel({
-  source,
-  target,
-}: {
-  source: Projection
-  target: Projection
-}) {
-  return (
-    <div className="mt-5 mb-3 p-3.5 rounded-[10px] bg-[rgba(20,18,28,0.03)] border border-line-2">
-      <div className="text-[11px] uppercase tracking-wider text-ink-3 mb-2 font-mono">
-        Node impact
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <ImpactRow row={source} delta="loses" />
-        <ImpactRow row={target} delta="gains" />
-      </div>
-    </div>
-  )
-}
-
-function ImpactRow({ row, delta }: { row: Projection; delta: 'gains' | 'loses' }) {
-  const color =
-    row.severity === 'high'
-      ? 'var(--bad)'
-      : row.severity === 'caution'
-        ? 'var(--warn)'
-        : 'var(--ink-body)'
-  const arrow = delta === 'gains' ? '+' : '−'
-  return (
-    <div
-      style={{ color }}
-      className="flex justify-between items-baseline gap-3 text-[12px] font-mono"
-    >
-      <span>
-        <strong className="text-ink">{row.node}</strong>{' '}
-        <span className="text-ink-3">({arrow}1 VM)</span>
-      </span>
-      <span>
-        RAM {row.plannedRamPct.toFixed(0)}%{' '}
-        <span className="text-ink-3">(was {row.currentRamPct.toFixed(0)}%)</span>
-      </span>
-    </div>
   )
 }
 
@@ -574,13 +532,3 @@ function OfflineConfirmBody({
   )
 }
 
-function pct(used: number, total: number): number {
-  if (total <= 0) return 0
-  return (used / total) * 100
-}
-
-function severityOf(ramPct: number): 'ok' | 'caution' | 'high' {
-  if (ramPct > 85) return 'high'
-  if (ramPct > 60) return 'caution'
-  return 'ok'
-}

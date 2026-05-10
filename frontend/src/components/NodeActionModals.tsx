@@ -15,6 +15,7 @@ import type {
   PlannedMigration,
 } from '@/api/client'
 import type { NodeView } from '@/types'
+import NodeImpactPanel from '@/components/ui/NodeImpactPanel'
 
 // CordonModal collects a free-text reason (optional) and flips the node's
 // lock state. Used for both directions — cordoning a none-state node and
@@ -433,7 +434,16 @@ export function DrainPlanModal({
       )}
 
       {phase === 'plan' && plan && liveAggregate.length > 0 && (
-        <AggregatePanel rows={liveAggregate} />
+        <NodeImpactPanel
+          label="Aggregate impact"
+          rows={liveAggregate.map((r) => ({
+            node: r.node,
+            currentRamPct: r.current_ram_pct,
+            plannedRamPct: r.planned_ram_pct,
+            severity: r.severity,
+            vmDelta: r.planned_vm_count - r.current_vm_count,
+          }))}
+        />
       )}
 
       {phase === 'plan' && plan && plan.migrations.length > 0 && (
@@ -555,37 +565,6 @@ function PlanTable({
           })}
         </tbody>
       </table>
-    </div>
-  )
-}
-
-function AggregatePanel({ rows }: { rows: NodeProjection[] }) {
-  return (
-    <div
-      style={{
-        padding: '12px 14px',
-        background: 'rgba(20,18,28,0.03)',
-        border: '1px solid var(--line)',
-        borderRadius: 10,
-        marginBottom: 14,
-      }}
-    >
-      <div style={{ fontSize: 11, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-        Aggregate impact
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {rows.map((r) => {
-          const color = r.severity === 'high' ? 'var(--err)'
-            : r.severity === 'caution' ? 'var(--warn)'
-              : 'var(--ink-body)'
-          return (
-            <div key={r.node} style={{ fontSize: 12, color, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-              <span><strong>{r.node}</strong> — {r.planned_vm_count} VMs (was {r.current_vm_count})</span>
-              <span>RAM {r.planned_ram_pct.toFixed(0)}% (was {r.current_ram_pct.toFixed(0)}%)</span>
-            </div>
-          )
-        })}
-      </div>
     </div>
   )
 }
