@@ -1093,11 +1093,17 @@ function VMTable({
             const map = new Map(allVMs.map((v) => [v.id, v]))
             return Array.from(selectedIDs)
               .map((id) => map.get(id))
-              .filter((v): v is ClusterVM => v !== undefined && v.id !== undefined)
+              .filter((v): v is ClusterVM =>
+                v !== undefined &&
+                v.id !== undefined &&
+                v.tier !== undefined &&
+                v.tier !== 'custom',
+              )
               .map((v) => ({
                 id: v.id!,
                 hostname: v.hostname || v.name,
                 node: v.node,
+                tier: v.tier as TierName,
               }))
           })()}
           onClose={() => setBulkMigrateOpen(false)}
