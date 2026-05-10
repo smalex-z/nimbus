@@ -81,6 +81,19 @@ func (f *fakeGopher) ListTunnelsForMachine(_ context.Context, _ string) ([]tunne
 	copy(out, f.listTunnels)
 	return out, nil
 }
+func (f *fakeGopher) ListTunnels(_ context.Context) ([]tunnel.Tunnel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listTunnelsErr != nil {
+		return nil, f.listTunnelsErr
+	}
+	out := make([]tunnel.Tunnel, len(f.listTunnels))
+	copy(out, f.listTunnels)
+	return out, nil
+}
+func (f *fakeGopher) DeleteTunnel(_ context.Context, _ string) error {
+	return nil
+}
 
 // TestMarkFailed_DeletesMachineAndWipesRow covers the happy cleanup
 // path: a failed bootstrap with a registered Gopher machine deletes
@@ -271,6 +284,126 @@ func TestAdoptCreatedTunnel(t *testing.T) {
 			}
 			if got.ID != tc.wantID {
 				t.Errorf("got tunnel %s, want %s", got.ID, tc.wantID)
+			}
+		})
+	}
+}
+
+// recordingGopher extends fakeGopher with capture+script support for
+// the takeover-on-409 path. CreateTunnel returns a scripted error the
+// first time and a scripted result on the retry; DeleteTunnel records
+// the id deleted so the test can assert the conflicting tunnel was
+// removed before the retry.
+type recordingGopher struct {
+	fakeGopher
+	createCalls    int
+	createErrFirst error
+	createResult   *tunnel.Tunnel
+	deletedTunnels []string
+}
+
+func (g *recordingGopher) CreateTunnel(_ context.Context, _ tunnel.CreateTunnelRequest) (*tunnel.Tunnel, error) {
+	g.mu.Lock()
+	g.createCalls++
+	call := g.createCalls
+	g.mu.Unlock()
+	if call == 1 && g.createErrFirst != nil {
+		return nil, g.createErrFirst
+	}
+	return g.createResult, nil
+}
+func (g *recordingGopher) DeleteTunnel(_ context.Context, id string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.deletedTunnels = append(g.deletedTunnels, id)
+	return nil
+}
+
+// TestReplaceConflictingTunnel covers the takeover path: when
+// CreateTunnel returns 409 "subdomain already exists", we list every
+// tunnel cluster-wide, delete the one bound to that subdomain, and
+// retry under our machine. Operator workflow: they manually set up a
+// Gopher tunnel earlier, now want Nimbus to take it over by saving
+// the same subdomain.
+func TestReplaceConflictingTunnel_DeletesOrphanAndRetries(t *testing.T) {
+	t.Parallel()
+	conflict := tunnel.Tunnel{
+		ID:         "t-orphan",
+		MachineID:  "m-old",
+		Subdomain:  "nimbus",
+		TargetPort: 8080,
+	}
+	created := &tunnel.Tunnel{
+		ID:         "t-new",
+		MachineID:  "m-new",
+		Subdomain:  "nimbus",
+		TargetPort: 8080,
+		TunnelURL:  "https://nimbus.altsuite.co",
+	}
+	g := &recordingGopher{
+		fakeGopher: fakeGopher{
+			listTunnels: []tunnel.Tunnel{conflict},
+		},
+		createResult: created,
+	}
+	svc := &Service{gopher: g, nimbusPort: 8080}
+
+	got, err := svc.replaceConflictingTunnel(context.Background(), "m-new", "nimbus", 8080)
+	if err != nil {
+		t.Fatalf("replaceConflictingTunnel: %v", err)
+	}
+	if got == nil || got.ID != "t-new" {
+		t.Fatalf("expected new tunnel t-new, got %+v", got)
+	}
+	if len(g.deletedTunnels) != 1 || g.deletedTunnels[0] != "t-orphan" {
+		t.Errorf("expected DeleteTunnel(t-orphan), got %v", g.deletedTunnels)
+	}
+	if g.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1 (the retry)", g.createCalls)
+	}
+}
+
+// TestReplaceConflictingTunnel_NoMatch surfaces the bail path: 409
+// happened but our list doesn't show the conflicting subdomain (race
+// or scope mismatch). Surface the situation rather than blindly retry
+// into another 409.
+func TestReplaceConflictingTunnel_NoMatch_Errors(t *testing.T) {
+	t.Parallel()
+	g := &recordingGopher{
+		fakeGopher: fakeGopher{listTunnels: []tunnel.Tunnel{}},
+	}
+	svc := &Service{gopher: g, nimbusPort: 8080}
+
+	_, err := svc.replaceConflictingTunnel(context.Background(), "m-new", "nimbus", 8080)
+	if err == nil {
+		t.Fatal("expected error when conflict not found in tunnel list")
+	}
+	if len(g.deletedTunnels) != 0 {
+		t.Errorf("should not have deleted anything when no conflict found; deleted=%v", g.deletedTunnels)
+	}
+}
+
+// TestIsSubdomainConflict covers the predicate that decides whether
+// to enter the takeover path.
+func TestIsSubdomainConflict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"409 subdomain", &tunnel.HTTPError{Status: 409, Body: "subdomain already exists"}, true},
+		{"409 case-insensitive", &tunnel.HTTPError{Status: 409, Body: "Subdomain conflict"}, true},
+		{"409 not subdomain", &tunnel.HTTPError{Status: 409, Body: "machine not found"}, false},
+		{"500 subdomain", &tunnel.HTTPError{Status: 500, Body: "subdomain database error"}, false},
+		{"plain error", errors.New("something else"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSubdomainConflict(tc.err); got != tc.want {
+				t.Errorf("isSubdomainConflict(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
