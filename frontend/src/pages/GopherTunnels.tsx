@@ -85,10 +85,15 @@ function GopherPanel() {
     }
   }
 
-  // credentialsSaved gates the password "leave blank to keep" hint and
-  // the Save→modal flow above. tunnelActive drives the visible
-  // "Configured" pill — saved creds with a failed bootstrap reads as
-  // not-configured per the explicit user-facing meaning.
+  // Two distinct concepts, two distinct pills:
+  //  - credentialsSaved: api_url + api_key are stored. Operators
+  //    intuit "I configured this" the moment they save creds.
+  //  - tunnelActive: the dashboard's own cloud tunnel is up. This
+  //    is downstream of credentialsSaved (requires the self-bootstrap
+  //    to install rathole on the host + register the tunnel).
+  // Showing only the latter under one "configured" label was
+  // misleading: a successful save with a still-pending bootstrap
+  // read as "not configured" even though creds were obviously stored.
   const credentialsSaved = settings?.credentials_saved ?? false
   const tunnelActive = settings?.tunnel_active ?? false
 
@@ -97,27 +102,14 @@ function GopherPanel() {
       className="glass"
       style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
           Gopher tunnels
         </span>
-        {tunnelActive ? (
-          <span className="n-pill n-pill-ok">
-            <span className="n-pill-dot" />
-            configured
-          </span>
-        ) : (
-          <span
-            className="n-pill"
-            style={{
-              color: 'var(--ink-mute)',
-              background: 'rgba(20,18,28,0.04)',
-              border: '1px solid var(--line)',
-            }}
-          >
-            not configured
-          </span>
-        )}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <StatusPill ok={credentialsSaved} okText="credentials saved" muteText="no credentials" />
+          <StatusPill ok={tunnelActive} okText="cloud tunnel active" muteText="cloud tunnel inactive" />
+        </div>
       </div>
 
       <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
@@ -206,6 +198,34 @@ function GopherPanel() {
       </form>
       {bootstrapOpen && <SelfBootstrapModal onClose={() => setBootstrapOpen(false)} />}
     </div>
+  )
+}
+
+// StatusPill — shared shape for the credentials-saved / cloud-tunnel-
+// active indicators. ok=true renders the green dot pill; ok=false
+// renders the muted/neutral pill. Two pills sit side-by-side so the
+// distinction between "creds stored" and "tunnel actually live" is
+// visible at a glance instead of collapsed into one ambiguous label.
+function StatusPill({ ok, okText, muteText }: { ok: boolean; okText: string; muteText: string }) {
+  if (ok) {
+    return (
+      <span className="n-pill n-pill-ok">
+        <span className="n-pill-dot" />
+        {okText}
+      </span>
+    )
+  }
+  return (
+    <span
+      className="n-pill"
+      style={{
+        color: 'var(--ink-mute)',
+        background: 'rgba(20,18,28,0.04)',
+        border: '1px solid var(--line)',
+      }}
+    >
+      {muteText}
+    </span>
   )
 }
 

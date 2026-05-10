@@ -100,6 +100,8 @@ type gopherClient interface {
 	GetMachine(ctx context.Context, id string) (*tunnel.Machine, error)
 	DeleteMachine(ctx context.Context, id string) error
 	CreateTunnel(ctx context.Context, req tunnel.CreateTunnelRequest) (*tunnel.Tunnel, error)
+	DeleteTunnel(ctx context.Context, id string) error
+	ListTunnels(ctx context.Context) ([]tunnel.Tunnel, error)
 	ListTunnelsForMachine(ctx context.Context, machineID string) ([]tunnel.Tunnel, error)
 }
 
@@ -268,11 +270,25 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		// finds a broken half-state. Try to adopt a matching tunnel that
 		// the server has by listing first; only fail if nothing matches.
 		adopted, aerr := s.adoptCreatedTunnel(ctx, machine.ID, subdomain, s.nimbusPort)
-		if aerr != nil || adopted == nil {
+		if aerr == nil && adopted != nil {
+			log.Printf("self-bootstrap: adopted existing tunnel %s for machine %s after CreateTunnel error: %v", adopted.ID, machine.ID, err)
+			t = adopted
+		} else if isSubdomainConflict(err) {
+			// 409 with subdomain-already-exists: a previous Nimbus run
+			// (or another Nimbus pointed at this Gopher) registered a
+			// machine + tunnel under the same subdomain, then died /
+			// re-registered. The orphan tunnel sits attached to a stale
+			// machine_id our adopt-by-machine logic can't see. Find it
+			// across ALL tunnels, delete it, then retry CreateTunnel —
+			// the operator chose this subdomain, they own it.
+			retried, rerr := s.replaceConflictingTunnel(ctx, machine.ID, subdomain, s.nimbusPort)
+			if rerr != nil {
+				return fmt.Errorf("create tunnel (after subdomain conflict): %w", rerr)
+			}
+			t = retried
+		} else {
 			return fmt.Errorf("create tunnel: %w", err)
 		}
-		log.Printf("self-bootstrap: adopted existing tunnel %s for machine %s after CreateTunnel error: %v", adopted.ID, machine.ID, err)
-		t = adopted
 	}
 
 	// Step 5 — record success.
@@ -283,6 +299,64 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		CloudBootstrapState: StateActive,
 		CloudBootstrapError: "",
 	})
+}
+
+// isSubdomainConflict matches Gopher's 409 + "subdomain already exists"
+// shape. CreateTunnel surfaces this when the operator picked a
+// subdomain that's already attached to a different machine — most
+// often a manually-configured tunnel they want Nimbus to take over,
+// or an orphan from a previous Nimbus run that re-registered as a
+// new machine. Either way, the takeover path replaces it.
+func isSubdomainConflict(err error) bool {
+	var he *tunnel.HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.Status != 409 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(he.Body), "subdomain")
+}
+
+// replaceConflictingTunnel handles the takeover-on-409 case. Lists
+// every tunnel on Gopher, finds the one bound to `subdomain`, deletes
+// it, then retries CreateTunnel under our `machineID`. The operator
+// implicitly opted into this by re-saving with the conflicting
+// subdomain — we treat their save as an "I own this subdomain"
+// declaration. Returns the freshly-created tunnel; surfaces any
+// retry/list failure verbatim so the operator sees what blocked it.
+func (s *Service) replaceConflictingTunnel(ctx context.Context, machineID, subdomain string, port int) (*tunnel.Tunnel, error) {
+	all, err := s.gopher.ListTunnels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list tunnels: %w", err)
+	}
+	var conflicting *tunnel.Tunnel
+	for i := range all {
+		if all[i].Subdomain == subdomain {
+			conflicting = &all[i]
+			break
+		}
+	}
+	if conflicting == nil {
+		// 409 came back but the conflict isn't visible in our list —
+		// could be a race or a Gopher account-scope mismatch. Bail
+		// rather than blindly retry into the same 409.
+		return nil, fmt.Errorf("subdomain %q reported as conflicting but not found in tunnels list", subdomain)
+	}
+	log.Printf("self-bootstrap: replacing conflicting tunnel %s (subdomain=%s, machine=%s) with one owned by machine %s",
+		conflicting.ID, subdomain, conflicting.MachineID, machineID)
+	if err := s.gopher.DeleteTunnel(ctx, conflicting.ID); err != nil {
+		return nil, fmt.Errorf("delete conflicting tunnel %s: %w", conflicting.ID, err)
+	}
+	t, err := s.gopher.CreateTunnel(ctx, tunnel.CreateTunnelRequest{
+		MachineID:  machineID,
+		TargetPort: port,
+		Subdomain:  subdomain,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retry create tunnel after delete: %w", err)
+	}
+	return t, nil
 }
 
 // adoptCreatedTunnel checks Gopher for a tunnel matching the parameters

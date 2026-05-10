@@ -887,7 +887,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 			tunnelError = "Guest agent did not confirm readiness — bootstrap skipped." +
 				" Re-run manually once the VM is up:\n  curl " + machineObj.BootstrapURL + " | sh"
 		default:
-			if berr := runTunnelBootstrap(ctx, s.px, target, newVMID, machineObj.BootstrapURL, req.Hostname); berr != nil {
+			if berr := runTunnelBootstrap(ctx, s.px, target, newVMID, machineObj.BootstrapURL, req.Hostname, username); berr != nil {
 				log.Printf("tunnel: bootstrap failed: %v", berr)
 				tunnelError = "tunnel bootstrap failed: " + berr.Error()
 			} else {

@@ -44,20 +44,26 @@ const (
 // path is virtio-serial through the host hypervisor, so this works
 // identically on vmbr0 and on isolated SDN subnets.
 //
-// machineName is exported as GOPHER_MACHINE_NAME so the bootstrap script
-// skips its interactive `/dev/tty` prompt — there's no PTY here.
+// machineName is exported as GOPHER_MACHINE_NAME and sshUser as
+// GOPHER_SSH_USER so the bootstrap script skips its interactive
+// `/dev/tty` prompts — there's no PTY here. Both are required by
+// Gopher's POST /machines/register or it 400s with
+// "token, name, and username are required".
 //
 // Returns nil on success; any non-zero exit + the captured stdout/stderr
 // is wrapped into the error so the caller can record it on tunnel_error.
-func runTunnelBootstrap(ctx context.Context, px AgentRunner, node string, vmid int, bootstrapURL, machineName string) error {
+func runTunnelBootstrap(ctx context.Context, px AgentRunner, node string, vmid int, bootstrapURL, machineName, sshUser string) error {
 	if bootstrapURL == "" {
 		return errors.New("empty bootstrap URL")
 	}
+	if sshUser == "" {
+		return errors.New("empty SSH user (cloud-init default user is required by gopher's machine register)")
+	}
 
-	// Single-quote URL + machine name so the shell doesn't interpret
-	// special characters from Gopher's path (tokens) or the hostname.
-	// Set GOPHER_MACHINE_NAME on the receiving shell — the script reads
-	// it before it would otherwise prompt over /dev/tty.
+	// Single-quote URL + machine name + ssh user so the shell doesn't
+	// interpret special characters from Gopher's path (tokens) or the
+	// values. Set both env vars on the receiving shell — the script
+	// reads them before it would otherwise prompt over /dev/tty.
 	//
 	// Download then exec, instead of `curl ... | sh`. The pipe form was
 	// silently masking curl failures: if curl exits non-zero (4xx, DNS
@@ -72,7 +78,8 @@ func runTunnelBootstrap(ctx context.Context, px AgentRunner, node string, vmid i
 		"set -e",
 		"_T=$(mktemp)",
 		fmt.Sprintf("curl -fsSL %s -o \"$_T\"", quote(bootstrapURL)),
-		fmt.Sprintf("GOPHER_MACHINE_NAME=%s sh \"$_T\"", quote(machineName)),
+		fmt.Sprintf("GOPHER_MACHINE_NAME=%s GOPHER_SSH_USER=%s sh \"$_T\"",
+			quote(machineName), quote(sshUser)),
 		"_RC=$?",
 		"rm -f \"$_T\"",
 		// Verify the rathole client unit came up. Without this the
