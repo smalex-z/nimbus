@@ -51,6 +51,11 @@ type SDNClient interface {
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
 	DeleteSDNSubnet(ctx context.Context, vnet, subnetID string) error
 	ApplySDN(ctx context.Context) error
+	// ReloadNodeNetwork blocks on a per-node ifreload UPID. ApplySDN
+	// alone returns before the cluster's per-node bridge creation
+	// completes — qmstart on the freshly-created VM races the reload
+	// and fails with "bridge ... does not exist" without this.
+	ReloadNodeNetwork(ctx context.Context, node string) error
 }
 
 // Config is the deployment-specific knobs the Service needs.
@@ -266,13 +271,55 @@ func (s *Service) tryInsertRow(ctx context.Context, vmID uint, salt, node string
 	return row, nil
 }
 
-// bootstrapPVE creates the per-VM PVE state. Failure mode: if any
-// step partially succeeds and the next fails, we leave the orphan
-// in place — the caller-level rollback (DeleteRow above) plus the
-// admin-facing Reset endpoint cover recovery. We don't try to walk
-// back partial PVE state inline because it'd just generate another
-// failure mode without simplifying the caller.
+// bootstrapPVE creates the per-VM PVE state and waits for the
+// target-node bridge to actually come up before returning. Two pieces
+// of correctness the original implementation skimped on:
+//
+//  1. Race-free bridge readiness. ApplySDN dispatches an *async*
+//     cluster-wide ifreload task and returns immediately. The caller
+//     (provision.Service) then runs qmstart on `row.Node`, which
+//     fails with "bridge ... does not exist" if ifupdown2 hasn't
+//     created the bridge on that node yet. ReloadNodeNetwork blocks
+//     on the per-node UPID, so by the time bootstrapPVE returns the
+//     bridge is genuinely up. Same pattern gateway.Provision uses
+//     before StartLXC ([gateway/service.go:329-336]).
+//
+//  2. Partial-state walkback on failure. Earlier this function
+//     leaked PVE artifacts whenever any step after CreateSDNZone
+//     errored — the comment said "we don't try to walk back partial
+//     PVE state inline" but the trade-off was wrong: the orphans
+//     accumulate forever (zones pinned to nodes that may not even
+//     exist anymore). On any error we now reverse-delete whatever
+//     we successfully created and re-apply, so the operator's next
+//     retry isn't blocked by phantom collisions.
 func (s *Service) bootstrapPVE(ctx context.Context, row *db.StandaloneVMNetwork) error {
+	// Track what got created so the rollback knows what to walk back
+	// when a later step fails.
+	var (
+		zoneCreated   bool
+		vnetCreated   bool
+		subnetCreated bool
+	)
+	rollback := func(reason error) error {
+		// Best-effort reverse delete + apply. Errors are folded into
+		// the original failure as wrapped context — the operator
+		// sees the root cause AND any cleanup-side surprise.
+		if subnetCreated {
+			subnetID := proxmox.FormatSDNSubnetID(row.ZoneName, row.SubnetCIDR)
+			_ = s.px.DeleteSDNSubnet(ctx, row.VNetName, subnetID)
+		}
+		if vnetCreated {
+			_ = s.px.DeleteSDNVNet(ctx, row.VNetName)
+		}
+		if zoneCreated {
+			_ = s.px.DeleteSDNZone(ctx, row.ZoneName)
+		}
+		// Apply so the deletions land in the running config; if this
+		// fails the next ApplySDN from any source will catch it.
+		_ = s.px.ApplySDN(ctx)
+		return reason
+	}
+
 	// Simple zones are host-local — only the node that runs the VM
 	// needs the bridge. Pin via Nodes= so PVE doesn't auto-create
 	// the bridge on every other cluster member (cleaner UI, fewer
@@ -284,29 +331,36 @@ func (s *Service) bootstrapPVE(ctx context.Context, row *db.StandaloneVMNetwork)
 	}); err != nil {
 		return fmt.Errorf("create zone %s: %w", row.ZoneName, err)
 	}
+	zoneCreated = true
 	if err := s.px.CreateSDNVNet(ctx, proxmox.SDNVNet{
 		VNet: row.VNetName,
 		Zone: row.ZoneName,
 	}); err != nil {
-		return fmt.Errorf("create vnet %s: %w", row.VNetName, err)
+		return rollback(fmt.Errorf("create vnet %s: %w", row.VNetName, err))
 	}
+	vnetCreated = true
 	if err := s.px.CreateSDNSubnet(ctx, proxmox.SDNSubnet{
 		Subnet:  row.SubnetCIDR,
 		VNet:    row.VNetName,
 		Gateway: row.GatewayIP,
 		SNAT:    true, // PVE handles MASQUERADE on the per-host bridge
 	}); err != nil {
-		return fmt.Errorf("create subnet %s: %w", row.SubnetCIDR, err)
+		return rollback(fmt.Errorf("create subnet %s: %w", row.SubnetCIDR, err))
 	}
+	subnetCreated = true
 	if err := s.px.ApplySDN(ctx); err != nil {
-		return fmt.Errorf("apply sdn: %w", err)
+		return rollback(fmt.Errorf("apply sdn: %w", err))
 	}
-	// ApplySDN itself triggers cluster-wide ifreload via PVE's
-	// "Reload network configuration on all nodes" task. We don't
-	// chase it with an explicit per-node reload anymore — that
-	// doubled the reload count for every provision. If a fresh
-	// node ever needs a manual nudge, `ifreload -a` on the host
-	// is the one-shot recovery.
+	// ApplySDN's cluster-wide reload is async — block on the
+	// target-node reload UPID so the bridge exists before the
+	// caller fires qmstart. Without this the provision races a
+	// background ifupdown task and dies with "bridge does not
+	// exist" intermittently. The redundant cluster reload (the
+	// reason this was originally removed) is the cost of
+	// correctness.
+	if err := s.px.ReloadNodeNetwork(ctx, row.Node); err != nil {
+		return rollback(fmt.Errorf("reload network on %s: %w", row.Node, err))
+	}
 	return nil
 }
 

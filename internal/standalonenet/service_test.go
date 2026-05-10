@@ -26,6 +26,7 @@ type fakeSDN struct {
 	deleteVNetCalls   int
 	deleteSubnetCalls int
 	applyCalls        int
+	reloadNodeCalls   int
 
 	createZoneErr   error
 	createVNetErr   error
@@ -34,6 +35,7 @@ type fakeSDN struct {
 	deleteVNetErr   error
 	deleteSubnetErr error
 	applyErr        error
+	reloadNodeErr   error
 }
 
 func (f *fakeSDN) CreateSDNZone(_ context.Context, _ proxmox.SDNZone) error {
@@ -78,7 +80,12 @@ func (f *fakeSDN) ApplySDN(_ context.Context) error {
 	f.mu.Unlock()
 	return f.applyErr
 }
-func (f *fakeSDN) ReloadNodeNetwork(_ context.Context, _ string) error { return nil }
+func (f *fakeSDN) ReloadNodeNetwork(_ context.Context, _ string) error {
+	f.mu.Lock()
+	f.reloadNodeCalls++
+	f.mu.Unlock()
+	return f.reloadNodeErr
+}
 
 func newTestSvc(t *testing.T, fake *fakeSDN) *standalonenet.Service {
 	t.Helper()
@@ -137,6 +144,12 @@ func TestProvision_HappyPath(t *testing.T) {
 	if fake.createZoneCalls != 1 || fake.createVNetCalls != 1 || fake.createSubnetCalls != 1 || fake.applyCalls != 1 {
 		t.Errorf("create call counts: zone=%d vnet=%d subnet=%d apply=%d (each want 1)",
 			fake.createZoneCalls, fake.createVNetCalls, fake.createSubnetCalls, fake.applyCalls)
+	}
+	// ReloadNodeNetwork is the per-node sync that closes the
+	// race-against-qmstart hazard. Asserted here so the bridge-readiness
+	// guarantee can't silently regress.
+	if fake.reloadNodeCalls != 1 {
+		t.Errorf("reloadNodeCalls = %d, want 1", fake.reloadNodeCalls)
 	}
 }
 
@@ -199,6 +212,63 @@ func TestProvision_PVEFailureRollsBackRow(t *testing.T) {
 	}
 	if row == nil {
 		t.Fatal("row is nil after successful retry")
+	}
+}
+
+// TestProvision_PVEFailure_RollsBackPartialPVEState asserts that
+// when a step inside bootstrapPVE fails (e.g. CreateSDNSubnet errors
+// after CreateSDNZone + CreateSDNVNet succeeded), the function walks
+// back the partially-created PVE artifacts. Without this rollback,
+// every transient PVE error would leak orphan zones + vnets that an
+// operator has to clean up by hand — see the May 2026 incident where
+// two orphan zones (s6bd79b1, sa4c87bb) accumulated before this
+// regression test was added.
+func TestProvision_PVEFailure_RollsBackPartialPVEState(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{createSubnetErr: errors.New("boom")}
+	svc := newTestSvc(t, fake)
+
+	_, err := svc.Provision(context.Background(), 1, "vm-uuid-1", "alpha")
+	if err == nil {
+		t.Fatalf("expected error from CreateSDNSubnet failure, got nil")
+	}
+	// Zone + VNet were created before the failing subnet step;
+	// rollback must delete each. Subnet was never successfully
+	// created so its delete should NOT fire.
+	if fake.deleteZoneCalls != 1 {
+		t.Errorf("deleteZoneCalls = %d, want 1 (zone created, must be walked back)", fake.deleteZoneCalls)
+	}
+	if fake.deleteVNetCalls != 1 {
+		t.Errorf("deleteVNetCalls = %d, want 1 (vnet created, must be walked back)", fake.deleteVNetCalls)
+	}
+	if fake.deleteSubnetCalls != 0 {
+		t.Errorf("deleteSubnetCalls = %d, want 0 (subnet never created)", fake.deleteSubnetCalls)
+	}
+	// applyCalls counts both the (failed) initial apply AND the
+	// rollback's apply. The initial apply was never reached (subnet
+	// step failed before it), so we expect exactly 1 — from rollback.
+	if fake.applyCalls != 1 {
+		t.Errorf("applyCalls = %d, want 1 (rollback's apply only)", fake.applyCalls)
+	}
+}
+
+// TestProvision_ReloadFailure_RollsBackEverything covers the new
+// per-node reload step: when ReloadNodeNetwork fails (e.g. PVE
+// pve-firewall reload errors out), the entire bootstrapPVE walks
+// back so the operator isn't left with a zone/vnet/subnet that the
+// target node never reloaded.
+func TestProvision_ReloadFailure_RollsBackEverything(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{reloadNodeErr: errors.New("ifreload exit 1")}
+	svc := newTestSvc(t, fake)
+
+	_, err := svc.Provision(context.Background(), 1, "vm-uuid-1", "alpha")
+	if err == nil {
+		t.Fatalf("expected error from ReloadNodeNetwork failure, got nil")
+	}
+	if fake.deleteZoneCalls != 1 || fake.deleteVNetCalls != 1 || fake.deleteSubnetCalls != 1 {
+		t.Errorf("rollback delete counts: zone=%d vnet=%d subnet=%d (each want 1)",
+			fake.deleteZoneCalls, fake.deleteVNetCalls, fake.deleteSubnetCalls)
 	}
 }
 
@@ -452,6 +522,10 @@ func (r *recordingSDN) DeleteSDNSubnet(ctx context.Context, vnet, subnet string)
 func (r *recordingSDN) ApplySDN(ctx context.Context) error {
 	r.record("ApplySDN")
 	return r.fakeSDN.ApplySDN(ctx)
+}
+func (r *recordingSDN) ReloadNodeNetwork(ctx context.Context, node string) error {
+	r.record("ReloadNodeNetwork")
+	return r.fakeSDN.ReloadNodeNetwork(ctx, node)
 }
 
 func newTestSvcWithSDN(t *testing.T, sdn standalonenet.SDNClient) *standalonenet.Service {
