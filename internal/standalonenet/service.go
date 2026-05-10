@@ -67,6 +67,13 @@ type Config struct {
 	// supernet but break the mental model of "this VM has its own
 	// network." Default 24.
 	SubnetSize int
+	// InstanceID namespaces zone names across multiple Nimbus instances
+	// pointed at the same Proxmox cluster. Without it, two instances
+	// derive identical SDN zone names from a recycled vmid and stomp
+	// each other's PVE state — see service.GetOrCreateInstanceID. Empty
+	// is allowed (single-instance dev/prod) and degrades to the legacy
+	// purely-vmid-derived naming.
+	InstanceID string
 }
 
 // Service is the Standalone VM network manager. Provision creates
@@ -152,10 +159,19 @@ func (s *Service) Provision(ctx context.Context, vmID uint, vmIdentifier, node s
 	// DB unique constraints on zone_name and subnet_cidr act as the
 	// collision detector — the salt-and-retry handles birthday hits
 	// without holding application-level locks.
+	//
+	// InstanceID prefix namespaces the salt so two Nimbus instances
+	// against the same PVE cluster (typical in dev) don't both compute
+	// the same zone for a recycled vmid. Empty InstanceID degrades to
+	// legacy naming — fine for single-instance prod.
+	base := vmIdentifier
+	if s.cfg.InstanceID != "" {
+		base = s.cfg.InstanceID + "|" + vmIdentifier
+	}
 	for attempt := 0; attempt < maxCollisionRetries; attempt++ {
-		salt := vmIdentifier
+		salt := base
 		if attempt > 0 {
-			salt = fmt.Sprintf("%s#%d", vmIdentifier, attempt)
+			salt = fmt.Sprintf("%s#%d", base, attempt)
 		}
 		row, err := s.tryInsertRow(ctx, vmID, salt, node)
 		if err == nil {

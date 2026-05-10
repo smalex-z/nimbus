@@ -889,3 +889,15 @@ type NetworkingV1Settings struct {
 	LXCIPPoolEnd   string `gorm:"column:lxc_ip_pool_end;default:''"`
 	LXCStorage     string `gorm:"column:lxc_storage;default:'local-lvm'"`
 }
+
+// InstanceSettings is a singleton (ID=1) holding Nimbus's per-install
+// identity. InstanceID is generated on first boot and persisted; every
+// cluster-shared name Nimbus produces (today: SDN zones in standalonenet,
+// extensible to selftunnel/gopher machine name, future Proxmox tag-based
+// orphan cleanup) mixes it in so two Nimbus instances against the same
+// PVE cluster (typical in dev) don't collide on names that derive from
+// shared inputs like cluster-recycled vmids.
+type InstanceSettings struct {
+	ID         uint   `gorm:"primaryKey"`
+	InstanceID string `gorm:"column:instance_id;not null;default:''"`
+}

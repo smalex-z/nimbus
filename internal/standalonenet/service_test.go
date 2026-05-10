@@ -231,6 +231,62 @@ func TestProvision_CollisionRetriesWithSalt(t *testing.T) {
 	}
 }
 
+// TestProvision_InstanceIDNamespacesZoneNames covers the multi-Nimbus
+// scenario: two Service instances pointed at the same Proxmox cluster
+// must derive different zone names for the same vmid, otherwise they
+// collide on PVE-side state when vmids get recycled. Cluster-shared
+// names need to be namespaced by the per-install InstanceID.
+//
+// Sets up two services (each with their own DB + their own InstanceID)
+// and asserts that Provisioning the same vmid produces distinct zone
+// names. Also pins the back-compat: empty InstanceID matches the
+// legacy purely-vmid-derived naming.
+func TestProvision_InstanceIDNamespacesZoneNames(t *testing.T) {
+	t.Parallel()
+	mk := func(instanceID string) *standalonenet.Service {
+		path := filepath.Join(t.TempDir(), "test.db")
+		database, err := db.New(path, &db.StandaloneVMNetwork{})
+		if err != nil {
+			t.Fatalf("db.New: %v", err)
+		}
+		svc, err := standalonenet.New(&fakeSDN{}, database.DB, standalonenet.Config{
+			PoolCIDR:   "10.128.0.0/9",
+			InstanceID: instanceID,
+		})
+		if err != nil {
+			t.Fatalf("standalonenet.New: %v", err)
+		}
+		return svc
+	}
+
+	rowA, err := mk("alpha-instance").Provision(context.Background(), 1, "vm-1", "alpha")
+	if err != nil {
+		t.Fatalf("instance A Provision: %v", err)
+	}
+	rowB, err := mk("beta-instance").Provision(context.Background(), 1, "vm-1", "alpha")
+	if err != nil {
+		t.Fatalf("instance B Provision: %v", err)
+	}
+	if rowA.ZoneName == rowB.ZoneName {
+		t.Errorf("two instances produced same zone %q for vmid=1; namespacing failed", rowA.ZoneName)
+	}
+
+	// Empty InstanceID falls back to the legacy purely-vmid-derived
+	// naming so single-instance prod isn't disturbed by the change.
+	rowLegacy1, err := mk("").Provision(context.Background(), 1, "vm-1", "alpha")
+	if err != nil {
+		t.Fatalf("legacy 1 Provision: %v", err)
+	}
+	rowLegacy2, err := mk("").Provision(context.Background(), 1, "vm-1", "alpha")
+	if err != nil {
+		t.Fatalf("legacy 2 Provision: %v", err)
+	}
+	if rowLegacy1.ZoneName != rowLegacy2.ZoneName {
+		t.Errorf("legacy mode (empty InstanceID) should be deterministic, got %q vs %q",
+			rowLegacy1.ZoneName, rowLegacy2.ZoneName)
+	}
+}
+
 // TestProvision_ClearsPreSeededOrphan covers the "Destroy was
 // skipped entirely" failure mode directly: a row exists for vmID
 // without ever having gone through Provision in this test, and
