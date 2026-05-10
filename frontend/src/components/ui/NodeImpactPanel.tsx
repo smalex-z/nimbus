@@ -46,9 +46,14 @@ export default function NodeImpactPanel({ rows, label = 'Node impact' }: NodeImp
 }
 
 function ImpactRow({ row }: { row: NodeProjectionRow }) {
+  // Project's CSS variable is named --err (not --bad — Tailwind has
+  // a `bad` color name but no matching CSS var, which silently
+  // rendered as default ink black before this fix). --warn / --ink-body
+  // exist; --err is the red used elsewhere in the app for the same
+  // "danger" meaning.
   const color =
     row.severity === 'high'
-      ? 'var(--bad)'
+      ? 'var(--err)'
       : row.severity === 'caution'
         ? 'var(--warn)'
         : 'var(--ink-body)'
