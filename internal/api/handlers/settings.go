@@ -708,7 +708,7 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 
 	var client *tunnel.Client
 	if settings.APIURL != "" && settings.APIKey != "" {
-		client, err = tunnel.New(settings.APIURL, settings.APIKey, 15*time.Second)
+		client, err = tunnel.New(settings.APIURL, settings.APIKey, 60*time.Second)
 		if err != nil {
 			response.BadRequest(w, "invalid Gopher settings: "+err.Error())
 			return

@@ -439,7 +439,7 @@ func main() {
 		}
 	}
 
-	tunnelClient, err := tunnel.New(gopherSettings.APIURL, gopherSettings.APIKey, 15*time.Second)
+	tunnelClient, err := tunnel.New(gopherSettings.APIURL, gopherSettings.APIKey, 60*time.Second)
 	if err != nil {
 		log.Fatalf("failed to init tunnel client: %v", err)
 	}

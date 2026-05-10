@@ -100,6 +100,7 @@ type gopherClient interface {
 	GetMachine(ctx context.Context, id string) (*tunnel.Machine, error)
 	DeleteMachine(ctx context.Context, id string) error
 	CreateTunnel(ctx context.Context, req tunnel.CreateTunnelRequest) (*tunnel.Tunnel, error)
+	ListTunnelsForMachine(ctx context.Context, machineID string) ([]tunnel.Tunnel, error)
 }
 
 // commandRunner runs a shell command. Real callers use exec.CommandContext;
@@ -261,7 +262,17 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		Subdomain:  subdomain,
 	})
 	if err != nil {
-		return fmt.Errorf("create tunnel: %w", err)
+		// CreateTunnel can succeed server-side and still surface an error
+		// to us — most commonly when Gopher takes longer than the http.Client
+		// timeout to respond. If we tear everything down here, the next save
+		// finds a broken half-state. Try to adopt a matching tunnel that
+		// the server has by listing first; only fail if nothing matches.
+		adopted, aerr := s.adoptCreatedTunnel(ctx, machine.ID, subdomain, s.nimbusPort)
+		if aerr != nil || adopted == nil {
+			return fmt.Errorf("create tunnel: %w", err)
+		}
+		log.Printf("self-bootstrap: adopted existing tunnel %s for machine %s after CreateTunnel error: %v", adopted.ID, machine.ID, err)
+		t = adopted
 	}
 
 	// Step 5 — record success.
@@ -272,6 +283,33 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		CloudBootstrapState: StateActive,
 		CloudBootstrapError: "",
 	})
+}
+
+// adoptCreatedTunnel checks Gopher for a tunnel matching the parameters
+// we just tried to create. Used to recover from CreateTunnel client-side
+// errors where the request actually reached and was processed by Gopher
+// (typical with http.Client timeouts under load).
+//
+// Match criteria: same machine, same target_port, and either an empty
+// configured subdomain (caller didn't pin one) or an exact subdomain
+// match. Returns nil, nil when nothing matches — the caller falls
+// through to the existing failure path.
+func (s *Service) adoptCreatedTunnel(ctx context.Context, machineID, subdomain string, port int) (*tunnel.Tunnel, error) {
+	list, err := s.gopher.ListTunnelsForMachine(ctx, machineID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		t := list[i]
+		if t.TargetPort != port {
+			continue
+		}
+		if subdomain != "" && t.Subdomain != subdomain {
+			continue
+		}
+		return &t, nil
+	}
+	return nil, nil
 }
 
 func (s *Service) waitConnected(ctx context.Context, machineID string) error {
