@@ -1430,35 +1430,6 @@ func (s *AuthService) SaveNetworkingV1Settings(next db.NetworkingV1Settings) err
 	}).Error
 }
 
-// GetOrCreateInstanceID returns this Nimbus install's stable identity,
-// generating + persisting one on first call. Used to namespace
-// cluster-shared names (SDN zones, etc.) so multiple Nimbus instances
-// against the same Proxmox cluster don't collide on names that derive
-// from shared inputs like cluster-recycled vmids. Idempotent.
-//
-// 16 random bytes hex-encoded (32 chars). Not RFC 4122 — we don't need
-// the version/variant bits, just enough entropy that two instances
-// never collide. crypto/rand is the source.
-func (s *AuthService) GetOrCreateInstanceID() (string, error) {
-	var row db.InstanceSettings
-	if err := s.db.FirstOrCreate(&row, db.InstanceSettings{ID: 1}).Error; err != nil {
-		return "", fmt.Errorf("load instance settings: %w", err)
-	}
-	if row.InstanceID != "" {
-		return row.InstanceID, nil
-	}
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate instance id: %w", err)
-	}
-	id := hex.EncodeToString(buf)
-	if err := s.db.Model(&db.InstanceSettings{}).Where("id = ?", 1).
-		Update("instance_id", id).Error; err != nil {
-		return "", fmt.Errorf("persist instance id: %w", err)
-	}
-	return id, nil
-}
-
 // GetGPUSettings returns the GX10 / GPU plane settings, creating an empty
 // row on first call. Empty BaseURL or Enabled=false means the GPU plane is
 // effectively off — VMs receive no inference env vars and the jobs API

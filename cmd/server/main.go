@@ -178,7 +178,6 @@ func main() {
 		&db.VPCMembership{},
 		&db.GatewayLXCIP{},
 		&db.NetworkingV1Settings{},
-		&db.InstanceSettings{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -644,20 +643,6 @@ func main() {
 		log.Printf("startup: reaped %d stuck operation(s)", reaped)
 	}
 
-	// Per-Nimbus-install identity — namespaces cluster-shared names
-	// (today: SDN zones in standalonenet) so two instances pointed at
-	// the same Proxmox cluster don't collide on names that derive from
-	// shared inputs like recycled vmids. Lazy-init on first boot;
-	// persisted afterwards. Failure is non-fatal — we degrade to the
-	// legacy purely-vmid-derived naming, which is fine for single-
-	// instance prod and only collides in multi-instance dev.
-	instanceID, err := authSvc.GetOrCreateInstanceID()
-	if err != nil {
-		log.Printf("warning: instance id init: %v — falling back to vmid-only zone names", err)
-	} else {
-		log.Printf("nimbus instance id: %s", instanceID)
-	}
-
 	// Networking-v1 Standalone primitive — per-VM Simple zone with
 	// PVE-native SNAT. Wired before the legacy vnetmgr so new
 	// provisions default to it; legacy SubnetResolver path remains
@@ -665,8 +650,7 @@ func main() {
 	// during the deprecation window. Construction failure (bad
 	// CIDR) is logged and downgrades to legacy-only mode.
 	standaloneNetSvc, snErr := standalonenet.New(pveClient, database.DB, standalonenet.Config{
-		PoolCIDR:   cfg.StandalonePoolCIDR,
-		InstanceID: instanceID,
+		PoolCIDR: cfg.StandalonePoolCIDR,
 	})
 	if snErr != nil {
 		log.Printf("warning: standalonenet disabled (%v) — provisions fall back to legacy SDN path", snErr)
