@@ -1246,9 +1246,10 @@ function ResultView({ result, onReset }: ResultViewProps) {
         </div>
         {result.console_password && (
           <p className="text-xs text-ink-3 mt-2 leading-relaxed">
-            🔑 The password is a one-time fallback for the Proxmox noVNC console
-            (VMID {result.vmid} → Console). Save it now — it's not stored anywhere
-            and a new one is generated on every provision.
+            🔑 The password logs you into the serial console — use the
+            <strong> Browser console</strong> button below, or VMID {result.vmid} → Console
+            in Proxmox. Save it now — it's not stored anywhere and a new one is
+            generated on every provision.
           </p>
         )}
 
@@ -1282,6 +1283,13 @@ function ResultView({ result, onReset }: ResultViewProps) {
         )}
 
         <div className="flex gap-2.5 justify-end mt-9 flex-wrap">
+          <Button
+            variant="ghost"
+            onClick={() => window.open(`/vms/${result.id}/console`, '_blank', 'noopener')}
+            title="Serial console in the browser — works for VPC-isolated VMs without any tunnel"
+          >
+            ⌨ Browser console
+          </Button>
           {hasTunnel && (
             <Button
               variant="ghost"
