@@ -1703,6 +1703,10 @@ export interface ProxmoxDiscovery {
   is_hypervisor: boolean
   endpoints: DiscoveredEndpoint[]
   suggested_gateway?: string
+  // suggested_prefix_len is the netmask of the host's default-route
+  // interface — picked so VMs can ARP the gateway directly. Auto-fills
+  // the wizard's `Subnet prefix length` field when present.
+  suggested_prefix_len?: number
 }
 
 // discoverProxmoxAdmin hits /api/proxmox/discover (admin-gated). Same
