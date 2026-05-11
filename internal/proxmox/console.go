@@ -124,6 +124,15 @@ func (c *Client) DialConsoleWS(ctx context.Context, node string, vmid, port int,
 // for API tokens PVE returns the full token id (`user@realm!tokenid`)
 // which pve-xtermjs may or may not accept depending on PVE version.
 func ConsoleAuthHandshake(conn *websocket.Conn, user, ticket string) error {
+	// pve-xtermjs's in-band ticket validator may not accept token-format
+	// user IDs (`user@realm!tokenid`). Termproxy assembles the ticket
+	// against the full token ID, but the in-band check is via a helper
+	// that only knows about PAM/PVE users. Strip the `!tokenid` suffix
+	// so the verify side sees the base user. If this also fails, the
+	// fallback is real PAM session-ticket auth.
+	if idx := strings.Index(user, "!"); idx >= 0 {
+		user = user[:idx]
+	}
 	payload := user + ":" + ticket + "\n"
 	tPrefix := ticket
 	if len(tPrefix) > 12 {
