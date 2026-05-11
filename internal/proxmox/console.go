@@ -87,9 +87,13 @@ func (c *Client) DialConsoleWS(ctx context.Context, node string, vmid, port int,
 	q.Set("vncticket", ticket)
 	u.RawQuery = q.Encode()
 
+	// PVE's web UI doesn't set a subprotocol for the serial/term
+	// console — only the noVNC graphical client uses ["binary"]. With
+	// a mismatched subprotocol, PVE accepts the upgrade then closes
+	// the bridge quietly (~3s later when pve-xtermjs times out on the
+	// auth read). Match the web UI by leaving Subprotocols unset.
 	dialer := *websocket.DefaultDialer
 	dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
-	dialer.Subprotocols = []string{"binary"}
 
 	hdr := http.Header{}
 	hdr.Set("Authorization", c.authHdr)
