@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import RFB from '@novnc/novnc/core/rfb.js'
+import RFB from '@novnc/novnc'
 import { openConsoleSession } from '@/api/client'
 
 // Console renders a full-screen graphical console (noVNC) connected to

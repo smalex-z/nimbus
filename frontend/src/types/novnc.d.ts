@@ -1,6 +1,8 @@
 // noVNC 1.7 ships no TypeScript types. We use a small subset of the
-// RFB surface; declare just what Console.tsx touches.
-declare module '@novnc/novnc/core/rfb.js' {
+// RFB surface; declare just what Console.tsx touches. noVNC's
+// package.json exports field maps the root entry to core/rfb.js, so
+// `@novnc/novnc` is the only valid import path.
+declare module '@novnc/novnc' {
   export interface RFBCredentials {
     username?: string
     password?: string
