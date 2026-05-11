@@ -91,6 +91,22 @@ func Run(args []string) {
 		return
 	}
 
+	// If a previous install left state behind (binary + systemd unit
+	// already present), treat bare `install` as upgrade. Users
+	// naturally re-run `install` for a refresh; making them remember
+	// `--upgrade` is friction with no benefit. The upgrade path is a
+	// strict subset of the install steps (no user/env/sudoers churn)
+	// so this is always safe.
+	if alreadyInstalled() {
+		fmt.Println("\nNimbus Upgrade (detected existing install)")
+		fmt.Println("────────────────────────────────────────────────")
+		step("Installing binary", installBinary)
+		step("Writing gopher-bootstrap helper unit", writeGopherHelperUnit)
+		step("Restarting service", startService)
+		fmt.Printf("\n✅ Nimbus upgraded.\n\n")
+		return
+	}
+
 	fmt.Println("\nNimbus Installer")
 	fmt.Println("────────────────────────────────────────────────")
 	step("Creating directories", createDirs)
@@ -105,6 +121,20 @@ func Run(args []string) {
 	ip := primaryIP()
 	fmt.Printf("\n✅ Nimbus installed.\n")
 	fmt.Printf("   Open http://%s:8080 to complete setup.\n\n", ip)
+}
+
+// alreadyInstalled returns true when the install location holds a
+// nimbus binary AND the systemd unit file exists. Used to auto-route
+// bare `install` to the upgrade path so users don't have to remember
+// `--upgrade` when iterating on a running host.
+func alreadyInstalled() bool {
+	if _, err := os.Stat(filepath.Join(installDir, appName)); err != nil {
+		return false
+	}
+	if _, err := os.Stat(serviceFile); err != nil {
+		return false
+	}
+	return true
 }
 
 func selfExecWithSudo() {
@@ -169,8 +199,20 @@ func installBinary() error {
 		return fmt.Errorf("read binary: %w", err)
 	}
 	dest := filepath.Join(installDir, appName)
-	if err := os.WriteFile(dest, data, 0755); err != nil {
-		return fmt.Errorf("write binary: %w", err)
+	// Write to a sibling temp file, then rename atomically. The
+	// direct os.WriteFile(dest, ...) path fails with ETXTBSY ("text
+	// file busy") whenever the destination is the currently-running
+	// binary (the kernel blocks open-for-write on a live exe). A
+	// rename works because the kernel keeps the OLD inode mmap'd
+	// for the running process while the path now points at the new
+	// inode — same trick `cp --remove-destination` uses.
+	tmp := dest + ".new"
+	if err := os.WriteFile(tmp, data, 0755); err != nil {
+		return fmt.Errorf("write tmp binary: %w", err)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("swap binary into place: %w", err)
 	}
 	_ = exec.Command("chown", "-R", serviceUser+":"+serviceUser, dataDir).Run()
 	return nil
