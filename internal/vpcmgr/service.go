@@ -211,6 +211,27 @@ func (s *Service) CreateVPC(ctx context.Context, ownerID uint, name string) (*db
 	}
 }
 
+// ReapStuckProvisioning flips any vpcs.status = 'provisioning' rows to
+// 'error' with a clear message. CreateVPC is synchronous and the
+// status-flip-to-active is its last write; any row still in
+// 'provisioning' when a fresh nimbus process starts means the previous
+// process died mid-create. The PVE-side state may be partial — the
+// operator can delete the row from the UI, which runs the same teardown
+// path as a normal delete (tolerant of missing PVE objects). Returns
+// the number of rows reaped.
+func (s *Service) ReapStuckProvisioning(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).Model(&db.VPC{}).
+		Where("status = ?", "provisioning").
+		Update("status", "error")
+	if res.Error != nil {
+		return 0, fmt.Errorf("reap stuck vpcs: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // DeleteVPC tears down a VPC. Refuses if any VMs are still members.
 // Reverse-order cleanup: gateway LXC → subnet → vnet → zone → row.
 func (s *Service) DeleteVPC(ctx context.Context, vpcID, ownerID uint, isAdmin bool) error {

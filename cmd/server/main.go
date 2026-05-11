@@ -631,16 +631,17 @@ func main() {
 
 	// Background-task registry: Operation rows survive an HTTP request
 	// so the SPA can close a tab and re-attach. On every startup, reap
-	// any non-terminal rows whose work goroutine died with a previous
-	// nimbus process — without this they'd stay "running" forever and
-	// the SPA's poll would never observe a final state. One-hour
-	// staleness is generous: provision is ~10 min worst-case, migrate
-	// 30 min for a busy VM.
+	// any non-terminal rows whose work goroutine died with the previous
+	// nimbus process — by definition there is no live worker for any
+	// op the OLD process owned, so it's safe (and required) to flip
+	// them all on startup. 5s cutoff is just paranoia for clock-skew;
+	// any op heartbeat older than "5s ago when this process started"
+	// is unambiguously orphaned.
 	opsSvc := operations.New(database.DB)
-	if reaped, err := opsSvc.ReapStuck(context.Background(), time.Hour); err != nil {
+	if reaped, err := opsSvc.ReapStuck(context.Background(), 5*time.Second); err != nil {
 		log.Printf("warning: reap stuck operations: %v", err)
 	} else if reaped > 0 {
-		log.Printf("startup: reaped %d stuck operation(s)", reaped)
+		log.Printf("startup: reaped %d stuck operation(s) abandoned by previous nimbus process", reaped)
 	}
 
 	// Networking-v1 Standalone primitive — per-VM Simple zone with
@@ -778,6 +779,19 @@ func main() {
 	}
 	rebuildVPCStack(*v1Settings)
 	_ = vpcStackCurrent // available for future debug surfacing
+
+	// Reap VPCs left in 'provisioning' by a previous nimbus process
+	// that died mid-CreateVPC. Same reasoning as the operations
+	// reaper above: by startup time the work goroutine is dead, so any
+	// row still in 'provisioning' is unambiguously orphaned. Marks
+	// them 'error' so the UI surfaces them and the user can delete.
+	if vpcMgrSvc != nil {
+		if reaped, err := vpcMgrSvc.ReapStuckProvisioning(context.Background()); err != nil {
+			log.Printf("warning: reap stuck VPCs: %v", err)
+		} else if reaped > 0 {
+			log.Printf("startup: marked %d VPC(s) as 'error' (abandoned by previous nimbus process mid-create)", reaped)
+		}
+	}
 
 	// Applier the Settings → Network handler calls on save. Accepts
 	// the freshly-persisted row and rebuilds the gateway + vpcmgr
