@@ -62,6 +62,7 @@ export default function Setup() {
   const [discovering, setDiscovering] = useState(true)
   const [hostAutofilled, setHostAutofilled] = useState(false)
   const [gatewayAutofilled, setGatewayAutofilled] = useState(false)
+  const [prefixAutofilled, setPrefixAutofilled] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testOk, setTestOk] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
@@ -84,6 +85,19 @@ export default function Setup() {
             if (n.gatewayIp) return n
             setGatewayAutofilled(true)
             return { ...n, gatewayIp: d.suggested_gateway! }
+          })
+        }
+        // Auto-fill the prefix length from the host's interface
+        // that owns the default route. Skipped when the user has
+        // already changed it from the default '24', so a manual
+        // override survives discovery races.
+        if (d.suggested_prefix_len && d.suggested_prefix_len > 0) {
+          setNetwork((n) => {
+            if (n.vmPrefixLen !== '24') return n
+            const next = String(d.suggested_prefix_len)
+            if (next === n.vmPrefixLen) return n
+            setPrefixAutofilled(true)
+            return { ...n, vmPrefixLen: next }
           })
         }
       })
@@ -236,9 +250,11 @@ export default function Setup() {
             fields={network}
             onChange={(key, val) => {
               if (key === 'gatewayIp') setGatewayAutofilled(false)
+              if (key === 'vmPrefixLen') setPrefixAutofilled(false)
               setNetwork((n) => ({ ...n, [key]: val }))
             }}
             gatewayAutofilled={gatewayAutofilled}
+            prefixAutofilled={prefixAutofilled}
             onBack={() => setStep('proxmox')}
             onNext={() => setStep('admin')}
           />
@@ -503,11 +519,12 @@ interface NetworkStepProps {
   fields: NetworkFields
   onChange: (key: keyof NetworkFields, value: string) => void
   gatewayAutofilled: boolean
+  prefixAutofilled: boolean
   onBack: () => void
   onNext: () => void
 }
 
-function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: NetworkStepProps) {
+function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, onBack, onNext }: NetworkStepProps) {
   const canNext = !!fields.ipPoolStart && !!fields.ipPoolEnd && !!fields.gatewayIp
   const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
   return (
@@ -562,7 +579,11 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, onBack, onNext }: Ne
           placeholder="24"
           value={fields.vmPrefixLen}
           onChange={(e) => onChange('vmPrefixLen', e.target.value)}
-          hint="CIDR netmask stamped into every VM's cloud-init (24 for /24, 16 for /16, etc.). Default 24 is right for most homelabs; bump it up if your VM bridge spans a larger network."
+          hint={
+            prefixAutofilled
+              ? `Prefix length auto-detected from this host's interface that owns the default route — /${fields.vmPrefixLen} covers your gateway. Override only if you know your VM bridge spans a different subnet.`
+              : "CIDR netmask stamped into every VM's cloud-init (24 for /24, 16 for /16, etc.). Must be wide enough that the gateway IP is in the same subnet as your pool — e.g. pool at 192.168.50.* with gateway 192.168.1.1 needs /16, not /24."
+          }
         />
       </Card>
 

@@ -298,6 +298,13 @@ type discoverResult struct {
 	IsHypervisor     bool                 `json:"is_hypervisor"`
 	Endpoints        []DiscoveredEndpoint `json:"endpoints"`
 	SuggestedGateway string               `json:"suggested_gateway,omitempty"`
+	// SuggestedPrefixLen is the netmask of the host's interface that
+	// owns the default route, when it covers the suggested gateway.
+	// Useful when the operator's LAN spans wider than /24 (e.g.
+	// 192.168.0.0/16 with pool VMs in 192.168.50.* but gateway at
+	// 192.168.1.1 — /24 would make those VMs unable to ARP the
+	// gateway). 0 when undetectable.
+	SuggestedPrefixLen int `json:"suggested_prefix_len,omitempty"`
 }
 
 // Discover handles GET /api/setup/discover (and the admin-side
@@ -327,7 +334,9 @@ type discoverResult struct {
 // @Router      /proxmox/discover [get]
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	result := discoverResult{Endpoints: []DiscoveredEndpoint{}}
-	result.SuggestedGateway = defaultGateway()
+	gw, iface := defaultGatewayAndIface()
+	result.SuggestedGateway = gw
+	result.SuggestedPrefixLen = defaultPrefixLen(iface, gw)
 
 	if _, err := os.Stat("/etc/pve"); err == nil {
 		result.IsHypervisor = true
@@ -640,12 +649,15 @@ func subnetHosts(subnet *net.IPNet) []string {
 	return hosts
 }
 
-// defaultGateway reads the default route from /proc/net/route.
-// The gateway field is a little-endian hex IPv4 address.
-func defaultGateway() string {
+// defaultGatewayAndIface reads the default route from /proc/net/route
+// and returns both the gateway IP (network-order dotted-quad) and the
+// outbound interface name (e.g. "eth0", "vmbr0"). The gateway field
+// is a little-endian hex IPv4 address. Empty returns on any parse
+// failure or no-default-route condition.
+func defaultGatewayAndIface() (gateway, iface string) {
 	f, err := os.Open("/proc/net/route")
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer f.Close() //nolint:errcheck
 
@@ -667,13 +679,60 @@ func defaultGateway() string {
 		for i := range 4 {
 			v, err := strconv.ParseUint(gwHex[i*2:i*2+2], 16, 8)
 			if err != nil {
-				return ""
+				return "", ""
 			}
 			b[3-i] = byte(v) // little-endian → network order
 		}
-		return fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3])
+		return fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]), fields[0]
 	}
-	return ""
+	return "", ""
+}
+
+// defaultPrefixLen returns the CIDR prefix length of the address on
+// `iface` whose subnet contains `gateway`. Used by the install
+// wizard to auto-fill vm_prefix_len so VMs get a netmask wide enough
+// to ARP the gateway directly (a common gotcha on /16 home networks
+// where the host's IP is in 192.168.50.* but the gateway is at
+// 192.168.1.1 — picking /24 silently breaks egress).
+//
+// Returns 0 when:
+//   - iface or gateway is empty
+//   - the interface isn't found
+//   - no IPv4 address on the interface covers the gateway
+//
+// Caller falls back to the SPA's default (24) in that case.
+func defaultPrefixLen(iface, gateway string) int {
+	if iface == "" || gateway == "" {
+		return 0
+	}
+	netIface, err := net.InterfaceByName(iface)
+	if err != nil {
+		return 0
+	}
+	gwIP := net.ParseIP(gateway)
+	if gwIP == nil {
+		return 0
+	}
+	addrs, err := netIface.Addrs()
+	if err != nil {
+		return 0
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ipNet.IP.To4() == nil {
+			continue
+		}
+		if ipNet.Contains(gwIP) {
+			ones, bits := ipNet.Mask.Size()
+			if bits == 32 {
+				return ones
+			}
+		}
+	}
+	return 0
 }
 
 func containsStr(ss []string, s string) bool {
