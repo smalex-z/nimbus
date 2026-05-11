@@ -114,12 +114,12 @@ export default function SSHDetailsModal({ target, onClose }: SSHDetailsModalProp
               variant="ghost"
               onClick={() => window.open(`/vms/${target.dbId}/console`, '_blank', 'noopener')}
             >
-              Open serial console in new tab →
+              Open browser console in new tab →
             </Button>
             <p className="mt-3 text-[12px] text-ink-3 leading-relaxed">
               Routed through the Proxmox host — works for VPC-isolated VMs without a tunnel.
-              Sign in at the getty prompt with your username and the one-time noVNC password
-              shown on the provision result screen.
+              Sign in at the VM's login prompt with your username and the one-time noVNC
+              password shown on the provision result screen.
             </p>
           </div>
         )}

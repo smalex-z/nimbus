@@ -431,9 +431,13 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 					r.Delete("/{id}", vms.Delete)
-					// Serial-console WebSocket relay → xterm.js in the SPA.
-					// Long-lived; no per-request timeout (the upgrade
-					// hijacks the conn). Owner-gated in the handler.
+					// Browser console (noVNC). Two endpoints: POST
+					// /session calls vncproxy and returns ticket+port;
+					// the SPA passes those into the WS query so the
+					// relay can open the matching upstream conn. WS is
+					// long-lived; no per-request timeout (the upgrade
+					// hijacks the conn). Owner-gated in the handlers.
+					r.Post("/{id}/console/session", vms.ConsoleSession)
 					r.Get("/{id}/console/ws", vms.Console)
 					// Power operations on the caller's own VM. Reboot
 					// waits on a Proxmox task — give it some room.

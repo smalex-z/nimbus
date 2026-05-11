@@ -32,10 +32,14 @@ var unannotatedRoutes = map[string]bool{
 	// /api/docs/* serves SwaggerUI itself — intentionally not in the spec.
 	"GET /docs":   true,
 	"GET /docs/*": true,
-	// /vms/{id}/console/ws is a WebSocket upgrade for the serial-console
-	// relay. swag's HTTP request/response model can't describe an upgrade,
-	// and the bidirectional byte stream isn't useful in a REST spec anyway.
-	"GET /vms/{id}/console/ws": true,
+	// /vms/{id}/console/ws is a WebSocket upgrade for the noVNC console
+	// relay. swag's HTTP request/response model can't describe an
+	// upgrade. /console/session is a transient bootstrap that hands the
+	// SPA the ticket+port for the upgrade — annotating it would surface
+	// a short-lived VNC ticket in the public spec, which isn't useful
+	// outside the SPA flow.
+	"GET /vms/{id}/console/ws":       true,
+	"POST /vms/{id}/console/session": true,
 }
 
 // TestOpenAPISpec_ChiRoutesMatchSpec asserts every chi-registered /api/* route

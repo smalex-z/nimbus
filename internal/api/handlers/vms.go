@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/audit"
 	"nimbus/internal/console"
 	"nimbus/internal/ctxutil"
+	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
 	"nimbus/internal/operations"
@@ -557,31 +558,81 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, vm)
 }
 
-// Console proxies a serial-console WebSocket from the browser to the VM
-// via Proxmox's termproxy + vncwebsocket. Owner-gated like Get; admins
-// can also reach it. The browser opens xterm.js on /vms/{id}/console
-// (route in the SPA), which connects WS here.
+// consoleSessionResponse is what the SPA needs to set up a noVNC
+// session: the ticket (used both as the vncticket query param on the
+// WS dial AND as the VNC password during the RFB handshake) and the
+// port PVE allocated for this session.
+type consoleSessionResponse struct {
+	Ticket string `json:"ticket"`
+	Port   int    `json:"port"`
+}
+
+// ConsoleSession handles POST /api/vms/{id}/console/session. Calls
+// vncproxy on the VM's PVE node and returns the ticket + port the SPA
+// hands to noVNC. Owner-gated like Get; admins bypass. The ticket is
+// short-lived (~2 min) — the SPA opens the WS immediately after.
+func (h *VMs) ConsoleSession(w http.ResponseWriter, r *http.Request) {
+	if h.console == nil {
+		response.Error(w, http.StatusServiceUnavailable, "console relay is not configured")
+		return
+	}
+	vm, ok := h.consoleLookupVM(w, r)
+	if !ok {
+		return
+	}
+	ticket, err := h.console.IssueSession(r.Context(), vm.Node, vm.VMID)
+	if err != nil {
+		response.InternalError(w, "open console session: "+err.Error())
+		return
+	}
+	response.Success(w, consoleSessionResponse{
+		Ticket: ticket.Ticket,
+		Port:   ticket.Port,
+	})
+}
+
+// Console proxies the noVNC WebSocket from the browser to PVE. Owner-
+// gated; admins bypass. Same 404-not-403 contract as Get to avoid
+// existence disclosure. Query params `port` and `vncticket` come from
+// a prior /console/session response — the SPA passes them through so
+// the relay opens the upstream WS with matching state.
 //
-// This is NOT annotated with swag because the route is a WebSocket
-// upgrade — swag's HTTP-method/response model doesn't fit. The route
-// is registered in router.go alongside the other /vms/{id}/* routes.
+// Not annotated with swag because the route is a WebSocket upgrade.
 func (h *VMs) Console(w http.ResponseWriter, r *http.Request) {
 	if h.console == nil {
 		response.Error(w, http.StatusServiceUnavailable, "console relay is not configured")
 		return
 	}
-	id, ok := parseVMID(w, r)
+	vm, ok := h.consoleLookupVM(w, r)
 	if !ok {
 		return
+	}
+	port, err := strconv.Atoi(r.URL.Query().Get("port"))
+	if err != nil || port == 0 {
+		response.BadRequest(w, "missing or invalid port query param")
+		return
+	}
+	ticket := r.URL.Query().Get("vncticket")
+	if ticket == "" {
+		response.BadRequest(w, "missing vncticket query param")
+		return
+	}
+	h.console.Stream(r.Context(), w, r, vm.Node, vm.VMID, port, ticket)
+}
+
+// consoleLookupVM is the shared auth + lookup body for both console
+// endpoints. Writes the HTTP error and returns ok=false on miss; on
+// success returns the VM row.
+func (h *VMs) consoleLookupVM(w http.ResponseWriter, r *http.Request) (*db.VM, bool) {
+	id, ok := parseVMID(w, r)
+	if !ok {
+		return nil, false
 	}
 	user := ctxutil.User(r.Context())
 	if user == nil {
 		response.Error(w, http.StatusUnauthorized, "Not authenticated")
-		return
+		return nil, false
 	}
-	// h.svc.Get scopes by owner unless requesterID is nil; admins bypass
-	// in service-side, matching Get/Lifecycle. Same 404-not-403 contract
-	// to avoid existence disclosure.
 	requesterID := &user.ID
 	if user.IsAdmin {
 		requesterID = nil
@@ -589,13 +640,13 @@ func (h *VMs) Console(w http.ResponseWriter, r *http.Request) {
 	vm, err := h.svc.Get(r.Context(), id, requesterID)
 	if err != nil {
 		response.FromError(w, err)
-		return
+		return nil, false
 	}
 	if vm.Node == "" || vm.VMID == 0 {
 		response.Error(w, http.StatusBadRequest, "VM has no node/vmid; cannot open console")
-		return
+		return nil, false
 	}
-	h.console.Stream(r.Context(), w, r, vm.Node, vm.VMID)
+	return vm, true
 }
 
 // ListTunnels handles GET /api/vms/{id}/tunnels — every Gopher per-port

@@ -214,8 +214,8 @@ func (s *Service) CreateVPC(ctx context.Context, ownerID uint, name string) (*db
 // ReapResult captures the row-level outcomes of ReapStuckProvisioning
 // so the caller can log them separately.
 type ReapResult struct {
-	VPCsMarkedError    int64
-	OrphanMemberships  int64
+	VPCsMarkedError   int64
+	OrphanMemberships int64
 }
 
 // ReapStuckProvisioning runs the startup-side cleanup for VPCs:

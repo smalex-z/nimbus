@@ -334,6 +334,19 @@ export async function getVMPrivateKey(id: number): Promise<VMPrivateKey> {
   return data
 }
 
+// ConsoleSession is the noVNC bootstrap payload — ticket doubles as
+// the vncticket query param on the WS dial AND the VNC password the
+// browser's RFB client sends during the RFB auth phase.
+export interface ConsoleSession {
+  ticket: string
+  port: number
+}
+
+export async function openConsoleSession(id: number): Promise<ConsoleSession> {
+  const { data } = await api.post<ConsoleSession>(`/vms/${id}/console/session`)
+  return data
+}
+
 export async function deleteVM(id: number): Promise<void> {
   await api.delete(`/vms/${id}`)
 }
