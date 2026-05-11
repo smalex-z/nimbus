@@ -16,6 +16,7 @@ import (
 	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
 	"nimbus/internal/config"
+	"nimbus/internal/console"
 	"nimbus/internal/gpu"
 	"nimbus/internal/ippool"
 	"nimbus/internal/nodemgr"
@@ -76,7 +77,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(rateLimiter(100, 200))
 
 	health := handlers.NewHealth(d.Proxmox)
-	vms := handlers.NewVMs(d.Provision).WithAudit(d.Audit).WithOperations(d.Operations)
+	vms := handlers.NewVMs(d.Provision).
+		WithAudit(d.Audit).
+		WithOperations(d.Operations).
+		WithConsoleRelay(console.New(d.Proxmox))
 	keys := handlers.NewKeys(d.Keys).WithAudit(d.Audit)
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)
@@ -427,6 +431,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/{id}", vms.Get)
 					r.Get("/{id}/private-key", vms.GetPrivateKey)
 					r.Delete("/{id}", vms.Delete)
+					// Serial-console WebSocket relay → xterm.js in the SPA.
+					// Long-lived; no per-request timeout (the upgrade
+					// hijacks the conn). Owner-gated in the handler.
+					r.Get("/{id}/console/ws", vms.Console)
 					// Power operations on the caller's own VM. Reboot
 					// waits on a Proxmox task — give it some room.
 					r.With(middleware.Timeout(2*time.Minute)).

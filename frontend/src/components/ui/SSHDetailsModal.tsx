@@ -105,6 +105,25 @@ export default function SSHDetailsModal({ target, onClose }: SSHDetailsModalProp
           </div>
         )}
 
+        {target.dbId && (
+          <div className="mt-7">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-2">
+              Browser console
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => window.open(`/vms/${target.dbId}/console`, '_blank', 'noopener')}
+            >
+              Open serial console in new tab →
+            </Button>
+            <p className="mt-3 text-[12px] text-ink-3 leading-relaxed">
+              Routed through the Proxmox host — works for VPC-isolated VMs without a tunnel.
+              Sign in at the getty prompt with your username and the one-time noVNC password
+              shown on the provision result screen.
+            </p>
+          </div>
+        )}
+
         <div className="flex justify-end mt-9">
           <Button variant="ghost" onClick={onClose}>Close</Button>
         </div>

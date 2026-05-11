@@ -14,6 +14,7 @@ import (
 
 	"nimbus/internal/api/response"
 	"nimbus/internal/audit"
+	"nimbus/internal/console"
 	"nimbus/internal/ctxutil"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/nodescore"
@@ -29,9 +30,10 @@ var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // VMs wraps the provision Service.
 type VMs struct {
-	svc   *provision.Service
-	audit *audit.Service
-	ops   *operations.Service
+	svc     *provision.Service
+	audit   *audit.Service
+	ops     *operations.Service
+	console *console.Relay
 }
 
 func NewVMs(svc *provision.Service) *VMs { return &VMs{svc: svc} }
@@ -46,6 +48,10 @@ func (h *VMs) WithAudit(a *audit.Service) *VMs { h.audit = a; return h }
 // close its tab and re-attach via the Tasks panel). Nil keeps the
 // pre-async behaviour where the work is bound to the request lifetime.
 func (h *VMs) WithOperations(o *operations.Service) *VMs { h.ops = o; return h }
+
+// WithConsoleRelay installs the serial-console WebSocket relay. Nil
+// disables /vms/{id}/console/ws (returns 503).
+func (h *VMs) WithConsoleRelay(r *console.Relay) *VMs { h.console = r; return h }
 
 type createVMRequest struct {
 	Hostname string `json:"hostname"`
@@ -549,6 +555,47 @@ func (h *VMs) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, vm)
+}
+
+// Console proxies a serial-console WebSocket from the browser to the VM
+// via Proxmox's termproxy + vncwebsocket. Owner-gated like Get; admins
+// can also reach it. The browser opens xterm.js on /vms/{id}/console
+// (route in the SPA), which connects WS here.
+//
+// This is NOT annotated with swag because the route is a WebSocket
+// upgrade — swag's HTTP-method/response model doesn't fit. The route
+// is registered in router.go alongside the other /vms/{id}/* routes.
+func (h *VMs) Console(w http.ResponseWriter, r *http.Request) {
+	if h.console == nil {
+		response.Error(w, http.StatusServiceUnavailable, "console relay is not configured")
+		return
+	}
+	id, ok := parseVMID(w, r)
+	if !ok {
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user == nil {
+		response.Error(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	// h.svc.Get scopes by owner unless requesterID is nil; admins bypass
+	// in service-side, matching Get/Lifecycle. Same 404-not-403 contract
+	// to avoid existence disclosure.
+	requesterID := &user.ID
+	if user.IsAdmin {
+		requesterID = nil
+	}
+	vm, err := h.svc.Get(r.Context(), id, requesterID)
+	if err != nil {
+		response.FromError(w, err)
+		return
+	}
+	if vm.Node == "" || vm.VMID == 0 {
+		response.Error(w, http.StatusBadRequest, "VM has no node/vmid; cannot open console")
+		return
+	}
+	h.console.Stream(r.Context(), w, r, vm.Node, vm.VMID)
 }
 
 // ListTunnels handles GET /api/vms/{id}/tunnels — every Gopher per-port
