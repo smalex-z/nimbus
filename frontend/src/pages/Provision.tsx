@@ -865,7 +865,7 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
       />
 
       <div className="flex flex-col gap-2">
-        <label className="text-[13px] font-medium text-ink">Public access</label>
+        <label className="text-[13px] font-medium text-ink">Public tunnel</label>
         <label
           className={`flex items-start gap-3 p-3 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
             tunnelInfo?.enabled && selectedKeyHasPrivate
@@ -881,11 +881,13 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
             className="mt-0.5 w-4 h-4 accent-ink disabled:cursor-not-allowed"
           />
           <div className="flex-1">
-            <div className="text-sm font-medium">Expose SSH publicly</div>
+            <div className="text-sm font-medium">Enable public tunneling</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Reverse-tunnel SSH via Gopher to{' '}
+              Bootstraps the tunnel client on this VM and exposes SSH at{' '}
               <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
-              Expose web services later from the machine page.
+              Once enabled, add HTTP/TCP/UDP tunnels for any port later from the
+              Networks tab. Skip to keep the VM private — you can still reach it
+              via the browser console.
             </div>
             {!tunnelInfo?.enabled && (
               <div className="text-xs text-warn mt-1">
