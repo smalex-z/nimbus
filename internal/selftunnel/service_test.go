@@ -3,6 +3,7 @@ package selftunnel
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -95,11 +96,11 @@ func (f *fakeGopher) DeleteTunnel(_ context.Context, _ string) error {
 	return nil
 }
 
-// TestMarkFailed_DeletesMachineAndWipesRow covers the happy cleanup
-// path: a failed bootstrap with a registered Gopher machine deletes
-// the machine, wipes every Gopher column, and drops the in-memory
-// gopher client so subsequent calls can't 401 against stale creds.
-func TestMarkFailed_DeletesMachineAndWipesRow(t *testing.T) {
+// TestMarkFailed_AuthFailure_WipesEverything covers the auth-class
+// branch: a 401/403 from Gopher means the saved key can't authenticate,
+// re-pasting is the only fix. Wipe creds + delete the partial machine
+// + drop the in-memory client.
+func TestMarkFailed_AuthFailure_WipesEverything(t *testing.T) {
 	t.Parallel()
 	store := &fakeStore{row: db.GopherSettings{
 		APIURL:         "https://g.example",
@@ -111,7 +112,7 @@ func TestMarkFailed_DeletesMachineAndWipesRow(t *testing.T) {
 	gopher := &fakeGopher{}
 	svc := &Service{store: store, gopher: gopher}
 
-	svc.markFailed("bootstrap script blew up")
+	svc.markFailed(&tunnel.HTTPError{Status: 401, Body: "unauthorized"})
 
 	if got := len(gopher.deleted); got != 1 || gopher.deleted[0] != "m-42" {
 		t.Errorf("DeleteMachine called %v, want [m-42]", gopher.deleted)
@@ -123,14 +124,64 @@ func TestMarkFailed_DeletesMachineAndWipesRow(t *testing.T) {
 		t.Errorf("row not wiped: %+v", store.row)
 	}
 	if svc.gopher != nil {
-		t.Errorf("gopher client not cleared after wipe")
+		t.Errorf("gopher client not cleared after auth-class wipe")
 	}
 }
 
-// TestMarkFailed_NoMachineRegistered_StillWipes covers an early
-// failure (e.g. checkSudo fails before CreateMachine). No machine to
-// delete, but credentials should still be wiped.
-func TestMarkFailed_NoMachineRegistered_StillWipes(t *testing.T) {
+// TestMarkFailed_OperationalFailure_KeepsCreds covers the
+// non-auth-class branch: subdomain conflict, timeout, install error,
+// etc. The credentials are fine — wiping them just forces the operator
+// to re-paste for a problem re-pasting doesn't fix. Keep creds, clear
+// only the cloud-tunnel state, surface the error message.
+func TestMarkFailed_OperationalFailure_KeepsCreds(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{row: db.GopherSettings{
+		APIURL:         "https://g.example",
+		APIKey:         "secret",
+		CloudSubdomain: "nimbus",
+		CloudMachineID: "m-42",
+		CloudTunnelID:  "t-7",
+		CloudTunnelURL: "https://stale.example",
+	}}
+	gopher := &fakeGopher{}
+	svc := &Service{store: store, gopher: gopher}
+
+	svc.markFailed(&tunnel.HTTPError{Status: 409, Body: "subdomain already exists"})
+
+	// Partial machine still gets cleaned up so Gopher's UI doesn't
+	// accumulate orphans.
+	if got := len(gopher.deleted); got != 1 || gopher.deleted[0] != "m-42" {
+		t.Errorf("DeleteMachine called %v, want [m-42]", gopher.deleted)
+	}
+	if store.wipes != 0 {
+		t.Errorf("WipeGopherSettings should NOT run on operational failure; got %d", store.wipes)
+	}
+	// Creds stay.
+	if store.row.APIURL != "https://g.example" || store.row.APIKey != "secret" || store.row.CloudSubdomain != "nimbus" {
+		t.Errorf("credentials should be preserved on operational failure; got %+v", store.row)
+	}
+	// Cloud-tunnel state cleared.
+	if store.row.CloudMachineID != "" || store.row.CloudTunnelID != "" || store.row.CloudTunnelURL != "" {
+		t.Errorf("cloud-tunnel state should be cleared; got machine=%q tunnel=%q url=%q",
+			store.row.CloudMachineID, store.row.CloudTunnelID, store.row.CloudTunnelURL)
+	}
+	// Error visible.
+	if store.row.CloudBootstrapState != StateFailed {
+		t.Errorf("state = %q, want %q", store.row.CloudBootstrapState, StateFailed)
+	}
+	if !strings.Contains(store.row.CloudBootstrapError, "subdomain") {
+		t.Errorf("bootstrap_error = %q, expected the underlying reason to be surfaced", store.row.CloudBootstrapError)
+	}
+	// In-memory client survives — the next save can re-broadcast it.
+	if svc.gopher == nil {
+		t.Errorf("gopher client cleared on operational failure (should only happen for auth failures)")
+	}
+}
+
+// TestMarkFailed_OperationalFailure_NoMachine covers an early
+// operational failure (CreateMachine returned an error before a
+// machine row was created). No DeleteMachine call should fire.
+func TestMarkFailed_OperationalFailure_NoMachine(t *testing.T) {
 	t.Parallel()
 	store := &fakeStore{row: db.GopherSettings{
 		APIURL: "https://g.example",
@@ -139,36 +190,16 @@ func TestMarkFailed_NoMachineRegistered_StillWipes(t *testing.T) {
 	gopher := &fakeGopher{}
 	svc := &Service{store: store, gopher: gopher}
 
-	svc.markFailed("sudo blocked")
+	svc.markFailed(errors.New("DNS resolution failed"))
 
 	if got := len(gopher.deleted); got != 0 {
-		t.Errorf("DeleteMachine should not be called when CloudMachineID is empty, got %v", gopher.deleted)
+		t.Errorf("DeleteMachine should not fire when CloudMachineID is empty, got %v", gopher.deleted)
 	}
-	if store.wipes != 1 {
-		t.Errorf("WipeGopherSettings called %d times, want 1", store.wipes)
+	if store.wipes != 0 {
+		t.Errorf("WipeGopherSettings should not fire on plain operational error")
 	}
-}
-
-// TestMarkFailed_DeleteMachineError_StillWipes covers a Gopher-side
-// error during cleanup. The DB wipe must still happen — leaving the
-// row with stale state is worse than orphaning a machine on Gopher.
-func TestMarkFailed_DeleteMachineError_StillWipes(t *testing.T) {
-	t.Parallel()
-	store := &fakeStore{row: db.GopherSettings{
-		APIURL:         "https://g.example",
-		APIKey:         "secret",
-		CloudMachineID: "m-99",
-	}}
-	gopher := &fakeGopher{deleteErr: errors.New("gopher 500")}
-	svc := &Service{store: store, gopher: gopher}
-
-	svc.markFailed("creating tunnel timed out")
-
-	if store.wipes != 1 {
-		t.Errorf("WipeGopherSettings should run even when DeleteMachine errors; got %d", store.wipes)
-	}
-	if svc.gopher != nil {
-		t.Errorf("gopher client should be cleared even when DeleteMachine errors")
+	if store.row.APIURL == "" || store.row.APIKey == "" {
+		t.Errorf("creds wiped on plain operational error: %+v", store.row)
 	}
 }
 

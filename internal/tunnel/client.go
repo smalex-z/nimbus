@@ -223,13 +223,42 @@ func (c *Client) DeleteTunnel(ctx context.Context, id string) error {
 	return err
 }
 
-// ListTunnels returns every tunnel known to Gopher. Admin-scoped.
+// ListTunnels returns every tunnel known to Gopher. Walks every page
+// rather than returning just the first — earlier single-page version
+// caused selftunnel.replaceConflictingTunnel to miss conflicts beyond
+// the default limit, producing "subdomain reported as conflicting but
+// not found in tunnels list" errors when the operator had >50 tunnels.
+//
+// Hard cap at 50 pages (50 × default limit) defends against a
+// pathological infinite loop if a future Gopher version stops
+// advancing Offset.
 func (c *Client) ListTunnels(ctx context.Context) ([]Tunnel, error) {
-	var page paginatedTunnels
-	if err := c.do(ctx, http.MethodGet, "/api/v1/tunnels", nil, &page); err != nil {
-		return nil, err
+	const maxPages = 50
+	var all []Tunnel
+	offset := 0
+	for page := 0; page < maxPages; page++ {
+		var pg paginatedTunnels
+		path := "/api/v1/tunnels"
+		if offset > 0 {
+			path = fmt.Sprintf("/api/v1/tunnels?offset=%d", offset)
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &pg); err != nil {
+			return nil, err
+		}
+		all = append(all, pg.Items...)
+		// Done when this page didn't fill OR we've collected total OR
+		// the server stopped advancing Offset.
+		if len(pg.Items) == 0 || (pg.Total > 0 && len(all) >= int(pg.Total)) {
+			break
+		}
+		if pg.Limit <= 0 {
+			// Server didn't tell us how big the page was; assume what
+			// we got is the full limit and advance by that.
+			pg.Limit = len(pg.Items)
+		}
+		offset += pg.Limit
 	}
-	return page.Items, nil
+	return all, nil
 }
 
 // ListTunnelsForMachine fetches every tunnel and filters down to those
