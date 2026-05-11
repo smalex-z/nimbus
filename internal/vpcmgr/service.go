@@ -211,25 +211,67 @@ func (s *Service) CreateVPC(ctx context.Context, ownerID uint, name string) (*db
 	}
 }
 
-// ReapStuckProvisioning flips any vpcs.status = 'provisioning' rows to
-// 'error' with a clear message. CreateVPC is synchronous and the
-// status-flip-to-active is its last write; any row still in
-// 'provisioning' when a fresh nimbus process starts means the previous
-// process died mid-create. The PVE-side state may be partial — the
-// operator can delete the row from the UI, which runs the same teardown
-// path as a normal delete (tolerant of missing PVE objects). Returns
-// the number of rows reaped.
-func (s *Service) ReapStuckProvisioning(ctx context.Context) (int64, error) {
+// ReapResult captures the row-level outcomes of ReapStuckProvisioning
+// so the caller can log them separately.
+type ReapResult struct {
+	VPCsMarkedError    int64
+	OrphanMemberships  int64
+}
+
+// ReapStuckProvisioning runs the startup-side cleanup for VPCs:
+//
+//  1. Drops VPCMembership rows whose vm_id has no live db.VM row.
+//     The VM-provision flow inserts the membership BEFORE the db.VM
+//     row, so a crash between those steps leaves an orphan
+//     membership pointing at a vmid that was never tracked. Scoped to
+//     VPCs in provisioning/error/degraded so we don't touch healthy
+//     state. (Status='active' rows can have orphan memberships too in
+//     pathological cases — TODO if it bites.)
+//  2. Flips any vpcs.status = 'provisioning' rows to 'error'.
+//     CreateVPC is synchronous and the status='active' write is its
+//     last step; anything still in 'provisioning' at startup means
+//     the previous process died mid-create. The PVE-side state may
+//     be partial — the operator can delete from the UI which is
+//     tolerant of missing PVE objects.
+//
+// Step 1 runs before step 2 so a freshly-reaped VPC also gets its
+// memberships cleaned in the same pass.
+func (s *Service) ReapStuckProvisioning(ctx context.Context) (ReapResult, error) {
+	var out ReapResult
 	if s == nil || s.db == nil {
-		return 0, nil
+		return out, nil
 	}
-	res := s.db.WithContext(ctx).Model(&db.VPC{}).
+
+	// Drop orphan memberships first. Subqueries reference the same
+	// tables that GORM gives soft-delete clauses on by default; we
+	// scope explicitly to live rows so a tombstoned db.VM doesn't
+	// rescue an actually-orphan membership.
+	orphanRes := s.db.WithContext(ctx).Unscoped().
+		Where(`vpc_id IN (?) AND vm_id NOT IN (?)`,
+			s.db.Model(&db.VPC{}).
+				Where("status IN ?", []string{"provisioning", "error", "degraded"}).
+				Where("deleted_at IS NULL").
+				Select("id"),
+			s.db.Model(&db.VM{}).
+				Where("deleted_at IS NULL").
+				Select("vmid"),
+		).
+		Delete(&db.VPCMembership{})
+	if orphanRes.Error != nil {
+		return out, fmt.Errorf("reap orphan memberships: %w", orphanRes.Error)
+	}
+	out.OrphanMemberships = orphanRes.RowsAffected
+
+	// Flip stuck provisioning rows to error.
+	statusRes := s.db.WithContext(ctx).Model(&db.VPC{}).
 		Where("status = ?", "provisioning").
 		Update("status", "error")
-	if res.Error != nil {
-		return 0, fmt.Errorf("reap stuck vpcs: %w", res.Error)
+	if statusRes.Error != nil {
+		return out, fmt.Errorf("mark stuck vpcs as error: %w", statusRes.Error)
 	}
-	return res.RowsAffected, nil
+	out.VPCsMarkedError = statusRes.RowsAffected
+
+	return out, nil
 }
 
 // DeleteVPC tears down a VPC. Refuses if any VMs are still members.

@@ -780,16 +780,21 @@ func main() {
 	rebuildVPCStack(*v1Settings)
 	_ = vpcStackCurrent // available for future debug surfacing
 
-	// Reap VPCs left in 'provisioning' by a previous nimbus process
-	// that died mid-CreateVPC. Same reasoning as the operations
-	// reaper above: by startup time the work goroutine is dead, so any
-	// row still in 'provisioning' is unambiguously orphaned. Marks
-	// them 'error' so the UI surfaces them and the user can delete.
+	// Reap VPC-side state left behind by previous nimbus processes that
+	// died mid-CreateVPC or mid-VM-provision. Two cleanups in one pass:
+	// orphan VPCMembership rows (whose VM never finished provisioning,
+	// so no live db.VM row exists for the vmid), and stuck 'provisioning'
+	// VPC rows (which get flipped to 'error' so the UI surfaces them).
 	if vpcMgrSvc != nil {
-		if reaped, err := vpcMgrSvc.ReapStuckProvisioning(context.Background()); err != nil {
-			log.Printf("warning: reap stuck VPCs: %v", err)
-		} else if reaped > 0 {
-			log.Printf("startup: marked %d VPC(s) as 'error' (abandoned by previous nimbus process mid-create)", reaped)
+		if res, err := vpcMgrSvc.ReapStuckProvisioning(context.Background()); err != nil {
+			log.Printf("warning: reap VPC orphans: %v", err)
+		} else {
+			if res.OrphanMemberships > 0 {
+				log.Printf("startup: dropped %d orphan VPC membership row(s) (no live VM for the vmid)", res.OrphanMemberships)
+			}
+			if res.VPCsMarkedError > 0 {
+				log.Printf("startup: marked %d VPC(s) as 'error' (abandoned by previous nimbus process mid-create)", res.VPCsMarkedError)
+			}
 		}
 	}
 

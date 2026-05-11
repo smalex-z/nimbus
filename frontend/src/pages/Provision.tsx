@@ -233,12 +233,18 @@ export default function Provision() {
     listVPCs()
       .then((rows) => {
         setSavedVPCs(rows)
-        if (rows.length > 0) {
-          setForm((prev) =>
-            prev.selectedVPCId === null
-              ? { ...prev, selectedVPCId: rows[0].id }
-              : prev,
-          )
+        // Default + heal: pick the first 'active' VPC. If the user's
+        // previously-selected VPC has since gone error/degraded we'd
+        // otherwise leave a broken selection that can't be submitted.
+        const usable = rows.filter((v) => v.status === 'active')
+        if (usable.length > 0) {
+          setForm((prev) => {
+            const currentIsUsable =
+              prev.selectedVPCId != null &&
+              usable.some((v) => v.id === prev.selectedVPCId)
+            if (currentIsUsable) return prev
+            return { ...prev, selectedVPCId: usable[0].id }
+          })
         }
       })
       .catch(() => {
@@ -1530,7 +1536,12 @@ function SubnetPicker({
     )
   }
 
-  const hasVPCs = savedVPCs.length > 0
+  // Only 'active' VPCs are usable. 'provisioning' rows are mid-create
+  // (rare — CreateVPC is sync), 'error'/'degraded' rows have a broken
+  // gateway LXC. Filter the picker to active-only so users can't try
+  // to provision into a non-functional VPC.
+  const usableVPCs = savedVPCs.filter((v) => v.status === 'active')
+  const hasVPCs = usableVPCs.length > 0
   const vpcChipDisabled = !netInfo.vpc_enabled || !hasVPCs
   const showClusterLAN = isAdmin || netInfo.cluster_lan_for_members
   return (
@@ -1592,7 +1603,7 @@ function SubnetPicker({
               }
               className="n-input"
             >
-              {savedVPCs.map((v) => (
+              {usableVPCs.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.cidr})
                 </option>
