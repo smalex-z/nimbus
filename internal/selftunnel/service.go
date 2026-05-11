@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -291,7 +292,34 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		}
 	}
 
-	// Step 5 — record success.
+	// Step 5 — verify the URL is actually serving TLS before flipping
+	// to active. Gopher's CreateTunnel returns success once the
+	// Tunnel row is persisted, but Caddy's per-subdomain conf is
+	// regenerated asynchronously — there's a window where the
+	// rathole tunnel is up + the API says "active" but Caddy hasn't
+	// reloaded yet, so a browser hitting the URL gets a TLS alert
+	// 80 (no SNI match) or a stale cert. Letting the SPA redirect
+	// during that window produces a confusing ERR_SSL_PROTOCOL_ERROR.
+	//
+	// Poll for up to 90s with a 3s connect timeout per attempt.
+	// 90s covers the Caddy reload + first Let's Encrypt issuance
+	// (typically <30s, but cert-renewal load can push it longer).
+	if t.TunnelURL != "" {
+		if verr := verifyTunnelTLS(ctx, t.TunnelURL); verr != nil {
+			// TLS verification failed — surface a specific error so
+			// the operator knows the problem is downstream of
+			// Nimbus (Caddy/cert lag on Gopher's side) rather than
+			// a Nimbus-side bug.
+			return fmt.Errorf(
+				"cloud tunnel %s registered on gopher but TLS handshake fails: %w "+
+					"(this usually means gopher's caddy hasn't picked up the new subdomain yet — "+
+					"check its caddy reload state, or retry once let's encrypt issues the cert)",
+				t.TunnelURL, verr,
+			)
+		}
+	}
+
+	// Step 6 — record success.
 	return s.persist(db.GopherSettings{
 		CloudMachineID:      machine.ID,
 		CloudTunnelID:       t.ID,
@@ -299,6 +327,48 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 		CloudBootstrapState: StateActive,
 		CloudBootstrapError: "",
 	})
+}
+
+// verifyTunnelTLS confirms the freshly-created cloud-tunnel URL
+// actually completes a TLS handshake from outside Gopher's perimeter
+// (i.e. from this Nimbus host, talking to Gopher's Caddy at the public
+// IP). Polls every 5s for up to 90s — covers the Caddy-reload window
+// plus a first-issuance Let's Encrypt round trip.
+//
+// We don't care about the HTTP response code or body — only that the
+// TLS handshake completes without an alert. A 502 from Caddy is fine
+// (means routing works, rathole upstream is just not responding yet);
+// an "internal error" alert means Caddy doesn't know about the
+// subdomain at all, which is the bug we're guarding against.
+func verifyTunnelTLS(ctx context.Context, rawURL string) error {
+	deadline := time.Now().Add(90 * time.Second)
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+		if err != nil {
+			return fmt.Errorf("build verify request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			// Any response (even 4xx/5xx) means TLS completed and
+			// Caddy is at least aware of the hostname. Close + done.
+			_ = resp.Body.Close()
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("tls verification timed out after 90s: %w", lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 // isSubdomainConflict matches Gopher's 409 + "subdomain already exists"
