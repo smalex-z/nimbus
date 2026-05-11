@@ -50,9 +50,20 @@ echo "✓ Uploaded: ${url}"
 echo ""
 echo "On the target machine, run:"
 echo ""
-echo "    curl -fsSL '${url}' -o /tmp/nimbus && \\"
+# -fL --progress-bar instead of -fsSL: progress bar stays visible so a
+# slow/hung transfer.uclaacm.com download is diagnosable at a glance
+# (the relay 502s + hangs intermittently — see /root/nimbus history).
+# --connect-timeout caps the TCP handshake at 10s so a wedged DNS or
+# unreachable IP fails fast instead of hanging forever; --max-time 300
+# caps the whole transfer at 5min (binary is ~35MiB).
+echo "    curl -fL --progress-bar --connect-timeout 10 --max-time 300 \\"
+echo "      '${url}' -o /tmp/nimbus && \\"
 echo "      chmod +x /tmp/nimbus && \\"
 echo "      sudo /tmp/nimbus install"
 echo ""
 echo "(Re-running 'install' on a host that already has Nimbus swaps the"
 echo "binary, re-writes the systemd unit, and restarts the service.)"
+echo ""
+echo "If 'install' hangs, the last partial '  → <step>...' line on the"
+echo "target tells you which step is stuck; SIGQUIT the process for a"
+echo "Go goroutine dump:  sudo pkill -QUIT -f '/tmp/nimbus install'"
