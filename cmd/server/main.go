@@ -137,7 +137,29 @@ func main() {
 	// Start in setup mode when required config is absent.
 	if !cfg.IsConfigured() {
 		log.Printf("nimbus %s starting in setup mode on :%s", build.Version, cfg.Port)
-		router := api.NewSetupRouter(cfg, restartSelf)
+		// Open the DB + wire AuthService + selftunnel.Service even
+		// in setup mode so the wizard's GopherPanel can hit the
+		// same /api/settings/gopher/* endpoints the configured-mode
+		// dashboard does. A best-effort init: if any step fails,
+		// the gopher routes simply 404 and the wizard skips them.
+		setupDeps := api.SetupDeps{Cfg: cfg, Restart: restartSelf}
+		setupDB, dbErr := db.New(cfg.DBPath,
+			&db.User{}, &db.GopherSettings{},
+		)
+		if dbErr != nil {
+			log.Printf("setup mode: skipping gopher-in-wizard wiring (db init failed: %v)", dbErr)
+		} else {
+			authSvc := service.NewAuthService(setupDB)
+			// nimbus port for the self-tunnel target — same value
+			// the configured-mode flow uses.
+			port, _ := strconv.Atoi(cfg.Port)
+			if port == 0 {
+				port = 8080
+			}
+			setupDeps.Auth = authSvc
+			setupDeps.SelfBootstrap = selftunnel.New(authSvc, nil, port)
+		}
+		router := api.NewSetupRouter(setupDeps)
 
 		mux := http.NewServeMux()
 		mux.Handle("/api/", router)
