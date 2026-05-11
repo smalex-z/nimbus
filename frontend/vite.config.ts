@@ -20,6 +20,11 @@ export default defineConfig({
   build: {
     outDir: '../cmd/server/frontend/dist',
     emptyOutDir: true,
+    // noVNC 1.7 uses top-level await for WebCodecs H264 support detection.
+    // Vite's default target ('modules': chrome87/firefox78/safari14/etc)
+    // predates TLA support. Bumping to es2022 keeps the same broad browser
+    // coverage while allowing TLA — every browser >= ~April 2021 has it.
+    target: 'es2022',
   },
   server: {
     port: 5173,

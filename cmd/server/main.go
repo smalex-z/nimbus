@@ -631,16 +631,17 @@ func main() {
 
 	// Background-task registry: Operation rows survive an HTTP request
 	// so the SPA can close a tab and re-attach. On every startup, reap
-	// any non-terminal rows whose work goroutine died with a previous
-	// nimbus process — without this they'd stay "running" forever and
-	// the SPA's poll would never observe a final state. One-hour
-	// staleness is generous: provision is ~10 min worst-case, migrate
-	// 30 min for a busy VM.
+	// any non-terminal rows whose work goroutine died with the previous
+	// nimbus process — by definition there is no live worker for any
+	// op the OLD process owned, so it's safe (and required) to flip
+	// them all on startup. 5s cutoff is just paranoia for clock-skew;
+	// any op heartbeat older than "5s ago when this process started"
+	// is unambiguously orphaned.
 	opsSvc := operations.New(database.DB)
-	if reaped, err := opsSvc.ReapStuck(context.Background(), time.Hour); err != nil {
+	if reaped, err := opsSvc.ReapStuck(context.Background(), 5*time.Second); err != nil {
 		log.Printf("warning: reap stuck operations: %v", err)
 	} else if reaped > 0 {
-		log.Printf("startup: reaped %d stuck operation(s)", reaped)
+		log.Printf("startup: reaped %d stuck operation(s) abandoned by previous nimbus process", reaped)
 	}
 
 	// Networking-v1 Standalone primitive — per-VM Simple zone with
@@ -778,6 +779,24 @@ func main() {
 	}
 	rebuildVPCStack(*v1Settings)
 	_ = vpcStackCurrent // available for future debug surfacing
+
+	// Reap VPC-side state left behind by previous nimbus processes that
+	// died mid-CreateVPC or mid-VM-provision. Two cleanups in one pass:
+	// orphan VPCMembership rows (whose VM never finished provisioning,
+	// so no live db.VM row exists for the vmid), and stuck 'provisioning'
+	// VPC rows (which get flipped to 'error' so the UI surfaces them).
+	if vpcMgrSvc != nil {
+		if res, err := vpcMgrSvc.ReapStuckProvisioning(context.Background()); err != nil {
+			log.Printf("warning: reap VPC orphans: %v", err)
+		} else {
+			if res.OrphanMemberships > 0 {
+				log.Printf("startup: dropped %d orphan VPC membership row(s) (no live VM for the vmid)", res.OrphanMemberships)
+			}
+			if res.VPCsMarkedError > 0 {
+				log.Printf("startup: marked %d VPC(s) as 'error' (abandoned by previous nimbus process mid-create)", res.VPCsMarkedError)
+			}
+		}
+	}
 
 	// Applier the Settings → Network handler calls on save. Accepts
 	// the freshly-persisted row and rebuilds the gateway + vpcmgr
