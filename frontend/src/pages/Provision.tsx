@@ -889,11 +889,11 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
           <div className="flex-1">
             <div className="text-sm font-medium">Enable public tunneling</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Bootstraps the tunnel client on this VM and exposes SSH at{' '}
+              Bootstraps the edge gateway agent on this VM and exposes SSH at{' '}
               <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
-              Once enabled, add HTTP/TCP/UDP tunnels for any port later from the
-              Networks tab. Skip to keep the VM private — you can still reach it
-              via the browser console.
+              Once enabled, add HTTP/TCP/UDP port forwards later from the
+              Networks tab. Skip to keep the VM unreachable from the internet —
+              you can still reach it via the browser console.
             </div>
             {!tunnelInfo?.enabled && (
               <div className="text-xs text-warn mt-1">
