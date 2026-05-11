@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -48,6 +49,8 @@ func (c *Client) TermProxy(ctx context.Context, node string, vmid int) (*TermPro
 	if err != nil {
 		return nil, fmt.Errorf("termproxy %s/%d: parse port %q: %w", node, vmid, raw.Port, err)
 	}
+	log.Printf("proxmox console: termproxy %s/%d → user=%q port=%d ticket_len=%d upid=%q",
+		node, vmid, raw.User, port, len(raw.Ticket), raw.UPID)
 	return &TermProxyTicket{
 		Ticket: raw.Ticket,
 		Port:   port,
@@ -102,26 +105,36 @@ func (c *Client) DialConsoleWS(ctx context.Context, node string, vmid, port int,
 	return conn, nil
 }
 
-// ConsoleAuthHandshake completes PVE's serial-console auth dance over an
-// already-upgraded WebSocket. PVE expects the upstream client to send the
-// auth payload as a TEXT frame within seconds of the upgrade — without
-// this the connection is held open but no bytes flow.
+// ConsoleAuthHandshake completes PVE's in-band auth dance with the
+// pve-xtermjs server reachable through the vncwebsocket bridge. PVE's
+// API server proxies WS bytes to a local TCP socket where pve-xtermjs
+// reads the first line as "<user>:<ticket>\n" and replies "OK\n" on
+// success.
 //
-// Wire format: send "<user>:<ticket>\n" as text, then read a single frame
-// echoing "OK" on success. After that the channel is raw bytes both ways.
-//
-// Frame type matters: PVE rejects this as a Binary frame and closes 1006
-// before responding. The PVE web UI sends it via the default `ws.send(str)`
-// which produces a Text frame; we must mirror that.
+// Frame type matters here for API-token auth: tested both Text and
+// Binary frames against PVE 8.x with API-token authentication; both
+// produce a 1006 close. Logs the User and ticket prefix on send so a
+// next-look at the journal can confirm what was actually transmitted,
+// since the canonical wire format (`user:ticket\n`) only works when
+// `user` matches what the termproxy call was authenticated as — and
+// for API tokens PVE returns the full token id (`user@realm!tokenid`)
+// which pve-xtermjs may or may not accept depending on PVE version.
 func ConsoleAuthHandshake(conn *websocket.Conn, user, ticket string) error {
 	payload := user + ":" + ticket + "\n"
+	tPrefix := ticket
+	if len(tPrefix) > 12 {
+		tPrefix = tPrefix[:12] + "..."
+	}
+	log.Printf("proxmox console: sending auth handshake user=%q ticket_prefix=%q bytes=%d",
+		user, tPrefix, len(payload))
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		return fmt.Errorf("send auth: %w", err)
 	}
-	_, msg, err := conn.ReadMessage()
+	mt, msg, err := conn.ReadMessage()
 	if err != nil {
 		return fmt.Errorf("read auth ack: %w", err)
 	}
+	log.Printf("proxmox console: auth reply mt=%d bytes=%d body=%q", mt, len(msg), string(msg))
 	if !strings.HasPrefix(string(msg), "OK") {
 		return fmt.Errorf("console auth rejected: %q", strings.TrimSpace(string(msg)))
 	}
