@@ -186,6 +186,7 @@ type CreateVMOpts struct {
 // pre-encode.
 type CloudInitConfig struct {
 	CIUser       string
+	CIPassword   string // one-time noVNC console password. Plaintext on the wire (Proxmox hashes it).
 	SSHKeys      string
 	IPConfig0    string // e.g. "ip=192.168.0.142/24,gw=192.168.0.1"
 	Nameserver   string // e.g. "1.1.1.1 8.8.8.8"

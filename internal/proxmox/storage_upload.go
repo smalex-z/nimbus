@@ -194,6 +194,37 @@ func (c *Client) AttachCDROM(ctx context.Context, node string, vmid int, slot, v
 	return c.do(ctx, http.MethodPost, path, params, nil)
 }
 
+// AttachCloudInitDrive sets the given slot (typically "ide2") to a
+// Proxmox-managed cloud-init drive backed by the named storage. The
+// volid `<storage>:cloudinit` is a magic Proxmox value: instead of
+// referencing an existing volume, it tells PVE to generate a small
+// per-VM ISO whose contents are derived from the VM's config fields
+// (`ciuser`, `cipassword`, `sshkeys`, `ipconfig0`, …). The drive is
+// regenerated on every relevant config change.
+//
+// Use this rather than AttachCDROM when you want the managed-drive
+// semantics — AttachCDROM appends `media=cdrom` and treats the slot
+// as a static image, which prevents Proxmox from rewriting it when
+// SetCloudInit runs.
+//
+// The choice of storage matters operationally but not semantically:
+// Nimbus passes the boot disk's storage so the cloudinit drive lives
+// on the same volume as the VM, ensuring it travels (or gets
+// regenerated) wherever the VM lives. Proxmox handles migration of
+// the managed drive natively — no per-node-local CDROM blockage.
+func (c *Client) AttachCloudInitDrive(ctx context.Context, node string, vmid int, slot, storage string) error {
+	if slot == "" {
+		return fmt.Errorf("attach cloudinit: empty slot")
+	}
+	if storage == "" {
+		return fmt.Errorf("attach cloudinit: empty storage")
+	}
+	params := url.Values{}
+	params.Set(slot, fmt.Sprintf("%s:cloudinit", storage))
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	return c.do(ctx, http.MethodPost, path, params, nil)
+}
+
 // DetachDrive removes a VM config slot (e.g. ide2, sata1) and the
 // underlying volume if Proxmox manages it. Implemented as POST
 // /config with `delete=<slot>` — same channel Proxmox's web UI uses

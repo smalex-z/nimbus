@@ -419,8 +419,10 @@ func (c *Client) CloneVM(ctx context.Context, sourceNode, targetNode string, tem
 }
 
 // WaitForTask polls a task's status until it reports stopped, returning an
-// error if exitstatus != "OK". Polls every interval; total wait is bounded by
-// ctx deadline.
+// error if exitstatus != "OK". On failure, the error body is enriched with
+// the tail of the task's log (last ~20 lines) so callers don't have to SSH
+// into a Proxmox node to find out *why* a task failed. Polls every
+// interval; total wait is bounded by ctx deadline.
 func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error {
 	if interval == 0 {
 		interval = 2 * time.Second
@@ -436,6 +438,14 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval 
 			if st.ExitStatus == "OK" {
 				return nil
 			}
+			// Fetch the task log tail on a separate context so a ctx
+			// already at deadline still produces a useful message.
+			logCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			tail := c.taskLogTail(logCtx, node, taskID, 20)
+			cancel()
+			if tail != "" {
+				return fmt.Errorf("task %s failed: %s\n--- task log tail ---\n%s", taskID, st.ExitStatus, tail)
+			}
 			return fmt.Errorf("task %s failed: %s", taskID, st.ExitStatus)
 		}
 		select {
@@ -444,6 +454,47 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval 
 		case <-time.After(interval):
 		}
 	}
+}
+
+// taskLogEntry is one row from /nodes/{n}/tasks/{upid}/log. PVE returns
+// `[{"n": <ordinal>, "t": "<log line>"}, ...]`.
+type taskLogEntry struct {
+	N int    `json:"n"`
+	T string `json:"t"`
+}
+
+// TaskLog fetches the full log of a Proxmox task. Returns the lines in
+// the same order PVE recorded them (oldest first). Used for surfacing
+// the real cause of a task failure in operator-facing error messages —
+// the task's `exitstatus` field is a one-liner ("migration aborted",
+// "got timeout"), the log carries the actual reason.
+func (c *Client) TaskLog(ctx context.Context, node, taskID string) ([]string, error) {
+	path := fmt.Sprintf("/nodes/%s/tasks/%s/log", url.PathEscape(node), url.PathEscape(taskID))
+	var entries []taskLogEntry
+	if err := c.do(ctx, http.MethodGet, path, nil, &entries); err != nil {
+		return nil, fmt.Errorf("task log %s on %s: %w", taskID, node, err)
+	}
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, e.T)
+	}
+	return lines, nil
+}
+
+// taskLogTail returns at most `n` lines from the END of the task's log,
+// joined by newlines. Errors are swallowed and reported as "" — this is
+// for error-message enrichment, not the load-bearing call path. A blank
+// return just means "no extra context available," which the caller
+// handles by falling back to the bare exitstatus.
+func (c *Client) taskLogTail(ctx context.Context, node, taskID string, n int) string {
+	lines, err := c.TaskLog(ctx, node, taskID)
+	if err != nil {
+		return ""
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // SetCloudInit applies cloud-init config to a VM.
@@ -462,6 +513,11 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	params := url.Values{}
 	if cfg.CIUser != "" {
 		params.Set("ciuser", cfg.CIUser)
+	}
+	if cfg.CIPassword != "" {
+		// Plaintext on the wire — Proxmox hashes server-side and writes
+		// the hash into the managed cloud-init drive. Don't pre-hash.
+		params.Set("cipassword", cfg.CIPassword)
 	}
 	if cfg.SSHKeys != "" {
 		// QueryEscape uses + for spaces; replace with %20 to be safe.
@@ -597,6 +653,22 @@ func isTransientWorkerSpawnFailure(err error) bool {
 	}
 	return httpErr.Status == http.StatusInternalServerError &&
 		strings.Contains(httpErr.Body, "got no worker upid")
+}
+
+// GetVMState reads a VM's current power state ("running" / "stopped" /
+// "paused" / ...) via /nodes/{node}/qemu/{vmid}/status/current. Lighter
+// than ListVMs when the caller only needs status for a single VMID —
+// notably during the template-bake poll where we wait for the bake VM
+// to power off after `shutdown -h now`. Mirrors LXCStatus for parity.
+func (c *Client) GetVMState(ctx context.Context, node string, vmid int) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(node), vmid)
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
 }
 
 // StartVM powers on a VM. Returns the task UPID for the start task.

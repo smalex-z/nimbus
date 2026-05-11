@@ -83,6 +83,18 @@ func (s *Service) processForceGatewayVM(parentCtx context.Context, vm db.VM, gat
 			Err: "vm has no recorded IP",
 		}
 	}
+	// Legacy VMs still have the Nimbus cidata ISO at ide2 with no
+	// managed cloudinit drive; SetCloudInit(ipconfig0) would write
+	// fields nothing consumes. Swap them onto a managed drive first
+	// so the new ipconfig0 actually reaches the guest on next boot.
+	// Idempotent — already-managed VMs no-op here.
+	if err := s.swapLegacyCIToManaged(ctx, vm.Node, vm.VMID); err != nil {
+		log.Printf("force-gateway: swap cidata vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "swap legacy cidata: " + err.Error(),
+		}
+	}
 	ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", vm.IP, s.PrefixLen(), gateway)
 	if err := s.px.SetCloudInit(ctx, vm.Node, vm.VMID, proxmox.CloudInitConfig{
 		IPConfig0: ipconfig,
@@ -175,6 +187,18 @@ func (s *Service) processRenumberVM(parentCtx context.Context, vm db.VM, gateway
 		return &NetworkOpFailure{
 			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
 			Err: "reserve new ip: " + err.Error(),
+		}, nil
+	}
+
+	// Legacy VMs: swap to managed cloudinit drive before pushing the
+	// new ipconfig0, otherwise SetCloudInit writes a field that nothing
+	// in the guest consumes. Idempotent for already-managed VMs.
+	if err := s.swapLegacyCIToManaged(ctx, vm.Node, vm.VMID); err != nil {
+		_ = s.pool.Release(parentCtx, newIP)
+		log.Printf("renumber: swap cidata vmid=%d on %s: %v (rolled back reservation)", vm.VMID, vm.Node, err)
+		return &NetworkOpFailure{
+			VMRowID: vm.ID, VMID: vm.VMID, Hostname: vm.Hostname,
+			Err: "swap legacy cidata: " + err.Error(),
 		}, nil
 	}
 

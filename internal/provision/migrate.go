@@ -106,6 +106,14 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 		wasStopped = true
 	}
 
+	// Legacy VMs still have the per-node Nimbus cidata ISO at ide2,
+	// which Proxmox refuses to migrate ("can't migrate local disk:
+	// local cdrom image"). Swap them onto a managed cloudinit drive
+	// before the migrate request. Idempotent for already-managed VMs.
+	if err := s.swapLegacyCIToManaged(ctx, vm.Node, vm.VMID); err != nil {
+		return nil, fmt.Errorf("swap legacy cidata before offline migrate: %w", err)
+	}
+
 	if err := s.migrateOffline(ctx, vm, target); err != nil {
 		// If we stopped the VM but the migration itself failed, try to
 		// power it back on so the admin isn't left with a dark VM. The

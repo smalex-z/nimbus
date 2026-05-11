@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -53,6 +54,20 @@ type ProxmoxClient interface {
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	CreateVMWithImport(ctx context.Context, node string, vmid int, opts proxmox.CreateVMOpts) (string, error)
 	ConvertToTemplate(ctx context.Context, node string, vmid int) error
+
+	// Bake ceremony — boot the imported image once, install
+	// qemu-guest-agent + cloud-init clean, then power off before
+	// ConvertToTemplate. See bake.go.
+	UploadFile(ctx context.Context, node, storage, contentType, filename string, content []byte) error
+	AttachCDROM(ctx context.Context, node string, vmid int, slot, volid string) error
+	DetachDrive(ctx context.Context, node string, vmid int, slot string) error
+	DeleteStorageVolume(ctx context.Context, node, volid string) error
+	StartVM(ctx context.Context, node string, vmid int) (string, error)
+	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
+	GetVMState(ctx context.Context, node string, vmid int) (string, error)
+	SetVMTags(ctx context.Context, node string, vmid int, tags []string) error
+	AgentRun(ctx context.Context, node string, vmid int, command []string, inputData string, pollInterval time.Duration) (*proxmox.AgentExecStatus, error)
 }
 
 // importContentType is the Proxmox content type Nimbus uses for cloud-image
@@ -318,16 +333,38 @@ func (s *Service) bootstrapOne(
 		return finish(vmid, fmt.Sprintf("vm create task: %v", err))
 	}
 
-	// Templates intentionally do NOT get a Proxmox cloud-init drive.
-	// Nimbus delivers cloud-init via a per-VM ISO uploaded at
-	// provision time and attached at ide2 (see installCIDataISO).
-	// A Proxmox-managed cloud-init drive on the template would
-	// either compete with our ISO at the same slot (ide2) or sit
-	// unused — neither is useful. Templates stay minimal.
+	// Step 5b: bake ceremony. Boot the imported cloud image once with a
+	// minimal cidata ISO that installs qemu-guest-agent, then drive
+	// `cloud-init clean` + `poweroff` from outside via QGA exec, then
+	// detach the bake ISO. After this the template:
+	//   - has qemu-guest-agent baked into the disk image,
+	//   - has cloud-init state wiped (fresh instance-id for every clone),
+	//   - has no transient CDROM attached (so it can be migrated).
+	//
+	// Pre-D-boot templates relied on a per-VM cidata ISO at provision
+	// time to install QGA; that scheme blocked Proxmox migration
+	// because the ISO file was per-node-local. Baking it into the
+	// template means provision can use Proxmox's managed cloudinit
+	// drive (no local ISO), and migration just works.
+	if err := s.bakeTemplate(ctx, node, vmid); err != nil {
+		return finish(vmid, fmt.Sprintf("bake template: %v", err))
+	}
 
 	// Step 6: convert to immutable template
 	if err := s.px.ConvertToTemplate(ctx, node, vmid); err != nil {
 		return finish(vmid, fmt.Sprintf("convert to template: %v", err))
+	}
+
+	// Step 6b: stamp the template with NimbusBakedTag so the provision
+	// flow can verify it was built with the D-boot ceremony. A clone of
+	// an untagged template fails at provision time with a clear
+	// "re-run bootstrap" error rather than the silent-breakage path of
+	// "VM came up but qga never appears".
+	if err := s.px.SetVMTags(ctx, node, vmid, []string{NimbusBakedTag}); err != nil {
+		// Don't fail the whole template build for a tag write — the
+		// template is otherwise fine and tags can be added later via
+		// `qm set --tags`. Log so operators see it.
+		log.Printf("bootstrap vmid=%d on %s: set baked tag: %v (template usable but provision will reject it until tag is added manually)", vmid, node, err)
 	}
 
 	// Step 7: persist the (node, OS) → vmid mapping so future bootstrap and

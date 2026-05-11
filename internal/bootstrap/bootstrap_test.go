@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,10 +29,24 @@ type fakePX struct {
 	createVMWithImport   func(context.Context, string, int, proxmox.CreateVMOpts) (string, error)
 	convertToTemplate    func(context.Context, string, int) error
 
+	// Bake ceremony surface — added with the D-boot rewrite.
+	uploadFile          func(context.Context, string, string, string, string, []byte) error
+	attachCDROM         func(context.Context, string, int, string, string) error
+	detachDrive         func(context.Context, string, int, string) error
+	deleteStorageVolume func(context.Context, string, string) error
+	startVM             func(context.Context, string, int) (string, error)
+	stopVM              func(context.Context, string, int) (string, error)
+	destroyVM           func(context.Context, string, int) (string, error)
+	getVMState          func(context.Context, string, int) (string, error)
+	setVMTags           func(context.Context, string, int, []string) error
+	agentRun            func(context.Context, string, int, []string, string, time.Duration) (*proxmox.AgentExecStatus, error)
+
 	nextVMIDSeq   atomic.Int32 // for default sequential VMID assignment
 	createCalls   atomic.Int32
 	downloadCalls atomic.Int32
 	convertCalls  atomic.Int32
+	bakeCalls     atomic.Int32 // counts AgentRun invocations during bake
+	tagCalls      atomic.Int32
 }
 
 func (f *fakePX) GetNodes(ctx context.Context) ([]proxmox.Node, error) {
@@ -64,6 +79,38 @@ func (f *fakePX) ConvertToTemplate(ctx context.Context, n string, vmid int) erro
 	f.convertCalls.Add(1)
 	return f.convertToTemplate(ctx, n, vmid)
 }
+func (f *fakePX) UploadFile(ctx context.Context, n, s, ct, fn string, c []byte) error {
+	return f.uploadFile(ctx, n, s, ct, fn, c)
+}
+func (f *fakePX) AttachCDROM(ctx context.Context, n string, vmid int, slot, volid string) error {
+	return f.attachCDROM(ctx, n, vmid, slot, volid)
+}
+func (f *fakePX) DetachDrive(ctx context.Context, n string, vmid int, slot string) error {
+	return f.detachDrive(ctx, n, vmid, slot)
+}
+func (f *fakePX) DeleteStorageVolume(ctx context.Context, n, volid string) error {
+	return f.deleteStorageVolume(ctx, n, volid)
+}
+func (f *fakePX) StartVM(ctx context.Context, n string, vmid int) (string, error) {
+	return f.startVM(ctx, n, vmid)
+}
+func (f *fakePX) StopVM(ctx context.Context, n string, vmid int) (string, error) {
+	return f.stopVM(ctx, n, vmid)
+}
+func (f *fakePX) DestroyVM(ctx context.Context, n string, vmid int) (string, error) {
+	return f.destroyVM(ctx, n, vmid)
+}
+func (f *fakePX) GetVMState(ctx context.Context, n string, vmid int) (string, error) {
+	return f.getVMState(ctx, n, vmid)
+}
+func (f *fakePX) SetVMTags(ctx context.Context, n string, vmid int, tags []string) error {
+	f.tagCalls.Add(1)
+	return f.setVMTags(ctx, n, vmid, tags)
+}
+func (f *fakePX) AgentRun(ctx context.Context, n string, vmid int, cmd []string, in string, p time.Duration) (*proxmox.AgentExecStatus, error) {
+	f.bakeCalls.Add(1)
+	return f.agentRun(ctx, n, vmid, cmd, in, p)
+}
 
 // happyPX returns a fully-mocked client where everything succeeds.
 // NextVMIDFrom returns sequential IDs starting at the requested floor so each
@@ -87,6 +134,22 @@ func happyPX() *fakePX {
 			return "UPID:create", nil
 		},
 		convertToTemplate: func(_ context.Context, _ string, _ int) error { return nil },
+
+		// Bake ceremony defaults — every step succeeds, GetVMState returns
+		// "stopped" so waitForStopped exits on first poll, AgentRun
+		// returns exit 0 so every cloud-init / poweroff probe is happy.
+		uploadFile:          func(_ context.Context, _, _, _, _ string, _ []byte) error { return nil },
+		attachCDROM:         func(_ context.Context, _ string, _ int, _, _ string) error { return nil },
+		detachDrive:         func(_ context.Context, _ string, _ int, _ string) error { return nil },
+		deleteStorageVolume: func(_ context.Context, _, _ string) error { return nil },
+		startVM:             func(_ context.Context, _ string, _ int) (string, error) { return "UPID:start", nil },
+		stopVM:              func(_ context.Context, _ string, _ int) (string, error) { return "UPID:stop", nil },
+		destroyVM:           func(_ context.Context, _ string, _ int) (string, error) { return "UPID:destroy", nil },
+		getVMState:          func(_ context.Context, _ string, _ int) (string, error) { return "stopped", nil },
+		setVMTags:           func(_ context.Context, _ string, _ int, _ []string) error { return nil },
+		agentRun: func(_ context.Context, _ string, _ int, _ []string, _ string, _ time.Duration) (*proxmox.AgentExecStatus, error) {
+			return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0}, nil
+		},
 	}
 	f.nextVMIDFrom = func(_ context.Context, min int) (int, error) {
 		return min + int(f.nextVMIDSeq.Add(1)) - 1, nil
@@ -419,9 +482,21 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		mu.Unlock()
 		return "UPID:create", nil
 	}
+	px.uploadFile = func(_ context.Context, _, _, _, _ string, _ []byte) error {
+		mu.Lock()
+		sequence = append(sequence, "bake")
+		mu.Unlock()
+		return nil
+	}
 	px.convertToTemplate = func(_ context.Context, _ string, _ int) error {
 		mu.Lock()
 		sequence = append(sequence, "template")
+		mu.Unlock()
+		return nil
+	}
+	px.setVMTags = func(_ context.Context, _ string, _ int, _ []string) error {
+		mu.Lock()
+		sequence = append(sequence, "tag")
 		mu.Unlock()
 		return nil
 	}
@@ -432,12 +507,12 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		OS: []string{"ubuntu-24.04"},
 	})
 
-	// Templates intentionally don't get a Proxmox cloud-init drive
-	// anymore — Nimbus delivers cloud-init via per-VM ISOs at
-	// provision time (see provision.installCIDataISO). So the
-	// expected sequence is shorter than before:
-	// has-file → download → nextid → create → template.
-	want := []string{"has-file", "download", "nextid", "create", "template"}
+	// Post-D-boot ordering: bake (one-time configure-then-template
+	// ceremony) runs between create and convert-to-template, and the
+	// nimbus-baked tag is stamped right after convert. The exact bake
+	// substeps are exercised by other tests; here we only assert the
+	// high-level invariant — bake is in the right place.
+	want := []string{"has-file", "download", "nextid", "create", "bake", "template", "tag"}
 	if len(sequence) != len(want) {
 		t.Fatalf("got %d steps, want %d: %v", len(sequence), len(want), sequence)
 	}
@@ -445,5 +520,91 @@ func TestBootstrap_StepsCalledInOrder(t *testing.T) {
 		if sequence[i] != step {
 			t.Errorf("step %d = %q, want %q (full: %v)", i, sequence[i], step, sequence)
 		}
+	}
+}
+
+func TestBootstrap_BakeStampsNimbusBakedTag(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	// Single OS, single node — keeps assertions readable.
+	px.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{{Name: "alpha", Status: "online"}}, nil
+	}
+	var (
+		mu      sync.Mutex
+		gotTags []string
+	)
+	px.setVMTags = func(_ context.Context, _ string, _ int, tags []string) error {
+		mu.Lock()
+		gotTags = append(gotTags, tags...)
+		mu.Unlock()
+		return nil
+	}
+
+	svc, _ := newSvc(t, px)
+	res, err := svc.Bootstrap(context.Background(), bootstrap.Request{
+		OS: []string{"ubuntu-24.04"},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if len(res.Failed) != 0 {
+		t.Fatalf("unexpected failures: %+v", res.Failed)
+	}
+	if len(gotTags) != 1 || gotTags[0] != bootstrap.NimbusBakedTag {
+		t.Errorf("tags set = %v, want exactly [%q]", gotTags, bootstrap.NimbusBakedTag)
+	}
+	if got := px.tagCalls.Load(); got != 1 {
+		t.Errorf("SetVMTags called %d times, want 1", got)
+	}
+}
+
+func TestBootstrap_BakeFailure_ForceStopsAndAbortsConvert(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{{Name: "alpha", Status: "online"}}, nil
+	}
+
+	// QGA probe (the `true` command) responds OK so waitForQGA exits.
+	// `cloud-init status --wait` then returns a non-zero exit, which
+	// surfaces as a bake error — bake must force-stop the VM and abort
+	// before ConvertToTemplate runs.
+	bakeErr := errors.New("simulated cloud-init failure")
+	px.agentRun = func(_ context.Context, _ string, _ int, cmd []string, _ string, _ time.Duration) (*proxmox.AgentExecStatus, error) {
+		if len(cmd) > 0 && cmd[0] == "cloud-init" {
+			return nil, bakeErr
+		}
+		return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0}, nil
+	}
+
+	var stopCalls atomic.Int32
+	px.stopVM = func(_ context.Context, _ string, _ int) (string, error) {
+		stopCalls.Add(1)
+		return "UPID:stop", nil
+	}
+
+	svc, _ := newSvc(t, px)
+	res, err := svc.Bootstrap(context.Background(), bootstrap.Request{
+		OS: []string{"ubuntu-24.04"},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap (outer): %v", err)
+	}
+
+	// Single OS × single node → exactly one Failed outcome whose error
+	// message carries the bake context. ConvertToTemplate must NOT have
+	// been called.
+	if len(res.Failed) != 1 {
+		t.Fatalf("failed = %d, want 1: %+v", len(res.Failed), res.Failed)
+	}
+	if !strings.Contains(res.Failed[0].Error, "bake") {
+		t.Errorf("failure message %q does not mention bake", res.Failed[0].Error)
+	}
+	if got := px.convertCalls.Load(); got != 0 {
+		t.Errorf("ConvertToTemplate called %d times during a bake failure, want 0", got)
+	}
+	if got := stopCalls.Load(); got != 1 {
+		t.Errorf("StopVM called %d times after bake failure, want 1 (force-stop in deferred cleanup)", got)
 	}
 }
