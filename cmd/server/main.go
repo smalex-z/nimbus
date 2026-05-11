@@ -107,6 +107,20 @@ func main() {
 		return
 	}
 
+	// Reject unknown subcommands rather than silently falling through
+	// to "start the server" — `sudo nimbus reinstall` (typo for
+	// `install`) used to drop into setup mode and confusingly fail on
+	// "address already in use" because a real server was bound. A
+	// clear error here saves the user from chasing the wrong failure.
+	// Anything that starts with '-' is a flag for the server, not a
+	// subcommand — preserve `--port`, `--version`, etc.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintf(os.Stderr, "nimbus: unknown subcommand %q\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "Valid subcommands: bootstrap, install, gopher-bootstrap")
+		fmt.Fprintln(os.Stderr, "(omit a subcommand to start the server with flags like --port / --db / --version)")
+		os.Exit(2)
+	}
+
 	flags := flag.NewFlagSet("nimbus", flag.ExitOnError)
 	port := flags.String("port", "", "server port (overrides PORT env var)")
 	dbPath := flags.String("db", "", "database path (overrides DB_PATH env var)")
