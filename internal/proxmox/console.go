@@ -104,14 +104,18 @@ func (c *Client) DialConsoleWS(ctx context.Context, node string, vmid, port int,
 
 // ConsoleAuthHandshake completes PVE's serial-console auth dance over an
 // already-upgraded WebSocket. PVE expects the upstream client to send the
-// auth ticket as a text frame within seconds of the upgrade — without
+// auth payload as a TEXT frame within seconds of the upgrade — without
 // this the connection is held open but no bytes flow.
 //
-// Wire format: send "<user>:<ticket>\n" then read a single frame echoing
-// "OK" on success. After that the channel is raw bytes both ways.
+// Wire format: send "<user>:<ticket>\n" as text, then read a single frame
+// echoing "OK" on success. After that the channel is raw bytes both ways.
+//
+// Frame type matters: PVE rejects this as a Binary frame and closes 1006
+// before responding. The PVE web UI sends it via the default `ws.send(str)`
+// which produces a Text frame; we must mirror that.
 func ConsoleAuthHandshake(conn *websocket.Conn, user, ticket string) error {
 	payload := user + ":" + ticket + "\n"
-	if err := conn.WriteMessage(websocket.BinaryMessage, []byte(payload)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		return fmt.Errorf("send auth: %w", err)
 	}
 	_, msg, err := conn.ReadMessage()
