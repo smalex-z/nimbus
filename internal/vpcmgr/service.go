@@ -172,17 +172,24 @@ func (s *Service) CreateVPC(ctx context.Context, ownerID uint, name string) (*db
 		}
 		row, err := s.tryInsertRow(ctx, ownerID, name, salt)
 		if err == nil {
-			// DB write OK — provision PVE state.
+			// DB write OK — provision PVE state. Rollback paths use
+			// context.Background() for the DELETE — the request ctx is
+			// usually canceled when we land here (timeout is the most
+			// common failure mode), and gorm refuses queries on a
+			// canceled context. Silently swallowing that error leaves
+			// the provisioning row stranded in the DB until the next
+			// startup reap.
 			if perr := s.bootstrapPVE(ctx, row, peers); perr != nil {
-				_ = s.db.WithContext(ctx).Unscoped().Delete(row).Error
+				_ = s.db.WithContext(context.Background()).Unscoped().Delete(row).Error
 				return nil, fmt.Errorf("provision pve state for vpc %s: %w", name, perr)
 			}
 			// Gateway LXC.
 			gwVMID, gwNode, gerr := s.gw.Provision(ctx, row)
 			if gerr != nil {
-				// Rollback PVE state + DB row.
+				// Rollback PVE state + DB row — both on fresh contexts
+				// for the same reason as the bootstrap rollback above.
 				s.tearDownPVE(context.Background(), row)
-				_ = s.db.WithContext(ctx).Unscoped().Delete(row).Error
+				_ = s.db.WithContext(context.Background()).Unscoped().Delete(row).Error
 				return nil, fmt.Errorf("provision gateway lxc: %w", gerr)
 			}
 			row.GatewayLXCID = &gwVMID
