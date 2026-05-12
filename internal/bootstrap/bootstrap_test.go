@@ -21,6 +21,7 @@ import (
 type fakePX struct {
 	getNodes             func(context.Context) ([]proxmox.Node, error)
 	templateExists       func(context.Context, string, int) (bool, error)
+	listVMs              func(context.Context, string) ([]proxmox.VMStatus, error)
 	nextVMIDFrom         func(context.Context, int) (int, error)
 	ensureStorageContent func(context.Context, string, string) error
 	storageHasFile       func(context.Context, string, string, string, string) (bool, error)
@@ -54,6 +55,9 @@ func (f *fakePX) GetNodes(ctx context.Context) ([]proxmox.Node, error) {
 }
 func (f *fakePX) TemplateExists(ctx context.Context, n string, vmid int) (bool, error) {
 	return f.templateExists(ctx, n, vmid)
+}
+func (f *fakePX) ListVMs(ctx context.Context, n string) ([]proxmox.VMStatus, error) {
+	return f.listVMs(ctx, n)
 }
 func (f *fakePX) NextVMIDFrom(ctx context.Context, minVMID int) (int, error) {
 	return f.nextVMIDFrom(ctx, minVMID)
@@ -124,6 +128,7 @@ func happyPX() *fakePX {
 			}, nil
 		},
 		templateExists:       func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
+		listVMs:              func(_ context.Context, _ string) ([]proxmox.VMStatus, error) { return nil, nil },
 		ensureStorageContent: func(_ context.Context, _, _ string) error { return nil },
 		storageHasFile:       func(_ context.Context, _, _, _, _ string) (bool, error) { return false, nil },
 		downloadStorageURL: func(_ context.Context, _, _, _, _, _ string) (string, error) {
@@ -606,5 +611,156 @@ func TestBootstrap_BakeFailure_ForceStopsAndAbortsConvert(t *testing.T) {
 	}
 	if got := stopCalls.Load(); got != 1 {
 		t.Errorf("StopVM called %d times after bake failure, want 1 (force-stop in deferred cleanup)", got)
+	}
+}
+
+// CheckTemplatesStatus must report a row as baked WITHOUT scanning the
+// node when the DB pointer is still good — both to stay cheap and to
+// avoid stamping false positives.
+func TestCheckTemplatesStatus_RowBaked_NoNodeScan(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) { return true, nil }
+
+	var listCalls atomic.Int32
+	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) {
+		listCalls.Add(1)
+		return nil, nil
+	}
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	st, err := svc.CheckTemplatesStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CheckTemplatesStatus: %v", err)
+	}
+	if st.Total != 1 || st.Baked != 1 || st.Unbaked != 0 {
+		t.Errorf("status = %+v, want Total=1 Baked=1 Unbaked=0", st)
+	}
+	if got := listCalls.Load(); got != 0 {
+		t.Errorf("ListVMs called %d times for a good row, want 0", got)
+	}
+}
+
+// The reconciliation case: another Nimbus instance rebuilt the templates
+// on a shared cluster, leaving this instance's DB pointer dangling. The
+// status check should discover the live baked sibling, rewrite the row,
+// and report baked.
+func TestCheckTemplatesStatus_AdoptsBakedSiblingOnStaleRow(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	const stale, fresh = 9000, 9100
+	px.templateExists = func(_ context.Context, _ string, vmid int) (bool, error) {
+		switch vmid {
+		case stale:
+			return false, nil // old VMID is gone / unbaked
+		case fresh:
+			return true, nil // sibling Nimbus baked this one
+		}
+		return false, nil
+	}
+	px.listVMs = func(_ context.Context, n string) ([]proxmox.VMStatus, error) {
+		if n != "alpha" {
+			return nil, nil
+		}
+		return []proxmox.VMStatus{
+			{VMID: fresh, Name: "ubuntu-template", Template: 1},
+			{VMID: 100, Name: "some-user-vm", Template: 0},
+		}, nil
+	}
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: stale}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	st, err := svc.CheckTemplatesStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CheckTemplatesStatus: %v", err)
+	}
+	if st.Total != 1 || st.Baked != 1 || st.Unbaked != 0 {
+		t.Errorf("status = %+v, want Total=1 Baked=1 Unbaked=0 after adoption", st)
+	}
+	if st.Details[0].VMID != fresh {
+		t.Errorf("Details[0].VMID = %d, want %d (adopted sibling)", st.Details[0].VMID, fresh)
+	}
+
+	// DB row must be rewritten so provision picks up the live template.
+	var got db.NodeTemplate
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+		t.Fatalf("re-read row: %v", err)
+	}
+	if got.VMID != fresh {
+		t.Errorf("row vmid = %d, want %d", got.VMID, fresh)
+	}
+}
+
+// If the node has no baked sibling, reconciliation must leave the row
+// alone and report unbaked — that's the genuine "rebuild needed" path.
+func TestCheckTemplatesStatus_NoSibling_StaysUnbaked(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) { return false, nil }
+	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) {
+		// Templates on the node, but none named ubuntu-template.
+		return []proxmox.VMStatus{
+			{VMID: 9100, Name: "debian-template", Template: 1},
+		}, nil
+	}
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	st, err := svc.CheckTemplatesStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CheckTemplatesStatus: %v", err)
+	}
+	if st.Total != 1 || st.Baked != 0 || st.Unbaked != 1 {
+		t.Errorf("status = %+v, want Total=1 Baked=0 Unbaked=1", st)
+	}
+	var got db.NodeTemplate
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+		t.Fatalf("re-read row: %v", err)
+	}
+	if got.VMID != 9000 {
+		t.Errorf("row vmid = %d, want 9000 (untouched when no sibling)", got.VMID)
+	}
+}
+
+// A discovered sibling whose tag check fails must NOT be adopted — we
+// only heal toward a confirmed-baked template.
+func TestCheckTemplatesStatus_SiblingNotBaked_NoAdopt(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) { return false, nil }
+	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) {
+		return []proxmox.VMStatus{
+			{VMID: 9100, Name: "ubuntu-template", Template: 1}, // present but unbaked
+		}, nil
+	}
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	st, err := svc.CheckTemplatesStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CheckTemplatesStatus: %v", err)
+	}
+	if st.Unbaked != 1 {
+		t.Errorf("status = %+v, want Unbaked=1 (sibling lacks baked tag)", st)
+	}
+	var got db.NodeTemplate
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+		t.Fatalf("re-read row: %v", err)
+	}
+	if got.VMID != 9000 {
+		t.Errorf("row vmid = %d, want 9000 (untouched)", got.VMID)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,7 @@ const (
 type ProxmoxClient interface {
 	GetNodes(ctx context.Context) ([]proxmox.Node, error)
 	TemplateExists(ctx context.Context, node string, vmid int) (bool, error)
+	ListVMs(ctx context.Context, node string) ([]proxmox.VMStatus, error)
 	NextVMIDFrom(ctx context.Context, minVMID int) (int, error)
 	EnsureStorageContent(ctx context.Context, storage, contentType string) error
 	StorageHasFile(ctx context.Context, node, storage, contentType, filename string) (bool, error)
@@ -157,9 +159,17 @@ type TemplateStatusDetail struct {
 // CheckTemplatesStatus walks every node_templates row and asks Proxmox
 // whether the template VMID still exists AND carries the bake tag.
 //
-// Cost: one GetVMConfig per row. For a 4-OS × 4-node cluster that's 16
-// API calls. The banner endpoint that wraps this is admin-only and
-// rate-limited by route timeout; not intended for hot-loop polling.
+// When a row's VMID is stale (no longer present, or present but no longer
+// baked), this also runs a tag-first reconciliation pass: list the node's
+// templates, find one named "{os}-template" tagged with NimbusBakedTag,
+// and rewrite the row's VMID to point at it. This keeps multi-instance
+// dev deployments working when one Nimbus rebuilds templates on a shared
+// Proxmox cluster — the other instances' DB pointers heal automatically
+// instead of falsely reporting "rebuild needed" (and breaking provision).
+//
+// Cost: TemplateExists per row + one ListVMs per node that has stale
+// rows. The banner endpoint that wraps this is admin-only and rate-
+// limited by route timeout; not intended for hot-loop polling.
 func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, error) {
 	var rows []db.NodeTemplate
 	if err := s.db.WithContext(ctx).Order("node, os").Find(&rows).Error; err != nil {
@@ -169,6 +179,16 @@ func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, er
 		Total:   len(rows),
 		Details: make([]TemplateStatusDetail, 0, len(rows)),
 	}
+
+	// Per-node template inventory, populated lazily — at most one
+	// ListVMs call per node, only when a stale row needs reconciliation.
+	type discovered struct {
+		name string
+		vmid int
+	}
+	nodeTemplates := map[string][]discovered{}
+	nodeListed := map[string]bool{}
+
 	for _, r := range rows {
 		baked, err := s.px.TemplateExists(ctx, r.Node, r.VMID)
 		// Probe errors map to "not baked" — the operator's action (re-run
@@ -177,13 +197,55 @@ func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, er
 		if err != nil {
 			baked = false
 		}
+		vmid := r.VMID
+
+		if !baked {
+			if !nodeListed[r.Node] {
+				nodeListed[r.Node] = true
+				if vms, lerr := s.px.ListVMs(ctx, r.Node); lerr == nil {
+					for _, vm := range vms {
+						if vm.Template != 1 {
+							continue
+						}
+						nodeTemplates[r.Node] = append(nodeTemplates[r.Node], discovered{
+							name: strings.ToLower(vm.Name),
+							vmid: vm.VMID,
+						})
+					}
+				}
+			}
+			wantName := fmt.Sprintf("%s-template", r.OS)
+			for _, d := range nodeTemplates[r.Node] {
+				if d.name != wantName || d.vmid == r.VMID {
+					continue
+				}
+				ok, terr := s.px.TemplateExists(ctx, r.Node, d.vmid)
+				if terr != nil || !ok {
+					continue
+				}
+				if err := s.db.WithContext(ctx).
+					Model(&db.NodeTemplate{}).
+					Where("node = ? AND os = ?", r.Node, r.OS).
+					Update("vmid", d.vmid).Error; err != nil {
+					log.Printf("templates-status: reconcile (%s,%s) vmid=%d→%d: %v",
+						r.Node, r.OS, r.VMID, d.vmid, err)
+					break
+				}
+				log.Printf("templates-status: reconciled (%s,%s) vmid=%d→%d (adopted baked sibling)",
+					r.Node, r.OS, r.VMID, d.vmid)
+				vmid = d.vmid
+				baked = true
+				break
+			}
+		}
+
 		if baked {
 			out.Baked++
 		} else {
 			out.Unbaked++
 		}
 		out.Details = append(out.Details, TemplateStatusDetail{
-			Node: r.Node, OS: r.OS, VMID: r.VMID, Baked: baked,
+			Node: r.Node, OS: r.OS, VMID: vmid, Baked: baked,
 		})
 	}
 	return out, nil

@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 
+	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
 	"nimbus/internal/proxmox"
 )
@@ -196,6 +197,63 @@ func (s *Service) swapLegacyCIToManaged(ctx context.Context, node string, vmid i
 	}
 	log.Printf("swap legacy cidata vmid=%d: managed cloudinit drive attached at ide2=%s:cloudinit", vmid, bootStorage)
 	return nil
+}
+
+// SweepResult is the aggregate outcome of SweepLegacyCIData. Total is the
+// number of VMs the sweep considered; OK is how many ended in the desired
+// "managed cloudinit drive at ide2" state (either already there or
+// successfully swapped); Failed enumerates per-VM errors so operators can
+// retry or investigate.
+type SweepResult struct {
+	Total  int            `json:"total"`
+	OK     int            `json:"ok"`
+	Failed []SweepFailure `json:"failed,omitempty"`
+}
+
+// SweepFailure is one VM's swap error for SweepResult.
+type SweepFailure struct {
+	VMID     int    `json:"vmid"`
+	Hostname string `json:"hostname"`
+	Node     string `json:"node"`
+	Error    string `json:"error"`
+}
+
+// SweepLegacyCIData walks every VM in the local DB and runs the legacy
+// → managed cloud-init swap on each one. Idempotent for VMs already
+// using a managed drive (swapLegacyCIToManaged early-returns).
+//
+// Purpose: pre-D-boot VMs still carry a per-node `nimbus-vm-{vmid}.iso`
+// at ide2. Proxmox refuses to migrate those, so any operation that goes
+// straight to MigrateVM (notably node drain via nodemgr) fails until the
+// swap is performed. Running this eagerly — typically right after a
+// templates bootstrap — pre-empts that class of failure across the
+// whole fleet instead of relying on lazy per-operation swaps that not
+// every code path triggers.
+//
+// Sequential by design: each swap is ~2 API calls, the fleet is
+// typically small (dozens), and serializing keeps per-node Proxmox load
+// well below saturation. Cluster-wide errors (e.g. listing VMs) abort;
+// per-VM failures collect into SweepResult.Failed and the loop
+// continues so one bad node doesn't strand the rest.
+func (s *Service) SweepLegacyCIData(ctx context.Context) (SweepResult, error) {
+	var vms []db.VM
+	if err := s.db.WithContext(ctx).Find(&vms).Error; err != nil {
+		return SweepResult{}, fmt.Errorf("list vms: %w", err)
+	}
+	result := SweepResult{Total: len(vms)}
+	for _, vm := range vms {
+		if err := s.swapLegacyCIToManaged(ctx, vm.Node, vm.VMID); err != nil {
+			log.Printf("sweep legacy cidata vmid=%d (%s on %s): %v", vm.VMID, vm.Hostname, vm.Node, err)
+			result.Failed = append(result.Failed, SweepFailure{
+				VMID: vm.VMID, Hostname: vm.Hostname, Node: vm.Node,
+				Error: err.Error(),
+			})
+			continue
+		}
+		result.OK++
+	}
+	log.Printf("sweep legacy cidata: total=%d ok=%d failed=%d", result.Total, result.OK, len(result.Failed))
+	return result, nil
 }
 
 // discoverBootDiskStorage finds the Proxmox storage backing the VM's boot

@@ -9,19 +9,35 @@ import (
 	"nimbus/internal/api/response"
 	"nimbus/internal/audit"
 	"nimbus/internal/bootstrap"
+	"nimbus/internal/provision"
 )
+
+// LegacyCIDataSweeper is the small surface BootstrapTemplates uses to run
+// the post-bootstrap legacy → managed cloud-init sweep across every VM.
+// Defined as an interface so the handler can be wired up without a hard
+// dependency on *provision.Service in tests.
+type LegacyCIDataSweeper interface {
+	SweepLegacyCIData(ctx context.Context) (provision.SweepResult, error)
+}
 
 // Bootstrap wraps long-running admin operations (template bootstrap today;
 // re-bootstrap, template refresh, etc. later).
 type Bootstrap struct {
-	svc   *bootstrap.Service
-	audit *audit.Service
+	svc     *bootstrap.Service
+	audit   *audit.Service
+	sweeper LegacyCIDataSweeper
 }
 
 func NewBootstrap(svc *bootstrap.Service) *Bootstrap { return &Bootstrap{svc: svc} }
 
 // WithAudit installs the audit-log sink. Nil disables emission.
 func (h *Bootstrap) WithAudit(a *audit.Service) *Bootstrap { h.audit = a; return h }
+
+// WithSweeper installs the legacy cloud-init sweeper. When set, a
+// successful BootstrapTemplates call also sweeps every Nimbus VM, swapping
+// any remaining pre-D-boot per-VM cidata ISOs for managed cloudinit
+// drives. Nil-ok — sweep silently skipped if unset (test setups).
+func (h *Bootstrap) WithSweeper(s LegacyCIDataSweeper) *Bootstrap { h.sweeper = s; return h }
 
 type bootstrapRequest struct {
 	Nodes []string `json:"nodes,omitempty"`
@@ -138,17 +154,62 @@ func (h *Bootstrap) BootstrapTemplates(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, err)
 		return
 	}
+
+	// Post-bootstrap legacy-VM sweep: any pre-D-boot VM still carrying a
+	// per-node cidata ISO at ide2 gets converted to a managed cloudinit
+	// drive so future migrations don't fail at Proxmox's local-cdrom
+	// guard. Sweep errors don't fail the response — templates ARE built;
+	// the per-VM failures are reported back so the operator can retry.
+	var sweep *provision.SweepResult
+	if h.sweeper != nil {
+		// Bounded timeout — keeps a slow Proxmox from holding the request
+		// open indefinitely. Each per-VM swap is a few API calls; budget
+		// generously for fleets of a hundred or two.
+		sweepCtx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+		swept, sweepErr := h.sweeper.SweepLegacyCIData(sweepCtx)
+		cancel()
+		if sweepErr != nil {
+			// Cluster-wide failure (DB list etc.) — surface in audit but
+			// don't fail the bootstrap response. Operator sees template
+			// outcomes; sweep can be retried by re-running.
+			h.audit.Record(r.Context(), audit.Event{
+				Action:   "bootstrap.sweep_legacy_cidata",
+				Success:  false,
+				ErrorMsg: sweepErr.Error(),
+			})
+		} else {
+			sweep = &swept
+		}
+	}
+
+	auditDetails := map[string]any{
+		"nodes":   req.Nodes,
+		"os":      req.OS,
+		"force":   req.Force,
+		"created": len(res.Created),
+		"skipped": len(res.Skipped),
+		"failed":  len(res.Failed),
+	}
+	if sweep != nil {
+		auditDetails["sweep_total"] = sweep.Total
+		auditDetails["sweep_ok"] = sweep.OK
+		auditDetails["sweep_failed"] = len(sweep.Failed)
+	}
 	h.audit.Record(r.Context(), audit.Event{
-		Action: "bootstrap.templates",
-		Details: map[string]any{
-			"nodes":   req.Nodes,
-			"os":      req.OS,
-			"force":   req.Force,
-			"created": len(res.Created),
-			"skipped": len(res.Skipped),
-			"failed":  len(res.Failed),
-		},
+		Action:  "bootstrap.templates",
+		Details: auditDetails,
 		Success: true,
 	})
-	response.Success(w, res)
+
+	response.Success(w, bootstrapResponse{Result: *res, Sweep: sweep})
+}
+
+// bootstrapResponse is the wire-shape returned by BootstrapTemplates.
+// Embeds bootstrap.Result so the existing template-outcome fields stay
+// untouched, and adds the optional Sweep payload from the post-bootstrap
+// legacy-CI swap (nil when no sweeper is wired or when the sweep
+// itself errored at the cluster level).
+type bootstrapResponse struct {
+	bootstrap.Result
+	Sweep *provision.SweepResult `json:"sweep,omitempty"`
 }
