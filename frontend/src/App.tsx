@@ -107,6 +107,12 @@ export default function App() {
                   <Layout>
                     <Routes>
                       <Route path="/" element={<Provision />} />
+                      {/* /provision is a bookmark / deep-link alias for
+                          the root provision form — the Tasks dropdown
+                          historically linked here. Without the redirect
+                          the page renders blank since no Route owns the
+                          path. */}
+                      <Route path="/provision" element={<Navigate to="/" replace />} />
                       <Route path="/vms" element={<MyVMs />} />
                       <Route path="/keys" element={<Keys />} />
                       {/* /vpcs is the Networking-v1 VPC manager —

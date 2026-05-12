@@ -137,11 +137,12 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
   // page with ?op=<id> so the Admin mount-time handler can open
   // MigrateVMModal in re-attach mode. Provision rows go to the
   // Provision page where the existing ReattachBanner detects the
-  // in-flight op on its own. Unknown types fall back to the dropdown
-  // (no nav).
+  // in-flight op on its own — and that page is mounted at the
+  // root path, not /provision (which has no Route and would render
+  // a blank page). Unknown types fall back to the dropdown (no nav).
   const href = (() => {
     if (op.type === 'vm.migrate') return `/admin?op=${op.id}`
-    if (op.type === 'vm.provision') return '/provision'
+    if (op.type === 'vm.provision') return '/'
     return null
   })()
 
