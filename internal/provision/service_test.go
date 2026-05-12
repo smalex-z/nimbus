@@ -3,6 +3,7 @@ package provision_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -40,31 +41,32 @@ func realPubKey(t *testing.T) string {
 // a function field the test can override to inject behavior; defaults return
 // success with empty data.
 type fakePVE struct {
-	getNodes          func(context.Context) ([]proxmox.Node, error)
-	getClusterVMs     func(context.Context) ([]proxmox.ClusterVM, error)
-	getClusterStorage func(context.Context) ([]proxmox.ClusterStorage, error)
-	getVMConfig       func(context.Context, string, int) (map[string]any, error)
-	templateExists    func(context.Context, string, int) (bool, error)
-	nextVMID          func(context.Context) (int, error)
-	cloneVM           func(context.Context, string, string, int, int, string) (string, error)
-	waitForTask       func(context.Context, string, string, time.Duration) error
-	setCloudInit      func(context.Context, string, int, proxmox.CloudInitConfig) error
-	setVMTags         func(context.Context, string, int, []string) error
-	setVMDescription  func(context.Context, string, int, string) error
-	resizeDisk        func(context.Context, string, int, string, string) error
-	startVM           func(context.Context, string, int) (string, error)
-	stopVM            func(context.Context, string, int) (string, error)
-	shutdownVM        func(context.Context, string, int) (string, error)
-	rebootVM          func(context.Context, string, int) (string, error)
-	destroyVM         func(context.Context, string, int) (string, error)
-	getAgentIfaces    func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
-	migrateVM         func(context.Context, string, int, string, bool) (string, error)
-	setVMNetwork      func(context.Context, string, int, string, string) error
-	agentRun          func(context.Context, string, int, []string, string, time.Duration) (*proxmox.AgentExecStatus, error)
-	uploadFile        func(context.Context, string, string, string, string, []byte) error
-	deleteVolume      func(context.Context, string, string) error
-	attachCDROM       func(context.Context, string, int, string, string) error
-	detachDrive       func(context.Context, string, int, string) error
+	getNodes             func(context.Context) ([]proxmox.Node, error)
+	getClusterVMs        func(context.Context) ([]proxmox.ClusterVM, error)
+	getClusterStorage    func(context.Context) ([]proxmox.ClusterStorage, error)
+	getVMConfig          func(context.Context, string, int) (map[string]any, error)
+	templateExists       func(context.Context, string, int) (bool, error)
+	nextVMID             func(context.Context) (int, error)
+	cloneVM              func(context.Context, string, string, int, int, string) (string, error)
+	waitForTask          func(context.Context, string, string, time.Duration) error
+	setCloudInit         func(context.Context, string, int, proxmox.CloudInitConfig) error
+	setVMTags            func(context.Context, string, int, []string) error
+	setVMDescription     func(context.Context, string, int, string) error
+	resizeDisk           func(context.Context, string, int, string, string) error
+	startVM              func(context.Context, string, int) (string, error)
+	stopVM               func(context.Context, string, int) (string, error)
+	shutdownVM           func(context.Context, string, int) (string, error)
+	rebootVM             func(context.Context, string, int) (string, error)
+	destroyVM            func(context.Context, string, int) (string, error)
+	getAgentIfaces       func(context.Context, string, int) ([]proxmox.NetworkInterface, error)
+	migrateVM            func(context.Context, string, int, string, bool) (string, error)
+	setVMNetwork         func(context.Context, string, int, string, string) error
+	agentRun             func(context.Context, string, int, []string, string, time.Duration) (*proxmox.AgentExecStatus, error)
+	uploadFile           func(context.Context, string, string, string, string, []byte) error
+	deleteVolume         func(context.Context, string, string) error
+	attachCDROM          func(context.Context, string, int, string, string) error
+	attachCloudInitDrive func(context.Context, string, int, string, string) error
+	detachDrive          func(context.Context, string, int, string) error
 
 	cloneCalls     atomic.Int32
 	cloudInitCalls atomic.Int32
@@ -186,6 +188,12 @@ func (f *fakePVE) AttachCDROM(ctx context.Context, node string, vmid int, slot, 
 	}
 	return f.attachCDROM(ctx, node, vmid, slot, volid)
 }
+func (f *fakePVE) AttachCloudInitDrive(ctx context.Context, node string, vmid int, slot, storage string) error {
+	if f.attachCloudInitDrive == nil {
+		return nil
+	}
+	return f.attachCloudInitDrive(ctx, node, vmid, slot, storage)
+}
 func (f *fakePVE) DetachDrive(ctx context.Context, node string, vmid int, slot string) error {
 	if f.detachDrive == nil {
 		return nil
@@ -208,7 +216,19 @@ func happyFakePVE(t *testing.T) *fakePVE {
 			return nil, nil
 		},
 		templateExists: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
-		nextVMID:       func(_ context.Context) (int, error) { return 200, nil },
+		// Default GetVMConfig: returns a config carrying the D-boot
+		// baked-tag and a scsi0 entry on local-lvm. This keeps both
+		// verifyTemplateBaked (reads tags on the template VMID) and
+		// discoverBootDiskStorage (reads scsi0 on the clone VMID)
+		// happy with one default — tests that need a different shape
+		// override per-test.
+		getVMConfig: func(_ context.Context, _ string, vmid int) (map[string]any, error) {
+			return map[string]any{
+				"tags":  "nimbus-baked-v1",
+				"scsi0": fmt.Sprintf("local-lvm:vm-%d-disk-0,size=10G", vmid),
+			}, nil
+		},
+		nextVMID: func(_ context.Context) (int, error) { return 200, nil },
 		cloneVM: func(_ context.Context, _, _ string, _, _ int, _ string) (string, error) {
 			return "UPID:alpha:00001234::qmclone:200:root@pam:", nil
 		},

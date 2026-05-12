@@ -785,6 +785,31 @@ export async function getBootstrapStatus(): Promise<{ bootstrapped: boolean }> {
   return data
 }
 
+export interface TemplateStatusDetail {
+  node: string
+  os: string
+  vmid: number
+  baked: boolean
+}
+
+export interface TemplatesStatus {
+  total: number
+  baked: number
+  unbaked: number
+  details: TemplateStatusDetail[]
+}
+
+// getTemplatesStatus drives the "rebuild templates" banner. Unbaked > 0
+// means one or more node_templates rows point at a Proxmox template that
+// either no longer exists or lacks the nimbus-baked-v1 tag — i.e. an
+// upgraded deployment that still has pre-D-boot templates. Admins
+// resolve this by clicking the banner's "Rebuild now" button (which
+// calls bootstrapTemplates).
+export async function getTemplatesStatus(): Promise<TemplatesStatus> {
+  const { data } = await api.get<TemplatesStatus>('/admin/templates-status')
+  return data
+}
+
 export interface CreateAdminRequest {
   name: string
   email: string

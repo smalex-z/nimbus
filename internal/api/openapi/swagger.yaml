@@ -28,6 +28,30 @@ definitions:
       vmid:
         type: integer
     type: object
+  bootstrap.TemplateStatusDetail:
+    properties:
+      baked:
+        type: boolean
+      node:
+        type: string
+      os:
+        type: string
+      vmid:
+        type: integer
+    type: object
+  bootstrap.TemplatesStatus:
+    properties:
+      baked:
+        type: integer
+      details:
+        items:
+          $ref: '#/definitions/bootstrap.TemplateStatusDetail'
+        type: array
+      total:
+        type: integer
+      unbaked:
+        type: integer
+    type: object
   db.Node:
     properties:
       created_at:
@@ -605,6 +629,15 @@ definitions:
         type: boolean
       suggested_gateway:
         type: string
+      suggested_prefix_len:
+        description: |-
+          SuggestedPrefixLen is the netmask of the host's interface that
+          owns the default route, when it covers the suggested gateway.
+          Useful when the operator's LAN spans wider than /24 (e.g.
+          192.168.0.0/16 with pool VMs in 192.168.50.* but gateway at
+          192.168.1.1 — /24 would make those VMs unable to ARP the
+          gateway). 0 when undetectable.
+        type: integer
     type: object
   handlers.drainExecuteRequest:
     properties:
@@ -2041,6 +2074,43 @@ paths:
       security:
       - cookieAuth: []
       summary: Build VM templates on cluster nodes (admin)
+      tags:
+      - bootstrap
+  /admin/templates-status:
+    get:
+      description: |-
+        Reports how many node_templates rows still point at a
+        Proxmox template that carries the nimbus-baked-v1 tag.
+        Used by the SPA banner to nudge operators of pre-D-boot
+        deployments to re-run bootstrap so future provisions
+        don't fail at the template-baked guard.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/bootstrap.TemplatesStatus'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Per-template freshness check (admin)
       tags:
       - bootstrap
   /audit:

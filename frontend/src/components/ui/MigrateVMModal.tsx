@@ -395,9 +395,11 @@ function PickerBody({
     <>
       <p className="text-sm text-ink-2 leading-relaxed mb-5">
         Live migration runs without downtime. If Proxmox refuses live
-        migration (snapshots, local CD/DVD, etc.) we'll surface the reason
+        migration (snapshots, local devices, etc.) we'll surface the reason
         and you can choose to stop, migrate, then start the VM on the new
-        node.
+        node. VMs created on older Nimbus versions still have a per-node
+        cloud-init ISO attached; Nimbus will detach it automatically during
+        the offline migration so the move can proceed.
       </p>
 
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 font-mono text-[11px] mb-5 p-3.5 rounded-[10px] bg-[rgba(27,23,38,0.04)] border border-line-2">

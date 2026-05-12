@@ -195,9 +195,11 @@ export default function MultiMigrateModal({ selectedVMs, onClose, onDispatched }
         <p className="text-sm text-ink-2 mb-5 leading-relaxed">
           Each VM dispatches as its own background task — watch progress
           in the Tasks panel. Live migration is attempted first; on
-          rejection (snapshots, local CD/DVD, etc.) the bulk path
+          rejection (snapshots, local devices, etc.) the bulk path
           automatically falls back to stop → migrate → start (no
-          per-VM confirmation prompt).
+          per-VM confirmation prompt). Legacy VMs with a per-node
+          cloud-init ISO attached have it detached automatically during
+          the offline phase.
         </p>
 
         <div className="flex justify-between items-baseline mb-1.5">

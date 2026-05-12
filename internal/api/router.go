@@ -360,6 +360,11 @@ func NewRouter(d Deps) http.Handler {
 				r.With(middleware.Timeout(30*time.Minute)).
 					Post("/admin/bootstrap-templates", bs.BootstrapTemplates)
 
+				// Read-only per-template freshness check; drives the
+				// "rebuild templates" SPA banner. One Proxmox config
+				// fetch per template row, so a tight timeout is fine.
+				r.Get("/admin/templates-status", bs.TemplatesStatus)
+
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
 				r.Get("/settings/access-code", settings.GetAccessCode)

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -53,6 +54,20 @@ type ProxmoxClient interface {
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	CreateVMWithImport(ctx context.Context, node string, vmid int, opts proxmox.CreateVMOpts) (string, error)
 	ConvertToTemplate(ctx context.Context, node string, vmid int) error
+
+	// Bake ceremony — boot the imported image once, install
+	// qemu-guest-agent + cloud-init clean, then power off before
+	// ConvertToTemplate. See bake.go.
+	UploadFile(ctx context.Context, node, storage, contentType, filename string, content []byte) error
+	AttachCDROM(ctx context.Context, node string, vmid int, slot, volid string) error
+	DetachDrive(ctx context.Context, node string, vmid int, slot string) error
+	DeleteStorageVolume(ctx context.Context, node, volid string) error
+	StartVM(ctx context.Context, node string, vmid int) (string, error)
+	StopVM(ctx context.Context, node string, vmid int) (string, error)
+	DestroyVM(ctx context.Context, node string, vmid int) (string, error)
+	GetVMState(ctx context.Context, node string, vmid int) (string, error)
+	SetVMTags(ctx context.Context, node string, vmid int, tags []string) error
+	AgentRun(ctx context.Context, node string, vmid int, command []string, inputData string, pollInterval time.Duration) (*proxmox.AgentExecStatus, error)
 }
 
 // importContentType is the Proxmox content type Nimbus uses for cloud-image
@@ -115,6 +130,63 @@ func (s *Service) HasTemplates(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// TemplatesStatus is the result of inspecting every (node, OS) template row
+// against Proxmox to see which are still bake-tagged. Used by the admin
+// banner to nudge operators of pre-D-boot deployments to re-run bootstrap.
+type TemplatesStatus struct {
+	Total   int                    `json:"total"`
+	Baked   int                    `json:"baked"`
+	Unbaked int                    `json:"unbaked"`
+	Details []TemplateStatusDetail `json:"details"`
+}
+
+// TemplateStatusDetail is one row's verdict in TemplatesStatus.Details.
+// Baked == false means TemplateExists returned false — either the Proxmox
+// VMID is gone (DB stale) or the template lacks the NimbusBakedTag (pre-
+// D-boot template needing rebuild). Either way the operator's action is
+// the same: re-run bootstrap.
+type TemplateStatusDetail struct {
+	Node  string `json:"node"`
+	OS    string `json:"os"`
+	VMID  int    `json:"vmid"`
+	Baked bool   `json:"baked"`
+}
+
+// CheckTemplatesStatus walks every node_templates row and asks Proxmox
+// whether the template VMID still exists AND carries the bake tag.
+//
+// Cost: one GetVMConfig per row. For a 4-OS × 4-node cluster that's 16
+// API calls. The banner endpoint that wraps this is admin-only and
+// rate-limited by route timeout; not intended for hot-loop polling.
+func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, error) {
+	var rows []db.NodeTemplate
+	if err := s.db.WithContext(ctx).Order("node, os").Find(&rows).Error; err != nil {
+		return TemplatesStatus{}, fmt.Errorf("list node_templates: %w", err)
+	}
+	out := TemplatesStatus{
+		Total:   len(rows),
+		Details: make([]TemplateStatusDetail, 0, len(rows)),
+	}
+	for _, r := range rows {
+		baked, err := s.px.TemplateExists(ctx, r.Node, r.VMID)
+		// Probe errors map to "not baked" — the operator's action (re-run
+		// bootstrap) is the same either way. The error itself is dropped
+		// rather than surfaced; this endpoint is best-effort UX.
+		if err != nil {
+			baked = false
+		}
+		if baked {
+			out.Baked++
+		} else {
+			out.Unbaked++
+		}
+		out.Details = append(out.Details, TemplateStatusDetail{
+			Node: r.Node, OS: r.OS, VMID: r.VMID, Baked: baked,
+		})
+	}
+	return out, nil
 }
 
 // Request is one bootstrap invocation. All fields are optional — empty Request
@@ -318,16 +390,38 @@ func (s *Service) bootstrapOne(
 		return finish(vmid, fmt.Sprintf("vm create task: %v", err))
 	}
 
-	// Templates intentionally do NOT get a Proxmox cloud-init drive.
-	// Nimbus delivers cloud-init via a per-VM ISO uploaded at
-	// provision time and attached at ide2 (see installCIDataISO).
-	// A Proxmox-managed cloud-init drive on the template would
-	// either compete with our ISO at the same slot (ide2) or sit
-	// unused — neither is useful. Templates stay minimal.
+	// Step 5b: bake ceremony. Boot the imported cloud image once with a
+	// minimal cidata ISO that installs qemu-guest-agent, then drive
+	// `cloud-init clean` + `poweroff` from outside via QGA exec, then
+	// detach the bake ISO. After this the template:
+	//   - has qemu-guest-agent baked into the disk image,
+	//   - has cloud-init state wiped (fresh instance-id for every clone),
+	//   - has no transient CDROM attached (so it can be migrated).
+	//
+	// Pre-D-boot templates relied on a per-VM cidata ISO at provision
+	// time to install QGA; that scheme blocked Proxmox migration
+	// because the ISO file was per-node-local. Baking it into the
+	// template means provision can use Proxmox's managed cloudinit
+	// drive (no local ISO), and migration just works.
+	if err := s.bakeTemplate(ctx, node, vmid); err != nil {
+		return finish(vmid, fmt.Sprintf("bake template: %v", err))
+	}
 
 	// Step 6: convert to immutable template
 	if err := s.px.ConvertToTemplate(ctx, node, vmid); err != nil {
 		return finish(vmid, fmt.Sprintf("convert to template: %v", err))
+	}
+
+	// Step 6b: stamp the template with NimbusBakedTag so the provision
+	// flow can verify it was built with the D-boot ceremony. A clone of
+	// an untagged template fails at provision time with a clear
+	// "re-run bootstrap" error rather than the silent-breakage path of
+	// "VM came up but qga never appears".
+	if err := s.px.SetVMTags(ctx, node, vmid, []string{NimbusBakedTag}); err != nil {
+		// Don't fail the whole template build for a tag write — the
+		// template is otherwise fine and tags can be added later via
+		// `qm set --tags`. Log so operators see it.
+		log.Printf("bootstrap vmid=%d on %s: set baked tag: %v (template usable but provision will reject it until tag is added manually)", vmid, node, err)
 	}
 
 	// Step 7: persist the (node, OS) → vmid mapping so future bootstrap and
