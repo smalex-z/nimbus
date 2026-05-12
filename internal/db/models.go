@@ -782,8 +782,10 @@ type UserSubnet struct {
 // forever. Plain `index` tags here keep the columns searchable.
 type StandaloneVMNetwork struct {
 	gorm.Model
-	// VMID is the foreign key to db.VM. Unique among live rows because
-	// each Standalone VM has exactly one network record.
+	// VMID is the Proxmox VMID (not the gorm primary key of db.VM).
+	// Stored as uint to match the provision call site that passes
+	// `uint(newVMID)` from /cluster/nextid. Unique among live rows
+	// because each Standalone VM has exactly one network record.
 	VMID uint `gorm:"column:vm_id;not null;index"`
 	// ZoneName is the Proxmox SDN zone name. Format "s<7 hex>" derived
 	// from sha256(vm.UUID); guaranteed lowercase alphanumeric and 8

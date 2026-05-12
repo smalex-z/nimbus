@@ -70,8 +70,10 @@ type TemplateBootstrapper interface {
 // behaves as before (Standalone VMs fail to migrate at the
 // "bridge does not exist" guard).
 type NetMigrator interface {
-	PrepareNetForMigrate(ctx context.Context, vmID uint, targetNode string) error
-	CommitNetMove(ctx context.Context, vmID uint, finalNode string) error
+	// pveVMID is the Proxmox VMID (db.VM.VMID), not the gorm primary
+	// key. standalone_vm_networks rows key off the Proxmox vmid.
+	PrepareNetForMigrate(ctx context.Context, pveVMID uint, targetNode string) error
+	CommitNetMove(ctx context.Context, pveVMID uint, finalNode string) error
 }
 
 // Service is the admin-facing handle for node management. Callers obtain one

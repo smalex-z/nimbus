@@ -89,7 +89,10 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 	// startup-on-target fails and we return an error.
 	landedOnTarget := false
 	if s.standaloneNet != nil {
-		if err := s.standaloneNet.PrepareNetForMigrate(ctx, vm.ID, target); err != nil {
+		// standalone_vm_networks.vm_id stores the Proxmox VMID, not
+		// the gorm primary key — pass vm.VMID, not vm.ID.
+		pveVMID := uint(vm.VMID)
+		if err := s.standaloneNet.PrepareNetForMigrate(ctx, pveVMID, target); err != nil {
 			return nil, fmt.Errorf("prepare standalone net for migrate: %w", err)
 		}
 		defer func() {
@@ -101,7 +104,7 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 			// HTTP request doesn't strand the SDN narrow-back step.
 			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_ = s.standaloneNet.CommitNetMove(cctx, vm.ID, finalNode)
+			_ = s.standaloneNet.CommitNetMove(cctx, pveVMID, finalNode)
 		}()
 	}
 

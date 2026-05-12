@@ -183,7 +183,10 @@ func (s *Service) migrateOne(ctx context.Context, vm db.VM, target string, repor
 	// No-op for VPC / cluster-LAN VMs.
 	landedOnTarget := false
 	if s.netMigrator != nil {
-		if err := s.netMigrator.PrepareNetForMigrate(migrateCtx, vm.ID, target); err != nil {
+		// standalone_vm_networks.vm_id stores the Proxmox VMID, not
+		// the gorm primary key — pass vm.VMID, not vm.ID.
+		pveVMID := uint(vm.VMID)
+		if err := s.netMigrator.PrepareNetForMigrate(migrateCtx, pveVMID, target); err != nil {
 			return fmt.Errorf("prepare standalone net: %w", err)
 		}
 		defer func() {
@@ -195,7 +198,7 @@ func (s *Service) migrateOne(ctx context.Context, vm db.VM, target string, repor
 			// or been canceled by the time we reach the narrow.
 			cctx, cncl := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cncl()
-			_ = s.netMigrator.CommitNetMove(cctx, vm.ID, finalNode)
+			_ = s.netMigrator.CommitNetMove(cctx, pveVMID, finalNode)
 		}()
 	}
 
