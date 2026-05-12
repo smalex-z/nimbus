@@ -60,8 +60,12 @@ type Deps struct {
 	VPCsHandler       *handlers.VPCs
 	NetworkingHandler *handlers.Networking
 	V1Applier         handlers.NetworkingV1Applier
-	Config            *config.Config
-	Restart           func()
+	// TunnelReconcile keeps db.VM.TunnelURL aligned with Gopher's view —
+	// receives SaveGopher's freshly-built tunnel.Client via the same
+	// applier interface the provision service implements. Nil-safe.
+	TunnelReconcile handlers.TunnelClientApplier
+	Config          *config.Config
+	Restart         func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -90,8 +94,12 @@ func NewRouter(d Deps) http.Handler {
 		auth = auth.WithBucketPurger(d.UserBuckets)
 	}
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
+	tunnelAppliers := []handlers.TunnelClientApplier{d.Provision}
+	if d.TunnelReconcile != nil {
+		tunnelAppliers = append(tunnelAppliers, d.TunnelReconcile)
+	}
 	settingsBuilder := handlers.NewSettings(d.Auth).
-		WithTunnelAppliers(d.Provision).
+		WithTunnelAppliers(tunnelAppliers...).
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
 		WithNimbusAppURL(d.Config.AppURL).

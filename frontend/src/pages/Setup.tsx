@@ -675,7 +675,7 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, go
         </label>
         {fields.gopherEnabled && (
           <div className="mt-2">
-            <GopherPanel onTunnelActive={onGopherActive} />
+            <GopherPanel onTunnelActive={onGopherActive} autoRedirectOnActive={false} />
           </div>
         )}
       </Card>

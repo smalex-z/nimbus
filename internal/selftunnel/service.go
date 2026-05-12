@@ -220,7 +220,17 @@ func (s *Service) runBootstrap(ctx context.Context) error {
 	if err := s.persist(db.GopherSettings{CloudBootstrapState: StateRegistering}); err != nil {
 		return fmt.Errorf("persist state: %w", err)
 	}
-	machine, err := s.gopher.CreateMachine(ctx, tunnel.CreateMachineRequest{PublicSSH: false})
+	// Default: private SSH (don't expose host:22 publicly). Preserve when
+	// the host already had an SSH service registered with Gopher — the
+	// most common case is "Nimbus running on a Nimbus-provisioned VM
+	// that was bootstrapped with public SSH". Without this, the new
+	// machine's public_ssh: false silently downgrades the VM's existing
+	// SSH exposure to private.
+	publicSSH := detectExistingSSHExposure()
+	if publicSSH {
+		log.Printf("self-bootstrap: existing SSH tunnel detected in rathole client config; preserving public SSH")
+	}
+	machine, err := s.gopher.CreateMachine(ctx, tunnel.CreateMachineRequest{PublicSSH: publicSSH})
 	if err != nil {
 		return fmt.Errorf("register host: %w", err)
 	}
@@ -657,6 +667,43 @@ func readHostname() string {
 		}
 	}
 	return "nimbus"
+}
+
+// detectExistingSSHExposure returns true when the host appears to already
+// have an SSH service exposed through Gopher's rathole client — signal
+// that the operator (or a parent Nimbus's per-VM provision flow) chose
+// public SSH on this host before. The self-bootstrap re-registers a new
+// machine and would otherwise overwrite that with public_ssh: false,
+// silently downgrading the existing SSH tunnel to private (the gateway
+// re-binds 127.0.0.1 instead of 0.0.0.0).
+//
+// Coarse: client.toml only tells us "an SSH service exists", not whether
+// the gateway-side binding was public or private. Preserving as public
+// over-exposes hosts where the operator deliberately chose private SSH,
+// but that's a manual one-click fix from Gopher's UI; the inverse (we
+// silently take you from public to private) is the user-visible bug
+// this fix addresses.
+func detectExistingSSHExposure() bool {
+	data, err := os.ReadFile("/etc/rathole/client.toml")
+	if err != nil {
+		return false
+	}
+	body := string(data)
+	// Gopher writes per-machine SSH services as
+	//   [client.services.machine-<id>-ssh]
+	//   local_addr = "0.0.0.0:22"
+	// (see gopher's internal/config/rathole.go:GenerateMachineSSHClientConfig).
+	// The 0.0.0.0 binding is what makes the listener accept connections
+	// from the rathole tunnel — it's not a privacy signal, just the
+	// rathole bind spec. Either match the explicit block marker OR the
+	// :22 local_addr lines so we still notice an SSH service even if a
+	// future Gopher version switches the bind to 127.0.0.1.
+	if strings.Contains(body, "[client.services.machine-") {
+		return true
+	}
+	return strings.Contains(body, `local_addr = "0.0.0.0:22"`) ||
+		strings.Contains(body, `local_addr = "127.0.0.1:22"`) ||
+		strings.Contains(body, `local_addr = "localhost:22"`)
 }
 
 // truncate keeps the head of s when it exceeds n bytes. Used to bound

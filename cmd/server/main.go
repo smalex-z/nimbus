@@ -61,6 +61,7 @@ import (
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/standalonenet"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/tunnelreconcile"
 	"nimbus/internal/vnetmgr"
 	"nimbus/internal/vpcmgr"
 )
@@ -484,6 +485,14 @@ func main() {
 		provSvc.SetTunnelClient(tunnelClient)
 	}
 
+	// Periodic tunnel reconcile: rewrites db.VM.TunnelURL when Gopher's
+	// view diverges (takeover, manual rename on Gopher UI, etc.). Hooked
+	// into Settings.SaveGopher's applier chain too so credential changes
+	// re-point the loop at the new client without a restart.
+	tunnelReconcileSvc := tunnelreconcile.New(database.DB)
+	tunnelReconcileSvc.SetTunnelClient(tunnelClient)
+	go tunnelReconcileSvc.Run(bgCtx, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
 	// GPU bootstrap config — same seed pattern as Gopher. When the operator
 	// later edits these from Settings → GPU, the SaveGPU handler calls
 	// provSvc.SetGPUBootstrapConfig again so live VM provisions pick up
@@ -891,6 +900,7 @@ func main() {
 		VPCsHandler:       vpcsHandler,
 		NetworkingHandler: networkingHandler,
 		V1Applier:         v1Applier,
+		TunnelReconcile:   tunnelReconcileSvc,
 		Config:            cfg,
 		Restart:           restartSelf,
 	})
