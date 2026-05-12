@@ -663,6 +663,15 @@ type Operation struct {
 	StartedAt       *time.Time `gorm:"column:started_at"                       json:"started_at,omitempty"`
 	FinishedAt      *time.Time `gorm:"column:finished_at"                      json:"finished_at,omitempty"`
 	LastHeartbeatAt time.Time  `gorm:"column:last_heartbeat_at;index"          json:"last_heartbeat_at"`
+	// AcknowledgedAt records the first time the actor "saw" the
+	// terminal result (success or failure) in the SPA — set by
+	// operations.Service.Acknowledge, called from the Provision page
+	// after a re-attached ResultView/ErrorView renders. Until acked,
+	// the Tasks dropdown shows the row with an unread marker so an
+	// operator who walks away mid-provision can still see whether
+	// the job ended in warning/error after they get back. Null while
+	// running.
+	AcknowledgedAt *time.Time `gorm:"column:acknowledged_at"                  json:"acknowledged_at,omitempty"`
 }
 
 // TableName pins the GORM table to "operations" — same explicit-name

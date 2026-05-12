@@ -39,7 +39,14 @@ export default function TasksDropdown() {
 
     const tick = async () => {
       try {
-        const res = await listOperations()
+        // includeFinished=true so terminal-but-unacked rows surface
+        // as "unread" — without this, a provision that succeeds while
+        // the user was on another page disappears the moment it goes
+        // terminal, and the operator never sees the warnings (cidata
+        // upload, tunnel bootstrap, etc.) baked into the result.
+        // The server caps the response, so paging through history is
+        // a future concern.
+        const res = await listOperations({ includeFinished: true, limit: 50 })
         if (!cancelled) setOps(res.operations)
       } catch {
         // Silent — the SPA's auth wrapper already handles 401.
@@ -70,14 +77,31 @@ export default function TasksDropdown() {
   }, [open])
 
   const inflight = ops.filter((o) => !isTerminalOperationState(o.state))
-  const count = inflight.length
+  // Unread = terminal + never-acknowledged. These are completed tasks
+  // (success OR failure) the user hasn't yet viewed in the SPA — we
+  // surface them so warnings/errors don't get lost when the user walks
+  // away mid-provision.
+  const unread = ops.filter(
+    (o) => isTerminalOperationState(o.state) && !o.acknowledged_at,
+  )
+  const inflightCount = inflight.length
+  const unreadCount = unread.length
+  const badgeCount = inflightCount + unreadCount
+  // When ANY in-flight work exists, badge color stays orange (active).
+  // If only unread items exist, switch to a calmer "needs attention"
+  // gray-blue so the eye still catches it without the urgency of a
+  // running task. Failed/unread is the same color — clicking surfaces
+  // the actual state.
+  const badgeColors = inflightCount > 0
+    ? 'text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border-[rgba(248,175,130,0.4)]'
+    : 'text-ink bg-[rgba(27,23,38,0.08)] border-[rgba(27,23,38,0.15)]'
 
   return (
     <div className="relative" ref={popoverRef}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-label={`Background tasks (${count} running)`}
+        aria-label={`Background tasks (${inflightCount} running, ${unreadCount} unread)`}
         className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors flex items-center gap-1.5 cursor-pointer"
       >
         <svg
@@ -94,9 +118,9 @@ export default function TasksDropdown() {
           <circle cx="12" cy="12" r="10" />
           <polyline points="12 6 12 12 16 14" />
         </svg>
-        {count > 0 && (
-          <span className="text-[10px] font-semibold tracking-wider uppercase font-sans text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded">
-            {count}
+        {badgeCount > 0 && (
+          <span className={`text-[10px] font-semibold tracking-wider uppercase font-sans border px-1.5 py-px rounded ${badgeColors}`}>
+            {badgeCount}
           </span>
         )}
       </button>
@@ -133,6 +157,11 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
   const stateLabel = labelForState(op.state)
   const dotColor = colorForState(op.state)
   const ago = relativeTime(op.last_heartbeat_at)
+  // Unread = finished but the user hasn't viewed the result page yet.
+  // Surfaces a bold "Unread" pill so success/error tasks aren't visually
+  // identical to ones the user already reviewed.
+  const isUnread =
+    isTerminalOperationState(op.state) && !op.acknowledged_at
   // Deep-link target. Migrate rows take the operator to the Admin
   // page with ?op=<id> so the Admin mount-time handler can open
   // MigrateVMModal in re-attach mode. Provision rows go to the
@@ -155,13 +184,23 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-[13px] truncate">
+          <span className={`font-mono text-[13px] truncate ${isUnread ? 'font-semibold' : ''}`}>
             {labelForType(op.type)}
             {op.target_label ? ` ${op.target_label}` : ''}
           </span>
-          <span className="text-[11px] text-ink-3 whitespace-nowrap">
-            {stateLabel}
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isUnread && (
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wider text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded"
+                title="Open this task to view the result"
+              >
+                Unread
+              </span>
+            )}
+            <span className="text-[11px] text-ink-3 whitespace-nowrap">
+              {stateLabel}
+            </span>
+          </div>
         </div>
         {op.message && (
           <div className="text-[12px] text-ink-2 truncate">{op.message}</div>

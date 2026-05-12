@@ -13,6 +13,7 @@ import {
   getGPUInference,
   listOperations,
   getOperation,
+  acknowledgeOperation,
   isTerminalOperationState,
   type BootstrapResult,
   type NetworkingInfo,
@@ -294,6 +295,21 @@ export default function Provision() {
     setError(failureMessage)
     setErrorStep(undefined)
     setView('error')
+  }, [reattachOp])
+
+  // Acknowledge the re-attached terminal op the first time it renders
+  // here — that's the moment the user has "actually seen" the
+  // success/error page, which is what acknowledged_at tracks. Idempotent
+  // server-side (only stamps when null), so duplicate fires across
+  // navigations are harmless. Fire-and-forget: a failure just means the
+  // Tasks-dropdown unread marker sticks for one extra page load.
+  useEffect(() => {
+    if (!reattachOp) return
+    if (!isTerminalOperationState(reattachOp.state)) return
+    if (reattachOp.acknowledged_at) return
+    acknowledgeOperation(reattachOp.id).catch(() => {
+      // Non-fatal — see comment above.
+    })
   }, [reattachOp])
 
   useEffect(() => {

@@ -3619,6 +3619,61 @@ const docTemplate = `{
                 }
             }
         },
+        "/operations/{id}/acknowledge": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Stamps acknowledged_at; idempotent. Used by the SPA's\nProvision result view to clear the Tasks-dropdown\nunread marker after the user has actually viewed the\nterminal page.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "operations"
+                ],
+                "summary": "Mark a background operation as seen",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "operation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "no content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/proxmox/binding": {
             "get": {
                 "security": [
@@ -9054,6 +9109,10 @@ const docTemplate = `{
         "handlers.operationView": {
             "type": "object",
             "properties": {
+                "acknowledged_at": {
+                    "description": "AcknowledgedAt is stamped the first time the actor views the\nrow's terminal result page in the SPA. Empty while unacked —\nthe Tasks dropdown uses presence/absence to render an unread\nmarker so a walked-away operator can still see whether their\nprovision ended in warning/error after returning.",
+                    "type": "string"
+                },
                 "actor_email": {
                     "type": "string"
                 },
