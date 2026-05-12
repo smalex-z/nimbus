@@ -233,12 +233,18 @@ export default function Provision() {
     listVPCs()
       .then((rows) => {
         setSavedVPCs(rows)
-        if (rows.length > 0) {
-          setForm((prev) =>
-            prev.selectedVPCId === null
-              ? { ...prev, selectedVPCId: rows[0].id }
-              : prev,
-          )
+        // Default + heal: pick the first 'active' VPC. If the user's
+        // previously-selected VPC has since gone error/degraded we'd
+        // otherwise leave a broken selection that can't be submitted.
+        const usable = rows.filter((v) => v.status === 'active')
+        if (usable.length > 0) {
+          setForm((prev) => {
+            const currentIsUsable =
+              prev.selectedVPCId != null &&
+              usable.some((v) => v.id === prev.selectedVPCId)
+            if (currentIsUsable) return prev
+            return { ...prev, selectedVPCId: usable[0].id }
+          })
         }
       })
       .catch(() => {
@@ -865,7 +871,7 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
       />
 
       <div className="flex flex-col gap-2">
-        <label className="text-[13px] font-medium text-ink">Public access</label>
+        <label className="text-[13px] font-medium text-ink">Public tunnel</label>
         <label
           className={`flex items-start gap-3 p-3 rounded-[10px] border border-line-2 bg-white/85 transition-colors ${
             tunnelInfo?.enabled && selectedKeyHasPrivate
@@ -881,11 +887,13 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
             className="mt-0.5 w-4 h-4 accent-ink disabled:cursor-not-allowed"
           />
           <div className="flex-1">
-            <div className="text-sm font-medium">Expose SSH publicly</div>
+            <div className="text-sm font-medium">Enable public tunneling</div>
             <div className="text-xs text-ink-3 mt-0.5">
-              Reverse-tunnel SSH via Gopher to{' '}
+              Bootstraps the edge gateway agent on this VM and exposes SSH at{' '}
               <span className="font-mono">{tunnelInfo?.host || 'gateway'}:&lt;port&gt;</span>.
-              Expose web services later from the machine page.
+              Once enabled, add HTTP/TCP/UDP port forwards later from the
+              Networks tab. Skip to keep the VM unreachable from the internet —
+              you can still reach it via the browser console.
             </div>
             {!tunnelInfo?.enabled && (
               <div className="text-xs text-warn mt-1">
@@ -1244,9 +1252,10 @@ function ResultView({ result, onReset }: ResultViewProps) {
         </div>
         {result.console_password && (
           <p className="text-xs text-ink-3 mt-2 leading-relaxed">
-            🔑 The password is a one-time fallback for the Proxmox noVNC console
-            (VMID {result.vmid} → Console). Save it now — it's not stored anywhere
-            and a new one is generated on every provision.
+            🔑 The password logs you into the serial console — use the
+            <strong> Browser console</strong> button below, or VMID {result.vmid} → Console
+            in Proxmox. Save it now — it's not stored anywhere and a new one is
+            generated on every provision.
           </p>
         )}
 
@@ -1280,6 +1289,13 @@ function ResultView({ result, onReset }: ResultViewProps) {
         )}
 
         <div className="flex gap-2.5 justify-end mt-9 flex-wrap">
+          <Button
+            variant="ghost"
+            onClick={() => window.open(`/vms/${result.id}/console`, '_blank', 'noopener')}
+            title="Serial console in the browser — works for VPC-isolated VMs without any tunnel"
+          >
+            ⌨ Browser console
+          </Button>
           {hasTunnel && (
             <Button
               variant="ghost"
@@ -1520,7 +1536,12 @@ function SubnetPicker({
     )
   }
 
-  const hasVPCs = savedVPCs.length > 0
+  // Only 'active' VPCs are usable. 'provisioning' rows are mid-create
+  // (rare — CreateVPC is sync), 'error'/'degraded' rows have a broken
+  // gateway LXC. Filter the picker to active-only so users can't try
+  // to provision into a non-functional VPC.
+  const usableVPCs = savedVPCs.filter((v) => v.status === 'active')
+  const hasVPCs = usableVPCs.length > 0
   const vpcChipDisabled = !netInfo.vpc_enabled || !hasVPCs
   const showClusterLAN = isAdmin || netInfo.cluster_lan_for_members
   return (
@@ -1582,7 +1603,7 @@ function SubnetPicker({
               }
               className="n-input"
             >
-              {savedVPCs.map((v) => (
+              {usableVPCs.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.cidr})
                 </option>

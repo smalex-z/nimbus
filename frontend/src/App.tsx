@@ -8,6 +8,7 @@ import RequireAuth from '@/components/RequireAuth'
 import RequireVerified from '@/components/RequireVerified'
 import Account from '@/pages/Account'
 import Admin from '@/pages/Admin'
+import Console from '@/pages/Console'
 import ApiDocs from '@/pages/ApiDocs'
 import Audit from '@/pages/Audit'
 import Authentication from '@/pages/Authentication'
@@ -81,6 +82,20 @@ export default function App() {
             element={
               <RequireAuth>
                 <VerifyGate />
+              </RequireAuth>
+            }
+          />
+          {/* /vms/:id/console is the xterm.js serial-console page. Lives
+              outside the Layout/Sidebar wrap so it can fill the viewport;
+              opened in a new tab from the SSH details modal. Auth-gated
+              like every other VM-scoped surface. */}
+          <Route
+            path="/vms/:id/console"
+            element={
+              <RequireAuth>
+                <RequireVerified>
+                  <Console />
+                </RequireVerified>
               </RequireAuth>
             }
           />
