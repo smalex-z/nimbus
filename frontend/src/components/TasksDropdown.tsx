@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  acknowledgeOperation,
   listOperations,
   isTerminalOperationState,
   type Operation,
@@ -76,6 +77,26 @@ export default function TasksDropdown() {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
+  // markAsRead optimistically stamps the row's acknowledged_at in
+  // local state so the dropdown filter excludes it immediately —
+  // without this the row lingered for up to a poll interval (2–4s)
+  // after the user clicked through, which read as a bug. The server
+  // POST runs in parallel; if it fails the row re-appears on the
+  // next poll because the server still reports acknowledged_at=null.
+  const markAsRead = (id: number) => {
+    const stamp = new Date().toISOString()
+    setOps((prev) =>
+      prev.map((o) =>
+        o.id === id && !o.acknowledged_at
+          ? { ...o, acknowledged_at: stamp }
+          : o,
+      ),
+    )
+    acknowledgeOperation(id).catch(() => {
+      // Non-fatal — see comment above.
+    })
+  }
+
   const inflight = ops.filter((o) => !isTerminalOperationState(o.state))
   // Unread = terminal + never-acknowledged. These are completed tasks
   // (success OR failure) the user hasn't yet viewed in the SPA — we
@@ -83,6 +104,16 @@ export default function TasksDropdown() {
   // away mid-provision.
   const unread = ops.filter(
     (o) => isTerminalOperationState(o.state) && !o.acknowledged_at,
+  )
+  // visibleOps is what the dropdown actually renders. Terminal-and-
+  // acknowledged rows are hidden: once the user has viewed the result,
+  // the row has served its purpose and clutters the "what needs
+  // attention" surface. The data is preserved server-side for the
+  // Activity / audit views.
+  const visibleOps = [...inflight, ...unread].sort(
+    (a, b) =>
+      new Date(b.last_heartbeat_at).getTime() -
+      new Date(a.last_heartbeat_at).getTime(),
   )
   const inflightCount = inflight.length
   const unreadCount = unread.length
@@ -136,14 +167,19 @@ export default function TasksDropdown() {
           <div className="px-4 py-3 border-b border-line text-[12px] font-semibold uppercase tracking-wider text-ink-2">
             Background tasks
           </div>
-          {ops.length === 0 ? (
+          {visibleOps.length === 0 ? (
             <div className="px-4 py-6 text-sm text-ink-3 text-center">
               No tasks. Start a migration or provision to see progress here.
             </div>
           ) : (
             <ul className="max-h-[400px] overflow-y-auto">
-              {ops.map((op) => (
-                <OpRow key={op.id} op={op} onClose={() => setOpen(false)} />
+              {visibleOps.map((op) => (
+                <OpRow
+                  key={op.id}
+                  op={op}
+                  onClose={() => setOpen(false)}
+                  onMarkRead={markAsRead}
+                />
               ))}
             </ul>
           )}
@@ -153,7 +189,15 @@ export default function TasksDropdown() {
   )
 }
 
-function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
+function OpRow({
+  op,
+  onClose,
+  onMarkRead,
+}: {
+  op: Operation
+  onClose: () => void
+  onMarkRead: (id: number) => void
+}) {
   const stateLabel = labelForState(op.state)
   const dotColor = colorForState(op.state)
   const ago = relativeTime(op.last_heartbeat_at)
@@ -162,16 +206,21 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
   // identical to ones the user already reviewed.
   const isUnread =
     isTerminalOperationState(op.state) && !op.acknowledged_at
-  // Deep-link target. Migrate rows take the operator to the Admin
-  // page with ?op=<id> so the Admin mount-time handler can open
-  // MigrateVMModal in re-attach mode. Provision rows go to the
-  // Provision page where the existing ReattachBanner detects the
-  // in-flight op on its own — and that page is mounted at the
-  // root path, not /provision (which has no Route and would render
-  // a blank page). Unknown types fall back to the dropdown (no nav).
+  // Deep-link target. Both row types carry ?op=<id> so the destination
+  // page can re-attach to the SPECIFIC operation the user clicked,
+  // not just the most-recent in-flight/terminal one.
+  //
+  // Migrate → /dashboard (NOT /admin). The /admin path is just a
+  // bookmark-redirect to /dashboard in App.tsx, and Navigate strips
+  // query params during the redirect, killing our ?op=. Going
+  // directly to /dashboard preserves the param so Admin's re-attach
+  // effect can read it.
+  //
+  // Provision → root, where the Provision page reads ?op= on mount.
+  // Unknown types fall back to no nav.
   const href = (() => {
-    if (op.type === 'vm.migrate') return `/admin?op=${op.id}`
-    if (op.type === 'vm.provision') return '/'
+    if (op.type === 'vm.migrate') return `/dashboard?op=${op.id}`
+    if (op.type === 'vm.provision') return `/?op=${op.id}`
     return null
   })()
 
@@ -215,7 +264,16 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
       {href ? (
         <Link
           to={href}
-          onClick={onClose}
+          onClick={() => {
+            onClose()
+            // Mark as read on click for terminal+unread rows so the
+            // dropdown filter drops them instantly — without this the
+            // row would linger up to a poll interval after navigation,
+            // reading as a UI bug. In-flight tasks are left alone:
+            // they're not "read-able" until they terminate. Server
+            // POST runs in parallel via markAsRead.
+            if (isUnread) onMarkRead(op.id)
+          }}
           className="block px-4 py-3 no-underline text-ink"
         >
           {inner}

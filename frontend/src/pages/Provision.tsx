@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   provisionVMStreaming,
   ProvisionError,
@@ -172,13 +172,57 @@ export default function Provision() {
   // On mount, check for an in-flight provision the user kicked off in
   // a previous tab. Surfaces as a banner above the form so the
   // operator knows their work is still progressing and can watch it
-  // here without re-submitting. Polls every 2s until terminal; on
-  // terminal, the banner sticks around as a result/error chip the
-  // user can dismiss.
+  // Two entry paths, separated into two effects so they don't fight:
+  //  1. Deep-link from the Tasks dropdown: /?op=<id>. Effect A loads
+  //     THAT specific op via getOperation(id). Polls if in-flight.
+  //     We do NOT clear ?op= after reading — clearing re-fired this
+  //     effect, which then ran the fallback heuristic, which clobbered
+  //     reattachOp before the deep-link fetch resolved. reset()
+  //     (Provision another machine) clears the URL explicitly.
+  //  2. Organic page mount with no ?op=: effect B falls back to
+  //     "in-flight if any, else most-recent terminal." Mount-only so
+  //     it doesn't re-fire after effect A sets reattachOp.
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Effect A: deep-link handler. Re-fires when ?op= changes (e.g.
+  // user clicks a different dropdown row while on this page).
   useEffect(() => {
+    const opStr = searchParams.get('op')
+    if (!opStr) return
+    const opID = parseInt(opStr, 10)
+    if (Number.isNaN(opID)) return
+
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const op = await getOperation(opID)
+        if (cancelled) return
+        setReattachOp(op)
+        if (!isTerminalOperationState(op.state)) {
+          timer = setTimeout(tick, 2000)
+        }
+      } catch {
+        if (!cancelled) setReattachOp(null)
+      }
+    }
+    void tick()
 
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [searchParams])
+
+  // Effect B: fallback heuristic — only runs once on mount, and only
+  // when there's no deep-link to take precedence. includeFinished:true
+  // so a terminal op can surface (the user's provisions are mostly
+  // terminal; without this the page just showed the empty form).
+  useEffect(() => {
+    if (searchParams.get('op')) return // effect A handles it
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async (id: number) => {
       try {
         const op = await getOperation(id)
@@ -188,12 +232,11 @@ export default function Provision() {
           timer = setTimeout(() => tick(id), 2000)
         }
       } catch {
-        // 404 / network error — drop the banner.
         if (!cancelled) setReattachOp(null)
       }
     }
 
-    listOperations({ type: 'vm.provision' })
+    listOperations({ type: 'vm.provision', includeFinished: true, limit: 5 })
       .then((res) => {
         if (cancelled) return
         // Prefer in-flight; otherwise fall back to the most recent
@@ -218,6 +261,9 @@ export default function Provision() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
+    // Mount-only by design. Don't depend on searchParams — that's
+    // effect A's job. eslint allow-empty here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Derive view + supporting state from reattachOp so the page renders
@@ -434,6 +480,18 @@ export default function Provision() {
     // would immediately bounce the user back to the result/error
     // view they just dismissed.
     setReattachOp(null)
+    // Strip ?op= from the URL so a refresh doesn't snap back to the
+    // same re-attached view. Effect A no-ops on a missing param.
+    if (searchParams.get('op')) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev)
+          next.delete('op')
+          return next
+        },
+        { replace: true },
+      )
+    }
     setView('form')
     // Re-fetch saved keys + VPCs so any items created by the prior
     // provision (auto-generated key, freshly-attached VPC) show up
@@ -516,7 +574,21 @@ export default function Provision() {
   }
 
   if (view === 'loading') {
-    return <LoadingView hostname={form.hostname} currentStep={currentStep} />
+    // For a re-attached in-flight op, take hostname + start time from
+    // the operation row so the timer reflects the actual elapsed
+    // wall-clock since provision began — without this it resets to
+    // 0 every time the user navigates back to the page.
+    return (
+      <LoadingView
+        hostname={reattachOp?.target_label ?? form.hostname}
+        currentStep={currentStep}
+        startedAtMs={
+          reattachOp?.started_at
+            ? new Date(reattachOp.started_at).getTime()
+            : undefined
+        }
+      />
+    )
   }
   if (view === 'result' && result) {
     return <ResultView result={result} onReset={reset} />
@@ -1006,6 +1078,12 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 interface LoadingViewProps {
   hostname: string
   currentStep: ProvisionStep | undefined
+  // Wall-clock anchor (ms since epoch) for the "elapsed" counter.
+  // When provided, the timer starts at (now - startedAtMs) so a
+  // re-attach to an in-flight provision shows the *actual* elapsed
+  // time, not zero. Live-submit path leaves this undefined and the
+  // counter starts at 0 as before.
+  startedAtMs?: number
 }
 
 // Phases shown in the checklist. Each one corresponds to a `step` ID the
@@ -1038,8 +1116,15 @@ const SERVER_LABEL_TO_STEP: Record<string, ProvisionStep> = {
 // it's normal — first-boot agent installs can legitimately take 1–2 min.
 const GUEST_AGENT_HINT_AFTER_SEC = 30
 
-function LoadingView({ hostname, currentStep }: LoadingViewProps) {
-  const [elapsed, setElapsed] = useState(0)
+function LoadingView({ hostname, currentStep, startedAtMs }: LoadingViewProps) {
+  // Lazy init — Math.floor((now - startedAtMs)/1000) when given, else 0.
+  // The interval below keeps ticking either way, so re-attached
+  // loadings continue counting up from the real elapsed value.
+  const [elapsed, setElapsed] = useState(() =>
+    startedAtMs
+      ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+      : 0,
+  )
   // Track when each phase became active so we can show a phase-specific
   // sub-hint after a threshold (e.g. guest agent taking >30s is fine but
   // worth flagging so the user knows nothing is stuck).
