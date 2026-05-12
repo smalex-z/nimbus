@@ -61,6 +61,7 @@ import (
 	"nimbus/internal/sshkeys"
 	"nimbus/internal/standalonenet"
 	"nimbus/internal/tunnel"
+	"nimbus/internal/tunnelreconcile"
 	"nimbus/internal/vnetmgr"
 	"nimbus/internal/vpcmgr"
 )
@@ -107,6 +108,20 @@ func main() {
 		return
 	}
 
+	// Reject unknown subcommands rather than silently falling through
+	// to "start the server" — `sudo nimbus reinstall` (typo for
+	// `install`) used to drop into setup mode and confusingly fail on
+	// "address already in use" because a real server was bound. A
+	// clear error here saves the user from chasing the wrong failure.
+	// Anything that starts with '-' is a flag for the server, not a
+	// subcommand — preserve `--port`, `--version`, etc.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintf(os.Stderr, "nimbus: unknown subcommand %q\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "Valid subcommands: bootstrap, install, gopher-bootstrap")
+		fmt.Fprintln(os.Stderr, "(omit a subcommand to start the server with flags like --port / --db / --version)")
+		os.Exit(2)
+	}
+
 	flags := flag.NewFlagSet("nimbus", flag.ExitOnError)
 	port := flags.String("port", "", "server port (overrides PORT env var)")
 	dbPath := flags.String("db", "", "database path (overrides DB_PATH env var)")
@@ -137,7 +152,29 @@ func main() {
 	// Start in setup mode when required config is absent.
 	if !cfg.IsConfigured() {
 		log.Printf("nimbus %s starting in setup mode on :%s", build.Version, cfg.Port)
-		router := api.NewSetupRouter(cfg, restartSelf)
+		// Open the DB + wire AuthService + selftunnel.Service even
+		// in setup mode so the wizard's GopherPanel can hit the
+		// same /api/settings/gopher/* endpoints the configured-mode
+		// dashboard does. A best-effort init: if any step fails,
+		// the gopher routes simply 404 and the wizard skips them.
+		setupDeps := api.SetupDeps{Cfg: cfg, Restart: restartSelf}
+		setupDB, dbErr := db.New(cfg.DBPath,
+			&db.User{}, &db.GopherSettings{},
+		)
+		if dbErr != nil {
+			log.Printf("setup mode: skipping gopher-in-wizard wiring (db init failed: %v)", dbErr)
+		} else {
+			authSvc := service.NewAuthService(setupDB)
+			// nimbus port for the self-tunnel target — same value
+			// the configured-mode flow uses.
+			port, _ := strconv.Atoi(cfg.Port)
+			if port == 0 {
+				port = 8080
+			}
+			setupDeps.Auth = authSvc
+			setupDeps.SelfBootstrap = selftunnel.New(authSvc, nil, port)
+		}
+		router := api.NewSetupRouter(setupDeps)
 
 		mux := http.NewServeMux()
 		mux.Handle("/api/", router)
@@ -447,6 +484,14 @@ func main() {
 		log.Printf("gopher tunnel integration enabled (url=%s)", gopherSettings.APIURL)
 		provSvc.SetTunnelClient(tunnelClient)
 	}
+
+	// Periodic tunnel reconcile: rewrites db.VM.TunnelURL when Gopher's
+	// view diverges (takeover, manual rename on Gopher UI, etc.). Hooked
+	// into Settings.SaveGopher's applier chain too so credential changes
+	// re-point the loop at the new client without a restart.
+	tunnelReconcileSvc := tunnelreconcile.New(database.DB)
+	tunnelReconcileSvc.SetTunnelClient(tunnelClient)
+	go tunnelReconcileSvc.Run(bgCtx, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
 	// GPU bootstrap config — same seed pattern as Gopher. When the operator
 	// later edits these from Settings → GPU, the SaveGPU handler calls
@@ -874,6 +919,7 @@ func main() {
 		VPCsHandler:       vpcsHandler,
 		NetworkingHandler: networkingHandler,
 		V1Applier:         v1Applier,
+		TunnelReconcile:   tunnelReconcileSvc,
 		Config:            cfg,
 		Restart:           restartSelf,
 	})

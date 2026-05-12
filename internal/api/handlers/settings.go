@@ -675,6 +675,18 @@ func (s *Settings) SaveGopher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate api_url shape BEFORE persisting — Go's url.Parse is too
+	// permissive (it accepts "root@pam!nimbus" as a relative URI) and a
+	// bad value here would otherwise be written to the DB and survive
+	// across save attempts, since every retry re-reads it back. Empty
+	// means "preserve existing" so we skip validation for blank input.
+	if url != "" {
+		if _, err := tunnel.New(url, "placeholder", time.Second); err != nil {
+			response.BadRequest(w, err.Error())
+			return
+		}
+	}
+
 	// Snapshot the *effective* subdomain BEFORE the save so we can detect a
 	// change and tear down the obsolete tunnel.
 	prev, err := s.auth.GetGopherSettings()

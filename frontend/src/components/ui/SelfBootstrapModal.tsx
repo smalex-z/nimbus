@@ -10,6 +10,14 @@ import Card from '@/components/ui/Card'
 
 interface SelfBootstrapModalProps {
   onClose: () => void
+  // autoRedirect controls the post-active behavior. Default true — used
+  // on the Settings page where the operator wants to land on the new
+  // public URL once the tunnel is up. Pass false from the install
+  // wizard: there the operator is on the LAN IP mid-flow and needs to
+  // finish the rest of the wizard before the public URL is useful, so
+  // we surface the URL as info + an "Open in new tab" link and let
+  // them close the modal to keep configuring.
+  autoRedirect?: boolean
 }
 
 // Phases the orchestrator walks through. Order matches the state machine
@@ -30,7 +38,7 @@ const REDIRECT_AFTER_MS = 5_000
 // state machine as a phase checklist. On `active`, shows the new public
 // URL with a "Open" button + a 5s auto-redirect. On `failed`, shows the
 // error and a "Try again" button.
-export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps) {
+export default function SelfBootstrapModal({ onClose, autoRedirect = true }: SelfBootstrapModalProps) {
   const [state, setState] = useState<SelfBootstrapState>('')
   const [error, setError] = useState<string | undefined>()
   const [tunnelURL, setTunnelURL] = useState<string | undefined>()
@@ -61,8 +69,11 @@ export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps)
   }, [retrying])
 
   // Auto-redirect once tunnel is active. Only fires once even if the modal
-  // re-renders during the countdown.
+  // re-renders during the countdown. Skipped when autoRedirect=false (the
+  // install wizard) — the operator stays on LAN IP to finish the rest of
+  // the wizard, and just sees the new URL as info.
   useEffect(() => {
+    if (!autoRedirect) return
     if (state !== 'active' || !tunnelURL || redirectedRef.current) return
     setRedirectIn(Math.ceil(REDIRECT_AFTER_MS / 1000))
     const id = setInterval(() => {
@@ -80,7 +91,7 @@ export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps)
       })
     }, 1_000)
     return () => clearInterval(id)
-  }, [state, tunnelURL])
+  }, [state, tunnelURL, autoRedirect])
 
   // Close on Escape; lock body scroll while open.
   useEffect(() => {
@@ -186,6 +197,8 @@ export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps)
             </div>
             <a
               href={tunnelURL}
+              target={autoRedirect ? undefined : '_blank'}
+              rel={autoRedirect ? undefined : 'noopener noreferrer'}
               className="font-mono text-base text-ink underline break-all"
             >
               {tunnelURL}
@@ -193,6 +206,12 @@ export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps)
             {redirectIn !== null && redirectIn > 0 && (
               <p className="mt-3 text-[12px] text-ink-3">
                 Redirecting in {redirectIn}s…
+              </p>
+            )}
+            {!autoRedirect && (
+              <p className="mt-3 text-[12px] text-ink-3 leading-relaxed">
+                Continue setup on this page — you can switch to the public URL
+                once Nimbus is fully configured.
               </p>
             )}
           </div>
@@ -205,9 +224,20 @@ export default function SelfBootstrapModal({ onClose }: SelfBootstrapModalProps)
             </Button>
           )}
           {isActive && tunnelURL ? (
-            <a href={tunnelURL}>
-              <Button>Open Nimbus</Button>
-            </a>
+            <>
+              {!autoRedirect && (
+                <Button variant="ghost" onClick={onClose}>
+                  Continue setup
+                </Button>
+              )}
+              <a
+                href={tunnelURL}
+                target={autoRedirect ? undefined : '_blank'}
+                rel={autoRedirect ? undefined : 'noopener noreferrer'}
+              >
+                <Button>Open Nimbus</Button>
+              </a>
+            </>
           ) : (
             <Button variant="ghost" onClick={onClose}>
               {isFailed ? 'Close' : 'Hide'}

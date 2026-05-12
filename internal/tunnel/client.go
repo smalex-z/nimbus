@@ -61,8 +61,19 @@ func New(baseURL, apiKey string, timeout time.Duration) (*Client, error) {
 	if apiKey == "" {
 		return nil, errors.New("tunnel: GOPHER_API_KEY is required when GOPHER_API_URL is set")
 	}
-	if _, err := url.Parse(baseURL); err != nil {
+	u, err := url.Parse(baseURL)
+	if err != nil {
 		return nil, fmt.Errorf("tunnel: invalid base URL %q: %w", baseURL, err)
+	}
+	// url.Parse is permissive — "root@pam!nimbus" parses with no error
+	// (Scheme=""), then later POSTs fail with "unsupported protocol scheme".
+	// Require an explicit http/https scheme + host so the bad value is
+	// rejected at save time instead of at the first bootstrap attempt.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("tunnel: base URL %q must start with http:// or https://", baseURL)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("tunnel: base URL %q is missing a host", baseURL)
 	}
 	if timeout == 0 {
 		timeout = 15 * time.Second

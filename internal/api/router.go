@@ -61,8 +61,12 @@ type Deps struct {
 	VPCsHandler       *handlers.VPCs
 	NetworkingHandler *handlers.Networking
 	V1Applier         handlers.NetworkingV1Applier
-	Config            *config.Config
-	Restart           func()
+	// TunnelReconcile keeps db.VM.TunnelURL aligned with Gopher's view —
+	// receives SaveGopher's freshly-built tunnel.Client via the same
+	// applier interface the provision service implements. Nil-safe.
+	TunnelReconcile handlers.TunnelClientApplier
+	Config          *config.Config
+	Restart         func()
 }
 
 // NewRouter builds and returns the application router for normal (configured) mode.
@@ -94,8 +98,12 @@ func NewRouter(d Deps) http.Handler {
 		auth = auth.WithBucketPurger(d.UserBuckets)
 	}
 	tunnels := handlers.NewTunnels(d.Tunnels, d.TunnelURL)
+	tunnelAppliers := []handlers.TunnelClientApplier{d.Provision}
+	if d.TunnelReconcile != nil {
+		tunnelAppliers = append(tunnelAppliers, d.TunnelReconcile)
+	}
 	settingsBuilder := handlers.NewSettings(d.Auth).
-		WithTunnelAppliers(d.Provision).
+		WithTunnelAppliers(tunnelAppliers...).
 		WithTunnelInfoSetter(tunnels).
 		WithGPUAppliers(d.Provision).
 		WithNimbusAppURL(d.Config.AppURL).
@@ -519,9 +527,23 @@ func NewRouter(d Deps) http.Handler {
 	return r
 }
 
-// NewSetupRouter builds a minimal router for unconfigured (setup) mode.
-// Only setup and health routes are registered; all other API calls 404.
-func NewSetupRouter(cfg *config.Config, restart func()) http.Handler {
+// SetupDeps bundles the services the setup-mode router needs. Auth +
+// SelfBootstrap are optional — when nil the gopher-pre-config routes
+// 404, matching the pre-DB behaviour the install wizard's first version
+// shipped with.
+type SetupDeps struct {
+	Cfg           *config.Config
+	Restart       func()
+	Auth          *service.AuthService // nil-ok: gopher endpoints disabled
+	SelfBootstrap *selftunnel.Service  // nil-ok: bootstrap endpoint disabled
+}
+
+// NewSetupRouter builds the router for unconfigured (setup) mode. Adds
+// the same /api/settings/gopher/* surface the configured-mode router
+// exposes, so the install wizard can use the existing GopherPanel
+// component as-is. Mounted only when Auth + SelfBootstrap are wired
+// (main.go gates this on whether DB + selftunnel could be initialised).
+func NewSetupRouter(deps SetupDeps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -529,7 +551,20 @@ func NewSetupRouter(cfg *config.Config, restart func()) http.Handler {
 	r.Use(loggingMiddleware)
 	r.Use(recoveryMiddleware)
 
-	setup := handlers.NewSetup(cfg, restart)
+	setup := handlers.NewSetup(deps.Cfg, deps.Restart)
+
+	// Build a stripped Settings handler with only the wiring the
+	// gopher-in-wizard flow needs. No audit, no GPU appliers, no
+	// network appliers — those services don't exist in setup mode.
+	// selftunnel.Service receives client updates via the
+	// SelfBootstrap interface's SetGopherClient method (not the
+	// TunnelClientApplier path); no separate applier registration
+	// needed here.
+	var settings *handlers.Settings
+	if deps.Auth != nil && deps.SelfBootstrap != nil {
+		settings = handlers.NewSettings(deps.Auth).
+			WithSelfBootstrap(deps.SelfBootstrap)
+	}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -540,6 +575,16 @@ func NewSetupRouter(cfg *config.Config, restart func()) http.Handler {
 		r.Get("/setup/discover", setup.Discover)
 		r.Post("/setup/test", setup.Test)
 		r.Post("/setup/save", setup.Save)
+
+		// Gopher surface — same endpoints + handler the configured-
+		// mode router mounts under /api/settings/gopher/*. The install
+		// wizard's GopherPanel calls these exact paths.
+		if settings != nil {
+			r.Get("/settings/gopher", settings.GetGopher)
+			r.Put("/settings/gopher", settings.SaveGopher)
+			r.Get("/settings/gopher/self-bootstrap", settings.SelfBootstrapStatus)
+			r.Post("/settings/gopher/self-bootstrap", settings.SelfBootstrapStart)
+		}
 	})
 
 	return r

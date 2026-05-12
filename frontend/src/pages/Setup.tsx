@@ -3,6 +3,7 @@ import Background from '@/components/Background'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import GopherPanel from '@/components/ui/GopherPanel'
 import {
   getSetupStatus,
   testProxmoxConnection,
@@ -29,8 +30,11 @@ interface NetworkFields {
   nameserver: string
   searchDomain: string
   port: string
-  gopherApiUrl: string
-  gopherApiKey: string
+  // gopherEnabled gates the GopherPanel in the Network step.
+  // When false, Gopher is skipped entirely. When true, the panel
+  // renders, the operator saves creds + watches the bootstrap, and
+  // Next is blocked until the cloud tunnel reaches active.
+  gopherEnabled: boolean
 }
 
 interface AdminFields {
@@ -54,9 +58,14 @@ export default function Setup() {
     nameserver: '',
     searchDomain: '',
     port: '',
-    gopherApiUrl: '',
-    gopherApiKey: '',
+    gopherEnabled: false,
   })
+  // gopherTunnelActive tracks whether the cloud-tunnel bootstrap
+  // succeeded. Updated by GopherPanel's onTunnelActive callback.
+  // When gopherEnabled && !gopherTunnelActive, the Network step's
+  // Next button is disabled — operator must either succeed or flip
+  // the toggle off.
+  const [gopherTunnelActive, setGopherTunnelActive] = useState(false)
   const [admin, setAdmin] = useState<AdminFields>({ name: '', email: '', password: '' })
   const [discovery, setDiscovery] = useState<ProxmoxDiscovery | null>(null)
   const [discovering, setDiscovering] = useState(true)
@@ -151,8 +160,10 @@ export default function Setup() {
     if (network.nameserver) req.nameserver = network.nameserver
     if (network.searchDomain) req.search_domain = network.searchDomain
     if (network.port) req.port = network.port
-    if (network.gopherApiUrl) req.gopher_api_url = network.gopherApiUrl
-    if (network.gopherApiKey) req.gopher_api_key = network.gopherApiKey
+    // Gopher creds aren't part of the bulk save anymore — they're
+    // persisted earlier via GopherPanel's direct call to
+    // PUT /api/settings/gopher. The setup payload only carries
+    // Proxmox + network basics.
     try {
       await saveSetupConfig(req)
       setStep('restarting')
@@ -255,6 +266,8 @@ export default function Setup() {
             }}
             gatewayAutofilled={gatewayAutofilled}
             prefixAutofilled={prefixAutofilled}
+            gopherTunnelActive={gopherTunnelActive}
+            onGopherActive={() => setGopherTunnelActive(true)}
             onBack={() => setStep('proxmox')}
             onNext={() => setStep('admin')}
           />
@@ -517,16 +530,25 @@ function GuideStep({
 
 interface NetworkStepProps {
   fields: NetworkFields
-  onChange: (key: keyof NetworkFields, value: string) => void
+  onChange: (key: keyof NetworkFields, value: string | boolean) => void
   gatewayAutofilled: boolean
   prefixAutofilled: boolean
+  // gopherTunnelActive is the Gopher cloud-tunnel state lifted from
+  // GopherPanel via onGopherActive — used to gate Next when the
+  // operator has Gopher enabled but the bootstrap hasn't succeeded.
+  gopherTunnelActive: boolean
+  onGopherActive: () => void
   onBack: () => void
   onNext: () => void
 }
 
-function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, onBack, onNext }: NetworkStepProps) {
-  const canNext = !!fields.ipPoolStart && !!fields.ipPoolEnd && !!fields.gatewayIp
-  const missing = !canNext && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
+function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, gopherTunnelActive, onGopherActive, onBack, onNext }: NetworkStepProps) {
+  const baseNetworkOK = !!fields.ipPoolStart && !!fields.ipPoolEnd && !!fields.gatewayIp
+  // Gopher gating: when the operator opted in, Next blocks until the
+  // cloud tunnel reaches active. The toggle-off path is unaffected.
+  const gopherOK = !fields.gopherEnabled || gopherTunnelActive
+  const canNext = baseNetworkOK && gopherOK
+  const missing = !baseNetworkOK && (fields.ipPoolStart || fields.ipPoolEnd || fields.gatewayIp)
   return (
     <div>
       <div className="eyebrow">Step 2 of 4</div>
@@ -595,23 +617,6 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, on
         <span className="text-[11px] text-ink-3">— safe defaults apply if left blank</span>
       </div>
       <Card className="p-8 flex flex-col gap-5">
-        <div className="grid grid-cols-2 gap-4">
-          <Input
-            label="Gopher API URL"
-            placeholder="https://gopher.example.com"
-            value={fields.gopherApiUrl}
-            onChange={(e) => onChange('gopherApiUrl', e.target.value)}
-            hint="Optional reverse-tunnel gateway used to expose VMs at public hostnames. Leave blank to skip."
-          />
-          <Input
-            label="Gopher API key"
-            type="password"
-            placeholder="Paste your Gopher API key"
-            value={fields.gopherApiKey}
-            onChange={(e) => onChange('gopherApiKey', e.target.value)}
-            hint="Editable later from the Authentication page if you skip it now."
-          />
-        </div>
         <Input
           label="HTTP port"
           placeholder="8080"
@@ -637,9 +642,53 @@ function NetworkStep({ fields, onChange, gatewayAutofilled, prefixAutofilled, on
         </div>
       </Card>
 
+      {/* Gopher tunnels — opt-in. When enabled, the operator saves
+          creds via GopherPanel (same UI the Infrastructure page uses)
+          and Next is blocked until the cloud tunnel bootstrap
+          succeeds. When disabled, Gopher is skipped entirely and the
+          operator can keep going with Nimbus standalone. */}
+      <div className="mb-2 flex items-center gap-2 mt-2">
+        <span className="text-[11px] font-mono font-medium uppercase tracking-widest text-ink-3">
+          Public access via Gopher
+        </span>
+        <span className="text-[11px] text-ink-3">— optional reverse-tunnel gateway</span>
+      </div>
+      <Card className="p-8 flex flex-col gap-4">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={fields.gopherEnabled}
+            onChange={(e) => onChange('gopherEnabled', e.target.checked as unknown as string)}
+          />
+          <div>
+            <div className="text-sm font-medium text-ink">Enable Gopher tunnels</div>
+            <p className="text-[12px] text-ink-2 mt-1 leading-relaxed">
+              When enabled, Nimbus uses a reverse-tunnel gateway to expose this
+              dashboard + provisioned VMs at public hostnames. You'll save your
+              Gopher API URL + key + subdomain below, then watch the cloud
+              tunnel bootstrap before moving on. Leave off if you only need
+              LAN-internal access — you can enable it later from the
+              Infrastructure → Gopher tunnels page.
+            </p>
+          </div>
+        </label>
+        {fields.gopherEnabled && (
+          <div className="mt-2">
+            <GopherPanel onTunnelActive={onGopherActive} autoRedirectOnActive={false} />
+          </div>
+        )}
+      </Card>
+
       {missing && (
         <p className="text-xs text-bad mt-4 text-right">
           Fill in all required fields to continue.
+        </p>
+      )}
+      {baseNetworkOK && fields.gopherEnabled && !gopherTunnelActive && (
+        <p className="text-xs text-bad mt-4 text-right">
+          Gopher tunnels is enabled — save credentials + wait for the cloud
+          tunnel to come up, or disable the toggle to skip.
         </p>
       )}
 
