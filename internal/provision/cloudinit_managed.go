@@ -7,8 +7,8 @@ import (
 	"log"
 	"strings"
 
-	"nimbus/internal/bootstrap"
 	internalerrors "nimbus/internal/errors"
+	"nimbus/internal/proxmox"
 )
 
 // vmISOFilename is the per-VM cloud-init ISO name produced by the
@@ -109,7 +109,7 @@ func (s *Service) verifyTemplateBaked(ctx context.Context, node string, template
 	// observed across PVE 7.x and 8.x; if a future PVE switches to ','
 	// we'd need to widen the split set.
 	for _, t := range strings.Split(tags, ";") {
-		if strings.TrimSpace(t) == bootstrap.NimbusBakedTag {
+		if strings.TrimSpace(t) == proxmox.NimbusBakedTag {
 			return nil
 		}
 	}
@@ -120,7 +120,7 @@ func (s *Service) verifyTemplateBaked(ctx context.Context, node string, template
 				"Re-run bootstrap (Settings → Storage → rebuild templates) to bake qemu-guest-agent into the cloud image. "+
 				"Existing VMs are unaffected — they keep working until the operator migrates or renumbers them, "+
 				"at which point Nimbus will auto-swap them onto the managed cloud-init drive.",
-			templateVMID, node, bootstrap.NimbusBakedTag),
+			templateVMID, node, proxmox.NimbusBakedTag),
 	}
 }
 

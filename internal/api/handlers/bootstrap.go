@@ -58,6 +58,36 @@ func (h *Bootstrap) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, bootstrapStatusView{Bootstrapped: has})
 }
 
+// TemplatesStatus handles GET /api/admin/templates-status.
+//
+// @Summary     Per-template freshness check (admin)
+// @Description Reports how many node_templates rows still point at a
+// @Description Proxmox template that carries the nimbus-baked-v1 tag.
+// @Description Used by the SPA banner to nudge operators of pre-D-boot
+// @Description deployments to re-run bootstrap so future provisions
+// @Description don't fail at the template-baked guard.
+// @Tags        bootstrap
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=bootstrap.TemplatesStatus}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /admin/templates-status [get]
+func (h *Bootstrap) TemplatesStatus(w http.ResponseWriter, r *http.Request) {
+	// One GetVMConfig per template row — for typical 4×4 clusters that
+	// completes well under 5s. A 30s timeout caps pathological cases
+	// where the Proxmox API is degraded.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	st, err := h.svc.CheckTemplatesStatus(ctx)
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, st)
+}
+
 // BootstrapTemplates handles POST /api/admin/bootstrap-templates.
 //
 // Synchronous — the call blocks for up to ~20 minutes while Proxmox downloads

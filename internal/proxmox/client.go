@@ -316,10 +316,26 @@ func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[st
 	return cfg, nil
 }
 
-// TemplateExists reports whether the template VMID exists on the node AND has
-// a cloud-init drive attached. Without the cloud-init drive, SetCloudInit
-// silently succeeds but the cloud-init config never reaches the booted VM —
-// see design-doc gotcha #4.
+// NimbusBakedTag is the VM tag bootstrap stamps on a template after a
+// successful bake ceremony (install qemu-guest-agent + cloud-init clean
+// → ConvertToTemplate). Lives here rather than in the bootstrap package
+// so TemplateExists (this file) and verifyTemplateBaked (provision
+// package) can both reference it without bootstrap → proxmox → bootstrap
+// cycles. Bootstrap re-exports it as bootstrap.NimbusBakedTag for
+// callers in that import path.
+//
+// The version suffix gives us room to invalidate older bake formats in
+// the future without confusing the marker semantics.
+const NimbusBakedTag = "nimbus-baked-v1"
+
+// TemplateExists reports whether the VMID is a Nimbus-built template
+// — present on the node AND tagged with NimbusBakedTag. Bootstrap uses
+// this to decide whether to skip re-creating an already-good template.
+//
+// Pre-D-boot templates (no bake ceremony, no tag) report false on
+// purpose: the !force bootstrap path will treat them as "needs rebuild"
+// and replace the DB row pointer with a new VMID, surfacing the
+// upgraded template to provision.
 func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (bool, error) {
 	cfg, err := c.GetVMConfig(ctx, node, vmid)
 	if err != nil {
@@ -328,15 +344,9 @@ func (c *Client) TemplateExists(ctx context.Context, node string, vmid int) (boo
 		}
 		return false, err
 	}
-	// Look for any drive (ide*, scsi*, sata*, virtio*) whose value mentions
-	// "cloudinit". This is the canonical way Proxmox attaches the cloud-init
-	// drive — `qm set <vmid> --ide2 local-lvm:cloudinit` for example.
-	for _, v := range cfg {
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		if strings.Contains(s, "cloudinit") {
+	tags, _ := cfg["tags"].(string)
+	for _, t := range strings.Split(tags, ";") {
+		if strings.TrimSpace(t) == NimbusBakedTag {
 			return true, nil
 		}
 	}

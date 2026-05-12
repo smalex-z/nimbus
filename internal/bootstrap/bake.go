@@ -10,18 +10,14 @@ import (
 	"time"
 
 	"github.com/kdomanski/iso9660"
+
+	"nimbus/internal/proxmox"
 )
 
-// NimbusBakedTag is the VM tag bootstrap stamps on a template after a
-// successful bake. The provision flow reads this to verify the template
-// was built with qemu-guest-agent pre-installed (i.e. the post-D-boot
-// template generation). VMs cloned from an unstamped template fail with
-// a clear "re-run bootstrap to rebuild" error rather than the older
-// silent breakage.
-//
-// The version suffix gives us room to invalidate older bake formats in
-// the future without confusing the marker semantics.
-const NimbusBakedTag = "nimbus-baked-v1"
+// NimbusBakedTag re-exports proxmox.NimbusBakedTag for callers that
+// were already in the bootstrap import path. Keep both pointing at the
+// same constant — see the proxmox package for the rationale.
+const NimbusBakedTag = proxmox.NimbusBakedTag
 
 // Bake timing knobs. These are tunable here rather than in Config because
 // they're calibrated against the bake workload, not deployment-specific.

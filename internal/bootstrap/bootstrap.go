@@ -132,6 +132,63 @@ func (s *Service) HasTemplates(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+// TemplatesStatus is the result of inspecting every (node, OS) template row
+// against Proxmox to see which are still bake-tagged. Used by the admin
+// banner to nudge operators of pre-D-boot deployments to re-run bootstrap.
+type TemplatesStatus struct {
+	Total   int                    `json:"total"`
+	Baked   int                    `json:"baked"`
+	Unbaked int                    `json:"unbaked"`
+	Details []TemplateStatusDetail `json:"details"`
+}
+
+// TemplateStatusDetail is one row's verdict in TemplatesStatus.Details.
+// Baked == false means TemplateExists returned false — either the Proxmox
+// VMID is gone (DB stale) or the template lacks the NimbusBakedTag (pre-
+// D-boot template needing rebuild). Either way the operator's action is
+// the same: re-run bootstrap.
+type TemplateStatusDetail struct {
+	Node  string `json:"node"`
+	OS    string `json:"os"`
+	VMID  int    `json:"vmid"`
+	Baked bool   `json:"baked"`
+}
+
+// CheckTemplatesStatus walks every node_templates row and asks Proxmox
+// whether the template VMID still exists AND carries the bake tag.
+//
+// Cost: one GetVMConfig per row. For a 4-OS × 4-node cluster that's 16
+// API calls. The banner endpoint that wraps this is admin-only and
+// rate-limited by route timeout; not intended for hot-loop polling.
+func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, error) {
+	var rows []db.NodeTemplate
+	if err := s.db.WithContext(ctx).Order("node, os").Find(&rows).Error; err != nil {
+		return TemplatesStatus{}, fmt.Errorf("list node_templates: %w", err)
+	}
+	out := TemplatesStatus{
+		Total:   len(rows),
+		Details: make([]TemplateStatusDetail, 0, len(rows)),
+	}
+	for _, r := range rows {
+		baked, err := s.px.TemplateExists(ctx, r.Node, r.VMID)
+		// Probe errors map to "not baked" — the operator's action (re-run
+		// bootstrap) is the same either way. The error itself is dropped
+		// rather than surfaced; this endpoint is best-effort UX.
+		if err != nil {
+			baked = false
+		}
+		if baked {
+			out.Baked++
+		} else {
+			out.Unbaked++
+		}
+		out.Details = append(out.Details, TemplateStatusDetail{
+			Node: r.Node, OS: r.OS, VMID: r.VMID, Baked: baked,
+		})
+	}
+	return out, nil
+}
+
 // Request is one bootstrap invocation. All fields are optional — empty Request
 // means "all OSes in the catalogue, on every online node, idempotent".
 type Request struct {

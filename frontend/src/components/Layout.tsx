@@ -5,6 +5,7 @@ import api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 import NavDropdown from '@/components/ui/NavDropdown'
 import TasksDropdown from '@/components/TasksDropdown'
+import TemplatesRebuildBanner from '@/components/TemplatesRebuildBanner'
 
 interface LayoutProps {
   children: ReactNode
@@ -185,6 +186,10 @@ export default function Layout({ children, showNav = true }: LayoutProps) {
           360px policy rail; /nodes packs a 4-up card grid + a dense
           management table. All three benefit from the extra horizontal
           breathing room over the 1200px default. */}
+      {/* Admin-only nudge to re-run bootstrap when templates aren't
+          baked — sits between the nav and main, sticky like the nav so
+          it stays visible while scrolling. Hidden for non-admins. */}
+      <TemplatesRebuildBanner />
       <main
         className={`flex-1 mx-auto w-full px-8 py-12 pb-20 animate-fadeIn ${
           location.pathname.startsWith('/infrastructure')

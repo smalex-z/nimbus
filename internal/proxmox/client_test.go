@@ -195,20 +195,30 @@ func TestClient_TemplateExists(t *testing.T) {
 		wantErr     bool
 	}{
 		{
-			name:       "exists with cloud-init drive",
+			name:       "exists with nimbus-baked tag",
 			statusCode: http.StatusOK,
 			body: map[string]any{
 				"name":  "ubuntu-template",
-				"ide2":  "local-lvm:cloudinit,media=cdrom",
+				"tags":  "nimbus-baked-v1",
 				"scsi0": "local-lvm:vm-9000-disk-0,size=10G",
 			},
 			wantPresent: true,
 		},
 		{
-			name:       "exists but no cloud-init drive (silent failure trap)",
+			name:       "exists with multiple tags including nimbus-baked",
 			statusCode: http.StatusOK,
 			body: map[string]any{
-				"name":  "ubuntu-no-ci",
+				"name":  "ubuntu-template",
+				"tags":  "production;nimbus-baked-v1;ubuntu",
+				"scsi0": "local-lvm:vm-9000-disk-0,size=10G",
+			},
+			wantPresent: true,
+		},
+		{
+			name:       "exists but pre-D-boot (no nimbus-baked tag)",
+			statusCode: http.StatusOK,
+			body: map[string]any{
+				"name":  "ubuntu-old-template",
 				"scsi0": "local-lvm:vm-9000-disk-0,size=10G",
 			},
 			wantPresent: false,

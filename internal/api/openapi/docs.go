@@ -333,6 +333,61 @@ const docTemplate = `{
                 }
             }
         },
+        "/admin/templates-status": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Reports how many node_templates rows still point at a\nProxmox template that carries the nimbus-baked-v1 tag.\nUsed by the SPA banner to nudge operators of pre-D-boot\ndeployments to re-run bootstrap so future provisions\ndon't fail at the template-baked guard.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "bootstrap"
+                ],
+                "summary": "Per-template freshness check (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/bootstrap.TemplatesStatus"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/audit": {
             "get": {
                 "security": [
@@ -7749,6 +7804,43 @@ const docTemplate = `{
                 }
             }
         },
+        "bootstrap.TemplateStatusDetail": {
+            "type": "object",
+            "properties": {
+                "baked": {
+                    "type": "boolean"
+                },
+                "node": {
+                    "type": "string"
+                },
+                "os": {
+                    "type": "string"
+                },
+                "vmid": {
+                    "type": "integer"
+                }
+            }
+        },
+        "bootstrap.TemplatesStatus": {
+            "type": "object",
+            "properties": {
+                "baked": {
+                    "type": "integer"
+                },
+                "details": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/bootstrap.TemplateStatusDetail"
+                    }
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "unbaked": {
+                    "type": "integer"
+                }
+            }
+        },
         "db.Node": {
             "type": "object",
             "properties": {
@@ -8526,6 +8618,10 @@ const docTemplate = `{
                 },
                 "suggested_gateway": {
                     "type": "string"
+                },
+                "suggested_prefix_len": {
+                    "description": "SuggestedPrefixLen is the netmask of the host's interface that\nowns the default route, when it covers the suggested gateway.\nUseful when the operator's LAN spans wider than /24 (e.g.\n192.168.0.0/16 with pool VMs in 192.168.50.* but gateway at\n192.168.1.1 — /24 would make those VMs unable to ARP the\ngateway). 0 when undetectable.",
+                    "type": "integer"
                 }
             }
         },
