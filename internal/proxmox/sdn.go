@@ -170,6 +170,29 @@ func (c *Client) DeleteSDNZone(ctx context.Context, zone string) error {
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// UpdateSDNZoneNodes rewrites just the `nodes` field of an existing
+// zone. Pass an empty string to clear the restriction (zone becomes
+// cluster-wide). Used by the migrate-prepare flow to widen a host-
+// pinned zone to include the target node before migrate, and to
+// narrow it back to a single node after.
+//
+// Type cannot be changed — only nodes is sent. Like every other SDN
+// mutation, the caller must invoke ApplySDN afterwards for the
+// change to land in the running config.
+func (c *Client) UpdateSDNZoneNodes(ctx context.Context, zone, nodes string) error {
+	params := url.Values{}
+	if nodes == "" {
+		// Proxmox SDN clears optional fields via the `delete` parameter,
+		// not by setting them to empty string. Sending `nodes=""` keeps
+		// the existing value.
+		params.Set("delete", "nodes")
+	} else {
+		params.Set("nodes", nodes)
+	}
+	path := "/cluster/sdn/zones/" + url.PathEscape(zone)
+	return c.do(ctx, http.MethodPut, path, params, nil)
+}
+
 // ListSDNVNets returns every VNet across every zone.
 func (c *Client) ListSDNVNets(ctx context.Context) ([]SDNVNet, error) {
 	var out []SDNVNet

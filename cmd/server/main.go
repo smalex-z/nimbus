@@ -702,6 +702,10 @@ func main() {
 		log.Printf("warning: standalonenet disabled (%v) — provisions fall back to legacy SDN path", snErr)
 	} else {
 		provSvc.SetStandaloneNet(standaloneNetSvc)
+		// Same instance handles the drain-time prepare/commit hooks
+		// for host-pinned SDN zones, so Standalone VMs can migrate
+		// across nodes without operator-side ApplySDN gymnastics.
+		nodeMgrSvc.SetNetMigrator(standaloneNetSvc)
 	}
 
 	// Networking-v1 VPC primitive — VXLAN zone shared across nodes

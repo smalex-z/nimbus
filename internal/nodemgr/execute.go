@@ -176,6 +176,29 @@ func (s *Service) migrateOne(ctx context.Context, vm db.VM, target string, repor
 	migrateCtx, cancel := context.WithTimeout(ctx, s.cfg.PerVMMigrateTimeout)
 	defer cancel()
 
+	// Standalone-net VMs are pinned to their home node via the SDN
+	// zone's nodes= restriction. Widen the zone to include the
+	// target before MigrateVM dispatches, narrow back to the VM's
+	// final location after (target on success, source on failure).
+	// No-op for VPC / cluster-LAN VMs.
+	landedOnTarget := false
+	if s.netMigrator != nil {
+		if err := s.netMigrator.PrepareNetForMigrate(migrateCtx, vm.ID, target); err != nil {
+			return fmt.Errorf("prepare standalone net: %w", err)
+		}
+		defer func() {
+			finalNode := vm.Node
+			if landedOnTarget {
+				finalNode = target
+			}
+			// Fresh context — drain's migrateCtx may have expired
+			// or been canceled by the time we reach the narrow.
+			cctx, cncl := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cncl()
+			_ = s.netMigrator.CommitNetMove(cctx, vm.ID, finalNode)
+		}()
+	}
+
 	taskID, err := s.px.MigrateVM(migrateCtx, vm.Node, vm.VMID, target, true)
 	if err != nil {
 		return fmt.Errorf("migrate request: %w", err)
@@ -187,6 +210,7 @@ func (s *Service) migrateOne(ctx context.Context, vm db.VM, target string, repor
 			return fmt.Errorf("migrate task: %w", err)
 		}
 	}
+	landedOnTarget = true
 
 	// Update local row so the next reconcile pass sees the canonical
 	// node placement immediately.
