@@ -75,12 +75,46 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 		return nil, err
 	}
 
+	// Standalone-net VMs are pinned to their home node via the SDN
+	// zone's nodes= restriction. Widen it to include the target (and
+	// apply SDN) before any migrate attempt; narrow it back to the
+	// VM's final node after, whether the migrate succeeded or
+	// failed. No-op for VPC / cluster-LAN VMs.
+	//
+	// landedOnTarget is what the deferred narrow-back consults to
+	// decide the VM's final home. Set true the moment Proxmox
+	// accepts the migrate (online task succeeds or migrateOffline
+	// returns nil), BEFORE post-migrate startup runs — because at
+	// that point the VM is already on target, even if a subsequent
+	// startup-on-target fails and we return an error.
+	landedOnTarget := false
+	if s.standaloneNet != nil {
+		// standalone_vm_networks.vm_id stores the Proxmox VMID, not
+		// the gorm primary key — pass vm.VMID, not vm.ID.
+		pveVMID := uint(vm.VMID)
+		if err := s.standaloneNet.PrepareNetForMigrate(ctx, pveVMID, target); err != nil {
+			return nil, fmt.Errorf("prepare standalone net for migrate: %w", err)
+		}
+		defer func() {
+			finalNode := vm.Node
+			if landedOnTarget {
+				finalNode = target
+			}
+			// Use a fresh context so cancellation of the migrate
+			// HTTP request doesn't strand the SDN narrow-back step.
+			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = s.standaloneNet.CommitNetMove(cctx, pveVMID, finalNode)
+		}()
+	}
+
 	wasRunning := strings.EqualFold(vm.Status, "running")
 
 	// 1. Try online migration when the VM is running.
 	if wasRunning {
 		online, err := s.tryOnlineMigration(ctx, vm, target)
 		if err == nil {
+			landedOnTarget = true
 			return online, nil
 		}
 		var onlineFail *internalerrors.OnlineMigrationFailedError
@@ -125,6 +159,7 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 		}
 		return nil, fmt.Errorf("offline migrate: %w", err)
 	}
+	landedOnTarget = true
 
 	if wasStopped {
 		// VM has now landed on `target`. Start it there.

@@ -822,6 +822,38 @@ export async function getTemplatesStatus(): Promise<TemplatesStatus> {
   return data
 }
 
+// Template-sweep types. Mirrors internal/bootstrap.SweepResult — kept
+// in sync by hand since swag's TS export isn't wired up.
+export interface SweepResult {
+  dry_run: boolean
+  nodes: NodeSweep[]
+  total_removed: number
+}
+
+export interface NodeSweep {
+  node: string
+  removed?: RemovedTemplate[]
+  kept?: Record<string, number>
+  errors?: string[]
+}
+
+export interface RemovedTemplate {
+  vmid: number
+  name: string
+  os: string
+  reason: 'duplicate' | 'unbaked_with_baked_sibling' | 'failed_bake_leftover'
+  status: string
+}
+
+// sweepTemplates removes duplicate / unbaked / failed-bake template
+// artifacts cluster-wide. Pass dryRun=true for a preview the SPA shows
+// before confirming the destroy.
+export async function sweepTemplates(dryRun: boolean): Promise<SweepResult> {
+  const qs = dryRun ? '?dry_run=true' : ''
+  const { data } = await api.post<SweepResult>(`/admin/templates-sweep${qs}`)
+  return data
+}
+
 export interface CreateAdminRequest {
   name: string
   email: string
@@ -1844,6 +1876,16 @@ export interface DrainPlan {
   migrations: PlannedMigration[]
   aggregate: NodeProjection[]
   has_blocked: boolean
+  // external_vms are VMs on the source node that Nimbus didn't
+  // provision — drain won't migrate them. Surfaced in the modal so the
+  // operator handles them via the Proxmox UI before powering off.
+  external_vms?: ExternalVM[]
+}
+
+export interface ExternalVM {
+  vmid: number
+  name: string
+  status: string
 }
 
 export async function getDrainPlan(name: string): Promise<DrainPlan> {

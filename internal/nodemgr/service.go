@@ -36,6 +36,30 @@ var (
 	ErrSelfHosted     = errors.New("cannot remove the node Nimbus itself runs on")
 )
 
+// ManualDelnodeRequiredError is returned by Remove when Proxmox
+// refuses the cluster-removal API call. The Proxmox API gates
+// `DELETE /cluster/config/nodes/{name}` to user == "root@pam"
+// exactly — API tokens like `root@pam!nimbus` fail with 403 even
+// though they're root-owned. The handler maps this to a 409 and
+// the SPA surfaces the embedded command for the operator.
+//
+// Template destruction happens BEFORE this error fires, so the
+// Proxmox-side cleanup (4 VM destroys) has already completed
+// successfully by the time the operator sees this. Re-clicking
+// Remove after running pvecm delnode manually completes the flow:
+// destroyNodeTemplates is a DB-empty no-op, GetNodes confirms the
+// node is gone, DeleteNode is skipped, DB row is deleted.
+type ManualDelnodeRequiredError struct {
+	Node string
+}
+
+func (e *ManualDelnodeRequiredError) Error() string {
+	return fmt.Sprintf(
+		"Proxmox refuses cluster removal via API tokens. SSH to any remaining cluster node as root and run:\n\n    pvecm delnode %s\n\nThen re-click Remove to finish the local cleanup. Templates on %s have already been destroyed.",
+		e.Node, e.Node,
+	)
+}
+
 // ProxmoxClient is the small subset of *proxmox.Client nodemgr depends on.
 // Defined here per the "accept interfaces" idiom so tests can swap in a
 // fake without dragging the whole HTTP client.
@@ -64,6 +88,18 @@ type TemplateBootstrapper interface {
 	Bootstrap(ctx context.Context, req bootstrap.Request) (*bootstrap.Result, error)
 }
 
+// NetMigrator is the optional standalonenet hook drain uses to widen
+// a Standalone VM's host-pinned SDN zone before MigrateVM and narrow
+// it back after. nil-ok — when unset, drain skips both calls and
+// behaves as before (Standalone VMs fail to migrate at the
+// "bridge does not exist" guard).
+type NetMigrator interface {
+	// pveVMID is the Proxmox VMID (db.VM.VMID), not the gorm primary
+	// key. standalone_vm_networks rows key off the Proxmox vmid.
+	PrepareNetForMigrate(ctx context.Context, pveVMID uint, targetNode string) error
+	CommitNetMove(ctx context.Context, pveVMID uint, finalNode string) error
+}
+
 // Service is the admin-facing handle for node management. Callers obtain one
 // from New and share it across handlers; methods are safe for concurrent use
 // (per-node mutations serialize on a per-name mutex held inside the service).
@@ -83,6 +119,11 @@ type Service struct {
 	// is disabled (e.g. tests, install-wizard mode).
 	bootstrapper TemplateBootstrapper
 
+	// netMigrator is the optional standalonenet hook drain calls
+	// around each VM's MigrateVM dispatch to handle host-pinned SDN
+	// zones. nil means drain ignores network state (legacy behavior).
+	netMigrator NetMigrator
+
 	// bootstrapsMu guards bootstrapsInFlight. Bootstrap is slow
 	// (~10-20 min for the full 4-OS catalog) and Reconcile fires every
 	// 60 s — without this guard we'd stack parallel bootstraps onto the
@@ -96,6 +137,14 @@ type Service struct {
 // observed nodes. Idempotent — pass nil to disable.
 func (s *Service) SetTemplateBootstrapper(b TemplateBootstrapper) {
 	s.bootstrapper = b
+}
+
+// SetNetMigrator wires the standalonenet hook used to widen / narrow
+// host-pinned SDN zones around each drain migrate. Idempotent — pass
+// nil to disable (Standalone VMs will fail to migrate at the bridge
+// guard, same as pre-D-boot behavior).
+func (s *Service) SetNetMigrator(m NetMigrator) {
+	s.netMigrator = m
 }
 
 // Config tunes per-VM execution timeouts and reconciler thresholds. Zero

@@ -89,7 +89,7 @@ func NewRouter(d Deps) http.Handler {
 	nodes := handlers.NewNodes(d.NodeMgr, d.Config, d.Restart).WithAudit(d.Audit)
 	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit).WithOperations(d.Operations)
-	bs := handlers.NewBootstrap(d.Bootstrap).WithAudit(d.Audit)
+	bs := handlers.NewBootstrap(d.Bootstrap).WithAudit(d.Audit).WithSweeper(d.Provision)
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
@@ -364,6 +364,13 @@ func NewRouter(d Deps) http.Handler {
 				// "rebuild templates" SPA banner. One Proxmox config
 				// fetch per template row, so a tight timeout is fine.
 				r.Get("/admin/templates-status", bs.TemplatesStatus)
+
+				// Sweep duplicate / unbaked / failed-bake template
+				// artifacts cluster-wide. Supports ?dry_run=true for
+				// the preview pass the SPA renders before confirming.
+				// Bounded to 5 minutes inside the handler.
+				r.With(middleware.Timeout(6*time.Minute)).
+					Post("/admin/templates-sweep", bs.SweepTemplates)
 
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)

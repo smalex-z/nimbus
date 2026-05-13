@@ -255,6 +255,19 @@ type StandaloneNetService interface {
 	Provision(ctx context.Context, vmID uint, vmIdentifier, node string) (*db.StandaloneVMNetwork, error)
 	Destroy(ctx context.Context, vmID uint) error
 	Get(ctx context.Context, vmID uint) (*db.StandaloneVMNetwork, error)
+	// PrepareNetForMigrate widens the VM's per-host SDN zone to
+	// include the target node so MigrateVM doesn't fail with
+	// "bridge does not exist". No-op for non-Standalone VMs.
+	// pveVMID is the Proxmox VMID (db.VM.VMID), not the gorm
+	// primary key — standalone_vm_networks keys off the Proxmox
+	// vmid all the way down.
+	PrepareNetForMigrate(ctx context.Context, pveVMID uint, targetNode string) error
+	// CommitNetMove narrows the zone back to a single node (the
+	// VM's final location — target on success, source on failure)
+	// and updates the DB row. Logs-not-fatal on Proxmox errors;
+	// the migrate outcome takes precedence. pveVMID is the
+	// Proxmox VMID, same as PrepareNetForMigrate.
+	CommitNetMove(ctx context.Context, pveVMID uint, finalNode string) error
 }
 
 // SetStandaloneNet wires the standalonenet service onto the Service.

@@ -388,6 +388,69 @@ const docTemplate = `{
                 }
             }
         },
+        "/admin/templates-sweep": {
+            "post": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Removes duplicate templates, unbaked siblings, and failed-\nbake leftover VMs across every online node. Pass\n?dry_run=true to preview the changes without destroying\nanything — the response describes what would be removed.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "bootstrap"
+                ],
+                "summary": "Sweep redundant template artifacts (admin)",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "Preview only when true; default false executes destroys",
+                        "name": "dry_run",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/bootstrap.SweepResult"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/audit": {
             "get": {
                 "security": [
@@ -7816,6 +7879,55 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "bootstrap.NodeSweep": {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "kept": {
+                    "description": "Kept maps OS → VMID of the surviving template for that OS on this\nnode. Empty when no baked template exists for an OS (the rebuild\nbanner already covers that case).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "node": {
+                    "type": "string"
+                },
+                "removed": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/bootstrap.RemovedTemplate"
+                    }
+                }
+            }
+        },
+        "bootstrap.RemovedTemplate": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "os": {
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "duplicate | unbaked_with_baked_sibling | failed_bake_leftover",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "VM status at sweep time",
+                    "type": "string"
+                },
+                "vmid": {
+                    "type": "integer"
+                }
+            }
+        },
         "bootstrap.Result": {
             "type": "object",
             "properties": {
@@ -7836,6 +7948,23 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/bootstrap.TemplateOutcome"
                     }
+                }
+            }
+        },
+        "bootstrap.SweepResult": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean"
+                },
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/bootstrap.NodeSweep"
+                    }
+                },
+                "total_removed": {
+                    "type": "integer"
                 }
             }
         },
@@ -9786,6 +9915,13 @@ const docTemplate = `{
                         "$ref": "#/definitions/nodemgr.NodeProjection"
                     }
                 },
+                "external_vms": {
+                    "description": "ExternalVMs are VMs running on the source node that Nimbus didn't\nprovision and won't migrate. Surfaced so the operator knows to\nhandle them via the Proxmox UI before powering the host down.\nTemplates are excluded (drain wouldn't move them anyway).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/nodemgr.ExternalVM"
+                    }
+                },
                 "has_blocked": {
                     "description": "HasBlocked is a derived flag the SPA gates the \"Start drain\" button\non. True iff any row has Eligible == [] or Override pointing at a\ndisabled target (the executor would refuse).",
                     "type": "boolean"
@@ -9830,6 +9966,21 @@ const docTemplate = `{
                 },
                 "score": {
                     "type": "number"
+                }
+            }
+        },
+        "nodemgr.ExternalVM": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "\"running\" / \"stopped\"",
+                    "type": "string"
+                },
+                "vmid": {
+                    "type": "integer"
                 }
             }
         },

@@ -740,9 +740,15 @@ func (h *Nodes) SaveSchedulingSettings(w http.ResponseWriter, r *http.Request) {
 // writeNodeMutationError maps nodemgr's typed errors to HTTP statuses.
 // Unknown errors fall through to 500.
 func writeNodeMutationError(w http.ResponseWriter, err error) {
+	var manualDelnode *nodemgr.ManualDelnodeRequiredError
 	switch {
 	case errors.Is(err, nodemgr.ErrNodeNotFound):
 		response.NotFound(w, err.Error())
+	case errors.As(err, &manualDelnode):
+		// 409 with the message body containing the exact command the
+		// operator needs to run. Same shape as the other lock-state
+		// conflicts so the SPA's existing error renderer surfaces it.
+		response.Conflict(w, err.Error())
 	case errors.Is(err, nodemgr.ErrInvalidLock),
 		errors.Is(err, nodemgr.ErrNotDrained),
 		errors.Is(err, nodemgr.ErrSelfHosted),

@@ -32,6 +32,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
 
@@ -45,6 +46,8 @@ import (
 // stub without standing up the whole Proxmox surface.
 type SDNClient interface {
 	CreateSDNZone(ctx context.Context, z proxmox.SDNZone) error
+	GetSDNZone(ctx context.Context, zone string) (*proxmox.SDNZone, error)
+	UpdateSDNZoneNodes(ctx context.Context, zone, nodes string) error
 	DeleteSDNZone(ctx context.Context, zone string) error
 	CreateSDNVNet(ctx context.Context, v proxmox.SDNVNet) error
 	DeleteSDNVNet(ctx context.Context, vnet string) error
@@ -80,6 +83,13 @@ type Service struct {
 	px  SDNClient
 	db  *gorm.DB
 	cfg Config
+
+	// migrateMu serializes PrepareNetForMigrate/CommitNetMove so two
+	// concurrent migrates can't race PUT zone + ApplySDN against each
+	// other. Held only inside those calls, not across the migrate
+	// itself — drain still parallelizes per-VM migrate dispatch; only
+	// the PVE-state edits serialize.
+	migrateMu sync.Mutex
 }
 
 // New constructs a Service. cfg.PoolCIDR is required and must be a
@@ -430,6 +440,173 @@ func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") ||
 		strings.Contains(msg, "constraint violation")
+}
+
+// PrepareNetForMigrate widens the standalone-net SDN zone of vmID to
+// include targetNode (in addition to its current home) and applies
+// SDN so the target node materializes the bridge. Required before
+// any cross-node migrate of a Standalone VM — without it, the target
+// rejects the live-migrate with "bridge X does not exist".
+//
+// Idempotent: if targetNode is already in the zone's nodes list, or
+// the zone is already cluster-wide (empty nodes), returns nil without
+// touching Proxmox.
+//
+// No-op for VMs that are not Standalone-net (vpc / cluster-LAN) —
+// the row lookup returns ErrRecordNotFound and the call returns nil.
+// Callers (provision.MigrateAdmin, nodemgr.migrateOne) invoke this
+// unconditionally on every migrate.
+//
+// Failure modes:
+//   - PUT zone fails        → return error, no Proxmox state changed.
+//   - ApplySDN fails        → best-effort revert of the PUT, return error.
+//   - ReloadNodeNetwork err → log warning, return nil (bridge usually
+//     materializes by the time MigrateVM dispatches; the 6-step flow
+//     tolerates eventual consistency here).
+func (s *Service) PrepareNetForMigrate(ctx context.Context, vmID uint, targetNode string) error {
+	if targetNode == "" {
+		return errors.New("standalonenet: target node required")
+	}
+
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+
+	var row db.StandaloneVMNetwork
+	err := s.db.WithContext(ctx).Where("vm_id = ?", vmID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load standalone net row vmID=%d: %w", vmID, err)
+	}
+
+	zone, err := s.px.GetSDNZone(ctx, row.ZoneName)
+	if err != nil {
+		return fmt.Errorf("get sdn zone %s: %w", row.ZoneName, err)
+	}
+
+	// Empty Nodes = cluster-wide already. No widen needed; target
+	// will have the bridge once the running config catches up
+	// (ApplySDN below is still useful in case it hasn't).
+	if zone.Nodes == "" {
+		return nil
+	}
+	current := splitNodes(zone.Nodes)
+	if sliceContains(current, targetNode) {
+		return nil
+	}
+	originalNodes := zone.Nodes
+	newNodes := strings.Join(append(current, targetNode), ",")
+
+	if err := s.px.UpdateSDNZoneNodes(ctx, row.ZoneName, newNodes); err != nil {
+		return fmt.Errorf("widen zone %s nodes to include %s: %w", row.ZoneName, targetNode, err)
+	}
+	if err := s.px.ApplySDN(ctx); err != nil {
+		// Revert the widen so we don't leave a pending SDN change
+		// that surprises the next operator.
+		if rerr := s.px.UpdateSDNZoneNodes(ctx, row.ZoneName, originalNodes); rerr != nil {
+			log.Printf("standalonenet.PrepareNetForMigrate: revert widen of zone %s failed: %v "+
+				"(pending state may need manual cleanup)", row.ZoneName, rerr)
+		} else {
+			_ = s.px.ApplySDN(ctx)
+		}
+		return fmt.Errorf("apply sdn after widening zone %s: %w", row.ZoneName, err)
+	}
+	// Block on per-node bridge creation so the subsequent MigrateVM
+	// doesn't race ifupdown2. Soft-fail: a slow reload is annoying
+	// but the bridge usually comes up well before live-migrate's
+	// target-start phase.
+	if err := s.px.ReloadNodeNetwork(ctx, targetNode); err != nil {
+		log.Printf("standalonenet.PrepareNetForMigrate: reload %s network: %v (continuing — bridge may already be up)",
+			targetNode, err)
+	}
+	log.Printf("standalonenet.PrepareNetForMigrate: widened zone %s to include %s (was %q)",
+		row.ZoneName, targetNode, originalNodes)
+	return nil
+}
+
+// CommitNetMove narrows the standalone-net SDN zone of vmID to just
+// finalNode and updates the DB row's node field. Call with the node
+// where the VM actually ended up:
+//   - on a successful migrate → pass the target node.
+//   - on a migrate failure    → pass the original (source) node;
+//     this undoes the widen from PrepareNetForMigrate.
+//
+// Idempotent in both directions. Proxmox-side failures (PUT zone /
+// ApplySDN) are logged but NOT returned — by the time we get here
+// the VM has either migrated successfully (cosmetic cleanup) or
+// stayed put (cosmetic revert). Either way the caller has nothing
+// to do; surfacing the error would mask the real migrate outcome.
+//
+// No-op for non-Standalone VMs.
+func (s *Service) CommitNetMove(ctx context.Context, vmID uint, finalNode string) error {
+	if finalNode == "" {
+		return errors.New("standalonenet: final node required")
+	}
+
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+
+	var row db.StandaloneVMNetwork
+	err := s.db.WithContext(ctx).Where("vm_id = ?", vmID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load standalone net row vmID=%d: %w", vmID, err)
+	}
+
+	if err := s.px.UpdateSDNZoneNodes(ctx, row.ZoneName, finalNode); err != nil {
+		log.Printf("standalonenet.CommitNetMove vmID=%d zone=%s: narrow nodes to %s failed: %v "+
+			"(VM is at %s; pending SDN state may need manual cleanup)",
+			vmID, row.ZoneName, finalNode, err, finalNode)
+		return nil
+	}
+	if err := s.px.ApplySDN(ctx); err != nil {
+		log.Printf("standalonenet.CommitNetMove vmID=%d zone=%s: apply sdn after narrow failed: %v",
+			vmID, row.ZoneName, err)
+		return nil
+	}
+
+	if row.Node != finalNode {
+		if err := s.db.WithContext(ctx).
+			Model(&db.StandaloneVMNetwork{}).
+			Where("vm_id = ?", vmID).
+			Update("node", finalNode).Error; err != nil {
+			log.Printf("standalonenet.CommitNetMove vmID=%d: db node update %s→%s failed: %v "+
+				"(reconciler will catch this on next pass)",
+				vmID, row.Node, finalNode, err)
+		}
+	}
+	log.Printf("standalonenet.CommitNetMove vmID=%d zone=%s: narrowed to %s",
+		vmID, row.ZoneName, finalNode)
+	return nil
+}
+
+// splitNodes parses Proxmox's comma-separated nodes= field, dropping
+// empty entries and trimming whitespace.
+func splitNodes(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func sliceContains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // Compile-time assertion that the real *proxmox.Client satisfies our

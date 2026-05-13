@@ -26,6 +26,20 @@ type DrainPlan struct {
 	// on. True iff any row has Eligible == [] or Override pointing at a
 	// disabled target (the executor would refuse).
 	HasBlocked bool `json:"has_blocked"`
+	// ExternalVMs are VMs running on the source node that Nimbus didn't
+	// provision and won't migrate. Surfaced so the operator knows to
+	// handle them via the Proxmox UI before powering the host down.
+	// Templates are excluded (drain wouldn't move them anyway).
+	ExternalVMs []ExternalVM `json:"external_vms,omitempty"`
+}
+
+// ExternalVM is one VM on the source node that drain leaves behind —
+// either provisioned outside Nimbus (manual Proxmox-UI create, pre-Nimbus
+// VM) or in a state Nimbus's executor doesn't touch.
+type ExternalVM struct {
+	VMID   int    `json:"vmid"`
+	Name   string `json:"name"`
+	Status string `json:"status"` // "running" / "stopped"
 }
 
 // PlannedMigration describes one VM's planned move.
@@ -258,6 +272,32 @@ func (s *Service) ComputePlan(ctx context.Context, sourceNode string) (*DrainPla
 
 	plan.Aggregate = computeAggregate(candidates, currentVMCount, committedMem, plannedAdd, maxMemByNode, plan.Migrations)
 	plan.HasBlocked = anyBlocked(plan.Migrations)
+
+	// External VMs: anything Proxmox reports on the source node that isn't
+	// in the managed set and isn't a template. The drain executor won't
+	// move these, so the operator needs to handle them out-of-band before
+	// powering the host down.
+	managedVMIDs := make(map[int]struct{}, len(managed))
+	for _, m := range managed {
+		managedVMIDs[m.VMID] = struct{}{}
+	}
+	for _, vm := range vms {
+		if vm.Node != sourceNode || vm.Template != 0 {
+			continue
+		}
+		if _, ok := managedVMIDs[vm.VMID]; ok {
+			continue
+		}
+		plan.ExternalVMs = append(plan.ExternalVMs, ExternalVM{
+			VMID:   vm.VMID,
+			Name:   vm.Name,
+			Status: vm.Status,
+		})
+	}
+	sort.SliceStable(plan.ExternalVMs, func(i, j int) bool {
+		return plan.ExternalVMs[i].VMID < plan.ExternalVMs[j].VMID
+	})
+
 	return plan, nil
 }
 

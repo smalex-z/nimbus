@@ -19,14 +19,17 @@ import (
 type fakeSDN struct {
 	mu sync.Mutex
 
-	createZoneCalls   int
-	createVNetCalls   int
-	createSubnetCalls int
-	deleteZoneCalls   int
-	deleteVNetCalls   int
-	deleteSubnetCalls int
-	applyCalls        int
-	reloadNodeCalls   int
+	createZoneCalls      int
+	createVNetCalls      int
+	createSubnetCalls    int
+	deleteZoneCalls      int
+	deleteVNetCalls      int
+	deleteSubnetCalls    int
+	applyCalls           int
+	reloadNodeCalls      int
+	getZoneCalls         int
+	updateZoneNodesCalls int
+	lastUpdateZoneNodes  string // nodes value from the most recent UpdateSDNZoneNodes
 
 	createZoneErr   error
 	createVNetErr   error
@@ -36,6 +39,12 @@ type fakeSDN struct {
 	deleteSubnetErr error
 	applyErr        error
 	reloadNodeErr   error
+	getZoneErr      error
+	updateZoneErr   error
+
+	// getZoneResp lets a test stub the zone returned by GetSDNZone.
+	// Nil means "default simple zone with pinned nodes='source'".
+	getZoneResp *proxmox.SDNZone
 }
 
 func (f *fakeSDN) CreateSDNZone(_ context.Context, _ proxmox.SDNZone) error {
@@ -85,6 +94,30 @@ func (f *fakeSDN) ReloadNodeNetwork(_ context.Context, _ string) error {
 	f.reloadNodeCalls++
 	f.mu.Unlock()
 	return f.reloadNodeErr
+}
+func (f *fakeSDN) GetSDNZone(_ context.Context, zone string) (*proxmox.SDNZone, error) {
+	f.mu.Lock()
+	f.getZoneCalls++
+	resp := f.getZoneResp
+	err := f.getZoneErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		// Return a copy so caller mutations don't affect future calls.
+		c := *resp
+		return &c, nil
+	}
+	return &proxmox.SDNZone{Zone: zone, Type: "simple", Nodes: "source"}, nil
+}
+func (f *fakeSDN) UpdateSDNZoneNodes(_ context.Context, _, nodes string) error {
+	f.mu.Lock()
+	f.updateZoneNodesCalls++
+	f.lastUpdateZoneNodes = nodes
+	err := f.updateZoneErr
+	f.mu.Unlock()
+	return err
 }
 
 func newTestSvc(t *testing.T, fake *fakeSDN) *standalonenet.Service {
@@ -549,4 +582,201 @@ func endsWith(s, suffix string) bool {
 		return false
 	}
 	return s[len(s)-len(suffix):] == suffix
+}
+
+// PrepareNetForMigrate on a VM that isn't Standalone-net (no row in
+// the table) is a silent no-op — nothing in Proxmox touched.
+func TestPrepareNetForMigrate_NoRowIsNoOp(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	if err := svc.PrepareNetForMigrate(context.Background(), 9999, "beta"); err != nil {
+		t.Fatalf("PrepareNetForMigrate: %v", err)
+	}
+	if fake.getZoneCalls != 0 || fake.updateZoneNodesCalls != 0 || fake.applyCalls != 0 {
+		t.Errorf("expected no Proxmox calls for non-Standalone VM, got get=%d update=%d apply=%d",
+			fake.getZoneCalls, fake.updateZoneNodesCalls, fake.applyCalls)
+	}
+}
+
+// Widening when the target is already in the zone's nodes list is a
+// no-op — same idempotency the friend's review called out.
+func TestPrepareNetForMigrate_AlreadyWidenedIsNoOp(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	row, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha")
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	// Pretend the zone is already widened to alpha + beta.
+	fake.getZoneResp = &proxmox.SDNZone{
+		Zone: row.ZoneName, Type: "simple", Nodes: "alpha,beta",
+	}
+	// Reset post-Provision call counters so we only see what
+	// PrepareNetForMigrate triggers.
+	fake.updateZoneNodesCalls = 0
+	fake.applyCalls = 0
+
+	if err := svc.PrepareNetForMigrate(context.Background(), 1, "beta"); err != nil {
+		t.Fatalf("PrepareNetForMigrate: %v", err)
+	}
+	if fake.updateZoneNodesCalls != 0 || fake.applyCalls != 0 {
+		t.Errorf("expected no PVE writes when target already in nodes, got update=%d apply=%d",
+			fake.updateZoneNodesCalls, fake.applyCalls)
+	}
+}
+
+// Happy path: zone pinned to alpha, prepare widens to alpha,beta and
+// applies. Reload on target is invoked. DB row is left alone — narrow
+// happens later in Commit.
+func TestPrepareNetForMigrate_WidensAndApplies(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	row, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha")
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	fake.getZoneResp = &proxmox.SDNZone{
+		Zone: row.ZoneName, Type: "simple", Nodes: "alpha",
+	}
+	fake.updateZoneNodesCalls = 0
+	fake.applyCalls = 0
+	fake.reloadNodeCalls = 0
+
+	if err := svc.PrepareNetForMigrate(context.Background(), 1, "beta"); err != nil {
+		t.Fatalf("PrepareNetForMigrate: %v", err)
+	}
+	if fake.updateZoneNodesCalls != 1 {
+		t.Errorf("UpdateSDNZoneNodes calls = %d, want 1", fake.updateZoneNodesCalls)
+	}
+	if fake.lastUpdateZoneNodes != "alpha,beta" {
+		t.Errorf("widened nodes = %q, want %q", fake.lastUpdateZoneNodes, "alpha,beta")
+	}
+	if fake.applyCalls != 1 {
+		t.Errorf("ApplySDN calls = %d, want 1", fake.applyCalls)
+	}
+	if fake.reloadNodeCalls != 1 {
+		t.Errorf("ReloadNodeNetwork calls = %d, want 1 (for target node)", fake.reloadNodeCalls)
+	}
+}
+
+// ApplySDN failure after a successful widen triggers a best-effort
+// revert (a second UpdateSDNZoneNodes call back to the original) and
+// surfaces the apply error.
+func TestPrepareNetForMigrate_RevertsWidenOnApplyFailure(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	row, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha")
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	fake.getZoneResp = &proxmox.SDNZone{
+		Zone: row.ZoneName, Type: "simple", Nodes: "alpha",
+	}
+	// Reset counters, then arm the apply failure for the widen step.
+	fake.updateZoneNodesCalls = 0
+	fake.applyCalls = 0
+	fake.applyErr = errors.New("apply boom")
+
+	err = svc.PrepareNetForMigrate(context.Background(), 1, "beta")
+	if err == nil {
+		t.Fatal("expected error from apply failure, got nil")
+	}
+	// One widen + one revert.
+	if fake.updateZoneNodesCalls != 2 {
+		t.Errorf("UpdateSDNZoneNodes calls = %d, want 2 (widen + revert)", fake.updateZoneNodesCalls)
+	}
+	// Final UpdateSDNZoneNodes call should have restored the original.
+	if fake.lastUpdateZoneNodes != "alpha" {
+		t.Errorf("post-revert nodes = %q, want %q", fake.lastUpdateZoneNodes, "alpha")
+	}
+}
+
+// CommitNetMove narrows the zone to the final node and updates the DB
+// row when the VM landed on a new node. Idempotent if final == row's
+// current node (no DB update needed, but the narrow still runs to
+// sweep any widened state from a failed migrate).
+func TestCommitNetMove_NarrowsAndUpdatesDBRow(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	if _, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha"); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	fake.updateZoneNodesCalls = 0
+	fake.applyCalls = 0
+
+	if err := svc.CommitNetMove(context.Background(), 1, "beta"); err != nil {
+		t.Fatalf("CommitNetMove: %v", err)
+	}
+	if fake.updateZoneNodesCalls != 1 || fake.lastUpdateZoneNodes != "beta" {
+		t.Errorf("narrow update calls=%d nodes=%q, want 1 calls / nodes=beta",
+			fake.updateZoneNodesCalls, fake.lastUpdateZoneNodes)
+	}
+	if fake.applyCalls != 1 {
+		t.Errorf("ApplySDN calls = %d, want 1", fake.applyCalls)
+	}
+
+	got, err := svc.Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Node != "beta" {
+		t.Errorf("DB row node = %q, want beta", got.Node)
+	}
+}
+
+// On a failed migrate, the caller invokes CommitNetMove with the
+// source node — same code path, just narrows the zone back to where
+// the VM actually still lives. DB row stays put.
+func TestCommitNetMove_RevertNarrowsBackToSource(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{}
+	svc := newTestSvc(t, fake)
+
+	if _, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha"); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	fake.updateZoneNodesCalls = 0
+
+	if err := svc.CommitNetMove(context.Background(), 1, "alpha"); err != nil {
+		t.Fatalf("CommitNetMove: %v", err)
+	}
+	if fake.lastUpdateZoneNodes != "alpha" {
+		t.Errorf("post-revert nodes = %q, want alpha", fake.lastUpdateZoneNodes)
+	}
+	got, err := svc.Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Node != "alpha" {
+		t.Errorf("DB row node = %q, want alpha (unchanged)", got.Node)
+	}
+}
+
+// CommitNetMove returning nil on Proxmox failures is by design: by
+// the time we reach commit, the migrate outcome is already decided
+// and we don't want a cosmetic narrow-back error to mask it. Errors
+// should still be logged (no assertion possible from outside), but
+// the function must NOT propagate them.
+func TestCommitNetMove_ProxmoxFailureNotPropagated(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSDN{updateZoneErr: errors.New("pve unreachable")}
+	svc := newTestSvc(t, fake)
+
+	if _, err := svc.Provision(context.Background(), 1, "vm-uuid", "alpha"); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	if err := svc.CommitNetMove(context.Background(), 1, "beta"); err != nil {
+		t.Errorf("CommitNetMove returned error %v, want nil (PVE failures must not propagate)", err)
+	}
 }

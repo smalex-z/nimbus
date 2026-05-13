@@ -166,6 +166,15 @@ export function TagsModal({
 // firing pvecm delnode + deleting the local row. The button is gated on
 // the node already being drained — the row-actions menu enforces this
 // upstream too, but we double-check here.
+//
+// The cluster-removal API call (DELETE /cluster/config/nodes/{name}) is
+// gated by Proxmox to user == "root@pam" exactly; API tokens fail with
+// 403. The backend detects that case and returns 409 with the
+// `pvecm delnode` command embedded — we render it as a planned second
+// step rather than an error, since the operator can finish the flow by
+// SSHing in for one command. Templates have already been destroyed by
+// the time we reach that branch, so this really is just "run the one
+// command on the Proxmox host".
 export function RemoveNodeModal({
   node,
   onClose,
@@ -178,23 +187,184 @@ export function RemoveNodeModal({
   const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Phases:
+  //   confirm — typed-confirmation gate.
+  //   manual  — SSH-and-run-`pvecm delnode` step when the API-token 403
+  //             blocked cluster removal server-side.
+  //   done    — removal completed (either path). Surfaces an optional
+  //             corosync-state-wipe script the operator runs on the
+  //             removed host if they plan to rejoin it to another cluster.
+  const [phase, setPhase] = useState<'confirm' | 'manual' | 'done'>('confirm')
+  const [copiedCmd, setCopiedCmd] = useState(false)
+  const [copiedScript, setCopiedScript] = useState(false)
   useEscClose(onClose, busy)
 
   const expected = `REMOVE ${node.name.toUpperCase()}`
   const ready = confirm.trim() === expected
+  const manualCmd = `pvecm delnode ${node.name}`
+
+  // Drops corosync + /etc/pve/nodes/<peer> entries on the host that was
+  // just removed, leaving its pmxcfs in single-node state so it can join
+  // a fresh cluster. Generated server-side would be cleaner but this
+  // script touches nothing host-specific beyond `hostname`, so embedding
+  // it in the SPA keeps the round-trip out of the post-success flow.
+  const cleanupScript = `#!/bin/bash
+set -e
+
+SELF="$(hostname)"
+
+systemctl stop pve-cluster corosync
+pmxcfs -l
+rm -rf /etc/corosync/*
+rm -f /etc/pve/corosync.conf
+killall pmxcfs
+systemctl start pve-cluster
+
+# Remove stale node entries, keep this node's own dir
+find /etc/pve/nodes/ -mindepth 1 -maxdepth 1 -type d ! -name "$SELF" -exec rm -rf {} +
+
+echo "Cleanup complete. Node $SELF is ready to join a new cluster."
+`
+
+  // Detect the structured backend signal: the 409 body contains the
+  // literal `pvecm delnode <name>` line. Matching on the command string
+  // is robust against the surrounding copy changing.
+  const isManualDelnodeError = (msg: string): boolean =>
+    msg.includes(`pvecm delnode ${node.name}`)
 
   const submit = async () => {
-    if (!ready) return
+    if (!ready && phase === 'confirm') return
     setError(null)
     setBusy(true)
     try {
       await removeNode(node.name)
+      // Refresh the parent list now so the row disappears in the
+      // background while the operator reads the cleanup-script panel.
       onMutated()
+      setPhase('done')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed')
+      const msg = err instanceof Error ? err.message : 'failed'
+      if (isManualDelnodeError(msg)) {
+        setPhase('manual')
+        setError(null)
+      } else {
+        setError(msg)
+      }
     } finally {
       setBusy(false)
     }
+  }
+
+  const copy = async (text: string, kind: 'cmd' | 'script') => {
+    try {
+      await navigator.clipboard.writeText(text)
+      if (kind === 'cmd') {
+        setCopiedCmd(true)
+        setTimeout(() => setCopiedCmd(false), 1500)
+      } else {
+        setCopiedScript(true)
+        setTimeout(() => setCopiedScript(false), 1500)
+      }
+    } catch {
+      // clipboard.writeText can reject in insecure contexts; the text is
+      // still selectable so the user can copy manually. No UI noise.
+    }
+  }
+
+  if (phase === 'manual') {
+    return createPortal(
+      <ModalShell ariaLabel={`Finish removing ${node.name}`} onClose={onClose} busy={busy}>
+        <div className="eyebrow">Step 2 of 2 · finish on the Proxmox host</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>One more command to remove {node.name}</h3>
+        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          Templates have been destroyed on <strong>{node.name}</strong>. Proxmox
+          gates the cluster-removal API to <code>root@pam</code> sessions, so
+          Nimbus's API token can't finish this step. SSH to any remaining
+          cluster node as root and run:
+        </p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'stretch', marginBottom: 14 }}>
+          <code style={{
+            flex: 1,
+            padding: '8px 12px',
+            background: 'rgba(20,18,28,0.05)',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            fontSize: 13,
+            fontFamily: 'monospace',
+            wordBreak: 'break-all',
+            userSelect: 'all',
+          }}>{manualCmd}</code>
+          <button type="button" className="n-btn" onClick={() => copy(manualCmd, 'cmd')}>
+            {copiedCmd ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+          Once it returns, click below — Nimbus checks that the node is gone
+          and drops the local record.
+        </p>
+        {error && <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--err)' }}>{error}</p>}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" className="n-btn" onClick={onClose} disabled={busy}>Close</button>
+          <button
+            type="button"
+            className="n-btn"
+            onClick={submit}
+            disabled={busy}
+          >
+            {busy ? 'Finishing…' : "I've run it — finish removal"}
+          </button>
+        </div>
+      </ModalShell>,
+      document.body,
+    )
+  }
+
+  if (phase === 'done') {
+    return createPortal(
+      <ModalShell ariaLabel={`${node.name} removed`} onClose={onClose} busy={false}>
+        <div className="eyebrow" style={{ color: 'var(--ok)' }}>Removed</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 6px' }}>{node.name} is out of the cluster</h3>
+        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          The local record is gone and Proxmox no longer sees this node. If
+          you plan to rejoin <strong>{node.name}</strong> to another cluster,
+          its corosync state still references the old one — run the script
+          below on that host to wipe it.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+          <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
+            Run on <code>{node.name}</code> (the removed host):
+          </span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <pre style={{
+              flex: 1,
+              margin: 0,
+              padding: '10px 12px',
+              background: 'rgba(20,18,28,0.05)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12,
+              fontFamily: 'monospace',
+              lineHeight: 1.5,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              maxHeight: 220,
+              overflow: 'auto',
+              userSelect: 'all',
+            }}>{cleanupScript}</pre>
+            <button type="button" className="n-btn" onClick={() => copy(cleanupScript, 'script')}>
+              {copiedScript ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+        <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+          Skip this step if you're decommissioning the host entirely.
+        </p>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" className="n-btn n-btn-primary" onClick={onClose}>Done</button>
+        </div>
+      </ModalShell>,
+      document.body,
+    )
   }
 
   return createPortal(
@@ -419,8 +589,10 @@ export function DrainPlanModal({
 
       {phase === 'plan' && plan && plan.migrations.length === 0 && (
         <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-mute)' }}>
-          No managed VMs on this node — nothing to migrate. Cordon it
-          instead, then remove from the cluster directly.
+          No managed VMs on this node — nothing for Nimbus to migrate.
+          {plan.external_vms && plan.external_vms.length > 0
+            ? ' See the list below for VMs created outside Nimbus that need separate handling.'
+            : ' Cordon it instead, then remove from the cluster directly.'}
         </p>
       )}
 
@@ -444,6 +616,10 @@ export function DrainPlanModal({
             vmDelta: r.planned_vm_count - r.current_vm_count,
           }))}
         />
+      )}
+
+      {phase === 'plan' && plan && plan.external_vms && plan.external_vms.length > 0 && (
+        <ExternalVMsPanel vms={plan.external_vms} />
       )}
 
       {phase === 'plan' && plan && plan.migrations.length > 0 && (
@@ -565,6 +741,71 @@ function PlanTable({
           })}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ExternalVMsPanel lists VMs on the source node that drain won't move —
+// they don't have a Nimbus row, so the executor skips them. Read-only;
+// doesn't gate Start drain. The operator deals with these via Proxmox
+// directly (live-migrate, shut down, leave behind, whatever fits).
+function ExternalVMsPanel({ vms }: { vms: { vmid: number; name: string; status: string }[] }) {
+  return (
+    <div
+      style={{
+        marginTop: 14,
+        padding: '12px 14px',
+        border: '1px solid var(--line)',
+        borderRadius: 8,
+        background: 'rgba(20,18,28,0.025)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
+          Not migrated by Nimbus
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+          {vms.length} VM{vms.length === 1 ? '' : 's'} created outside Nimbus
+        </span>
+      </div>
+      <p style={{ margin: '0 0 10px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
+        Drain only moves Nimbus-managed VMs. Handle these via the Proxmox UI
+        (live-migrate, shut down, or accept they'll go down with the host)
+        before powering this node off.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {vms.map((vm) => (
+          <div
+            key={vm.vmid}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '60px 1fr auto',
+              gap: 10,
+              fontSize: 12,
+              padding: '4px 0',
+              alignItems: 'center',
+            }}
+          >
+            <code style={{ color: 'var(--ink-mute)' }}>#{vm.vmid}</code>
+            <span style={{ color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {vm.name || '(unnamed)'}
+            </span>
+            <span
+              style={{
+                fontSize: 11,
+                padding: '2px 8px',
+                borderRadius: 3,
+                color: vm.status === 'running' ? 'var(--ok)' : 'var(--ink-mute)',
+                background: vm.status === 'running'
+                  ? 'rgba(45,125,90,0.08)'
+                  : 'rgba(20,18,28,0.05)',
+              }}
+            >
+              {vm.status}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

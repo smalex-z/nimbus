@@ -2,10 +2,13 @@ package nodemgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 
 	"nimbus/internal/db"
+	"nimbus/internal/proxmox"
 )
 
 // Remove tears the node down: validates state, asks Proxmox to delete it
@@ -51,8 +54,36 @@ func (s *Service) Remove(ctx context.Context, name string) error {
 	// the dangling node_templates rows are cleared regardless so a
 	// future re-add re-bootstraps cleanly.
 	s.destroyNodeTemplates(ctx, name)
-	if err := s.px.DeleteNode(ctx, name); err != nil {
-		return fmt.Errorf("proxmox delete node: %w", err)
+
+	// Probe whether the node is still in the cluster. The operator
+	// may have already run `pvecm delnode` manually (e.g. on a retry
+	// after the API-token 403); if so we skip the API call and go
+	// straight to local DB cleanup. GetNodes failure leaves us in
+	// the cautious "still present, try delete" branch.
+	stillInCluster := true
+	if nodes, lerr := s.px.GetNodes(ctx); lerr == nil {
+		stillInCluster = false
+		for _, n := range nodes {
+			if n.Name == name {
+				stillInCluster = true
+				break
+			}
+		}
+	}
+	if stillInCluster {
+		if err := s.px.DeleteNode(ctx, name); err != nil {
+			// Proxmox gates `pvecm delnode` (DELETE /cluster/config/nodes)
+			// to user == "root@pam" exactly — API tokens fail with 403
+			// even when root-owned. Surface a structured error so the
+			// handler can show the operator the manual command.
+			var httpErr *proxmox.HTTPError
+			if errors.As(err, &httpErr) && httpErr.Status == http.StatusForbidden {
+				return &ManualDelnodeRequiredError{Node: name}
+			}
+			return fmt.Errorf("proxmox delete node: %w", err)
+		}
+	} else {
+		log.Printf("nodemgr.Remove(%s): node already absent from cluster (manually delnoded?); proceeding to local cleanup", name)
 	}
 	if err := s.db.WithContext(ctx).
 		Where("name = ?", name).

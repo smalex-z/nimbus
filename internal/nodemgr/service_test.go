@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	"nimbus/internal/db"
 	"nimbus/internal/nodemgr"
@@ -580,5 +583,75 @@ func TestRemoveRefusedUntilDrained(t *testing.T) {
 	}
 	if err := svc.Remove(ctx, "alpha"); !errors.Is(err, nodemgr.ErrNotDrained) {
 		t.Errorf("Remove on cordoned state: err = %v, want ErrNotDrained", err)
+	}
+}
+
+// seedDrainedNode inserts a db.Node row in the "drained" lock state
+// for testing Remove without going through the full Cordon → Execute
+// flow.
+func seedDrainedNode(t *testing.T, database *db.DB, name string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := database.Create(&db.Node{
+		Name: name, LockState: "drained", LockedAt: &now,
+	}).Error; err != nil {
+		t.Fatalf("seed drained node: %v", err)
+	}
+}
+
+// When Proxmox refuses pvecm delnode with a 403 (API tokens can't
+// touch cluster membership), Remove returns ManualDelnodeRequiredError
+// — a typed error the handler maps to a 409 carrying the exact
+// command for the operator to run.
+func TestRemove_PvecmDelnode403_ReturnsManualError(t *testing.T) {
+	t.Parallel()
+	svc, database, fake := newTestService(t)
+	fake.nodes = []proxmox.Node{{Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib}}
+	fake.deleteNodeErr = &proxmox.HTTPError{
+		Status: 403,
+		Body:   `{"message":"Permission check failed (user != root@pam)\n","data":null}`,
+	}
+	seedDrainedNode(t, database, "alpha")
+
+	err := svc.Remove(context.Background(), "alpha")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var manual *nodemgr.ManualDelnodeRequiredError
+	if !errors.As(err, &manual) {
+		t.Fatalf("err = %T (%v), want *ManualDelnodeRequiredError", err, err)
+	}
+	if manual.Node != "alpha" {
+		t.Errorf("Node = %q, want alpha", manual.Node)
+	}
+	if !strings.Contains(manual.Error(), "pvecm delnode alpha") {
+		t.Errorf("error message missing the command: %q", manual.Error())
+	}
+}
+
+// On a retry after the operator runs `pvecm delnode` manually, the
+// node is no longer in /cluster's node list. Remove must detect this
+// (via GetNodes) and skip the DeleteNode API call, going straight to
+// local DB cleanup.
+func TestRemove_AlreadyAbsentFromCluster_SkipsDeleteNode(t *testing.T) {
+	t.Parallel()
+	svc, database, fake := newTestService(t)
+	// GetNodes returns ONLY "beta" — alpha has already been delnoded.
+	fake.nodes = []proxmox.Node{{Name: "beta", Status: "online", MaxCPU: 8, MaxMem: 16 * gib}}
+	// Arm a poison error on DeleteNode to prove we don't call it.
+	fake.deleteNodeErr = errors.New("DeleteNode should not be called when node is already absent")
+	seedDrainedNode(t, database, "alpha")
+
+	if err := svc.Remove(context.Background(), "alpha"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// DB row for alpha should be deleted.
+	var got db.Node
+	err := database.DB.Where("name = ?", "alpha").First(&got).Error
+	if err == nil {
+		t.Errorf("alpha row still present after Remove, want gone")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Errorf("unexpected db error: %v", err)
 	}
 }

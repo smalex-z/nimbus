@@ -1,5 +1,41 @@
 basePath: /api
 definitions:
+  bootstrap.NodeSweep:
+    properties:
+      errors:
+        items:
+          type: string
+        type: array
+      kept:
+        additionalProperties:
+          type: integer
+        description: |-
+          Kept maps OS → VMID of the surviving template for that OS on this
+          node. Empty when no baked template exists for an OS (the rebuild
+          banner already covers that case).
+        type: object
+      node:
+        type: string
+      removed:
+        items:
+          $ref: '#/definitions/bootstrap.RemovedTemplate'
+        type: array
+    type: object
+  bootstrap.RemovedTemplate:
+    properties:
+      name:
+        type: string
+      os:
+        type: string
+      reason:
+        description: duplicate | unbaked_with_baked_sibling | failed_bake_leftover
+        type: string
+      status:
+        description: VM status at sweep time
+        type: string
+      vmid:
+        type: integer
+    type: object
   bootstrap.Result:
     properties:
       created:
@@ -14,6 +50,17 @@ definitions:
         items:
           $ref: '#/definitions/bootstrap.TemplateOutcome'
         type: array
+    type: object
+  bootstrap.SweepResult:
+    properties:
+      dry_run:
+        type: boolean
+      nodes:
+        items:
+          $ref: '#/definitions/bootstrap.NodeSweep'
+        type: array
+      total_removed:
+        type: integer
     type: object
   bootstrap.TemplateOutcome:
     properties:
@@ -1422,6 +1469,15 @@ definitions:
         items:
           $ref: '#/definitions/nodemgr.NodeProjection'
         type: array
+      external_vms:
+        description: |-
+          ExternalVMs are VMs running on the source node that Nimbus didn't
+          provision and won't migrate. Surfaced so the operator knows to
+          handle them via the Proxmox UI before powering the host down.
+          Templates are excluded (drain wouldn't move them anyway).
+        items:
+          $ref: '#/definitions/nodemgr.ExternalVM'
+        type: array
       has_blocked:
         description: |-
           HasBlocked is a derived flag the SPA gates the "Start drain" button
@@ -1455,6 +1511,16 @@ definitions:
         type: number
       score:
         type: number
+    type: object
+  nodemgr.ExternalVM:
+    properties:
+      name:
+        type: string
+      status:
+        description: '"running" / "stopped"'
+        type: string
+      vmid:
+        type: integer
     type: object
   nodemgr.MigratePlan:
     properties:
@@ -2119,6 +2185,47 @@ paths:
       security:
       - cookieAuth: []
       summary: Per-template freshness check (admin)
+      tags:
+      - bootstrap
+  /admin/templates-sweep:
+    post:
+      description: |-
+        Removes duplicate templates, unbaked siblings, and failed-
+        bake leftover VMs across every online node. Pass
+        ?dry_run=true to preview the changes without destroying
+        anything — the response describes what would be removed.
+      parameters:
+      - description: Preview only when true; default false executes destroys
+        in: query
+        name: dry_run
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/bootstrap.SweepResult'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Sweep redundant template artifacts (admin)
       tags:
       - bootstrap
   /audit:
