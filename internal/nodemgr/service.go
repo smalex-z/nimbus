@@ -36,6 +36,30 @@ var (
 	ErrSelfHosted     = errors.New("cannot remove the node Nimbus itself runs on")
 )
 
+// ManualDelnodeRequiredError is returned by Remove when Proxmox
+// refuses the cluster-removal API call. The Proxmox API gates
+// `DELETE /cluster/config/nodes/{name}` to user == "root@pam"
+// exactly — API tokens like `root@pam!nimbus` fail with 403 even
+// though they're root-owned. The handler maps this to a 409 and
+// the SPA surfaces the embedded command for the operator.
+//
+// Template destruction happens BEFORE this error fires, so the
+// Proxmox-side cleanup (4 VM destroys) has already completed
+// successfully by the time the operator sees this. Re-clicking
+// Remove after running pvecm delnode manually completes the flow:
+// destroyNodeTemplates is a DB-empty no-op, GetNodes confirms the
+// node is gone, DeleteNode is skipped, DB row is deleted.
+type ManualDelnodeRequiredError struct {
+	Node string
+}
+
+func (e *ManualDelnodeRequiredError) Error() string {
+	return fmt.Sprintf(
+		"Proxmox refuses cluster removal via API tokens. SSH to any remaining cluster node as root and run:\n\n    pvecm delnode %s\n\nThen re-click Remove to finish the local cleanup. Templates on %s have already been destroyed.",
+		e.Node, e.Node,
+	)
+}
+
 // ProxmoxClient is the small subset of *proxmox.Client nodemgr depends on.
 // Defined here per the "accept interfaces" idiom so tests can swap in a
 // fake without dragging the whole HTTP client.
