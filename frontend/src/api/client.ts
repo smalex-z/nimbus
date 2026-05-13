@@ -1832,6 +1832,16 @@ export interface DrainPlan {
   migrations: PlannedMigration[]
   aggregate: NodeProjection[]
   has_blocked: boolean
+  // external_vms are VMs on the source node that Nimbus didn't
+  // provision — drain won't migrate them. Surfaced in the modal so the
+  // operator handles them via the Proxmox UI before powering off.
+  external_vms?: ExternalVM[]
+}
+
+export interface ExternalVM {
+  vmid: number
+  name: string
+  status: string
 }
 
 export async function getDrainPlan(name: string): Promise<DrainPlan> {
