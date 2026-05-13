@@ -365,6 +365,13 @@ func NewRouter(d Deps) http.Handler {
 				// fetch per template row, so a tight timeout is fine.
 				r.Get("/admin/templates-status", bs.TemplatesStatus)
 
+				// Sweep duplicate / unbaked / failed-bake template
+				// artifacts cluster-wide. Supports ?dry_run=true for
+				// the preview pass the SPA renders before confirming.
+				// Bounded to 5 minutes inside the handler.
+				r.With(middleware.Timeout(6*time.Minute)).
+					Post("/admin/templates-sweep", bs.SweepTemplates)
+
 				r.Get("/settings/oauth", settings.GetOAuth)
 				r.Put("/settings/oauth", settings.SaveOAuth)
 				r.Get("/settings/access-code", settings.GetAccessCode)

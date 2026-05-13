@@ -1093,15 +1093,45 @@ function SpecChip({ spec }: { spec: Specialization }) {
 function ScoreCell({ breakdown }: { breakdown?: import('@/types').ScoreBreakdown }) {
   if (!breakdown) return <span style={{ color: 'var(--ink-mute)' }}>—</span>
   if (breakdown.score === 0) {
+    const reasons = breakdown.reasons ?? []
     return (
-      <span style={{ color: 'var(--err)' }} title={breakdown.reasons?.join(', ')}>
-        rejected
-      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+        <span style={{ color: 'var(--err)' }} title={reasons.join(', ')}>
+          rejected
+        </span>
+        {reasons.length > 0 && (
+          <span style={{ fontSize: 10, color: 'var(--ink-mute)', fontFamily: 'Inter, sans-serif' }}>
+            {humanizeRejection(reasons)}
+          </span>
+        )}
+      </div>
     )
   }
   const pct = breakdown.score * 100
   const color = pct > 70 ? 'var(--ok)' : pct > 40 ? '#9a5c2e' : 'var(--err)'
   return <span style={{ color }}>{pct.toFixed(0)}%</span>
+}
+
+// Map nodescore.Reason strings to operator-friendly text. Kept in sync
+// with the constants in internal/nodescore/score.go (Reason* values).
+const REJECTION_TEXT: Record<string, string> = {
+  offline: 'node offline',
+  excluded: 'excluded from placement',
+  cordoned: 'cordoned',
+  draining: 'draining',
+  drained: 'drained',
+  no_template: 'template not bootstrapped',
+  no_capacity: 'no RAM reported',
+  insufficient_cores: 'not enough vCPU headroom',
+  insufficient_mem: 'not enough RAM',
+  insufficient_disk: 'not enough disk',
+  missing_tag: 'required tag missing',
+}
+
+function humanizeRejection(reasons: string[]): string {
+  const labels = reasons.map((r) => REJECTION_TEXT[r] ?? r)
+  if (labels.length <= 2) return labels.join(' · ')
+  return `${labels[0]} · ${labels[1]} +${labels.length - 2} more`
 }
 
 function cellTooltip(tier: TierName, b?: import('@/types').ScoreBreakdown): string | undefined {

@@ -213,3 +213,67 @@ type bootstrapResponse struct {
 	bootstrap.Result
 	Sweep *provision.SweepResult `json:"sweep,omitempty"`
 }
+
+// SweepTemplates handles POST /api/admin/templates-sweep. The endpoint
+// supports a `dry_run` query param: when set, the response describes
+// what *would* be destroyed without making any Proxmox calls; when
+// omitted (or "false"), the destroys run. Two-stage flow lets the SPA
+// render a preview the operator confirms before any state changes.
+//
+// Removes three flavors of redundant template artifact across every
+// online node:
+//
+//   - duplicate baked templates (multiple `<os>-template` VMs tagged
+//     nimbus-baked-v1 — keeps one, destroys the rest)
+//   - unbaked templates whose OS has a baked sibling still surviving
+//   - stopped non-template VMs in the template VMID range with template-
+//     style names (failed bake leftovers)
+//
+// Conservative: an OS with no surviving baked template is skipped
+// entirely so the operator's rebuild surface stays intact.
+//
+// @Summary     Sweep redundant template artifacts (admin)
+// @Description Removes duplicate templates, unbaked siblings, and failed-
+// @Description bake leftover VMs across every online node. Pass
+// @Description ?dry_run=true to preview the changes without destroying
+// @Description anything — the response describes what would be removed.
+// @Tags        bootstrap
+// @Security    cookieAuth
+// @Produce     json
+// @Param       dry_run query bool false "Preview only when true; default false executes destroys"
+// @Success     200  {object} EnvelopeOK{data=bootstrap.SweepResult}
+// @Failure     401  {object} EnvelopeError
+// @Failure     403  {object} EnvelopeError
+// @Failure     500  {object} EnvelopeError
+// @Router      /admin/templates-sweep [post]
+func (h *Bootstrap) SweepTemplates(w http.ResponseWriter, r *http.Request) {
+	dryRun := r.URL.Query().Get("dry_run") == "true"
+
+	// Bounded but generous — each destroy is a wait-for-task; large
+	// fleets with many duplicates can take a couple of minutes.
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	res, err := h.svc.SweepTemplates(ctx, dryRun)
+	if err != nil {
+		h.audit.Record(r.Context(), audit.Event{
+			Action:   "bootstrap.templates_sweep",
+			Details:  map[string]any{"dry_run": dryRun},
+			Success:  false,
+			ErrorMsg: err.Error(),
+		})
+		response.InternalError(w, err.Error())
+		return
+	}
+
+	h.audit.Record(r.Context(), audit.Event{
+		Action: "bootstrap.templates_sweep",
+		Details: map[string]any{
+			"dry_run": dryRun,
+			"removed": res.TotalRemoved,
+			"nodes":   len(res.Nodes),
+		},
+		Success: true,
+	})
+	response.Success(w, res)
+}

@@ -597,6 +597,29 @@ func main() {
 	}
 	syncCancel()
 
+	// Eager template sweep on every boot: destroys duplicate baked
+	// templates, unbaked siblings with a baked twin, and stopped
+	// failed-bake leftover VMs. Conservative — leaves an OS alone if
+	// it has no surviving baked template so the rebuild path can fix
+	// it. Best-effort and bounded: a Proxmox blip just logs + continues
+	// (the next boot retries). Runs after SyncFromProxmox so adopted
+	// rows are honored when picking the keeper VMID.
+	sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	if res, err := bootstrapSvc.SweepTemplates(sweepCtx, false); err != nil {
+		log.Printf("warning: startup template sweep failed: %v", err)
+	} else if res.TotalRemoved > 0 {
+		log.Printf("startup sweep: destroyed %d redundant template artifact(s) across %d node(s)", res.TotalRemoved, len(res.Nodes))
+		for _, n := range res.Nodes {
+			if len(n.Removed) == 0 {
+				continue
+			}
+			for _, r := range n.Removed {
+				log.Printf("  %s: vmid=%d (%s) — %s", n.Node, r.VMID, r.Name, r.Reason)
+			}
+		}
+	}
+	sweepCancel()
+
 	s3Svc := s3storage.New(database.DB)
 	userBucketsSvc := s3storage.NewUserBucketService(database.DB, cipher, s3Svc)
 

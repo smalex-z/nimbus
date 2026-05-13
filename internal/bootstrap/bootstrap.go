@@ -391,6 +391,47 @@ func (s *Service) bootstrapOne(
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return finish(0, fmt.Sprintf("db lookup: %v", err))
 		}
+
+		// Step 1b: tag-first adoption pass — before falling through to a
+		// fresh create, scan the node for an existing baked template
+		// named `<os>-template`. Catches the case where the DB lost its
+		// row (manual edit, schema bump, fresh Nimbus install on an
+		// already-bootstrapped cluster) — without this, every reconcile
+		// cycle would mint a duplicate template and the node fills up
+		// with stale 9009/9017/9034/... siblings.
+		if adoptedVMID, ok := s.findAdoptableTemplate(ctx, node, entry.OS); ok {
+			if err := s.adoptOrInsertRow(ctx, node, entry.OS, adoptedVMID); err != nil {
+				return finish(adoptedVMID, fmt.Sprintf("adopt existing template: %v", err))
+			}
+			log.Printf("bootstrap %s on %s: adopted existing baked template vmid=%d", entry.OS, node, adoptedVMID)
+			return finish(adoptedVMID, errSkipped)
+		}
+	}
+
+	// Force=true with an existing template: destroy the old one first so
+	// "Re-bootstrap" doesn't leave the previous template as an orphan.
+	// We only destroy when the operator explicitly opted into a rebuild —
+	// the !force path above already short-circuits when a usable template
+	// exists.
+	if force {
+		var existing db.NodeTemplate
+		if err := s.db.WithContext(ctx).
+			Where("node = ? AND os = ?", node, entry.OS).
+			First(&existing).Error; err == nil && existing.VMID > 0 {
+			if taskID, derr := s.px.DestroyVM(ctx, node, existing.VMID); derr != nil {
+				log.Printf("bootstrap %s on %s: force-rebuild destroy of vmid=%d failed: %v (continuing; sweep can clean up the orphan)",
+					entry.OS, node, existing.VMID, derr)
+			} else if taskID != "" {
+				if werr := s.px.WaitForTask(ctx, node, taskID, destroyPollInterval); werr != nil {
+					log.Printf("bootstrap %s on %s: wait destroy vmid=%d: %v (continuing)", entry.OS, node, existing.VMID, werr)
+				}
+			}
+			if err := s.db.WithContext(ctx).
+				Where("node = ? AND os = ?", node, entry.OS).
+				Delete(&db.NodeTemplate{}).Error; err != nil {
+				log.Printf("bootstrap %s on %s: clear pre-rebuild db row: %v (continuing)", entry.OS, node, err)
+			}
+		}
 	}
 
 	// Step 2: download cloud image to ImageStorage on this node — but skip
