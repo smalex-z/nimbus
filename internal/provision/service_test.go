@@ -267,7 +267,7 @@ func newTestServiceOpts(t *testing.T, fake *fakePVE, mutate func(*provision.Conf
 	// nodes. happyFakePVE returns one node "alpha", so all 4 OS templates
 	// live there at unique VMIDs.
 	vmid := 9000
-	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-13"} {
 		if err := database.Create(&db.NodeTemplate{
 			Node: "alpha", OS: os, VMID: vmid,
 		}).Error; err != nil {
@@ -1008,7 +1008,7 @@ func newTestServiceWithCfg(t *testing.T, fake *fakePVE, cfg provision.Config) (*
 	_, pool, database := newTestService(t, fake)
 	// Add bravo's templates with unique VMIDs so both nodes can host the OS.
 	bravoVMID := 9100
-	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-11"} {
+	for _, os := range []string{"ubuntu-24.04", "ubuntu-22.04", "debian-12", "debian-13"} {
 		if err := database.Create(&db.NodeTemplate{Node: "bravo", OS: os, VMID: bravoVMID}).Error; err != nil {
 			t.Fatalf("seed bravo template: %v", err)
 		}

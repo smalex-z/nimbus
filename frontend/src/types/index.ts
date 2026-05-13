@@ -9,7 +9,7 @@ export interface User {
 }
 
 export type TierName = 'small' | 'medium' | 'large' | 'xl'
-export type OSTemplate = 'ubuntu-24.04' | 'ubuntu-22.04' | 'debian-12' | 'debian-11'
+export type OSTemplate = 'ubuntu-24.04' | 'ubuntu-22.04' | 'debian-12' | 'debian-13'
 export type VMStatus = 'provisioning' | 'running' | 'stopped' | 'paused' | 'failed' | 'unknown'
 
 export interface Tier {
@@ -29,8 +29,8 @@ export const TIERS: Record<TierName, Tier> = {
 export const OS_OPTIONS: Array<{ value: OSTemplate; label: string }> = [
   { value: 'ubuntu-24.04', label: 'Ubuntu 24.04 LTS' },
   { value: 'ubuntu-22.04', label: 'Ubuntu 22.04 LTS' },
+  { value: 'debian-13', label: 'Debian 13 (Trixie)' },
   { value: 'debian-12', label: 'Debian 12 (Bookworm)' },
-  { value: 'debian-11', label: 'Debian 11 (Bullseye)' },
 ]
 
 export interface VM {

@@ -271,8 +271,8 @@ type taskStatus struct {
 var TemplateOffsets = map[string]int{
 	"ubuntu-24.04": 0,
 	"ubuntu-22.04": 1,
-	"debian-12":    2,
-	"debian-11":    3,
+	"debian-13":    2,
+	"debian-12":    3,
 }
 
 // TemplateUsername returns the cloud-init default username for a given OS.

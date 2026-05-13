@@ -57,7 +57,7 @@ interface FormState {
   // chips in the AffinityPicker below.
   //
   // Defaults to "x86" because every cloud-init template Nimbus ships
-  // (ubuntu-22.04 / ubuntu-24.04 / debian-11 / debian-12) is x86_64 —
+  // (ubuntu-22.04 / ubuntu-24.04 / debian-13 / debian-12) is x86_64 —
   // KVM can't cross-arch, so landing one of those images on an ARM
   // host fails at boot. Operators with ARM hardware + ARM templates
   // remove the chip and add `arm` instead.
@@ -692,8 +692,8 @@ interface BootstrapGateProps {
 const OS_TEMPLATES = [
   { os: 'Ubuntu 24.04 LTS', vmid: 9000 },
   { os: 'Ubuntu 22.04 LTS', vmid: 9001 },
-  { os: 'Debian 12', vmid: 9002 },
-  { os: 'Debian 11', vmid: 9003 },
+  { os: 'Debian 13', vmid: 9002 },
+  { os: 'Debian 12', vmid: 9003 },
 ]
 
 function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGateProps) {

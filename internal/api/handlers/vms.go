@@ -908,7 +908,7 @@ func validateCreate(req createVMRequest) error {
 	if _, ok := proxmox.TemplateOffsets[req.OSTemplate]; !ok {
 		return &internalerrors.ValidationError{
 			Field:   "os_template",
-			Message: "must be one of ubuntu-24.04, ubuntu-22.04, debian-12, debian-11",
+			Message: "must be one of ubuntu-24.04, ubuntu-22.04, debian-12, debian-13",
 		}
 	}
 	// At most one SSH-key input mode at a time. None is allowed — the
