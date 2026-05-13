@@ -49,7 +49,7 @@ func TestSweepLegacyCIData_MixedFleetTalliesAndContinuesOnError(t *testing.T) {
 	// Per-VM config keyed by vmid so each row hits a different code path.
 	configs := map[int]map[string]any{
 		201: {"ide2": "local-lvm:cloudinit"},                          // already managed
-		202: {"scsi0": "local-lvm:vm-202-disk-0,size=10G"},             // empty ide2 → attach
+		202: {"scsi0": "local-lvm:vm-202-disk-0,size=10G"},            // empty ide2 → attach
 		204: {"ide2": "local:iso/some-user-attached.iso,media=cdrom"}, // foreign ide2 → swap refuses
 	}
 	fake.getVMConfig = func(_ context.Context, _ string, vmid int) (map[string]any, error) {

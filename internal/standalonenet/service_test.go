@@ -19,17 +19,17 @@ import (
 type fakeSDN struct {
 	mu sync.Mutex
 
-	createZoneCalls       int
-	createVNetCalls       int
-	createSubnetCalls     int
-	deleteZoneCalls       int
-	deleteVNetCalls       int
-	deleteSubnetCalls     int
-	applyCalls            int
-	reloadNodeCalls       int
-	getZoneCalls          int
-	updateZoneNodesCalls  int
-	lastUpdateZoneNodes   string // nodes value from the most recent UpdateSDNZoneNodes
+	createZoneCalls      int
+	createVNetCalls      int
+	createSubnetCalls    int
+	deleteZoneCalls      int
+	deleteVNetCalls      int
+	deleteSubnetCalls    int
+	applyCalls           int
+	reloadNodeCalls      int
+	getZoneCalls         int
+	updateZoneNodesCalls int
+	lastUpdateZoneNodes  string // nodes value from the most recent UpdateSDNZoneNodes
 
 	createZoneErr   error
 	createVNetErr   error
