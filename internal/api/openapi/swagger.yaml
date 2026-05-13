@@ -954,6 +954,14 @@ definitions:
     type: object
   handlers.operationView:
     properties:
+      acknowledged_at:
+        description: |-
+          AcknowledgedAt is stamped the first time the actor views the
+          row's terminal result page in the SPA. Empty while unacked —
+          the Tasks dropdown uses presence/absence to render an unread
+          marker so a walked-away operator can still see whether their
+          provision ended in warning/error after returning.
+        type: string
       actor_email:
         type: string
       actor_id:
@@ -4219,6 +4227,45 @@ paths:
       security:
       - cookieAuth: []
       summary: Read one background operation
+      tags:
+      - operations
+  /operations/{id}/acknowledge:
+    post:
+      description: |-
+        Stamps acknowledged_at; idempotent. Used by the SPA's
+        Provision result view to clear the Tasks-dropdown
+        unread marker after the user has actually viewed the
+        terminal page.
+      parameters:
+      - description: operation id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: no content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Mark a background operation as seen
       tags:
       - operations
   /proxmox/binding:

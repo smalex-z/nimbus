@@ -510,6 +510,10 @@ func NewRouter(d Deps) http.Handler {
 				// (admin sees the full cluster view).
 				r.Get("/operations", opsH.List)
 				r.Get("/operations/{id}", opsH.Get)
+				// POST not PATCH — the action is "stamp seen now", not
+				// "submit a partial update." Idempotent so retries are
+				// safe; the SPA fires-and-forgets after rendering.
+				r.Post("/operations/{id}/acknowledge", opsH.Acknowledge)
 
 				// GPU plane — submit/list/cancel jobs, inference status.
 				// Mounted under requireVerified so the access-code gate

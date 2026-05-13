@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { adminDeleteVM, adminVMLifecycle, getClusterStats, getOperation, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { acknowledgeOperation, adminDeleteVM, adminVMLifecycle, getClusterStats, getOperation, listClusterVMs, listIPs, listNodes } from '@/api/client'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -719,7 +719,32 @@ function VMTable({
         const vmid = Number(op.target_id ?? '')
         if (!Number.isFinite(vmid)) return
         const row = allVMs.find((v) => v.vmid === vmid)
-        if (!row) return
+        if (!row) {
+          // VM is gone (destroyed after a failed migrate, filtered out
+          // of the dashboard, etc.) but the operation row still exists.
+          // Surface the failure detail so a click on the Tasks dropdown
+          // isn't a no-op — without this the user sees the page
+          // re-render with no visible change and concludes the link is
+          // broken.
+          let detail = op.message ?? '(no detail)'
+          try {
+            if (op.details_json) {
+              const d = JSON.parse(op.details_json) as {
+                failure_message?: string
+              }
+              if (d.failure_message) detail = d.failure_message
+            }
+          } catch {
+            // fall back to op.message
+          }
+          window.alert(
+            `Migrate op #${opID} — target VM ${vmid} is no longer in the cluster.\n\n${detail}`,
+          )
+          // Mark as seen so the dropdown unread badge clears, since
+          // the user has now read the error.
+          void acknowledgeOperation(opID).catch(() => undefined)
+          return
+        }
         setMigrateTarget(row)
         setReattachOpID(opID)
       } finally {

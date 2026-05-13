@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   provisionVMStreaming,
   ProvisionError,
@@ -13,6 +13,7 @@ import {
   getGPUInference,
   listOperations,
   getOperation,
+  acknowledgeOperation,
   isTerminalOperationState,
   type BootstrapResult,
   type NetworkingInfo,
@@ -104,11 +105,13 @@ export default function Provision() {
   // Undefined means "nothing completed yet" — first phase is active.
   const [currentStep, setCurrentStep] = useState<ProvisionStep | undefined>()
 
-  // reattachOp — populated when the page mounts and detects an
-  // in-flight vm.provision operation owned by the current user. Drives
-  // the re-attach banner that polls the operation until terminal.
-  // Distinct from activeOpID (which tracks an op started in *this*
-  // browser tab via the NDJSON stream).
+  // reattachOp — populated when the page mounts and detects a recent
+  // vm.provision operation owned by the current user. The effect
+  // further down derives view + result + error from this so the page
+  // renders the full LoadingView / ResultView / ErrorView instead of
+  // just a banner — that's what a "re-attach to a task" affordance
+  // means. Distinct from activeOpID (an op started in *this* browser
+  // tab via the NDJSON stream, which drives the live state directly).
   const [reattachOp, setReattachOp] = useState<Operation | null>(null)
 
   const [bootstrapped, setBootstrapped] = useState<boolean | null>(null)
@@ -169,13 +172,57 @@ export default function Provision() {
   // On mount, check for an in-flight provision the user kicked off in
   // a previous tab. Surfaces as a banner above the form so the
   // operator knows their work is still progressing and can watch it
-  // here without re-submitting. Polls every 2s until terminal; on
-  // terminal, the banner sticks around as a result/error chip the
-  // user can dismiss.
+  // Two entry paths, separated into two effects so they don't fight:
+  //  1. Deep-link from the Tasks dropdown: /?op=<id>. Effect A loads
+  //     THAT specific op via getOperation(id). Polls if in-flight.
+  //     We do NOT clear ?op= after reading — clearing re-fired this
+  //     effect, which then ran the fallback heuristic, which clobbered
+  //     reattachOp before the deep-link fetch resolved. reset()
+  //     (Provision another machine) clears the URL explicitly.
+  //  2. Organic page mount with no ?op=: effect B falls back to
+  //     "in-flight if any, else most-recent terminal." Mount-only so
+  //     it doesn't re-fire after effect A sets reattachOp.
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Effect A: deep-link handler. Re-fires when ?op= changes (e.g.
+  // user clicks a different dropdown row while on this page).
   useEffect(() => {
+    const opStr = searchParams.get('op')
+    if (!opStr) return
+    const opID = parseInt(opStr, 10)
+    if (Number.isNaN(opID)) return
+
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const op = await getOperation(opID)
+        if (cancelled) return
+        setReattachOp(op)
+        if (!isTerminalOperationState(op.state)) {
+          timer = setTimeout(tick, 2000)
+        }
+      } catch {
+        if (!cancelled) setReattachOp(null)
+      }
+    }
+    void tick()
 
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [searchParams])
+
+  // Effect B: fallback heuristic — only runs once on mount, and only
+  // when there's no deep-link to take precedence. includeFinished:true
+  // so a terminal op can surface (the user's provisions are mostly
+  // terminal; without this the page just showed the empty form).
+  useEffect(() => {
+    if (searchParams.get('op')) return // effect A handles it
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async (id: number) => {
       try {
         const op = await getOperation(id)
@@ -185,31 +232,131 @@ export default function Provision() {
           timer = setTimeout(() => tick(id), 2000)
         }
       } catch {
-        // 404 / network error — drop the banner.
         if (!cancelled) setReattachOp(null)
       }
     }
 
-    listOperations({ type: 'vm.provision' })
+    listOperations({ type: 'vm.provision', includeFinished: true, limit: 5 })
       .then((res) => {
         if (cancelled) return
+        // Prefer in-flight; otherwise fall back to the most recent
+        // terminal-state op so the user can still see the success or
+        // failure page they navigated back to. listOperations returns
+        // newest first, so [0] is the most recent.
         const inflight = res.operations.find(
           (o) => !isTerminalOperationState(o.state),
         )
         if (inflight) {
           setReattachOp(inflight)
           timer = setTimeout(() => tick(inflight.id), 2000)
+        } else if (res.operations.length > 0) {
+          setReattachOp(res.operations[0])
         }
       })
       .catch(() => {
-        // Non-fatal — the banner just doesn't render.
+        // Non-fatal — the page just stays on the form view.
       })
 
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
+    // Mount-only by design. Don't depend on searchParams — that's
+    // effect A's job. eslint allow-empty here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Derive view + supporting state from reattachOp so the page renders
+  // the full LoadingView (in-flight), ResultView (succeeded), or
+  // ErrorView (failed) instead of a terse banner. The user-driven
+  // submit() path also writes view/result/error directly; this effect
+  // only fires when reattachOp changes, so it doesn't fight with live
+  // streaming state.
+  useEffect(() => {
+    if (!reattachOp) return
+    if (!isTerminalOperationState(reattachOp.state)) {
+      // In-flight: switch to the loading view and reverse-map the
+      // most-recent message to a structured step so the checklist
+      // lights up the right checkmarks. Unknown messages leave the
+      // step indicator on the first phase — degrades to "spinning
+      // wheel" rather than crashing.
+      const mapped = SERVER_LABEL_TO_STEP[reattachOp.message ?? '']
+      setCurrentStep(mapped)
+      setView('loading')
+      return
+    }
+    if (reattachOp.state === 'succeeded') {
+      // Build a ProvisionResult from details_json. ssh_private_key and
+      // console_password are intentionally absent on re-attach (the
+      // server omits them for security — one-time-show only), so the
+      // ResultView's "Save the private key now" copy auto-swaps to
+      // "Use your SSH key to connect."
+      let parsed: Partial<ProvisionResult> = {}
+      try {
+        if (reattachOp.details_json) {
+          parsed = JSON.parse(reattachOp.details_json) as Partial<ProvisionResult>
+        }
+      } catch {
+        // Malformed JSON: fall through with empty parsed. View will
+        // render with empty hostname/ip — the user can still
+        // navigate away via the dashboard link in ResultView.
+      }
+      // Normalize the partial shape into a full ProvisionResult. The
+      // server sends snake_case keys, which is what ProvisionResult
+      // already uses (it's a JSON-shaped type), so this is a straight
+      // cast with defensive defaults for the required fields.
+      const reconstructed: ProvisionResult = {
+        id:       parsed.id ?? 0,
+        vmid:     parsed.vmid ?? 0,
+        hostname: parsed.hostname ?? '',
+        ip:       parsed.ip ?? '',
+        username: parsed.username ?? '',
+        os:       parsed.os ?? ('ubuntu-24.04' as ProvisionResult['os']),
+        tier:     parsed.tier ?? ('small' as ProvisionResult['tier']),
+        node:     parsed.node ?? '',
+        key_name: parsed.key_name,
+        warning:  parsed.warning,
+        tunnel_url:       parsed.tunnel_url,
+        tunnel_error:     parsed.tunnel_error,
+        subnet_name:      parsed.subnet_name,
+        subnet_cidr:      parsed.subnet_cidr,
+        cloud_init_error: parsed.cloud_init_error,
+      }
+      setResult(reconstructed)
+      setView('result')
+      return
+    }
+    // failed or cancelled — pull the human message out of details_json
+    // (the server bakes failure_message there before Finish) and fall
+    // back to op.message if details are missing.
+    let failureMessage = reattachOp.message ?? 'provision failed'
+    try {
+      if (reattachOp.details_json) {
+        const d = JSON.parse(reattachOp.details_json) as { failure_message?: string }
+        if (d.failure_message) failureMessage = d.failure_message
+      }
+    } catch {
+      // ignore malformed details
+    }
+    setError(failureMessage)
+    setErrorStep(undefined)
+    setView('error')
+  }, [reattachOp])
+
+  // Acknowledge the re-attached terminal op the first time it renders
+  // here — that's the moment the user has "actually seen" the
+  // success/error page, which is what acknowledged_at tracks. Idempotent
+  // server-side (only stamps when null), so duplicate fires across
+  // navigations are harmless. Fire-and-forget: a failure just means the
+  // Tasks-dropdown unread marker sticks for one extra page load.
+  useEffect(() => {
+    if (!reattachOp) return
+    if (!isTerminalOperationState(reattachOp.state)) return
+    if (reattachOp.acknowledged_at) return
+    acknowledgeOperation(reattachOp.id).catch(() => {
+      // Non-fatal — see comment above.
+    })
+  }, [reattachOp])
 
   useEffect(() => {
     listKeys()
@@ -329,6 +476,22 @@ export default function Provision() {
     setError(null)
     setErrorStep(undefined)
     setCurrentStep(undefined)
+    // Clear the re-attached op too — otherwise the derivation effect
+    // would immediately bounce the user back to the result/error
+    // view they just dismissed.
+    setReattachOp(null)
+    // Strip ?op= from the URL so a refresh doesn't snap back to the
+    // same re-attached view. Effect A no-ops on a missing param.
+    if (searchParams.get('op')) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev)
+          next.delete('op')
+          return next
+        },
+        { replace: true },
+      )
+    }
     setView('form')
     // Re-fetch saved keys + VPCs so any items created by the prior
     // provision (auto-generated key, freshly-attached VPC) show up
@@ -411,7 +574,21 @@ export default function Provision() {
   }
 
   if (view === 'loading') {
-    return <LoadingView hostname={form.hostname} currentStep={currentStep} />
+    // For a re-attached in-flight op, take hostname + start time from
+    // the operation row so the timer reflects the actual elapsed
+    // wall-clock since provision began — without this it resets to
+    // 0 every time the user navigates back to the page.
+    return (
+      <LoadingView
+        hostname={reattachOp?.target_label ?? form.hostname}
+        currentStep={currentStep}
+        startedAtMs={
+          reattachOp?.started_at
+            ? new Date(reattachOp.started_at).getTime()
+            : undefined
+        }
+      />
+    )
   }
   if (view === 'result' && result) {
     return <ResultView result={result} onReset={reset} />
@@ -437,10 +614,6 @@ export default function Provision() {
           </p>
         </div>
       </div>
-
-      {reattachOp && (
-        <ReattachBanner op={reattachOp} onDismiss={() => setReattachOp(null)} />
-      )}
 
       {bootstrapped === null && (
         <div className="mt-12 grid place-items-center">
@@ -522,93 +695,6 @@ const OS_TEMPLATES = [
   { os: 'Debian 12', vmid: 9002 },
   { os: 'Debian 11', vmid: 9003 },
 ]
-
-// ReattachBanner — surfaces an in-flight (or recently-completed)
-// vm.provision operation when the user lands back on the Provision
-// page. Renders as a full-width card above the form so the operator
-// is reminded their previous build is still progressing without
-// having to remember which tab it was in.
-//
-// When the op is running, shows the live message + a spinner; when
-// terminal, swaps to a result/error chip with a link to the relevant
-// surface (My machines on success, dismiss-to-retry on failure).
-function ReattachBanner({
-  op,
-  onDismiss,
-}: {
-  op: Operation
-  onDismiss: () => void
-}) {
-  const terminal = isTerminalOperationState(op.state)
-  const failed = op.state === 'failed' || op.state === 'cancelled'
-  const succeeded = op.state === 'succeeded'
-
-  // Pull a few summary fields from details_json on success so the
-  // banner can deep-link to the right VM.
-  let dbID: number | undefined
-  let vmid: number | undefined
-  try {
-    if (succeeded && op.details_json) {
-      const d = JSON.parse(op.details_json) as { db_id?: number; vmid?: number }
-      dbID = d.db_id
-      vmid = d.vmid
-    }
-  } catch {
-    // ignore malformed details
-  }
-
-  const bg = failed
-    ? 'rgba(184,58,58,0.06)'
-    : succeeded
-      ? 'rgba(47,143,85,0.06)'
-      : 'rgba(248,175,130,0.10)'
-  const border = failed
-    ? 'rgba(184,58,58,0.25)'
-    : succeeded
-      ? 'rgba(47,143,85,0.25)'
-      : 'rgba(248,175,130,0.4)'
-
-  return (
-    <div
-      className="mt-4 mb-4 p-4 rounded-[12px] flex items-center gap-3"
-      style={{ background: bg, border: `1px solid ${border}` }}
-    >
-      {!terminal && (
-        <div className="w-4 h-4 border-[1.5px] border-ink-3 border-t-ink rounded-full animate-spin" />
-      )}
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-ink">
-          {failed
-            ? `Provision failed: ${op.target_label ?? 'machine'}`
-            : succeeded
-              ? `Provisioned ${op.target_label ?? 'machine'}`
-              : `Provisioning ${op.target_label ?? 'machine'}…`}
-        </div>
-        {op.message && (
-          <div className="text-[12px] text-ink-2 mt-0.5 truncate">
-            {op.message}
-          </div>
-        )}
-      </div>
-      {succeeded && (dbID || vmid) && (
-        <Link
-          to="/vms"
-          className="text-[13px] font-medium text-ink no-underline hover:underline"
-        >
-          View →
-        </Link>
-      )}
-      <button
-        type="button"
-        onClick={onDismiss}
-        aria-label="Dismiss"
-        className="text-ink-3 hover:text-ink text-[18px] leading-none px-1.5 cursor-pointer"
-      >
-        ×
-      </button>
-    </div>
-  )
-}
 
 function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGateProps) {
   const fmt = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`)
@@ -992,6 +1078,12 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 interface LoadingViewProps {
   hostname: string
   currentStep: ProvisionStep | undefined
+  // Wall-clock anchor (ms since epoch) for the "elapsed" counter.
+  // When provided, the timer starts at (now - startedAtMs) so a
+  // re-attach to an in-flight provision shows the *actual* elapsed
+  // time, not zero. Live-submit path leaves this undefined and the
+  // counter starts at 0 as before.
+  startedAtMs?: number
 }
 
 // Phases shown in the checklist. Each one corresponds to a `step` ID the
@@ -1006,12 +1098,33 @@ const PROVISION_PHASES: { step: ProvisionStep; label: string }[] = [
   { step: 'wait_guest_agent', label: 'Waiting for guest agent' },
 ]
 
+// SERVER_LABEL_TO_STEP reverse-maps the server's past-tense progress
+// labels (emitted via `report(StepX, "...")` in provision/service.go and
+// surfaced as op.message on the operations row) back to the structured
+// ProvisionStep ID so a re-attached LoadingView can light up checkmarks.
+// Keep in lockstep with the server-side strings — there's no shared wire
+// format for the step ID inside the operation today, only the human label.
+const SERVER_LABEL_TO_STEP: Record<string, ProvisionStep> = {
+  'Reserved IP and selected node': 'reserve_ip',
+  'Cloned golden template':        'clone_template',
+  'Configured cloud-init and disk': 'configure_vm',
+  'Started VM':                    'start_vm',
+  'Guest agent ready':             'wait_guest_agent',
+}
+
 // After this many seconds in the guest-agent phase, surface a hint that
 // it's normal — first-boot agent installs can legitimately take 1–2 min.
 const GUEST_AGENT_HINT_AFTER_SEC = 30
 
-function LoadingView({ hostname, currentStep }: LoadingViewProps) {
-  const [elapsed, setElapsed] = useState(0)
+function LoadingView({ hostname, currentStep, startedAtMs }: LoadingViewProps) {
+  // Lazy init — Math.floor((now - startedAtMs)/1000) when given, else 0.
+  // The interval below keeps ticking either way, so re-attached
+  // loadings continue counting up from the real elapsed value.
+  const [elapsed, setElapsed] = useState(() =>
+    startedAtMs
+      ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+      : 0,
+  )
   // Track when each phase became active so we can show a phase-specific
   // sub-hint after a threshold (e.g. guest agent taking >30s is fine but
   // worth flagging so the user knows nothing is stuck).

@@ -289,19 +289,31 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 	})
 	if h.ops != nil && opID > 0 {
-		// Bake a redacted view of the result into details so a
-		// re-attach poll has the summary fields without re-fetching
-		// the VM. SSHPrivateKey is intentionally omitted — it's
-		// one-time-show only and re-attach must not surface it.
+		// Bake a redacted view of the result into details so a re-attach
+		// poll can render the full success page without re-fetching the
+		// VM. SSHPrivateKey and ConsolePassword are intentionally omitted
+		// — they're one-time-show only and re-attach must not surface
+		// them. Everything else (the non-secret stuff the ResultView
+		// renders: SSH command components, tunnel URL, subnet framing,
+		// cloud-init warning) goes in so the re-attached page is
+		// indistinguishable from the live one apart from the credential
+		// fields.
 		if buf, jerr := json.Marshal(map[string]any{
-			"db_id":    res.ID,
-			"vmid":     res.VMID,
-			"hostname": res.Hostname,
-			"ip":       res.IP,
-			"node":     res.Node,
-			"tier":     res.Tier,
-			"os":       res.OS,
-			"warning":  res.Warning,
+			"db_id":            res.ID,
+			"vmid":             res.VMID,
+			"hostname":         res.Hostname,
+			"ip":               res.IP,
+			"node":             res.Node,
+			"tier":             res.Tier,
+			"os":               res.OS,
+			"username":         res.Username,
+			"key_name":         res.KeyName,
+			"warning":          res.Warning,
+			"tunnel_url":       res.TunnelURL,
+			"tunnel_error":     res.TunnelError,
+			"subnet_name":      res.SubnetName,
+			"subnet_cidr":      res.SubnetCIDR,
+			"cloud_init_error": res.CloudInitError,
 		}); jerr == nil {
 			_ = h.ops.UpdateDetails(bgCtx, opID, string(buf))
 		}

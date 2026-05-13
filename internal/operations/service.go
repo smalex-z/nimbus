@@ -204,6 +204,25 @@ func (s *Service) Finish(ctx context.Context, id uint, state, message string) er
 		}).Error
 }
 
+// Acknowledge stamps the row's acknowledged_at the first time the
+// actor views its terminal result in the SPA. Idempotent — calling
+// twice keeps the original timestamp so "first view" semantics hold
+// even if the user navigates back and forth.
+//
+// Acknowledging a non-terminal row is allowed but rare in practice;
+// the SPA only fires this from the Provision result view after the
+// op is terminal. We don't gate on state here so an admin clearing
+// stale rows from a future "Mark all read" UX isn't blocked.
+func (s *Service) Acknowledge(ctx context.Context, id uint) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	return s.db.WithContext(ctx).Model(&db.Operation{}).
+		Where("id = ? AND acknowledged_at IS NULL", id).
+		Update("acknowledged_at", now).Error
+}
+
 // Get returns one operation by id.
 func (s *Service) Get(ctx context.Context, id uint) (*db.Operation, error) {
 	if s == nil || s.db == nil {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  acknowledgeOperation,
   listOperations,
   isTerminalOperationState,
   type Operation,
@@ -39,7 +40,14 @@ export default function TasksDropdown() {
 
     const tick = async () => {
       try {
-        const res = await listOperations()
+        // includeFinished=true so terminal-but-unacked rows surface
+        // as "unread" — without this, a provision that succeeds while
+        // the user was on another page disappears the moment it goes
+        // terminal, and the operator never sees the warnings (cidata
+        // upload, tunnel bootstrap, etc.) baked into the result.
+        // The server caps the response, so paging through history is
+        // a future concern.
+        const res = await listOperations({ includeFinished: true, limit: 50 })
         if (!cancelled) setOps(res.operations)
       } catch {
         // Silent — the SPA's auth wrapper already handles 401.
@@ -69,15 +77,62 @@ export default function TasksDropdown() {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
+  // markAsRead optimistically stamps the row's acknowledged_at in
+  // local state so the dropdown filter excludes it immediately —
+  // without this the row lingered for up to a poll interval (2–4s)
+  // after the user clicked through, which read as a bug. The server
+  // POST runs in parallel; if it fails the row re-appears on the
+  // next poll because the server still reports acknowledged_at=null.
+  const markAsRead = (id: number) => {
+    const stamp = new Date().toISOString()
+    setOps((prev) =>
+      prev.map((o) =>
+        o.id === id && !o.acknowledged_at
+          ? { ...o, acknowledged_at: stamp }
+          : o,
+      ),
+    )
+    acknowledgeOperation(id).catch(() => {
+      // Non-fatal — see comment above.
+    })
+  }
+
   const inflight = ops.filter((o) => !isTerminalOperationState(o.state))
-  const count = inflight.length
+  // Unread = terminal + never-acknowledged. These are completed tasks
+  // (success OR failure) the user hasn't yet viewed in the SPA — we
+  // surface them so warnings/errors don't get lost when the user walks
+  // away mid-provision.
+  const unread = ops.filter(
+    (o) => isTerminalOperationState(o.state) && !o.acknowledged_at,
+  )
+  // visibleOps is what the dropdown actually renders. Terminal-and-
+  // acknowledged rows are hidden: once the user has viewed the result,
+  // the row has served its purpose and clutters the "what needs
+  // attention" surface. The data is preserved server-side for the
+  // Activity / audit views.
+  const visibleOps = [...inflight, ...unread].sort(
+    (a, b) =>
+      new Date(b.last_heartbeat_at).getTime() -
+      new Date(a.last_heartbeat_at).getTime(),
+  )
+  const inflightCount = inflight.length
+  const unreadCount = unread.length
+  const badgeCount = inflightCount + unreadCount
+  // When ANY in-flight work exists, badge color stays orange (active).
+  // If only unread items exist, switch to a calmer "needs attention"
+  // gray-blue so the eye still catches it without the urgency of a
+  // running task. Failed/unread is the same color — clicking surfaces
+  // the actual state.
+  const badgeColors = inflightCount > 0
+    ? 'text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border-[rgba(248,175,130,0.4)]'
+    : 'text-ink bg-[rgba(27,23,38,0.08)] border-[rgba(27,23,38,0.15)]'
 
   return (
     <div className="relative" ref={popoverRef}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-label={`Background tasks (${count} running)`}
+        aria-label={`Background tasks (${inflightCount} running, ${unreadCount} unread)`}
         className="px-3.5 py-2 rounded-[8px] text-sm font-medium text-ink-2 hover:bg-[rgba(27,23,38,0.05)] hover:text-ink transition-colors flex items-center gap-1.5 cursor-pointer"
       >
         <svg
@@ -94,9 +149,9 @@ export default function TasksDropdown() {
           <circle cx="12" cy="12" r="10" />
           <polyline points="12 6 12 12 16 14" />
         </svg>
-        {count > 0 && (
-          <span className="text-[10px] font-semibold tracking-wider uppercase font-sans text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded">
-            {count}
+        {badgeCount > 0 && (
+          <span className={`text-[10px] font-semibold tracking-wider uppercase font-sans border px-1.5 py-px rounded ${badgeColors}`}>
+            {badgeCount}
           </span>
         )}
       </button>
@@ -112,14 +167,19 @@ export default function TasksDropdown() {
           <div className="px-4 py-3 border-b border-line text-[12px] font-semibold uppercase tracking-wider text-ink-2">
             Background tasks
           </div>
-          {ops.length === 0 ? (
+          {visibleOps.length === 0 ? (
             <div className="px-4 py-6 text-sm text-ink-3 text-center">
               No tasks. Start a migration or provision to see progress here.
             </div>
           ) : (
             <ul className="max-h-[400px] overflow-y-auto">
-              {ops.map((op) => (
-                <OpRow key={op.id} op={op} onClose={() => setOpen(false)} />
+              {visibleOps.map((op) => (
+                <OpRow
+                  key={op.id}
+                  op={op}
+                  onClose={() => setOpen(false)}
+                  onMarkRead={markAsRead}
+                />
               ))}
             </ul>
           )}
@@ -129,19 +189,38 @@ export default function TasksDropdown() {
   )
 }
 
-function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
+function OpRow({
+  op,
+  onClose,
+  onMarkRead,
+}: {
+  op: Operation
+  onClose: () => void
+  onMarkRead: (id: number) => void
+}) {
   const stateLabel = labelForState(op.state)
   const dotColor = colorForState(op.state)
   const ago = relativeTime(op.last_heartbeat_at)
-  // Deep-link target. Migrate rows take the operator to the Admin
-  // page with ?op=<id> so the Admin mount-time handler can open
-  // MigrateVMModal in re-attach mode. Provision rows go to the
-  // Provision page where the existing ReattachBanner detects the
-  // in-flight op on its own. Unknown types fall back to the dropdown
-  // (no nav).
+  // Unread = finished but the user hasn't viewed the result page yet.
+  // Surfaces a bold "Unread" pill so success/error tasks aren't visually
+  // identical to ones the user already reviewed.
+  const isUnread =
+    isTerminalOperationState(op.state) && !op.acknowledged_at
+  // Deep-link target. Both row types carry ?op=<id> so the destination
+  // page can re-attach to the SPECIFIC operation the user clicked,
+  // not just the most-recent in-flight/terminal one.
+  //
+  // Migrate → /dashboard (NOT /admin). The /admin path is just a
+  // bookmark-redirect to /dashboard in App.tsx, and Navigate strips
+  // query params during the redirect, killing our ?op=. Going
+  // directly to /dashboard preserves the param so Admin's re-attach
+  // effect can read it.
+  //
+  // Provision → root, where the Provision page reads ?op= on mount.
+  // Unknown types fall back to no nav.
   const href = (() => {
-    if (op.type === 'vm.migrate') return `/admin?op=${op.id}`
-    if (op.type === 'vm.provision') return '/provision'
+    if (op.type === 'vm.migrate') return `/dashboard?op=${op.id}`
+    if (op.type === 'vm.provision') return `/?op=${op.id}`
     return null
   })()
 
@@ -154,13 +233,23 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-[13px] truncate">
+          <span className={`font-mono text-[13px] truncate ${isUnread ? 'font-semibold' : ''}`}>
             {labelForType(op.type)}
             {op.target_label ? ` ${op.target_label}` : ''}
           </span>
-          <span className="text-[11px] text-ink-3 whitespace-nowrap">
-            {stateLabel}
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isUnread && (
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wider text-[#9a5c2e] bg-[rgba(248,175,130,0.15)] border border-[rgba(248,175,130,0.4)] px-1.5 py-px rounded"
+                title="Open this task to view the result"
+              >
+                Unread
+              </span>
+            )}
+            <span className="text-[11px] text-ink-3 whitespace-nowrap">
+              {stateLabel}
+            </span>
+          </div>
         </div>
         {op.message && (
           <div className="text-[12px] text-ink-2 truncate">{op.message}</div>
@@ -175,7 +264,16 @@ function OpRow({ op, onClose }: { op: Operation; onClose: () => void }) {
       {href ? (
         <Link
           to={href}
-          onClick={onClose}
+          onClick={() => {
+            onClose()
+            // Mark as read on click for terminal+unread rows so the
+            // dropdown filter drops them instantly — without this the
+            // row would linger up to a poll interval after navigation,
+            // reading as a UI bug. In-flight tasks are left alone:
+            // they're not "read-able" until they terminate. Server
+            // POST runs in parallel via markAsRead.
+            if (isUnread) onMarkRead(op.id)
+          }}
           className="block px-4 py-3 no-underline text-ink"
         >
           {inner}

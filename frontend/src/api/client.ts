@@ -526,6 +526,10 @@ export interface Operation {
   started_at?: string
   finished_at?: string
   last_heartbeat_at: string
+  // Stamped the first time the actor views the row's terminal result.
+  // Undefined while running or while the user hasn't seen it yet —
+  // TasksDropdown uses presence to render the unread marker.
+  acknowledged_at?: string
 }
 
 export interface OperationListResponse {
@@ -555,6 +559,14 @@ export async function listOperations(opts?: {
 export async function getOperation(id: number): Promise<Operation> {
   const { data } = await api.get<Operation>(`/operations/${id}`)
   return data
+}
+
+// acknowledgeOperation marks the row as seen by the current user.
+// Fire-and-forget on the SPA side — failures are swallowed by callers
+// because the worst case is the unread marker sticks for one extra
+// page load. Idempotent on the server (only stamps when null).
+export async function acknowledgeOperation(id: number): Promise<void> {
+  await api.post(`/operations/${id}/acknowledge`)
 }
 
 // isTerminalOperationState — small helper so polling code reads cleanly

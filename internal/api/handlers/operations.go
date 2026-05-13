@@ -55,6 +55,12 @@ type operationView struct {
 	StartedAt       string `json:"started_at,omitempty"`
 	FinishedAt      string `json:"finished_at,omitempty"`
 	LastHeartbeatAt string `json:"last_heartbeat_at"`
+	// AcknowledgedAt is stamped the first time the actor views the
+	// row's terminal result page in the SPA. Empty while unacked —
+	// the Tasks dropdown uses presence/absence to render an unread
+	// marker so a walked-away operator can still see whether their
+	// provision ended in warning/error after returning.
+	AcknowledgedAt string `json:"acknowledged_at,omitempty"`
 }
 
 // List handles GET /api/operations. Verified-user; non-admins see
@@ -170,6 +176,68 @@ func (h *Operations) Get(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, toView(*row))
 }
 
+// Acknowledge handles POST /api/operations/{id}/acknowledge.
+//
+// Stamps the row as "seen" by the actor so the Tasks dropdown can drop
+// its unread marker. Fired by the SPA after a re-attached
+// ResultView/ErrorView renders. Idempotent — repeat calls keep the
+// original ack timestamp.
+//
+// Non-admins can only acknowledge their own operations (matches the
+// Get visibility rules) — a 404 hides everyone else's IDs the same
+// way Get does, so callers can't probe.
+//
+// @Summary     Mark a background operation as seen
+// @Description Stamps acknowledged_at; idempotent. Used by the SPA's
+// @Description Provision result view to clear the Tasks-dropdown
+// @Description unread marker after the user has actually viewed the
+// @Description terminal page.
+// @Tags        operations
+// @Security    cookieAuth
+// @Produce     json
+// @Param       id path int true "operation id"
+// @Success     204 "no content"
+// @Failure     400 {object} EnvelopeError
+// @Failure     401 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     500 {object} EnvelopeError
+// @Router      /operations/{id}/acknowledge [post]
+func (h *Operations) Acknowledge(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		response.NotFound(w, "operation not found")
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "invalid id")
+		return
+	}
+	// Ownership gate before write: load the row, 404 it if not the
+	// current user (and not an admin). Same shape as Get.
+	row, err := h.svc.Get(r.Context(), uint(id))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.NotFound(w, "operation not found")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
+	user := ctxutil.User(r.Context())
+	if user != nil && !user.IsAdmin {
+		if row.ActorID == nil || *row.ActorID != user.ID {
+			response.NotFound(w, "operation not found")
+			return
+		}
+	}
+	if err := h.svc.Acknowledge(r.Context(), uint(id)); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // toView lifts the model row into the wire shape with stringified
 // timestamps. Optional times (StartedAt, FinishedAt) collapse to
 // empty string when nil so the SPA's `started_at?:` field stays
@@ -195,6 +263,9 @@ func toView(op db.Operation) operationView {
 	}
 	if op.FinishedAt != nil {
 		v.FinishedAt = op.FinishedAt.Format(time.RFC3339)
+	}
+	if op.AcknowledgedAt != nil {
+		v.AcknowledgedAt = op.AcknowledgedAt.Format(time.RFC3339)
 	}
 	return v
 }
