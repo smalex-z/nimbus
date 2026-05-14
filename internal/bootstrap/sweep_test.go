@@ -176,7 +176,7 @@ func TestSweep_LeavesOSWithoutBakedTemplateAlone(t *testing.T) {
 			// Only an unbaked template — no baked sibling.
 			{VMID: 9007, Name: "debian-12-template", Template: 1},
 			// Only a stopped failed-bake — no baked template either.
-			{VMID: 9008, Name: "debian-11-template", Template: 0, Status: "stopped"},
+			{VMID: 9008, Name: "debian-13-template", Template: 0, Status: "stopped"},
 		}, nil
 	}
 	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) {
@@ -200,6 +200,98 @@ func TestSweep_LeavesOSWithoutBakedTemplateAlone(t *testing.T) {
 	}
 	if got := len(res.Nodes[0].Removed); got != 0 {
 		t.Errorf("removed = %d, want 0", got)
+	}
+}
+
+// TestSweep_DestroysTemplateForCatalogOrphanOS covers a fresh failure
+// mode: an OS used to be in the catalog (e.g. debian-11) and was later
+// retired in favor of a newer release. The old templates are still on
+// disk on every PVE node and their node_templates rows still exist —
+// `nimbus bootstrap --force` won't touch them because the catalog
+// iteration doesn't include the retired OS. Sweep must catch them via
+// the stale_os reason: destroy the PVE template AND drop the node_
+// templates row so the bootstrap-status banner stops counting them.
+func TestSweep_DestroysTemplateForCatalogOrphanOS(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		return []proxmox.Node{{Name: "alpha", Status: "online"}}, nil
+	}
+	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) {
+		return []proxmox.VMStatus{
+			// In-catalog: should not be touched.
+			{VMID: 9000, Name: "ubuntu-24.04-template", Template: 1},
+			// Catalog orphan: destroy.
+			{VMID: 9099, Name: "debian-11-template", Template: 1},
+		}, nil
+	}
+	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) {
+		return true, nil
+	}
+	var destroyed []int
+	px.destroyVM = func(_ context.Context, _ string, vmid int) (string, error) {
+		destroyed = append(destroyed, vmid)
+		return "UPID:destroy", nil
+	}
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}).Error; err != nil {
+		t.Fatalf("seed ubuntu row: %v", err)
+	}
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "debian-11", VMID: 9099}).Error; err != nil {
+		t.Fatalf("seed stale-os row: %v", err)
+	}
+
+	res, err := svc.SweepTemplates(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SweepTemplates: %v", err)
+	}
+	if !equalIntSlices(destroyed, []int{9099}) {
+		t.Errorf("destroyed = %v, want [9099]", destroyed)
+	}
+	if len(res.Nodes) != 1 || len(res.Nodes[0].Removed) != 1 || res.Nodes[0].Removed[0].Reason != "stale_os" {
+		t.Errorf("Removed = %+v, want one stale_os entry", res.Nodes[0].Removed)
+	}
+	// The catalog-orphan row should be gone; the in-catalog row stays.
+	var rows []db.NodeTemplate
+	if err := database.DB.Order("os").Find(&rows).Error; err != nil {
+		t.Fatalf("re-read rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].OS != "ubuntu-24.04" {
+		t.Errorf("rows after sweep = %+v, want only the ubuntu-24.04 row", rows)
+	}
+}
+
+// TestSweep_DropsOrphanRowsForAbsentNodes asserts that node_templates
+// rows for nodes that have left the cluster (PVE-side removal not
+// routed through Nimbus's RemoveNode) get dropped at the top of the
+// sweep so the bootstrap-status banner doesn't keep counting them.
+func TestSweep_DropsOrphanRowsForAbsentNodes(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	px.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+		// alpha is the only live node; bravo is the removed one.
+		return []proxmox.Node{{Name: "alpha", Status: "online"}}, nil
+	}
+	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) { return nil, nil }
+
+	svc, database := newSvc(t, px)
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}).Error; err != nil {
+		t.Fatalf("seed alpha row: %v", err)
+	}
+	if err := database.DB.Create(&db.NodeTemplate{Node: "bravo", OS: "ubuntu-24.04", VMID: 9100}).Error; err != nil {
+		t.Fatalf("seed bravo row: %v", err)
+	}
+
+	if _, err := svc.SweepTemplates(context.Background(), false); err != nil {
+		t.Fatalf("SweepTemplates: %v", err)
+	}
+	var rows []db.NodeTemplate
+	if err := database.DB.Order("node").Find(&rows).Error; err != nil {
+		t.Fatalf("re-read rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Node != "alpha" {
+		t.Errorf("rows after sweep = %+v, want only the alpha row", rows)
 	}
 }
 

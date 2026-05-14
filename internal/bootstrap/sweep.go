@@ -48,6 +48,7 @@ const (
 	reasonDuplicate     = "duplicate"
 	reasonUnbakedSib    = "unbaked_with_baked_sibling"
 	reasonFailedBake    = "failed_bake_leftover"
+	reasonStaleOS       = "stale_os" // template for an OS no longer in catalog
 	templateNameSuffix  = "-template"
 	destroyPollInterval = 2 * time.Second
 )
@@ -79,6 +80,39 @@ func (s *Service) SweepTemplates(ctx context.Context, dryRun bool) (*SweepResult
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
+	known := map[string]bool{}
+	for _, n := range nodes {
+		known[n.Name] = true
+	}
+
+	// Drop node_templates rows for nodes that aren't in the cluster
+	// anymore (e.g. removed via PVE directly without Nimbus's RemoveNode
+	// running its cleanup). Per-node sweep below only iterates online
+	// nodes, so without this their rows would linger and the bootstrap-
+	// status banner would falsely count them. Skipped in dry-run so the
+	// preview matches what live would do.
+	if !dryRun {
+		var orphanRows []db.NodeTemplate
+		if err := s.db.WithContext(ctx).Find(&orphanRows).Error; err == nil {
+			deletedNodes := map[string]bool{}
+			for _, r := range orphanRows {
+				if known[r.Node] {
+					continue
+				}
+				if err := s.db.WithContext(ctx).
+					Where("node = ? AND os = ?", r.Node, r.OS).
+					Delete(&db.NodeTemplate{}).Error; err != nil {
+					log.Printf("sweep-templates: drop orphan row (%s,%s): %v", r.Node, r.OS, err)
+					continue
+				}
+				if !deletedNodes[r.Node] {
+					log.Printf("sweep-templates: dropped node_templates rows for absent node %q", r.Node)
+					deletedNodes[r.Node] = true
+				}
+			}
+		}
+	}
+
 	res := &SweepResult{DryRun: dryRun}
 	for _, n := range nodes {
 		if n.Status != "online" {
@@ -114,9 +148,27 @@ func (s *Service) sweepNode(ctx context.Context, node string, dryRun bool) NodeS
 	}
 	buckets := map[string]*bucket{}
 
+	// Stale-OS VMs (template named `<os>-template` where <os> isn't in
+	// the current catalog) — these were created by a previous catalog
+	// before the operator swapped an OS out. The operator's intent in
+	// running sweep is to retire them, so we always queue them for
+	// removal regardless of bake state. Collected separately from the
+	// per-OS buckets because the bucket logic assumes a current-catalog
+	// OS.
+	var staleOS []proxmox.VMStatus
 	for _, vm := range vms {
 		if vm.VMID < s.cfg.TemplateBaseVMID {
 			continue
+		}
+		// Stale-OS detection: name matches `<something>-template`
+		// where <something> isn't in the catalog. Skip VMs that don't
+		// follow the bootstrap-name convention at all.
+		if strings.HasSuffix(vm.Name, templateNameSuffix) {
+			stem := strings.TrimSuffix(vm.Name, templateNameSuffix)
+			if LookupOS(stem) == nil {
+				staleOS = append(staleOS, vm)
+				continue
+			}
 		}
 		os := matchTemplateName(vm.Name)
 		if os == "" {
@@ -216,6 +268,21 @@ func (s *Service) sweepNode(ctx context.Context, node string, dryRun bool) NodeS
 		}
 	}
 
+	// Stale-OS VMs: name follows the bootstrap convention but the OS is
+	// no longer in the catalog (e.g. debian-11-template after a swap
+	// to debian-13). Always queue for removal regardless of bake state
+	// — the operator can't re-bake them via bootstrap anyway.
+	for _, t := range staleOS {
+		stem := strings.TrimSuffix(t.Name, templateNameSuffix)
+		status := t.Status
+		if t.Template == 1 {
+			status = "template"
+		}
+		out.Removed = append(out.Removed, RemovedTemplate{
+			VMID: t.VMID, Name: t.Name, OS: stem, Reason: reasonStaleOS, Status: status,
+		})
+	}
+
 	sort.SliceStable(out.Removed, func(i, j int) bool {
 		return out.Removed[i].VMID < out.Removed[j].VMID
 	})
@@ -251,6 +318,20 @@ func (s *Service) sweepNode(ctx context.Context, node string, dryRun bool) NodeS
 			}
 		}
 		log.Printf("sweep-templates: destroyed vmid=%d (%s) on %s — reason=%s", r.VMID, r.Name, node, r.Reason)
+		// Stale-OS removals also need their node_templates row gone —
+		// the OS isn't in the catalog so no future bootstrap will
+		// rewrite the row. Other reasons (duplicate/unbaked sibling/
+		// failed bake) keep the row because the catalog OS is still
+		// live and the row was either already correct or got assigned
+		// to the keeper VMID earlier in this function.
+		if r.Reason == reasonStaleOS {
+			if err := s.db.WithContext(ctx).
+				Where("node = ? AND os = ?", node, r.OS).
+				Delete(&db.NodeTemplate{}).Error; err != nil {
+				out.Errors = append(out.Errors,
+					fmt.Sprintf("clear stale-os row (%s,%s): %v", node, r.OS, err))
+			}
+		}
 	}
 
 	return out
