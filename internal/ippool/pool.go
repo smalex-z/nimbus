@@ -171,8 +171,14 @@ func (p *Pool) Reserve(ctx context.Context, hostname string) (string, error) {
 	var ip string
 	err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row IPAllocation
+		// Scope to the global pool (vnet=""). Per-subnet pools share
+		// this table distinguished by the vnet column (see SeedSubnet);
+		// without this filter Reserve leaks across the boundary and
+		// hands a subnet's IP to a global/Cluster-LAN provision —
+		// subnet ranges often sort below the global range, so they'd
+		// be drained first. Mirror of ReserveInSubnet's vnet scoping.
 		if err := tx.
-			Where("status = ?", StatusFree).
+			Where("vnet = ? AND status = ?", "", StatusFree).
 			Order("ip ASC").
 			First(&row).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -189,7 +195,7 @@ func (p *Pool) Reserve(ctx context.Context, hostname string) (string, error) {
 			"reserved_at": &now,
 		}
 		if err := tx.Model(&IPAllocation{}).
-			Where("ip = ? AND status = ?", row.IP, StatusFree).
+			Where("ip = ? AND vnet = ? AND status = ?", row.IP, "", StatusFree).
 			Updates(updates).Error; err != nil {
 			return fmt.Errorf("mark %s reserved: %w", row.IP, err)
 		}
