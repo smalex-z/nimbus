@@ -57,7 +57,7 @@ interface FormState {
   // chips in the AffinityPicker below.
   //
   // Defaults to "x86" because every cloud-init template Nimbus ships
-  // (ubuntu-22.04 / ubuntu-24.04 / debian-11 / debian-12) is x86_64 —
+  // (ubuntu-22.04 / ubuntu-24.04 / debian-13 / debian-12) is x86_64 —
   // KVM can't cross-arch, so landing one of those images on an ARM
   // host fails at boot. Operators with ARM hardware + ARM templates
   // remove the chip and add `arm` instead.
@@ -249,8 +249,17 @@ export default function Provision() {
         if (inflight) {
           setReattachOp(inflight)
           timer = setTimeout(() => tick(inflight.id), 2000)
-        } else if (res.operations.length > 0) {
-          setReattachOp(res.operations[0])
+        } else {
+          // Surface the most recent terminal op ONLY if the user hasn't
+          // seen it yet (acknowledged_at unset). Once acknowledged,
+          // re-entering /provision shows the empty form rather than a
+          // stale success/error page the user already dismissed.
+          // Deep-links (?op=, effect A) still force the page open
+          // regardless — that's an explicit user click, not a heuristic.
+          const unseen = res.operations.find(
+            (o) => isTerminalOperationState(o.state) && !o.acknowledged_at,
+          )
+          if (unseen) setReattachOp(unseen)
         }
       })
       .catch(() => {
@@ -522,6 +531,9 @@ export default function Provision() {
     setErrorStep(undefined)
     setCurrentStep(undefined)
     setView('loading')
+    // Captured from the first NDJSON event so we can acknowledge the op
+    // once the user lands on the result/error view — see the finally.
+    let opID: number | undefined
     try {
       const trimmedPriv = form.keyMode === 'byo' ? form.privKey.trim() : ''
       const res = await provisionVMStreaming(
@@ -559,6 +571,10 @@ export default function Provision() {
           // DNS) are added later from the machine page.
         },
         (evt) => setCurrentStep(evt.step),
+        undefined,
+        (id) => {
+          opID = id
+        },
       )
       setResult(res)
       setView('result')
@@ -570,6 +586,16 @@ export default function Provision() {
         setError(err instanceof Error ? err.message : 'unknown error')
       }
       setView('error')
+    } finally {
+      // The user is now on the result/error view for the op they just
+      // ran in this tab — that's "seen", same as the re-attach path's
+      // acknowledge effect. Without this, a live provision stays
+      // unacknowledged: the Tasks dropdown keeps its unread marker AND
+      // effect B re-surfaces this page on the next visit. Idempotent
+      // server-side; fire-and-forget.
+      if (opID !== undefined) {
+        void acknowledgeOperation(opID).catch(() => {})
+      }
     }
   }
 
@@ -692,8 +718,8 @@ interface BootstrapGateProps {
 const OS_TEMPLATES = [
   { os: 'Ubuntu 24.04 LTS', vmid: 9000 },
   { os: 'Ubuntu 22.04 LTS', vmid: 9001 },
-  { os: 'Debian 12', vmid: 9002 },
-  { os: 'Debian 11', vmid: 9003 },
+  { os: 'Debian 13', vmid: 9002 },
+  { os: 'Debian 12', vmid: 9003 },
 ]
 
 function BootstrapGate({ running, result, error, elapsed, onStart }: BootstrapGateProps) {

@@ -175,6 +175,40 @@ func (s *Service) CheckTemplatesStatus(ctx context.Context) (TemplatesStatus, er
 	if err := s.db.WithContext(ctx).Order("node, os").Find(&rows).Error; err != nil {
 		return TemplatesStatus{}, fmt.Errorf("list node_templates: %w", err)
 	}
+
+	// Filter the rows by current cluster reality before counting:
+	//
+	//  - Nodes that are no longer in the cluster (removed via Nimbus or
+	//    via PVE directly without Nimbus's cleanup running). Their
+	//    template rows linger in node_templates with no live host to
+	//    rebuild against, so the banner would falsely report "N
+	//    templates need rebuilding" for templates the operator can
+	//    never touch.
+	//  - OSes no longer in the catalog (e.g. debian-11 after a catalog
+	//    swap). The operator's action there isn't "rebuild" — it's
+	//    "clean up via SweepTemplates". Counting them under "rebuild"
+	//    is misleading and makes the count drift over time.
+	//
+	// Filtered rows are dropped silently; SweepTemplates is the surface
+	// that handles destroying their orphan PVE-side state.
+	known := map[string]bool{}
+	if nodes, err := s.px.GetNodes(ctx); err == nil {
+		for _, n := range nodes {
+			known[n.Name] = true
+		}
+	}
+	live := rows[:0]
+	for _, r := range rows {
+		if !known[r.Node] {
+			continue
+		}
+		if LookupOS(r.OS) == nil {
+			continue
+		}
+		live = append(live, r)
+	}
+	rows = live
+
 	out := TemplatesStatus{
 		Total:   len(rows),
 		Details: make([]TemplateStatusDetail, 0, len(rows)),

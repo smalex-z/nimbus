@@ -629,7 +629,7 @@ func TestCheckTemplatesStatus_RowBaked_NoNodeScan(t *testing.T) {
 	}
 
 	svc, database := newSvc(t, px)
-	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -667,13 +667,13 @@ func TestCheckTemplatesStatus_AdoptsBakedSiblingOnStaleRow(t *testing.T) {
 			return nil, nil
 		}
 		return []proxmox.VMStatus{
-			{VMID: fresh, Name: "ubuntu-template", Template: 1},
+			{VMID: fresh, Name: "ubuntu-24.04-template", Template: 1},
 			{VMID: 100, Name: "some-user-vm", Template: 0},
 		}, nil
 	}
 
 	svc, database := newSvc(t, px)
-	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: stale}).Error; err != nil {
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: stale}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -690,7 +690,7 @@ func TestCheckTemplatesStatus_AdoptsBakedSiblingOnStaleRow(t *testing.T) {
 
 	// DB row must be rewritten so provision picks up the live template.
 	var got db.NodeTemplate
-	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu-24.04").First(&got).Error; err != nil {
 		t.Fatalf("re-read row: %v", err)
 	}
 	if got.VMID != fresh {
@@ -712,7 +712,7 @@ func TestCheckTemplatesStatus_NoSibling_StaysUnbaked(t *testing.T) {
 	}
 
 	svc, database := newSvc(t, px)
-	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -724,7 +724,7 @@ func TestCheckTemplatesStatus_NoSibling_StaysUnbaked(t *testing.T) {
 		t.Errorf("status = %+v, want Total=1 Baked=0 Unbaked=1", st)
 	}
 	var got db.NodeTemplate
-	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu-24.04").First(&got).Error; err != nil {
 		t.Fatalf("re-read row: %v", err)
 	}
 	if got.VMID != 9000 {
@@ -740,12 +740,12 @@ func TestCheckTemplatesStatus_SiblingNotBaked_NoAdopt(t *testing.T) {
 	px.templateExists = func(_ context.Context, _ string, _ int) (bool, error) { return false, nil }
 	px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) {
 		return []proxmox.VMStatus{
-			{VMID: 9100, Name: "ubuntu-template", Template: 1}, // present but unbaked
+			{VMID: 9100, Name: "ubuntu-24.04-template", Template: 1}, // present but unbaked
 		}, nil
 	}
 
 	svc, database := newSvc(t, px)
-	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu", VMID: 9000}).Error; err != nil {
+	if err := database.DB.Create(&db.NodeTemplate{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -757,7 +757,7 @@ func TestCheckTemplatesStatus_SiblingNotBaked_NoAdopt(t *testing.T) {
 		t.Errorf("status = %+v, want Unbaked=1 (sibling lacks baked tag)", st)
 	}
 	var got db.NodeTemplate
-	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu").First(&got).Error; err != nil {
+	if err := database.DB.Where("node = ? AND os = ?", "alpha", "ubuntu-24.04").First(&got).Error; err != nil {
 		t.Fatalf("re-read row: %v", err)
 	}
 	if got.VMID != 9000 {

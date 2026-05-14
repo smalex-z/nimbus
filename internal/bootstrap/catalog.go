@@ -42,18 +42,18 @@ var Catalog = []OSEntry{
 		DisplayName: "Ubuntu 22.04 LTS",
 	},
 	{
-		OS:          "debian-12",
+		OS:          "debian-13",
 		Offset:      2,
+		Filename:    "debian-13-genericcloud-amd64.qcow2",
+		URL:         "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
+		DisplayName: "Debian 13 (Trixie)",
+	},
+	{
+		OS:          "debian-12",
+		Offset:      3,
 		Filename:    "debian-12-genericcloud-amd64.qcow2",
 		URL:         "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
 		DisplayName: "Debian 12 (Bookworm)",
-	},
-	{
-		OS:          "debian-11",
-		Offset:      3,
-		Filename:    "debian-11-genericcloud-amd64.qcow2",
-		URL:         "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2",
-		DisplayName: "Debian 11 (Bullseye)",
 	},
 }
 

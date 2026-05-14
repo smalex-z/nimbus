@@ -18,7 +18,7 @@ A single Go binary embeds the React SPA, talks to Proxmox over its REST API, and
 
 ## Features
 
-**VM provisioning** — Web portal, 4 OS templates (Ubuntu 22.04/24.04, Debian 11/12), atomic IP allocation, live cluster scoring (memory + CPU + disk + workload weighting), BYO or generated SSH keys with vault-stored private halves.
+**VM provisioning** — Web portal, 4 OS templates (Ubuntu 22.04/24.04, Debian 12/13), atomic IP allocation, live cluster scoring (memory + CPU + disk + workload weighting), BYO or generated SSH keys with vault-stored private halves.
 
 **Multi-tenancy** — Email + password, GitHub / Google OAuth, magic-link recovery via SMTP, GitHub-org and Google-domain allowlists, access-code gating, OAuth-only / passwordless workspace mode, self-service password change. Per-user quotas with admin overrides. Every privileged action audit-logged.
 
