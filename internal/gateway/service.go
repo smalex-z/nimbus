@@ -449,6 +449,13 @@ func (s *Service) Destroy(ctx context.Context, vpc *db.VPC) error {
 // as the container's init has launched; sshd takes another ~5-15 s
 // to start. dialSSHWithRetries inside runSSHBootstrap polls TCP/22
 // until the handshake works, so we don't sleep here.
+//
+// FORWARD policy: default-deny with RFC1918 destinations explicitly
+// dropped on the eth1→eth0 path. Internet egress (non-RFC1918) is
+// the only thing forwarded out. Without this, a VPC VM could reach
+// every other tenant's VPC gateway, every cluster-LAN VM, and every
+// standalone-zone bridge on the management network — the gateway
+// LXC would happily MASQUERADE all of it.
 func (s *Service) bootstrapNAT(ctx context.Context, gwIP string, key *EphemeralKeypair) error {
 	const script = `set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -477,6 +484,22 @@ apt-get install -y -qq iptables iptables-persistent
 # which case -A is skipped. eth0 is the host-network NIC PVE assigned.
 iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+# Default-deny FORWARD, then carve out the allowed paths. Flushing
+# first keeps the script idempotent across re-bootstrap runs (manual
+# retries, template re-bake, etc.) without piling up duplicate rules.
+iptables -P FORWARD DROP
+iptables -F FORWARD
+# Return traffic for connections the VPC opened.
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+# Block RFC1918 destinations on the eth1→eth0 path. Other tenants
+# (VPCs, standalone subnets, cluster-LAN VMs) all live in this
+# space; the LAN router itself is in 192.168.0.0/16.
+iptables -A FORWARD -i eth1 -o eth0 -d 10.0.0.0/8 -j DROP
+iptables -A FORWARD -i eth1 -o eth0 -d 172.16.0.0/12 -j DROP
+iptables -A FORWARD -i eth1 -o eth0 -d 192.168.0.0/16 -j DROP
+# Everything else (the public internet) is allowed.
+iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
 
 # Persist via netfilter-persistent.
 mkdir -p /etc/iptables
