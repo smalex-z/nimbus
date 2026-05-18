@@ -388,6 +388,37 @@ func (s *Service) findAdoptableTemplate(ctx context.Context, node, os string) (i
 	return candidates[0], true
 }
 
+// existsTemplateByName returns the lowest VMID for any VM (template-flag or
+// not) at >= TemplateBaseVMID whose name matches `<os>-template`. Used as
+// the last-ditch dedup gate right before Create — catches the window where
+// findAdoptableTemplate sees nothing (no baked template yet) but a sibling
+// bootstrap (concurrent retry, second Nimbus instance pointing at the same
+// cluster) has already created the VM and is mid-bake. Without this, two
+// instances reliably double-mint and the node fills with `<os>-template`
+// duplicates at adjacent VMIDs.
+func (s *Service) existsTemplateByName(ctx context.Context, node, os string) (int, bool) {
+	vms, err := s.px.ListVMs(ctx, node)
+	if err != nil {
+		return 0, false
+	}
+	wantName := os + templateNameSuffix
+	var candidates []int
+	for _, vm := range vms {
+		if vm.VMID < s.cfg.TemplateBaseVMID {
+			continue
+		}
+		if strings.ToLower(vm.Name) != wantName {
+			continue
+		}
+		candidates = append(candidates, vm.VMID)
+	}
+	if len(candidates) == 0 {
+		return 0, false
+	}
+	sort.Ints(candidates)
+	return candidates[0], true
+}
+
 // adoptOrInsertRow ensures the node_templates row for (node, os) points
 // at vmid. If a row already exists with a different VMID, it's updated;
 // if no row exists, it's created. Returns nil on success.

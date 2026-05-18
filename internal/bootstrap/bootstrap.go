@@ -491,6 +491,18 @@ func (s *Service) bootstrapOne(
 	// they can land on the same value. Once Create succeeds the VMID is
 	// "taken" and the next caller sees a higher value.
 	s.nextVMIDMu.Lock()
+	// Last-ditch same-name guard: between the Step 1b adoption pass and
+	// here, another bootstrap may have created `<os>-template` and be
+	// mid-bake (so it's not yet flagged baked, so findAdoptableTemplate
+	// missed it). Re-scan inside the lock. If found, skip — the operator
+	// can sweep + re-bootstrap if the in-flight one fails. Cross-instance
+	// races (two Nimbus deployments on the same cluster) get caught here
+	// too, since both check Proxmox state, not their own SQLite.
+	if existingVMID, ok := s.existsTemplateByName(ctx, node, entry.OS); ok {
+		s.nextVMIDMu.Unlock()
+		log.Printf("bootstrap %s on %s: same-name template vmid=%d already exists — skipping create", entry.OS, node, existingVMID)
+		return finish(existingVMID, errSkipped)
+	}
 	vmid, err := s.px.NextVMIDFrom(ctx, s.cfg.TemplateBaseVMID)
 	if err != nil {
 		s.nextVMIDMu.Unlock()
