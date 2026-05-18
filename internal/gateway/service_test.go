@@ -51,6 +51,9 @@ func (f *fakeLXC) NextVMID(_ context.Context) (int, error) {
 	v := f.nextVMID.Add(1) + 199
 	return int(v), nil
 }
+func (f *fakeLXC) ListLXCs(_ context.Context, _ string) ([]proxmox.LXCStatus, error) {
+	return nil, nil
+}
 func (f *fakeLXC) StorageHasFile(_ context.Context, _, _, _, _ string) (bool, error) {
 	return true, nil // pretend the template is already cached
 }

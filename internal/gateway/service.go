@@ -48,6 +48,7 @@ type LXCClient interface {
 	DestroyLXC(ctx context.Context, node string, vmid int) (string, error)
 	WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error
 	NextVMID(ctx context.Context) (int, error)
+	ListLXCs(ctx context.Context, node string) ([]proxmox.LXCStatus, error)
 	StorageHasFile(ctx context.Context, node, storage, contentType, filename string) (bool, error)
 	ListAvailableLXCTemplates(ctx context.Context, node string) ([]proxmox.AplinfoTemplate, error)
 	DownloadLXCTemplate(ctx context.Context, node, storage, templateName string) (string, error)
@@ -326,6 +327,27 @@ func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, erro
 	if len(hostname) > 63 {
 		hostname = hostname[:63]
 	}
+
+	// Same-hostname guard. A prior ProvisionGateway that hit the
+	// WARNINGS:1 task-status bug (now fixed) treated the create as
+	// failed and ran defer cleanup — but the cleanup's StopLXC /
+	// DestroyLXC ignored errors, so orphan LXCs piled up under the
+	// same nbu-gw-<zone> name. Without this guard the retry mints a
+	// fresh VMID and adds another duplicate (see vmids 104/106/107
+	// all nbu-gw-vc55253b, 118/131 both nbu-gw-v5062cc0 on
+	// uclaacm-laptop). Refuse to create when a same-name LXC already
+	// exists on the network node — the operator can adopt the orphan
+	// or remove it manually before retrying.
+	if existing, err := s.px.ListLXCs(ctx, s.cfg.NetworkNode); err == nil {
+		for _, lxc := range existing {
+			if lxc.Name == hostname {
+				return 0, "", fmt.Errorf("gateway lxc %q already exists on %s (vmid=%d, status=%s) — remove the orphan before retrying", hostname, s.cfg.NetworkNode, lxc.VMID, lxc.Status)
+			}
+		}
+	} else {
+		log.Printf("gateway: pre-create list lxcs on %s: %v (continuing — duplicate-name guard skipped)", s.cfg.NetworkNode, err)
+	}
+
 	// vpcmgr.ApplySDN dispatches reload tasks asynchronously — by
 	// the time we get here, the VPC's VXLAN bridge may not be up on
 	// our network node yet, and StartLXC would race the reload and
