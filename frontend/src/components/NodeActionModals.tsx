@@ -592,7 +592,7 @@ export function DrainPlanModal({
           No managed VMs on this node — nothing for Nimbus to migrate.
           {plan.external_vms && plan.external_vms.length > 0
             ? ' See the list below for VMs created outside Nimbus that need separate handling.'
-            : ' Cordon it instead, then remove from the cluster directly.'}
+            : ' Start drain to mark the node drained so you can remove it from the cluster.'}
         </p>
       )}
 
@@ -622,7 +622,7 @@ export function DrainPlanModal({
         <ExternalVMsPanel vms={plan.external_vms} />
       )}
 
-      {phase === 'plan' && plan && plan.migrations.length > 0 && (
+      {phase === 'plan' && plan && (
         <ConfirmGate
           expected={expectedConfirm}
           value={confirmText}
