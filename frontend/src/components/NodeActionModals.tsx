@@ -298,9 +298,40 @@ echo "Cleanup complete. Node $SELF is ready to join a new cluster."
             {copiedCmd ? 'Copied' : 'Copy'}
           </button>
         </div>
+        <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.55 }}>
+          And on <strong>{node.name}</strong> itself, if you plan to rejoin it
+          to another cluster later, wipe its corosync state with the script
+          below. (Skip if you're decommissioning the host entirely.)
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+          <span style={{ fontSize: 12, color: 'var(--ink-mute)' }}>
+            Run on <code>{node.name}</code> (the removed host):
+          </span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <pre style={{
+              flex: 1,
+              margin: 0,
+              padding: '10px 12px',
+              background: 'rgba(20,18,28,0.05)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12,
+              fontFamily: 'monospace',
+              lineHeight: 1.5,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              maxHeight: 220,
+              overflow: 'auto',
+              userSelect: 'all',
+            }}>{cleanupScript}</pre>
+            <button type="button" className="n-btn" onClick={() => copy(cleanupScript, 'script')}>
+              {copiedScript ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
         <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.55 }}>
-          Once it returns, click below — Nimbus checks that the node is gone
-          and drops the local record.
+          Once <code>pvecm delnode</code> returns, click below — Nimbus checks
+          that the node is gone and drops the local record.
         </p>
         {error && <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--err)' }}>{error}</p>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
