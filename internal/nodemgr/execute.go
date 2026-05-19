@@ -134,12 +134,19 @@ func (s *Service) Execute(ctx context.Context, req ExecuteRequest, report DrainR
 
 	// Decide the post-drain state. Recount managed VMs on the source —
 	// any survivors mean the drain didn't fully evacuate.
-	remaining, err := s.managedVMsOnNode(ctx, req.SourceNode)
+	//
+	// Use a fresh ctx, detached from the operator's HTTP request: if the
+	// browser dropped the NDJSON stream, the request ctx is canceled and
+	// these final writes would silently no-op, leaving lock_state stuck
+	// at "draining" with no drain actually in flight.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+	remaining, err := s.managedVMsOnNode(cleanupCtx, req.SourceNode)
 	if err != nil {
 		// Soft-fail: still emit complete, but conservatively flip to
 		// cordoned so the operator doesn't blindly remove a node we
 		// couldn't fully verify.
-		_ = s.flipSourceTo(ctx, req.SourceNode, "cordoned")
+		_ = s.flipSourceTo(cleanupCtx, req.SourceNode, "cordoned")
 		report(DrainEvent{
 			Type: "complete", Succeeded: succeeded, Failed: failed, Drained: false,
 		})
@@ -151,7 +158,7 @@ func (s *Service) Execute(ctx context.Context, req ExecuteRequest, report DrainR
 		finalState = "drained"
 		drained = true
 	}
-	if err := s.flipSourceTo(ctx, req.SourceNode, finalState); err != nil {
+	if err := s.flipSourceTo(cleanupCtx, req.SourceNode, finalState); err != nil {
 		return fmt.Errorf("flip source to %s: %w", finalState, err)
 	}
 	report(DrainEvent{
@@ -344,6 +351,41 @@ func (s *Service) IsDrainInFlight(name string) bool {
 	s.drainsMu.Lock()
 	defer s.drainsMu.Unlock()
 	return s.drainsInFlight[name]
+}
+
+// ReapStuckDrains flips every db.Node with lock_state="draining" back to
+// "cordoned" iff no drain is currently in flight in-process for that node.
+// At process startup drainsInFlight is empty, so any "draining" row is by
+// definition orphaned — the previous nimbus invocation died (or the
+// operator's HTTP stream dropped before the cleanup write could land) and
+// the row needs an operator hand to recover.
+//
+// Cordoned (not "none") on purpose: preserves the lock_at/by/reason
+// context so the operator can see what was happening and either re-Drain
+// or Uncordon. Returns the number of rows updated.
+func (s *Service) ReapStuckDrains(ctx context.Context) (int, error) {
+	var stuck []db.Node
+	if err := s.db.WithContext(ctx).
+		Where("lock_state = ?", "draining").
+		Find(&stuck).Error; err != nil {
+		return 0, fmt.Errorf("scan stuck drains: %w", err)
+	}
+	reaped := 0
+	for _, row := range stuck {
+		if s.IsDrainInFlight(row.Name) {
+			continue
+		}
+		if err := s.db.WithContext(ctx).Model(&db.Node{}).
+			Where("name = ? AND lock_state = ?", row.Name, "draining").
+			Updates(map[string]interface{}{
+				"lock_state": "cordoned",
+				"updated_at": time.Now().UTC(),
+			}).Error; err != nil {
+			return reaped, fmt.Errorf("reap %s: %w", row.Name, err)
+		}
+		reaped++
+	}
+	return reaped, nil
 }
 
 // IsValidationError reports whether an executor error is "this destination
