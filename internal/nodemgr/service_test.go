@@ -441,6 +441,57 @@ func TestExecuteFullSuccessFlipsToDrained(t *testing.T) {
 	}
 }
 
+// TestReapStuckDrainsFlipsOrphanedRows seeds a "draining" row with no
+// in-flight drain (simulating a restart or a dropped NDJSON stream) and
+// asserts the reaper flips it back to "cordoned" while preserving lock
+// context.
+func TestReapStuckDrainsFlipsOrphanedRows(t *testing.T) {
+	t.Parallel()
+
+	svc, database, _ := newTestService(t)
+	ctx := context.Background()
+	lockedAt := time.Now().UTC().Add(-time.Hour)
+	owner := uint(7)
+	if err := database.WithContext(ctx).Create(&db.Node{
+		Name: "ghost", LockState: "draining",
+		LockedAt: &lockedAt, LockedBy: &owner, LockReason: "stuck",
+	}).Error; err != nil {
+		t.Fatalf("seed ghost: %v", err)
+	}
+	if err := database.WithContext(ctx).Create(&db.Node{
+		Name: "clean", LockState: "none",
+	}).Error; err != nil {
+		t.Fatalf("seed clean: %v", err)
+	}
+
+	n, err := svc.ReapStuckDrains(ctx)
+	if err != nil {
+		t.Fatalf("ReapStuckDrains: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reaped = %d, want 1", n)
+	}
+
+	var ghost db.Node
+	if err := database.WithContext(ctx).Where("name = ?", "ghost").First(&ghost).Error; err != nil {
+		t.Fatalf("load ghost: %v", err)
+	}
+	if ghost.LockState != "cordoned" {
+		t.Errorf("LockState = %q, want cordoned", ghost.LockState)
+	}
+	if ghost.LockReason != "stuck" || ghost.LockedBy == nil || *ghost.LockedBy != owner {
+		t.Errorf("lock context lost: reason=%q by=%v", ghost.LockReason, ghost.LockedBy)
+	}
+
+	n2, err := svc.ReapStuckDrains(ctx)
+	if err != nil {
+		t.Fatalf("ReapStuckDrains second pass: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("reaped second pass = %d, want 0", n2)
+	}
+}
+
 // TestComputePlan_NoBlockedRows asserts that a typical drain produces a
 // plan with no blocked warnings + a recommended target per VM.
 func TestComputePlan_NoBlockedRows(t *testing.T) {
