@@ -1778,7 +1778,7 @@ export interface DiscoveredEndpoint {
   url: string
   ip: string
   node_name?: string
-  source: 'localhost' | 'corosync' | 'scan'
+  source: 'localhost' | 'corosync' | 'cluster' | 'scan'
 }
 
 export interface ProxmoxDiscovery {

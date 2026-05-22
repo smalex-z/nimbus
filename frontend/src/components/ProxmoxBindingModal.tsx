@@ -363,7 +363,7 @@ function DiscoveryPills({
             type="button"
             key={ep.url}
             onClick={() => onPick(ep.url)}
-            title={`${ep.url}${ep.source === 'corosync' ? ' (from corosync.conf)' : ep.source === 'localhost' ? ' (this host)' : ' (LAN scan)'}`}
+            title={`${ep.url}${ep.source === 'corosync' ? ' (from corosync.conf)' : ep.source === 'localhost' ? ' (this host)' : ep.source === 'cluster' ? ' (from cluster status)' : ' (LAN scan)'}`}
             style={{
               fontFamily: 'Geist Mono, monospace',
               fontSize: 11,
