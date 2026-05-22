@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { createVPC, deleteVPC, listVPCs } from '@/api/client'
 import type { VPC } from '@/api/client'
 import Button from '@/components/ui/Button'
@@ -142,6 +143,7 @@ function AddVPCForm({
 function VPCRow({ vpc, onChanged }: { vpc: VPC; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [showFirewall, setShowFirewall] = useState(false)
 
   const handleDelete = async () => {
     if (
@@ -186,12 +188,65 @@ function VPCRow({ vpc, onChanged }: { vpc: VPC; onChanged: () => void }) {
             )}
           </div>
         </div>
-        <Button variant="ghost" onClick={handleDelete} disabled={busy}>
-          {busy ? 'Deleting…' : 'Delete'}
-        </Button>
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="ghost" onClick={() => setShowFirewall(true)} disabled={busy}>
+            Firewall
+          </Button>
+          <Button variant="danger" onClick={handleDelete} disabled={busy}>
+            {busy ? 'Deleting…' : 'Delete'}
+          </Button>
+        </div>
       </div>
       {err && <p className="mt-2 text-sm text-bad">{err}</p>}
+      {showFirewall && (
+        <FirewallWIPModal vpcName={vpc.name} onClose={() => setShowFirewall(false)} />
+      )}
     </div>
+  )
+}
+
+// FirewallWIPModal is a placeholder for the (not-yet-built) per-VPC firewall
+// rule editor. Today every VPC enforces a fixed default-deny FORWARD policy
+// baked into the gateway LXC; this just signals that editing is coming.
+function FirewallWIPModal({ vpcName, onClose }: { vpcName: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1010] grid place-items-center p-4"
+      style={{ background: 'rgba(20,18,28,0.45)', backdropFilter: 'blur(8px)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Edit firewall rules"
+      onClick={onClose}
+    >
+      <div
+        className="glass"
+        style={{ width: '100%', maxWidth: 440, padding: '28px 32px' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="eyebrow">Firewall · {vpcName}</div>
+        <h3 style={{ fontSize: 20, margin: '4px 0 10px' }}>Edit firewall rules</h3>
+        <p style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--ink-body)', lineHeight: 1.6 }}>
+          Editable per-VPC firewall rules are a work in progress. For now every VPC
+          enforces a fixed policy: default-deny forwarding, with outbound internet
+          access allowed and other private networks (other VPCs, the cluster LAN,
+          standalone subnets) blocked.
+        </p>
+        <div className="flex justify-end">
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
