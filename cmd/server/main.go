@@ -911,6 +911,15 @@ func main() {
 				if err := vpcStackCurrent.gw.SweepHealth(ctx, pveClient); err != nil {
 					log.Printf("gateway sweep: health: %v", err)
 				}
+				// Keep each VPC's VXLAN zone peers aligned with live cluster
+				// membership — without this, a node that joins after a VPC was
+				// created has no vnet bridge, and VMs scheduled there fail to
+				// start ("bridge does not exist").
+				if n, err := vpcStackCurrent.mgr.ReconcilePeers(ctx); err != nil {
+					log.Printf("vpc peer reconcile: %v", err)
+				} else if n > 0 {
+					log.Printf("vpc peer reconcile: updated %d zone(s) to current cluster membership", n)
+				}
 				cancel()
 			}
 		}

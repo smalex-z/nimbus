@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 
 	"gorm.io/gorm"
@@ -43,6 +44,8 @@ import (
 type SDNClient interface {
 	CreateSDNZone(ctx context.Context, z proxmox.SDNZone) error
 	DeleteSDNZone(ctx context.Context, zone string) error
+	GetSDNZone(ctx context.Context, zone string) (*proxmox.SDNZone, error)
+	UpdateSDNZonePeers(ctx context.Context, zone, peers string) error
 	CreateSDNVNet(ctx context.Context, v proxmox.SDNVNet) error
 	DeleteSDNVNet(ctx context.Context, vnet string) error
 	CreateSDNSubnet(ctx context.Context, s proxmox.SDNSubnet) error
@@ -532,6 +535,92 @@ func (s *Service) bootstrapPVE(ctx context.Context, row *db.VPC, peers string) e
 	// single ApplySDN reload and let operators run `ifreload -a` by
 	// hand if a freshly-joined node is missing the VXLAN bridge.
 	return nil
+}
+
+// ReconcilePeers brings every VPC's VXLAN zone `peers` back in line with the
+// current set of online cluster nodes. Proxmox realizes a VXLAN vnet's bridge
+// only on the nodes listed in `peers`, so a zone created before a node joined
+// (or after one left) goes stale — a VM the scheduler then places on the new
+// node fails to start with "bridge 'vXXXX' does not exist". This is the
+// converge step: diff each zone's peers against the live set, rewrite the ones
+// that drifted, and ApplySDN once if anything changed.
+//
+// Best-effort and idempotent: when everything is already in sync it costs one
+// ResolvePeers plus one GetSDNZone per VPC and skips ApplySDN entirely. Meant
+// to run from the background sweep loop, so it converges within one reconcile
+// interval of a membership change.
+func (s *Service) ReconcilePeers(ctx context.Context) (changed int, err error) {
+	if !s.enabled {
+		return 0, nil
+	}
+	want, err := s.peers.ResolvePeers(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resolve cluster peers: %w", err)
+	}
+	if want == "" {
+		// An empty live set means the peer probe failed, not that the
+		// cluster has no nodes — never blank a zone's peers over that.
+		return 0, nil
+	}
+
+	var vpcs []db.VPC
+	if err := s.db.WithContext(ctx).Find(&vpcs).Error; err != nil {
+		return 0, fmt.Errorf("list vpcs: %w", err)
+	}
+
+	for i := range vpcs {
+		zone := vpcs[i].ZoneName
+		cur, gerr := s.px.GetSDNZone(ctx, zone)
+		if errors.Is(gerr, proxmox.ErrNotFound) {
+			continue // zone gone (mid-create/teardown) — nothing to reconcile
+		}
+		if gerr != nil {
+			return changed, fmt.Errorf("get zone %s: %w", zone, gerr)
+		}
+		if peersEqual(cur.Peers, want) {
+			continue
+		}
+		if uerr := s.px.UpdateSDNZonePeers(ctx, zone, want); uerr != nil {
+			return changed, fmt.Errorf("update zone %s peers: %w", zone, uerr)
+		}
+		log.Printf("vpcmgr: zone %s peers reconciled: %q -> %q", zone, cur.Peers, want)
+		changed++
+	}
+
+	if changed > 0 {
+		if err := s.px.ApplySDN(ctx); err != nil {
+			return changed, fmt.Errorf("apply sdn after peer reconcile: %w", err)
+		}
+	}
+	return changed, nil
+}
+
+// peersEqual compares two comma-separated peer lists as sets — order and
+// surrounding whitespace are insignificant to Proxmox, and treating them as
+// significant would trigger needless ApplySDN churn every reconcile.
+func peersEqual(a, b string) bool {
+	pa, pb := normPeers(a), normPeers(b)
+	if len(pa) != len(pb) {
+		return false
+	}
+	for i := range pa {
+		if pa[i] != pb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// normPeers splits, trims, drops blanks, and sorts a peer list for comparison.
+func normPeers(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // tearDownPVE reverses bootstrapPVE. Tolerates "already gone" 404s.

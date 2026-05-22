@@ -20,11 +20,14 @@ type fakeSDN struct {
 	// Per-method override hooks. nil = success no-op.
 	createZone   func(proxmox.SDNZone) error
 	deleteZone   func(string) error
+	getZone      func(string) (*proxmox.SDNZone, error)
+	updatePeers  func(string, string) error
 	createVNet   func(proxmox.SDNVNet) error
 	deleteVNet   func(string) error
 	createSubnet func(proxmox.SDNSubnet) error
 	deleteSubnet func(string, string) error
 	applySDN     func() error
+	applyCalls   int
 }
 
 func (f *fakeSDN) CreateSDNZone(_ context.Context, z proxmox.SDNZone) error {
@@ -40,6 +43,22 @@ func (f *fakeSDN) DeleteSDNZone(_ context.Context, z string) error {
 	defer f.mu.Unlock()
 	if f.deleteZone != nil {
 		return f.deleteZone(z)
+	}
+	return nil
+}
+func (f *fakeSDN) GetSDNZone(_ context.Context, z string) (*proxmox.SDNZone, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getZone != nil {
+		return f.getZone(z)
+	}
+	return &proxmox.SDNZone{Zone: z, Type: "vxlan"}, nil
+}
+func (f *fakeSDN) UpdateSDNZonePeers(_ context.Context, z, peers string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updatePeers != nil {
+		return f.updatePeers(z, peers)
 	}
 	return nil
 }
@@ -78,6 +97,7 @@ func (f *fakeSDN) DeleteSDNSubnet(_ context.Context, vnet, sub string) error {
 func (f *fakeSDN) ApplySDN(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.applyCalls++
 	if f.applySDN != nil {
 		return f.applySDN()
 	}
@@ -432,4 +452,87 @@ func formatU8(b byte) string {
 		b /= 10
 	}
 	return string(digits)
+}
+
+func TestReconcilePeers(t *testing.T) {
+	t.Parallel()
+	svc, sdn, _, database := newTestService(t)
+	// Resolver (from newTestService) reports peers "10.0.0.1,10.0.0.2".
+
+	// Two VPCs: one with stale peers (missing .2), one already in sync but
+	// in a different order — only the stale one should be rewritten.
+	for _, v := range []db.VPC{
+		{OwnerID: 1, Name: "stale", CIDR: "10.1.0.0/16", ZoneName: "vstale", VNetName: "vstale", Status: "active"},
+		{OwnerID: 1, Name: "synced", CIDR: "10.2.0.0/16", ZoneName: "vsynced", VNetName: "vsynced", Status: "active"},
+	} {
+		v := v
+		if err := database.DB.Create(&v).Error; err != nil {
+			t.Fatalf("seed vpc: %v", err)
+		}
+	}
+
+	cur := map[string]string{
+		"vstale":  "10.0.0.1",          // drifted: missing .2
+		"vsynced": "10.0.0.2,10.0.0.1", // same set, different order
+	}
+	sdn.getZone = func(z string) (*proxmox.SDNZone, error) {
+		return &proxmox.SDNZone{Zone: z, Type: "vxlan", Peers: cur[z]}, nil
+	}
+	var updated []string
+	sdn.updatePeers = func(z, peers string) error {
+		updated = append(updated, z+"="+peers)
+		return nil
+	}
+
+	changed, err := svc.ReconcilePeers(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcilePeers: %v", err)
+	}
+	if changed != 1 {
+		t.Fatalf("changed = %d, want 1", changed)
+	}
+	if len(updated) != 1 || updated[0] != "vstale=10.0.0.1,10.0.0.2" {
+		t.Fatalf("updates = %v, want only vstale rewritten to the full set", updated)
+	}
+	if sdn.applyCalls != 1 {
+		t.Fatalf("applyCalls = %d, want 1 (single apply after the batch)", sdn.applyCalls)
+	}
+}
+
+func TestReconcilePeers_NoopWhenAllSynced(t *testing.T) {
+	t.Parallel()
+	svc, sdn, _, database := newTestService(t)
+	if err := database.DB.Create(&db.VPC{
+		OwnerID: 1, Name: "ok", CIDR: "10.3.0.0/16", ZoneName: "vok", VNetName: "vok", Status: "active",
+	}).Error; err != nil {
+		t.Fatalf("seed vpc: %v", err)
+	}
+	sdn.getZone = func(z string) (*proxmox.SDNZone, error) {
+		return &proxmox.SDNZone{Zone: z, Type: "vxlan", Peers: "10.0.0.2, 10.0.0.1"}, nil
+	}
+	changed, err := svc.ReconcilePeers(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcilePeers: %v", err)
+	}
+	if changed != 0 || sdn.applyCalls != 0 {
+		t.Fatalf("in-sync should be a no-op: changed=%d applyCalls=%d", changed, sdn.applyCalls)
+	}
+}
+
+func TestReconcilePeers_SkipsMissingZone(t *testing.T) {
+	t.Parallel()
+	svc, sdn, _, database := newTestService(t)
+	if err := database.DB.Create(&db.VPC{
+		OwnerID: 1, Name: "gone", CIDR: "10.4.0.0/16", ZoneName: "vgone", VNetName: "vgone", Status: "provisioning",
+	}).Error; err != nil {
+		t.Fatalf("seed vpc: %v", err)
+	}
+	sdn.getZone = func(string) (*proxmox.SDNZone, error) { return nil, proxmox.ErrNotFound }
+	changed, err := svc.ReconcilePeers(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcilePeers should tolerate a missing zone: %v", err)
+	}
+	if changed != 0 || sdn.applyCalls != 0 {
+		t.Fatalf("missing zone should be skipped: changed=%d applyCalls=%d", changed, sdn.applyCalls)
+	}
 }
