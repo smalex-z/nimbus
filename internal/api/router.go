@@ -90,7 +90,7 @@ func NewRouter(d Deps) http.Handler {
 	ips := handlers.NewIPs(d.Pool, d.Reconciler).WithAudit(d.Audit)
 	cluster := handlers.NewCluster(d.Proxmox, d.Provision, d.NodeMgr).WithAudit(d.Audit).WithOperations(d.Operations)
 	bs := handlers.NewBootstrap(d.Bootstrap).WithAudit(d.Audit).WithSweeper(d.Provision)
-	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth)
+	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth).WithProxmox(d.Proxmox)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
 	opsH := handlers.NewOperations(d.Operations)
@@ -318,6 +318,11 @@ func NewRouter(d Deps) http.Handler {
 				// up. Same flow the install wizard uses.
 				r.Get("/proxmox/binding", nodes.Binding)
 				r.Put("/proxmox/binding", nodes.ChangeBinding)
+				// On-demand binding health: classifies the configured
+				// host (ok/unreachable/unauthorized) and, when it's
+				// broken, lists other nodes that still accept the token
+				// so a node that left the cluster can be rebound.
+				r.Get("/proxmox/binding/diagnose", setup.DiagnoseBinding)
 				// Discover Proxmox endpoints on this network — the
 				// admin reuses the install wizard's discovery handler
 				// from the change-binding modal, so the same scan +

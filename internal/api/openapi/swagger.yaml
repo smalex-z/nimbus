@@ -206,6 +206,29 @@ definitions:
       vmid:
         type: integer
     type: object
+  handlers.BindingDiagnosis:
+    properties:
+      alternatives:
+        description: |-
+          Alternatives are other discovered nodes that accept the *current*
+          token. Populated only when the configured host is unhealthy but the
+          token still works elsewhere (the "host left the cluster" / "host
+          moved" case) — safe one-secret rebind targets. Empty when healthy, or
+          when nothing on the network accepts the token (a rotated secret rather
+          than a moved host).
+        items:
+          $ref: '#/definitions/handlers.DiscoveredEndpoint'
+        type: array
+      configured_url:
+        description: ConfiguredURL echoes the host Nimbus is currently bound to.
+        type: string
+      detail:
+        description: Detail is a human-readable, banner-ready explanation of State.
+        type: string
+      state:
+        description: 'State of the configured host: "ok", "unreachable", or "unauthorized".'
+        type: string
+    type: object
   handlers.DiscoveredEndpoint:
     properties:
       ip:
@@ -217,7 +240,9 @@ definitions:
           Source tells the SPA where this entry came from so it can group
           or label appropriately. "localhost" only appears on hypervisor
           installs; "corosync" comes from /etc/pve/corosync.conf;
-          "scan" comes from the LAN TLS scan (CN extracted from the cert).
+          "cluster" comes from /cluster/status on the live Proxmox client
+          (admin mode); "scan" comes from the LAN TLS scan (CN extracted
+          from the cert).
         type: string
       url:
         type: string
@@ -4458,6 +4483,42 @@ paths:
       security:
       - cookieAuth: []
       summary: Reconfigure the Proxmox binding (admin)
+      tags:
+      - nodes
+  /proxmox/binding/diagnose:
+    get:
+      description: |-
+        Classifies the configured host (ok/unreachable/unauthorized) and,
+        when unhealthy, lists other discovered nodes that still accept
+        the current token — safe rebind targets when a node has left the
+        cluster or changed address.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.BindingDiagnosis'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Diagnose the Proxmox binding health (admin)
       tags:
       - nodes
   /proxmox/discover:
