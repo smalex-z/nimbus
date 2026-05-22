@@ -1291,6 +1291,14 @@ function ResultView({ result, onReset }: ResultViewProps) {
   const hasWarning = Boolean(result.warning)
   const hasTunnel = Boolean(publicSSHCommand)
   const isolated = Boolean(result.subnet_name)
+  // Label the IP by the network it lives on. Backend sets subnet_name to the
+  // VPC's name for VPC mode, "standalone-vm<vmid>" for the per-VM Standalone
+  // zone, and leaves it empty for a direct cluster-LAN (bridge) attachment.
+  const ipLabel = !result.subnet_name
+    ? 'Cluster LAN IP'
+    : result.subnet_name === `standalone-vm${result.vmid}`
+      ? 'Standalone IP'
+      : `VPC IP · ${result.subnet_name}`
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
@@ -1374,7 +1382,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
-          <CredCell label={isolated ? 'Subnet IP' : 'Local IP'} value={result.ip} />
+          <CredCell label={ipLabel} value={result.ip} />
           <CredCell
             label={result.console_password ? 'Username : password (one-time)' : 'Username'}
             value={
@@ -1420,7 +1428,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-3 mt-9 flex-wrap border-t border-line pt-6">
+        <div className="flex items-center justify-between gap-3 mt-6 flex-wrap border-t border-line pt-5">
           <div className="flex gap-2 flex-wrap">
             <Button
               variant="ghost"
@@ -1479,9 +1487,9 @@ function SSHAccessCell({ lanCommand, wanCommand, isolated }: SSHAccessCellProps)
   const value = showWAN ? (wanCommand as string) : lanCommand
 
   const caption = showWAN
-    ? 'Public via the Gopher tunnel — reachable from anywhere.'
+    ? 'Reachable from anywhere via the tunnel.'
     : isolated
-      ? 'Only reachable from inside the subnet, the Proxmox host, or via a tunnel.'
+      ? 'Reachable from inside the subnet, the Proxmox host, or via a tunnel.'
       : 'Direct on the cluster LAN.'
 
   return (
@@ -1512,7 +1520,7 @@ function SSHAccessCell({ lanCommand, wanCommand, isolated }: SSHAccessCellProps)
         <span>{value}</span>
         <CopyButton value={value} />
       </div>
-      <div className="text-[11px] text-ink-3 mt-1.5">{caption}</div>
+      <div className="text-[11px] text-ink-3 mt-1">{caption}</div>
     </div>
   )
 }
