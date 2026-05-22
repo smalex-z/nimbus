@@ -429,10 +429,15 @@ func (c *Client) CloneVM(ctx context.Context, sourceNode, targetNode string, tem
 }
 
 // WaitForTask polls a task's status until it reports stopped, returning an
-// error if exitstatus != "OK". On failure, the error body is enriched with
-// the tail of the task's log (last ~20 lines) so callers don't have to SSH
-// into a Proxmox node to find out *why* a task failed. Polls every
-// interval; total wait is bounded by ctx deadline.
+// error if exitstatus is not a success sentinel. On failure, the error body
+// is enriched with the tail of the task's log (last ~20 lines) so callers
+// don't have to SSH into a Proxmox node to find out *why* a task failed.
+// Polls every interval; total wait is bounded by ctx deadline.
+//
+// Success sentinels: "OK" (clean) and any "WARNINGS: N" (N>0, task completed
+// but emitted N warnings — vzcreate on Debian 12 emits the benign
+// "Systemd 252 detected. You may need to enable nesting." every run, and
+// treating it as failure would tear down a perfectly good container).
 func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval time.Duration) error {
 	if interval == 0 {
 		interval = 2 * time.Second
@@ -446,6 +451,10 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string, interval 
 		}
 		if st.Status == "stopped" {
 			if st.ExitStatus == "OK" {
+				return nil
+			}
+			if strings.HasPrefix(st.ExitStatus, "WARNINGS:") {
+				log.Printf("task %s completed with %s", taskID, st.ExitStatus)
 				return nil
 			}
 			// Fetch the task log tail on a separate context so a ctx

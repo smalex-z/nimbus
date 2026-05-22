@@ -30,6 +30,7 @@ import Textarea from '@/components/ui/Textarea'
 import TierCard from '@/components/ui/TierCard'
 import CopyButton from '@/components/ui/CopyButton'
 import KeyFileUpload from '@/components/ui/KeyFileUpload'
+import { NetworkIcon, TerminalIcon } from '@/components/ui/icons'
 import { validatePrivateKey, validatePublicKey } from '@/utils/sshKey'
 import { buildSSHCommand, parseTunnelURL } from '@/lib/format'
 import TunnelsModal from '@/components/ui/TunnelsModal'
@@ -1290,6 +1291,14 @@ function ResultView({ result, onReset }: ResultViewProps) {
   const hasWarning = Boolean(result.warning)
   const hasTunnel = Boolean(publicSSHCommand)
   const isolated = Boolean(result.subnet_name)
+  // Label the IP by the network it lives on. Backend sets subnet_name to the
+  // VPC's name for VPC mode, "standalone-vm<vmid>" for the per-VM Standalone
+  // zone, and leaves it empty for a direct cluster-LAN (bridge) attachment.
+  const ipLabel = !result.subnet_name
+    ? 'Cluster LAN IP'
+    : result.subnet_name === `standalone-vm${result.vmid}`
+      ? 'Standalone IP'
+      : `VPC IP · ${result.subnet_name}`
   const statusLabel = hasWarning ? 'MACHINE READY (UNVERIFIED)' : 'MACHINE READY'
   const statusColorClass = hasWarning
     ? 'bg-[rgba(184,101,15,0.12)] text-warn'
@@ -1373,7 +1382,7 @@ function ResultView({ result, onReset }: ResultViewProps) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-7">
           <CredCell label="Hostname" value={result.hostname} />
-          <CredCell label={isolated ? 'Subnet IP' : 'Local IP'} value={result.ip} />
+          <CredCell label={ipLabel} value={result.ip} />
           <CredCell
             label={result.console_password ? 'Username : password (one-time)' : 'Username'}
             value={
@@ -1383,10 +1392,10 @@ function ResultView({ result, onReset }: ResultViewProps) {
             }
           />
           <CredCell label="VMID / Node" value={`${result.vmid} on ${result.node}`} />
-          <CredCell
-            label={hasTunnel ? 'SSH (LAN)' : isolated ? 'SSH (from inside subnet)' : 'SSH command'}
-            value={sshCommand}
-            fullWidth
+          <SSHAccessCell
+            lanCommand={sshCommand}
+            wanCommand={publicSSHCommand}
+            isolated={isolated}
           />
         </div>
         {result.console_password && (
@@ -1396,14 +1405,6 @@ function ResultView({ result, onReset }: ResultViewProps) {
             in Proxmox. Save it now — it's not stored anywhere and a new one is
             generated on every provision.
           </p>
-        )}
-
-        {publicSSHCommand && tunnel && (
-          <GopherTunnelBox
-            host={tunnel.host}
-            port={tunnel.port}
-            sshCommand={publicSSHCommand}
-          />
         )}
 
         {result.ssh_private_key && (
@@ -1427,27 +1428,33 @@ function ResultView({ result, onReset }: ResultViewProps) {
           </div>
         )}
 
-        <div className="flex gap-2.5 justify-end mt-9 flex-wrap">
-          <Button
-            variant="ghost"
-            onClick={() => window.open(`/vms/${result.id}/console`, '_blank', 'noopener')}
-            title="Serial console in the browser — works for VPC-isolated VMs without any tunnel"
-          >
-            ⌨ Browser console
-          </Button>
-          {hasTunnel && (
+        <div className="flex items-center justify-between gap-3 mt-6 flex-wrap border-t border-line pt-5">
+          <div className="flex gap-2 flex-wrap">
             <Button
               variant="ghost"
-              onClick={() => setTunnelsOpen(true)}
-              title="Add HTTP/TCP tunnels for services running on this VM"
+              size="small"
+              onClick={() => window.open(`/vms/${result.id}/console`, '_blank', 'noopener')}
+              title="Serial console in the browser — works for VPC-isolated VMs without any tunnel"
             >
-              🌐 Manage tunnels
+              <TerminalIcon /> Browser console
             </Button>
-          )}
-          <Link to={dashboardHref}>
-            <Button variant="ghost">{dashboardLabel}</Button>
-          </Link>
-          <Button onClick={onReset}>Provision another</Button>
+            {hasTunnel && (
+              <Button
+                variant="ghost"
+                size="small"
+                onClick={() => setTunnelsOpen(true)}
+                title="Add HTTP/TCP tunnels for services running on this VM"
+              >
+                <NetworkIcon /> Manage tunnels
+              </Button>
+            )}
+          </div>
+          <div className="flex gap-2.5 flex-wrap">
+            <Link to={dashboardHref}>
+              <Button variant="ghost">{dashboardLabel}</Button>
+            </Link>
+            <Button onClick={onReset}>Provision another</Button>
+          </div>
         </div>
         {tunnelsOpen && (
           <TunnelsModal
@@ -1461,48 +1468,59 @@ function ResultView({ result, onReset }: ResultViewProps) {
   )
 }
 
-interface GopherTunnelBoxProps {
-  host: string
-  port: number
-  sshCommand: string
+interface SSHAccessCellProps {
+  lanCommand: string
+  // wanCommand is the public command via the Gopher tunnel — present only when
+  // a tunnel was established. Its presence is what turns on the WAN/LAN toggle.
+  wanCommand?: string
+  isolated: boolean
 }
 
-// GopherTunnelBox renders a self-contained section explaining the public
-// tunnel that's been wired up via Gopher (ACM@UCLA's reverse-tunnel gateway).
-// Only shown when the provision actually established the tunnel.
-function GopherTunnelBox({ host, port, sshCommand }: GopherTunnelBoxProps) {
-  const endpoint = `${host}:${port}`
+// SSHAccessCell is the single SSH connect cell. When a public tunnel exists it
+// shows a WAN/LAN toggle (WAN = via the Gopher tunnel, reachable anywhere; LAN
+// = the direct cluster-LAN command) rather than spilling the public tunnel
+// into a whole separate section. Defaults to WAN when available, since that's
+// the address that works from anywhere.
+function SSHAccessCell({ lanCommand, wanCommand, isolated }: SSHAccessCellProps) {
+  const [mode, setMode] = useState<'wan' | 'lan'>(wanCommand ? 'wan' : 'lan')
+  const showWAN = mode === 'wan' && Boolean(wanCommand)
+  const value = showWAN ? (wanCommand as string) : lanCommand
+
+  const caption = showWAN
+    ? 'Reachable from anywhere via the tunnel.'
+    : isolated
+      ? 'Reachable from inside the subnet, the Proxmox host, or via a tunnel.'
+      : 'Direct on the cluster LAN.'
+
   return (
-    <div className="mt-7 p-5 rounded-[10px] bg-[rgba(45,125,90,0.06)] border border-[rgba(45,125,90,0.25)]">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span className="text-lg" aria-hidden>🌐</span>
-          <span className="font-display text-base font-medium">Gopher tunnel</span>
+    <div className="p-3.5 rounded-[10px] bg-white/85 border border-line sm:col-span-2">
+      <div className="flex items-center justify-between gap-3 mb-1.5">
+        <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3">
+          SSH command
         </div>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-good bg-[rgba(45,125,90,0.12)] px-2 py-0.5 rounded">
-          ACTIVE
-        </span>
-      </div>
-      <p className="text-[13px] text-ink-2 mt-2 leading-relaxed">
-        SSH is exposed publicly via the Gopher reverse-tunnel gateway, so you can
-        reach this machine from anywhere — no LAN required.
-      </p>
-      <div className="grid grid-cols-1 gap-3 mt-4">
-        <div className="p-3.5 rounded-[10px] bg-white/85 border border-line">
-          <div className="text-[10px] font-mono uppercase tracking-widest text-ink-3 mb-1.5">
-            Routing
+        {wanCommand && (
+          <div className="inline-flex rounded-md border border-line overflow-hidden text-[10px] font-mono uppercase tracking-widest">
+            {(['wan', 'lan'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                aria-pressed={mode === m}
+                className={`px-2.5 py-1 transition-colors ${
+                  mode === m ? 'bg-ink text-white' : 'text-ink-3 hover:text-ink'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
           </div>
-          <div className="font-mono text-sm text-ink break-all flex items-center gap-2 flex-wrap">
-            <span>{endpoint}</span>
-            <span className="text-ink-3" aria-hidden>→</span>
-            <span>localhost:22</span>
-            <span className="font-mono text-[10px] uppercase tracking-widest text-ink-3 bg-[rgba(27,23,38,0.06)] px-1.5 py-0.5 rounded">
-              SSH
-            </span>
-          </div>
-        </div>
-        <CredCell label="SSH (public)" value={sshCommand} fullWidth />
+        )}
       </div>
+      <div className="font-mono text-sm text-ink break-all flex items-center justify-between gap-3">
+        <span>{value}</span>
+        <CopyButton value={value} />
+      </div>
+      <div className="text-[11px] text-ink-3 mt-1">{caption}</div>
     </div>
   )
 }

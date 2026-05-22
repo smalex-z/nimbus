@@ -193,6 +193,22 @@ func (c *Client) UpdateSDNZoneNodes(ctx context.Context, zone, nodes string) err
 	return c.do(ctx, http.MethodPut, path, params, nil)
 }
 
+// UpdateSDNZonePeers rewrites just the `peers` field of an existing VXLAN
+// zone — the comma-separated VTEP node IPs. Proxmox realizes a VXLAN vnet's
+// bridge only on nodes in this list, so it must track live cluster membership
+// (see vpcmgr.Service.ReconcilePeers). Rejects an empty list: clearing peers
+// would orphan every vnet in the zone. Like all SDN mutations, the caller
+// must invoke ApplySDN afterwards for the change to land in the running config.
+func (c *Client) UpdateSDNZonePeers(ctx context.Context, zone, peers string) error {
+	if peers == "" {
+		return errors.New("update sdn zone peers: empty peer list would orphan the zone")
+	}
+	params := url.Values{}
+	params.Set("peers", peers)
+	path := "/cluster/sdn/zones/" + url.PathEscape(zone)
+	return c.do(ctx, http.MethodPut, path, params, nil)
+}
+
 // ListSDNVNets returns every VNet across every zone.
 func (c *Client) ListSDNVNets(ctx context.Context) ([]SDNVNet, error) {
 	var out []SDNVNet

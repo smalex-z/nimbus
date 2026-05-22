@@ -27,10 +27,38 @@ type Setup struct {
 	cfg     *config.Config
 	restart func()
 	auth    *service.AuthService // nil in setup mode (Proxmox not yet configured)
+	// px is the live Proxmox client. Nil in the install wizard (no
+	// credentials yet); set via WithProxmox in normal mode so Discover
+	// can ask the cluster for its node list instead of relying on a
+	// same-subnet TLS scan.
+	px nodeAddrLister
+}
+
+// nodeAddrLister is the slice of *proxmox.Client that Discover needs —
+// name → IP for every node in the bound cluster.
+type nodeAddrLister interface {
+	NodeAddresses(ctx context.Context) (map[string]string, error)
 }
 
 func NewSetup(cfg *config.Config, restart func()) *Setup {
 	return &Setup{cfg: cfg, restart: restart}
+}
+
+// WithProxmox installs the live Proxmox client. Used in normal mode so the
+// admin change-binding modal's discovery can enumerate the bound cluster
+// authoritatively; the install wizard leaves it nil and falls back to the
+// corosync + TLS-scan path. Returns the receiver so it chains after
+// NewSetupWithAuth.
+//
+// Takes the concrete type (not nodeAddrLister) so a nil *proxmox.Client —
+// e.g. the zero-deps router in openapi_routes_test.go — stays a true nil
+// h.px rather than a non-nil interface wrapping a nil pointer.
+func (h *Setup) WithProxmox(px *proxmox.Client) *Setup {
+	if px == nil {
+		return h
+	}
+	h.px = px
+	return h
 }
 
 // NewSetupWithAuth is used in normal mode where the DB is available.
@@ -290,7 +318,9 @@ type DiscoveredEndpoint struct {
 	// Source tells the SPA where this entry came from so it can group
 	// or label appropriately. "localhost" only appears on hypervisor
 	// installs; "corosync" comes from /etc/pve/corosync.conf;
-	// "scan" comes from the LAN TLS scan (CN extracted from the cert).
+	// "cluster" comes from /cluster/status on the live Proxmox client
+	// (admin mode); "scan" comes from the LAN TLS scan (CN extracted
+	// from the cert).
 	Source string `json:"source"`
 }
 
@@ -308,9 +338,12 @@ type discoverResult struct {
 }
 
 // Discover handles GET /api/setup/discover (and the admin-side
-// /api/proxmox/discover). Two complementary sources merged:
+// /api/proxmox/discover). Up to three complementary sources merged:
 //   - corosync.conf (authoritative cluster membership; only readable on
 //     PVE nodes since /etc/pve requires www-data group membership)
+//   - /cluster/status via the live Proxmox client (admin mode only —
+//     authoritative name+IP for every node in the bound cluster, and
+//     unlike the TLS scan it isn't limited to the host's own subnets)
 //   - TLS handshake on port 8006 across local subnets — works from any
 //     box, and the cert CN is the Proxmox node hostname so we get names
 //     for free without needing API credentials.
@@ -388,7 +421,29 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Source 2: subnet TLS scan — finds Proxmox nodes anywhere on the
+	// Source 2: the bound cluster itself. In normal mode the admin
+	// change-binding modal has a live Proxmox client, so /cluster/status
+	// gives us every node name + IP authoritatively — no subnet guessing.
+	// This is the path that matters when Nimbus runs on a LAN VM whose
+	// own /24 doesn't overlap the cluster's (the TLS scan below only
+	// covers the host's own subnets, so it finds nothing there).
+	if h.px != nil {
+		cctx, ccancel := context.WithTimeout(r.Context(), 5*time.Second)
+		if addrs, err := h.px.NodeAddresses(cctx); err == nil {
+			for name, ip := range addrs {
+				if ip == "" {
+					continue
+				}
+				addEndpoint(DiscoveredEndpoint{
+					URL: "https://" + ip + ":8006", IP: ip,
+					NodeName: name, Source: "cluster",
+				})
+			}
+		}
+		ccancel()
+	}
+
+	// Source 3: subnet TLS scan — finds Proxmox nodes anywhere on the
 	// LAN. The cert CN is the node hostname; we extract it without
 	// needing API credentials. Skips IPs already covered by corosync
 	// (already-named) but still probes them when the corosync entry was

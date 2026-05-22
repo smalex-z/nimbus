@@ -684,6 +684,16 @@ func main() {
 	// (~10-20 min for the full 4-OS catalog) so an in-flight guard
 	// inside nodemgr prevents the every-60 s tick from stacking calls.
 	nodeMgrSvc.SetTemplateBootstrapper(bootstrapSvc)
+	// Reap any drains that were "in flight" when Nimbus restarted (or whose
+	// HTTP stream died before the executor's cleanup write could land).
+	// drainsInFlight is in-memory and always empty at this point, so any
+	// db.Node row still tagged "draining" is by definition orphaned. Flip
+	// back to "cordoned" so the operator can retry or uncordon.
+	if n, err := nodeMgrSvc.ReapStuckDrains(context.Background()); err != nil {
+		log.Printf("warning: stuck-drain reap failed: %v", err)
+	} else if n > 0 {
+		log.Printf("reaped %d stuck drain(s)", n)
+	}
 	// Background reconcile: same cadence as the IP pool's. Observed
 	// nodes upsert + LastSeenAt bump; unobserved nodes prune after the
 	// miss threshold, mirroring the ippool pattern. Failures are logged
@@ -900,6 +910,15 @@ func main() {
 				}
 				if err := vpcStackCurrent.gw.SweepHealth(ctx, pveClient); err != nil {
 					log.Printf("gateway sweep: health: %v", err)
+				}
+				// Keep each VPC's VXLAN zone peers aligned with live cluster
+				// membership — without this, a node that joins after a VPC was
+				// created has no vnet bridge, and VMs scheduled there fail to
+				// start ("bridge does not exist").
+				if n, err := vpcStackCurrent.mgr.ReconcilePeers(ctx); err != nil {
+					log.Printf("vpc peer reconcile: %v", err)
+				} else if n > 0 {
+					log.Printf("vpc peer reconcile: updated %d zone(s) to current cluster membership", n)
 				}
 				cancel()
 			}

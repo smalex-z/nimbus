@@ -295,6 +295,16 @@ func TestClient_WaitForTask(t *testing.T) {
 		}
 	})
 
+	t.Run("WARNINGS exit status treated as success", func(t *testing.T) {
+		_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
+			writeEnvelope(w, map[string]string{"status": "stopped", "exitstatus": "WARNINGS: 1"})
+		})
+		err := c.WaitForTask(context.Background(), "node1", "UPID:warn", 10*time.Millisecond)
+		if err != nil {
+			t.Errorf("expected WARNINGS to be treated as success, got: %v", err)
+		}
+	})
+
 	t.Run("ctx cancellation aborts polling", func(t *testing.T) {
 		_, c := newMockPVE(t, func(w http.ResponseWriter, r *http.Request) {
 			writeEnvelope(w, map[string]string{"status": "running"})
