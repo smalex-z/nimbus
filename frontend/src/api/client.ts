@@ -1818,6 +1818,29 @@ export async function changeProxmoxBinding(req: {
   await api.put('/proxmox/binding', req, { timeout: 15_000 })
 }
 
+// BindingDiagnosis explains why the configured Proxmox binding is (un)healthy.
+// state: 'ok' (binding works), 'unreachable' (host down / wrong address / no
+// TLS), or 'unauthorized' (host answers but rejects the token — usually means
+// the node left the cluster that owns the token, or the secret was rotated).
+// alternatives lists other discovered nodes that DO accept the current token —
+// safe one-secret rebind targets — and is populated only when the configured
+// host is broken but the token still works elsewhere.
+export interface BindingDiagnosis {
+  state: 'ok' | 'unreachable' | 'unauthorized'
+  configured_url: string
+  detail: string
+  alternatives: DiscoveredEndpoint[]
+}
+
+// diagnoseProxmoxBinding hits /api/proxmox/binding/diagnose. On-demand only —
+// it probes the configured host plus fans the token across discovered nodes
+// (a LAN scan), so it can take a few seconds. Call it when the dashboard's
+// Proxmox-backed panels error, not on a poll.
+export async function diagnoseProxmoxBinding(): Promise<BindingDiagnosis> {
+  const { data } = await api.get<BindingDiagnosis>('/proxmox/binding/diagnose', { timeout: 30_000 })
+  return data
+}
+
 // --- /api/nodes admin actions ------------------------------------------------
 
 export async function cordonNode(name: string, reason: string): Promise<void> {

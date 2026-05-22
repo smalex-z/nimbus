@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { acknowledgeOperation, adminDeleteVM, adminVMLifecycle, getClusterStats, getOperation, listClusterVMs, listIPs, listNodes } from '@/api/client'
+import { acknowledgeOperation, adminDeleteVM, adminVMLifecycle, diagnoseProxmoxBinding, getClusterStats, getOperation, getProxmoxBinding, listClusterVMs, listIPs, listNodes, type BindingDiagnosis, type ProxmoxBinding } from '@/api/client'
+import { ChangeBindingModal } from '@/components/ProxmoxBindingModal'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import DeleteVMConfirm from '@/components/ui/DeleteVMConfirm'
@@ -235,9 +236,7 @@ export default function Admin() {
       {statsLoading && (
         <p className="mt-8 text-ink-3 font-mono text-sm">Loading overview…</p>
       )}
-      {statsError && (
-        <Card className="mt-8 p-6 text-bad text-sm">Failed to load overview: {statsError}</Card>
-      )}
+      {statsError && <BindingTroubleBanner error={statsError} />}
 
       {!statsLoading && (
         <>
@@ -295,6 +294,57 @@ export default function Admin() {
         </>
       )}
     </div>
+  )
+}
+
+// BindingTroubleBanner replaces the bare "internal server error" card when the
+// dashboard's Proxmox calls fail. It diagnoses *why* (host down vs. token
+// rejected) and, when the configured node is unusable but the token still
+// works elsewhere — e.g. the node left the cluster — offers one-click rebind
+// targets that open the change-binding modal pre-filled with the chosen node
+// and the existing token. The operator confirms the swap in the modal.
+function BindingTroubleBanner({ error }: { error: string }) {
+  const [diag, setDiag] = useState<BindingDiagnosis | null>(null)
+  const [binding, setBinding] = useState<ProxmoxBinding | null>(null)
+  const [rebindHost, setRebindHost] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    // Both best-effort: the diagnosis explains the failure; the current
+    // binding lets the rebind modal pre-fill the existing token id. On
+    // failure we fall back to the raw error text.
+    diagnoseProxmoxBinding().then((d) => { if (!cancelled) setDiag(d) }).catch(() => { /* fall back to raw error */ })
+    getProxmoxBinding().then((b) => { if (!cancelled) setBinding(b) }).catch(() => { /* rebind buttons just stay disabled */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // Pre-fill the chosen alternative host but keep the existing token (empty
+  // secret in the modal = "keep current", since Proxmox tokens are cluster-wide).
+  const modalCurrent: ProxmoxBinding | null =
+    rebindHost && binding ? { ...binding, host: rebindHost } : null
+
+  return (
+    <Card className="mt-8 p-6 text-sm">
+      <div className="text-bad font-medium">Can&rsquo;t reach Proxmox</div>
+      <p className="mt-2 text-ink-2 leading-relaxed">
+        {diag?.detail ?? `Failed to load overview: ${error}`}
+      </p>
+      {binding && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {diag?.alternatives.map((ep) => (
+            <Button key={ep.url} variant="primary" size="small" onClick={() => setRebindHost(ep.url)}>
+              Rebind to {ep.node_name || ep.ip}
+            </Button>
+          ))}
+          <Button variant="ghost" size="small" onClick={() => setRebindHost(binding.host)}>
+            Change connection…
+          </Button>
+        </div>
+      )}
+      {modalCurrent && (
+        <ChangeBindingModal current={modalCurrent} onClose={() => setRebindHost(null)} />
+      )}
+    </Card>
   )
 }
 

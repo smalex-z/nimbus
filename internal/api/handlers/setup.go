@@ -366,13 +366,24 @@ type discoverResult struct {
 // @Failure     403 {object} EnvelopeError
 // @Router      /proxmox/discover [get]
 func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
-	result := discoverResult{Endpoints: []DiscoveredEndpoint{}}
+	endpoints, isHypervisor := h.gatherEndpoints(r.Context())
+	result := discoverResult{Endpoints: endpoints, IsHypervisor: isHypervisor}
 	gw, iface := defaultGatewayAndIface()
 	result.SuggestedGateway = gw
 	result.SuggestedPrefixLen = defaultPrefixLen(iface, gw)
 
+	response.Success(w, result)
+}
+
+// gatherEndpoints merges the three discovery sources — corosync membership,
+// live /cluster/status (admin mode), and the LAN TLS scan — into a deduped,
+// name-backfilled endpoint list. Shared by Discover (the operator-facing list)
+// and DiagnoseBinding (which probes these as candidate entry nodes when the
+// configured binding is unhealthy). Always returns a non-nil slice.
+func (h *Setup) gatherEndpoints(ctx context.Context) (endpoints []DiscoveredEndpoint, isHypervisor bool) {
+	endpoints = []DiscoveredEndpoint{}
 	if _, err := os.Stat("/etc/pve"); err == nil {
-		result.IsHypervisor = true
+		isHypervisor = true
 	}
 
 	// Source 1: corosync cluster membership (instant, authoritative on PVE nodes).
@@ -385,10 +396,10 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seenURL[ep.URL] = true
-		result.Endpoints = append(result.Endpoints, ep)
+		endpoints = append(endpoints, ep)
 	}
 
-	if result.IsHypervisor {
+	if isHypervisor {
 		// localhost gets the local node's name from corosync if we
 		// can identify which corosync entry is "us" by IP intersection.
 		localIPs := localIPv4s()
@@ -428,7 +439,7 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	// own /24 doesn't overlap the cluster's (the TLS scan below only
 	// covers the host's own subnets, so it finds nothing there).
 	if h.px != nil {
-		cctx, ccancel := context.WithTimeout(r.Context(), 5*time.Second)
+		cctx, ccancel := context.WithTimeout(ctx, 5*time.Second)
 		if addrs, err := h.px.NodeAddresses(cctx); err == nil {
 			for name, ip := range addrs {
 				if ip == "" {
@@ -448,16 +459,16 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 	// needing API credentials. Skips IPs already covered by corosync
 	// (already-named) but still probes them when the corosync entry was
 	// IP-only so we backfill names.
-	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	sctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	for _, hit := range scanPort8006(ctx) {
+	for _, hit := range scanPort8006(sctx) {
 		url := "https://" + hit.IP + ":8006"
 		if seenURL[url] {
 			// Backfill the name if the prior entry didn't have one.
 			if hit.NodeName != "" {
-				for i := range result.Endpoints {
-					if result.Endpoints[i].URL == url && result.Endpoints[i].NodeName == "" {
-						result.Endpoints[i].NodeName = hit.NodeName
+				for i := range endpoints {
+					if endpoints[i].URL == url && endpoints[i].NodeName == "" {
+						endpoints[i].NodeName = hit.NodeName
 					}
 				}
 			}
@@ -468,7 +479,137 @@ func (h *Setup) Discover(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	response.Success(w, result)
+	return endpoints, isHypervisor
+}
+
+// BindingDiagnosis is the verdict from GET /api/proxmox/binding/diagnose. It
+// explains why the configured Proxmox binding is (un)healthy and, when the
+// host is unusable but the token still works elsewhere, lists the nodes the
+// operator can rebind to without re-entering credentials.
+type BindingDiagnosis struct {
+	// State of the configured host: "ok", "unreachable", or "unauthorized".
+	State string `json:"state"`
+	// ConfiguredURL echoes the host Nimbus is currently bound to.
+	ConfiguredURL string `json:"configured_url"`
+	// Detail is a human-readable, banner-ready explanation of State.
+	Detail string `json:"detail"`
+	// Alternatives are other discovered nodes that accept the *current*
+	// token. Populated only when the configured host is unhealthy but the
+	// token still works elsewhere (the "host left the cluster" / "host
+	// moved" case) — safe one-secret rebind targets. Empty when healthy, or
+	// when nothing on the network accepts the token (a rotated secret rather
+	// than a moved host).
+	Alternatives []DiscoveredEndpoint `json:"alternatives"`
+}
+
+// DiagnoseBinding handles GET /api/proxmox/binding/diagnose. Probes the
+// configured host's /version with the current token to classify the binding
+// (ok / unreachable / unauthorized); when unhealthy it fans the *same* token
+// across every other discoverable node so the SPA can tell "host moved / left
+// the cluster" (some node still accepts the token → offer rebind) apart from
+// "credentials revoked" (nobody accepts it → re-enter the secret).
+//
+// On-demand only — the LAN scan + fan-out costs a few seconds, so the SPA
+// calls this when the dashboard's Proxmox-backed panels error, not on a poll.
+//
+// @Summary     Diagnose the Proxmox binding health (admin)
+// @Description Classifies the configured host (ok/unreachable/unauthorized) and,
+// @Description when unhealthy, lists other discovered nodes that still accept
+// @Description the current token — safe rebind targets when a node has left the
+// @Description cluster or changed address.
+// @Tags        nodes
+// @Security    cookieAuth
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=BindingDiagnosis}
+// @Failure     401 {object} EnvelopeError
+// @Failure     403 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /proxmox/binding/diagnose [get]
+func (h *Setup) DiagnoseBinding(w http.ResponseWriter, r *http.Request) {
+	if h.cfg == nil {
+		response.Error(w, http.StatusServiceUnavailable, "diagnose not wired in this build")
+		return
+	}
+	host := h.cfg.ProxmoxHost
+	out := BindingDiagnosis{ConfiguredURL: host, Alternatives: []DiscoveredEndpoint{}}
+
+	// Probe the configured entry node.
+	probeCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	_, err := proxmox.New(host, h.cfg.ProxmoxTokenID, h.cfg.ProxmoxTokenSecret, 5*time.Second).Version(probeCtx)
+	cancel()
+	state := proxmox.Classify(err)
+	out.State = string(state)
+	if state == proxmox.BindingOK {
+		out.Detail = "Proxmox binding is healthy."
+		response.Success(w, out)
+		return
+	}
+
+	// Unhealthy — fan the current token across every other discovered node
+	// to learn whether any still accept it.
+	endpoints, _ := h.gatherEndpoints(r.Context())
+	out.Alternatives = h.probeAlternatives(r.Context(), endpoints, host)
+	out.Detail = bindingDetail(state, len(out.Alternatives) > 0)
+	response.Success(w, out)
+}
+
+// probeAlternatives tries the configured token against every endpoint except
+// the configured host, in parallel, and returns those that answer /version —
+// i.e. the nodes the operator could rebind to with the same secret.
+func (h *Setup) probeAlternatives(ctx context.Context, endpoints []DiscoveredEndpoint, configured string) []DiscoveredEndpoint {
+	cfg := normalizeEndpoint(configured)
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	ok := []DiscoveredEndpoint{}
+	for _, ep := range endpoints {
+		if normalizeEndpoint(ep.URL) == cfg {
+			continue // the one we already know is broken
+		}
+		ep := ep
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pctx, pcancel := context.WithTimeout(ctx, 4*time.Second)
+			defer pcancel()
+			if _, err := proxmox.New(ep.URL, h.cfg.ProxmoxTokenID, h.cfg.ProxmoxTokenSecret, 4*time.Second).Version(pctx); err == nil {
+				mu.Lock()
+				ok = append(ok, ep)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return ok
+}
+
+// bindingDetail composes the operator-facing explanation for a non-OK state.
+func bindingDetail(state proxmox.BindingState, haveAlternatives bool) string {
+	switch state {
+	case proxmox.BindingUnauthorized:
+		if haveAlternatives {
+			return "The configured host is online but no longer accepts your API token — it looks like it left the cluster. Your token still works on the nodes listed below; rebind to one of them (no new secret needed)."
+		}
+		return "The configured host rejected your API token, and no other node on the network accepts it either. The token was likely revoked or its secret rotated — re-enter the token secret."
+	case proxmox.BindingUnreachable:
+		if haveAlternatives {
+			return "The configured host is unreachable, but your token works on other nodes — the host is likely down or its address changed. Rebind to a reachable node below."
+		}
+		return "The configured host is unreachable and no other Proxmox node responded on this network. Check that the cluster is online and reachable from Nimbus."
+	default:
+		return ""
+	}
+}
+
+// normalizeEndpoint reduces a Proxmox URL to a lowercased host[:port] so the
+// configured host and a discovered endpoint compare equal regardless of
+// scheme or a trailing slash.
+func normalizeEndpoint(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	raw = strings.TrimPrefix(raw, "https://")
+	raw = strings.TrimPrefix(raw, "http://")
+	return strings.TrimSuffix(raw, "/")
 }
 
 // corosyncMember pairs a node's logical name (from `name:` lines in
