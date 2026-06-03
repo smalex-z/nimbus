@@ -14,6 +14,9 @@ import type {
   ProvisionProgress,
   AuditListParams,
   AuditListResponse,
+  DivergenceListParams,
+  DivergenceListResponse,
+  DivergenceSummary,
   ProvisionRequest,
   ProvisionResult,
   ProvisionStep,
@@ -165,6 +168,31 @@ export async function listAuditEvents(params: AuditListParams = {}): Promise<Aud
   if (params.limit !== undefined) query.limit = String(params.limit)
   if (params.offset !== undefined) query.offset = String(params.offset)
   const { data } = await api.get<AuditListResponse>('/audit', { params: query })
+  return data
+}
+
+// listDivergences reads the VM divergence inventory the EPIC #296
+// reconciler maintains. Admin-only. Defaults to open divergences
+// newest-first; pass status='resolved' or 'all' for history.
+export async function listDivergences(
+  params: DivergenceListParams = {},
+): Promise<DivergenceListResponse> {
+  const query: Record<string, string> = {}
+  if (params.type) query.type = params.type
+  if (params.status) query.status = params.status
+  if (params.limit !== undefined) query.limit = String(params.limit)
+  if (params.offset !== undefined) query.offset = String(params.offset)
+  const { data } = await api.get<DivergenceListResponse>('/admin/divergences', {
+    params: query,
+  })
+  return data
+}
+
+// getDivergenceSummary returns aggregate counts per category plus the
+// most recent detection timestamp — the data the dashboard's Sync
+// Status widget polls at ~10 s intervals.
+export async function getDivergenceSummary(): Promise<DivergenceSummary> {
+  const { data } = await api.get<DivergenceSummary>('/admin/divergences/summary')
   return data
 }
 

@@ -23,6 +23,7 @@ import (
 	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/reconciler"
 	"nimbus/internal/s3storage"
 	"nimbus/internal/selftunnel"
 	"nimbus/internal/service"
@@ -51,8 +52,12 @@ type Deps struct {
 	NodeMgr       *nodemgr.Service
 	Audit         *audit.Service      // nil-safe — handlers and emit sites no-op when unset
 	Operations    *operations.Service // tracks long-running migrate/provision tasks; nil-safe
-	VNetMgr       *vnetmgr.Service    // legacy: per-user-subnet path during deprecation
-	VPCMgr        *vpcmgr.Service     // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
+	// Reconcile is the EPIC #296 divergence detector. Optional —
+	// nil-safe via the handler's no-op path so instances with the
+	// background loop disabled still mount the routes.
+	Reconcile *reconciler.Reconciler
+	VNetMgr   *vnetmgr.Service // legacy: per-user-subnet path during deprecation
+	VPCMgr    *vpcmgr.Service  // Networking-v1 VPC primitive (VXLAN + per-VPC gateway LXC)
 	// VPCsHandler and NetworkingHandler are pre-constructed in main.go
 	// so the rebuildVPCStack closure can call SetSvc / SetVPCSource on
 	// them after every Settings → Network save (live-rotate without a
@@ -93,6 +98,7 @@ func NewRouter(d Deps) http.Handler {
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth).WithProxmox(d.Proxmox)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
+	divergencesH := handlers.NewDivergences(d.Reconcile)
 	opsH := handlers.NewOperations(d.Operations)
 	if d.UserBuckets != nil {
 		auth = auth.WithBucketPurger(d.UserBuckets)
@@ -288,6 +294,12 @@ func NewRouter(d Deps) http.Handler {
 				// other handlers call inline; this endpoint exposes
 				// the table for the Infrastructure → Audit page.
 				r.Get("/audit", auditH.List)
+
+				// Divergence inventory (#296 EPIC). Read-only here;
+				// admin actions to resolve a divergence live in #300
+				// and mount alongside this group.
+				r.Get("/admin/divergences", divergencesH.List)
+				r.Get("/admin/divergences/summary", divergencesH.Summary)
 
 				r.Get("/nodes", nodes.List)
 				// Admin-facing node lifecycle. Drain streams NDJSON and

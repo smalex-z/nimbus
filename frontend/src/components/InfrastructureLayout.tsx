@@ -38,6 +38,7 @@ export default function InfrastructureLayout({ children }: InfrastructureLayoutP
     { label: 'Networking (LAN)', to: '/infrastructure/networking' },
     { label: 'API docs', to: '/infrastructure/api-docs' },
     { label: 'Audit log', to: '/infrastructure/audit' },
+    { label: 'Divergences', to: '/infrastructure/divergences' },
   ]
 
   return (

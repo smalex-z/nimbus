@@ -37,6 +37,8 @@ func TestAdminRoutesRejectAnonymous(t *testing.T) {
 		{http.MethodGet, "/api/cluster/stats"},
 		{http.MethodGet, "/api/admin/bootstrap-status"},
 		{http.MethodPost, "/api/admin/bootstrap-templates"},
+		{http.MethodGet, "/api/admin/divergences"},
+		{http.MethodGet, "/api/admin/divergences/summary"},
 		{http.MethodGet, "/api/settings/oauth"},
 		{http.MethodPut, "/api/settings/oauth"},
 		{http.MethodDelete, "/api/vms/1"},

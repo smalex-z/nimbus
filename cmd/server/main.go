@@ -971,6 +971,7 @@ func main() {
 		NodeMgr:           nodeMgrSvc,
 		Audit:             auditSvc,
 		Operations:        opsSvc,
+		Reconcile:         divergenceReconciler,
 		VNetMgr:           vnetMgr,
 		VPCMgr:            vpcMgrSvc,
 		VPCsHandler:       vpcsHandler,

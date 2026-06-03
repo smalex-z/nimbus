@@ -150,6 +150,17 @@ definitions:
           is observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.
           Default 0 — pre-existing rows behave correctly without backfill.
         type: integer
+      nimbus_id:
+        description: |-
+          NimbusID is the UUIDv7 we mint at provision time and stamp into
+          Proxmox (tag + description) plus the VM's own /etc/nimbus-id.
+          Stable across VMID slot recycling — the reconciler joins on this,
+          not on (node, vmid). Empty on pre-#297 rows until the backfill
+          (provision.BackfillNimbusIDs) reads them out of PVE config.
+          Not strictly NOT NULL because backfill may not find a value on
+          foreign-Nimbus or untagged VMs; the reconciler flags those as
+          `external-tagged-orphan` / `external-unmanaged` instead.
+        type: string
       node:
         type: string
       os_template:
@@ -166,6 +177,14 @@ definitions:
           WorkloadType experiment; column name stays `workload_type` so
           the schema doesn't require a rename migration on systems that
           briefly ran the prior column.
+        type: string
+      smbios_id:
+        description: |-
+          SMBIOSID is the smbios1 uuid Proxmox generates for the cloned VM.
+          Captured post-clone as a secondary identity anchor — if a VM's
+          tags and description are both wiped (operator scrub, template
+          rebake) the smbios uuid survives in the guest's DMI tables. Empty
+          when we couldn't parse one out of the config.
         type: string
       ssh_key_id:
         description: |-
@@ -217,7 +236,9 @@ definitions:
           Source tells the SPA where this entry came from so it can group
           or label appropriately. "localhost" only appears on hypervisor
           installs; "corosync" comes from /etc/pve/corosync.conf;
-          "scan" comes from the LAN TLS scan (CN extracted from the cert).
+          "cluster" comes from /cluster/status on the live Proxmox client
+          (admin mode); "scan" comes from the LAN TLS scan (CN extracted
+          from the cert).
         type: string
       url:
         type: string
@@ -684,6 +705,44 @@ definitions:
           192.168.0.0/16 with pool VMs in 192.168.50.* but gateway at
           192.168.1.1 — /24 would make those VMs unable to ARP the
           gateway). 0 when undetectable.
+        type: integer
+    type: object
+  handlers.divergenceListResponse:
+    properties:
+      divergences:
+        items:
+          $ref: '#/definitions/handlers.divergenceView'
+        type: array
+      total:
+        type: integer
+    type: object
+  handlers.divergenceView:
+    properties:
+      action_hint:
+        type: string
+      details_json:
+        type: string
+      detected_at:
+        type: string
+      first_detected_at:
+        type: string
+      hostname:
+        type: string
+      id:
+        type: integer
+      nimbus_id:
+        type: string
+      node:
+        type: string
+      resolved_action:
+        type: string
+      resolved_at:
+        type: string
+      resolved_by:
+        type: string
+      type:
+        type: string
+      vmid:
         type: integer
     type: object
   handlers.drainExecuteRequest:
@@ -1789,6 +1848,21 @@ definitions:
       snapshot_at:
         type: string
     type: object
+  reconciler.Summary:
+    properties:
+      external_tagged_orphan:
+        type: integer
+      external_unmanaged:
+        type: integer
+      last_detected_at:
+        type: string
+      open:
+        type: integer
+      orphaned:
+        type: integer
+      vmid_mismatch:
+        type: integer
+    type: object
   s3storage.AdminBucketStat:
     properties:
       created_at:
@@ -2150,6 +2224,108 @@ paths:
       summary: Build VM templates on cluster nodes (admin)
       tags:
       - bootstrap
+  /admin/divergences:
+    get:
+      description: |-
+        Read-only inventory of mismatches between the Nimbus DB
+        and the Proxmox cluster snapshot. By default returns
+        open (unresolved) divergences newest-first. Filter by
+        category via the `type` parameter; switch to historical
+        view with `status=resolved` or `status=all`.
+      parameters:
+      - description: filter by category
+        enum:
+        - orphaned
+        - external-unmanaged
+        - external-tagged-orphan
+        - vmid-mismatch
+        in: query
+        name: type
+        type: string
+      - description: filter by resolution state
+        enum:
+        - open
+        - resolved
+        - all
+        in: query
+        name: status
+        type: string
+      - description: page size (1-500, default 100)
+        in: query
+        name: limit
+        type: integer
+      - description: row offset for pagination
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.divergenceListResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: List VM divergences (admin)
+      tags:
+      - divergences
+  /admin/divergences/summary:
+    get:
+      description: |-
+        Counts of unresolved divergences by category, plus the
+        latest detection timestamp. Suitable for the dashboard
+        widget's 10s poll interval.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/reconciler.Summary'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Divergence aggregate summary (admin)
+      tags:
+      - divergences
   /admin/templates-status:
     get:
       description: |-

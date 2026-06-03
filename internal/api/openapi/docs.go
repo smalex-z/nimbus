@@ -333,6 +333,159 @@ const docTemplate = `{
                 }
             }
         },
+        "/admin/divergences": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Read-only inventory of mismatches between the Nimbus DB\nand the Proxmox cluster snapshot. By default returns\nopen (unresolved) divergences newest-first. Filter by\ncategory via the ` + "`" + `type` + "`" + ` parameter; switch to historical\nview with ` + "`" + `status=resolved` + "`" + ` or ` + "`" + `status=all` + "`" + `.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "divergences"
+                ],
+                "summary": "List VM divergences (admin)",
+                "parameters": [
+                    {
+                        "enum": [
+                            "orphaned",
+                            "external-unmanaged",
+                            "external-tagged-orphan",
+                            "vmid-mismatch"
+                        ],
+                        "type": "string",
+                        "description": "filter by category",
+                        "name": "type",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "open",
+                            "resolved",
+                            "all"
+                        ],
+                        "type": "string",
+                        "description": "filter by resolution state",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "page size (1-500, default 100)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "row offset for pagination",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/handlers.divergenceListResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/divergences/summary": {
+            "get": {
+                "security": [
+                    {
+                        "cookieAuth": []
+                    }
+                ],
+                "description": "Counts of unresolved divergences by category, plus the\nlatest detection timestamp. Suitable for the dashboard\nwidget's 10s poll interval.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "divergences"
+                ],
+                "summary": "Divergence aggregate summary (admin)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/handlers.EnvelopeOK"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/reconciler.Summary"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.EnvelopeError"
+                        }
+                    }
+                }
+            }
+        },
         "/admin/templates-status": {
             "get": {
                 "security": [
@@ -8091,6 +8244,10 @@ const docTemplate = `{
                     "description": "MissedCycles counts consecutive VM-reconciler runs in which Proxmox\nreported no VM at this row's (node, vmid). Reset to 0 whenever the VM\nis observed again. Crossing VACATE_MISS_THRESHOLD soft-deletes the row.\nDefault 0 — pre-existing rows behave correctly without backfill.",
                     "type": "integer"
                 },
+                "nimbus_id": {
+                    "description": "NimbusID is the UUIDv7 we mint at provision time and stamp into\nProxmox (tag + description) plus the VM's own /etc/nimbus-id.\nStable across VMID slot recycling — the reconciler joins on this,\nnot on (node, vmid). Empty on pre-#297 rows until the backfill\n(provision.BackfillNimbusIDs) reads them out of PVE config.\nNot strictly NOT NULL because backfill may not find a value on\nforeign-Nimbus or untagged VMs; the reconciler flags those as\n` + "`" + `external-tagged-orphan` + "`" + ` / ` + "`" + `external-unmanaged` + "`" + ` instead.",
+                    "type": "string"
+                },
                 "node": {
                     "type": "string"
                 },
@@ -8102,6 +8259,10 @@ const docTemplate = `{
                 },
                 "required_tags": {
                     "description": "RequiredTags is the host-aggregate filter the user opted into\nat provision time, as a CSV string (e.g. \"fast-cpu,nvme\"). Used\nby drain replacement to apply the same filter — a VM that\nrequired ` + "`" + `fast-cpu` + "`" + ` only migrates to other ` + "`" + `fast-cpu` + "`" + `-tagged\nnodes. Empty = no constraint. Replaces the earlier (unmerged)\nWorkloadType experiment; column name stays ` + "`" + `workload_type` + "`" + ` so\nthe schema doesn't require a rename migration on systems that\nbriefly ran the prior column.",
+                    "type": "string"
+                },
+                "smbios_id": {
+                    "description": "SMBIOSID is the smbios1 uuid Proxmox generates for the cloned VM.\nCaptured post-clone as a secondary identity anchor — if a VM's\ntags and description are both wiped (operator scrub, template\nrebake) the smbios uuid survives in the guest's DMI tables. Empty\nwhen we couldn't parse one out of the config.",
                     "type": "string"
                 },
                 "ssh_key_id": {
@@ -8150,7 +8311,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "source": {
-                    "description": "Source tells the SPA where this entry came from so it can group\nor label appropriately. \"localhost\" only appears on hypervisor\ninstalls; \"corosync\" comes from /etc/pve/corosync.conf;\n\"scan\" comes from the LAN TLS scan (CN extracted from the cert).",
+                    "description": "Source tells the SPA where this entry came from so it can group\nor label appropriately. \"localhost\" only appears on hypervisor\ninstalls; \"corosync\" comes from /etc/pve/corosync.conf;\n\"cluster\" comes from /cluster/status on the live Proxmox client\n(admin mode); \"scan\" comes from the LAN TLS scan (CN extracted\nfrom the cert).",
                     "type": "string"
                 },
                 "url": {
@@ -8805,6 +8966,64 @@ const docTemplate = `{
                 },
                 "suggested_prefix_len": {
                     "description": "SuggestedPrefixLen is the netmask of the host's interface that\nowns the default route, when it covers the suggested gateway.\nUseful when the operator's LAN spans wider than /24 (e.g.\n192.168.0.0/16 with pool VMs in 192.168.50.* but gateway at\n192.168.1.1 — /24 would make those VMs unable to ARP the\ngateway). 0 when undetectable.",
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.divergenceListResponse": {
+            "type": "object",
+            "properties": {
+                "divergences": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/handlers.divergenceView"
+                    }
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "handlers.divergenceView": {
+            "type": "object",
+            "properties": {
+                "action_hint": {
+                    "type": "string"
+                },
+                "details_json": {
+                    "type": "string"
+                },
+                "detected_at": {
+                    "type": "string"
+                },
+                "first_detected_at": {
+                    "type": "string"
+                },
+                "hostname": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "nimbus_id": {
+                    "type": "string"
+                },
+                "node": {
+                    "type": "string"
+                },
+                "resolved_action": {
+                    "type": "string"
+                },
+                "resolved_at": {
+                    "type": "string"
+                },
+                "resolved_by": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "vmid": {
                     "type": "integer"
                 }
             }
@@ -10319,6 +10538,29 @@ const docTemplate = `{
                 },
                 "snapshot_at": {
                     "type": "string"
+                }
+            }
+        },
+        "reconciler.Summary": {
+            "type": "object",
+            "properties": {
+                "external_tagged_orphan": {
+                    "type": "integer"
+                },
+                "external_unmanaged": {
+                    "type": "integer"
+                },
+                "last_detected_at": {
+                    "type": "string"
+                },
+                "open": {
+                    "type": "integer"
+                },
+                "orphaned": {
+                    "type": "integer"
+                },
+                "vmid_mismatch": {
+                    "type": "integer"
                 }
             }
         },

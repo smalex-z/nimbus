@@ -401,6 +401,58 @@ export interface AuditListParams {
   offset?: number
 }
 
+// Divergences (Reconciler EPIC #296) ──────────────────────────────────
+//
+// VMDivergence mirrors db.VMDivergence's wire shape. The reconciler
+// records one row per observed mismatch between vms and the Proxmox
+// cluster snapshot; rows are deduped on (type, nimbus_id, vmid, node).
+// resolved_at flips when an admin acts via the #300 surface (or when
+// the reconciler observes the underlying cause is gone).
+export type DivergenceType =
+  | 'orphaned'
+  | 'external-unmanaged'
+  | 'external-tagged-orphan'
+  | 'vmid-mismatch'
+
+export interface VMDivergence {
+  id: number
+  type: DivergenceType
+  nimbus_id?: string
+  vmid?: number
+  node?: string
+  hostname?: string
+  detected_at: string
+  first_detected_at: string
+  resolved_at?: string
+  resolved_by?: string
+  resolved_action?: string
+  action_hint: string
+  details_json?: string
+}
+
+export interface DivergenceListResponse {
+  divergences: VMDivergence[]
+  total: number
+}
+
+export interface DivergenceListParams {
+  type?: DivergenceType
+  // status defaults to 'open' server-side so the dashboard widget and
+  // the detail page surface unresolved divergences first.
+  status?: 'open' | 'resolved' | 'all'
+  limit?: number
+  offset?: number
+}
+
+export interface DivergenceSummary {
+  open: number
+  orphaned: number
+  external_unmanaged: number
+  external_tagged_orphan: number
+  vmid_mismatch: number
+  last_detected_at?: string
+}
+
 // GPU plane (Phase 4) types ───────────────────────────────────────────
 
 export type GPUJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
