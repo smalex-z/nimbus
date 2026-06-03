@@ -374,12 +374,24 @@ func (s *Service) Provision(ctx context.Context, vpc *db.VPC) (int, string, erro
 		if cleanupVMID == 0 {
 			return
 		}
+		// Use a fresh context — the request ctx is usually cancelled
+		// when we land here (HTTP timeout is the common failure mode)
+		// and proxmox calls would all error out immediately. The trade
+		// is that this can outlive the request; 30s caps the blast.
 		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if upid, err := s.px.StopLXC(cctx, s.cfg.NetworkNode, cleanupVMID); err == nil {
+		if upid, err := s.px.StopLXC(cctx, s.cfg.NetworkNode, cleanupVMID); err != nil {
+			if !isAlreadyGone(err) {
+				log.Printf("gateway: LEAK — rollback stop lxc %d on %s failed: %v (lxc may remain)", cleanupVMID, s.cfg.NetworkNode, err)
+			}
+		} else {
 			_ = s.px.WaitForTask(cctx, s.cfg.NetworkNode, upid, s.cfg.PollInterval)
 		}
-		if upid, err := s.px.DestroyLXC(cctx, s.cfg.NetworkNode, cleanupVMID); err == nil {
+		if upid, err := s.px.DestroyLXC(cctx, s.cfg.NetworkNode, cleanupVMID); err != nil {
+			if !isAlreadyGone(err) {
+				log.Printf("gateway: LEAK — rollback destroy lxc %d on %s failed: %v (lxc will need manual cleanup)", cleanupVMID, s.cfg.NetworkNode, err)
+			}
+		} else {
 			_ = s.px.WaitForTask(cctx, s.cfg.NetworkNode, upid, s.cfg.PollInterval)
 		}
 	}()

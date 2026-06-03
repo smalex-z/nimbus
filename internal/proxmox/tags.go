@@ -8,11 +8,14 @@ import (
 
 // Nimbus marker scheme.
 //
-// Provisioned VMs carry a single Proxmox tag — NimbusMarkerTag — and stash
-// their tier/OS metadata in the VM's `description` field as a hidden HTML
-// comment. One tag means one chip in the Proxmox UI list, which keeps the
-// dashboard uncluttered; the description marker is invisible when the field
-// is rendered as markdown but readable verbatim when an admin edits it.
+// Provisioned VMs carry two tags — NimbusMarkerTag for "this VM is Nimbus-
+// managed" and `nimbus-id-<short>` for visual disambiguation in the PVE list.
+// Full identity (tier, OS, full UUIDv7) lives in the VM `description` as a
+// hidden HTML comment so the PVE dashboard isn't flooded with chips.
+//
+// The short tag is 8 hex chars from the front of the UUIDv7 — long enough to
+// be uniquely identifying in a small cluster, short enough to render on one
+// chip. The full UUID is the only thing the reconciler joins on.
 //
 // Older builds used three tags (`nimbus`, `nimbus-tier-*`, `nimbus-os-*`).
 // Those legacy tags are still parsed (for VMs that haven't been backfilled
@@ -20,11 +23,20 @@ import (
 const (
 	NimbusMarkerTag = "nimbus"
 
+	// NimbusIDTagPrefix is the prefix for the short-form identity tag.
+	// The full tag is `nimbus-id-<short>` where short is ShortNimbusID(uuid).
+	NimbusIDTagPrefix = "nimbus-id-"
+
 	// Legacy tag prefixes — kept so MergeNimbusTags can strip them during
 	// migration and ParseNimbusTags can fall back to them when the VM's
 	// description hasn't been written yet.
 	legacyNimbusTierPrefix = "nimbus-tier-"
 	legacyNimbusOSPrefix   = "nimbus-os-"
+
+	// shortIDLen is the number of hex chars from the front of the UUID we
+	// stamp into the tag. 8 hex = 32 bits of entropy, more than enough to
+	// uniquely identify a VM in any realistic cluster.
+	shortIDLen = 8
 )
 
 // nimbusDescRE matches the structured marker line Nimbus stamps into a VM's
@@ -32,19 +44,36 @@ const (
 // one line so it doesn't accidentally swallow user prose between two `-->`s.
 var nimbusDescRE = regexp.MustCompile(`<!--\s*nimbus:\s*([^>\n]*?)\s*-->`)
 
-// EncodeNimbusTags returns the marker tag set Nimbus stamps onto a VM. The
-// tier and OS now live in the description; a single tag is enough.
-func EncodeNimbusTags() []string {
-	return []string{NimbusMarkerTag}
+// ShortNimbusID returns the leading 8 hex chars of a UUIDv7 (hyphens stripped).
+// Returns the empty string when the input is too short to extract from. Used
+// for the short-form `nimbus-id-<short>` tag.
+func ShortNimbusID(nimbusID string) string {
+	stripped := strings.ReplaceAll(nimbusID, "-", "")
+	if len(stripped) < shortIDLen {
+		return ""
+	}
+	return stripped[:shortIDLen]
 }
 
-// MergeNimbusTags merges the Nimbus marker into existing into a deduped slice.
-// User tags are preserved verbatim; any legacy `nimbus-tier-*` / `nimbus-os-*`
-// tags are dropped so the migrated VM ends up with a single `nimbus` chip in
-// the Proxmox UI.
-func MergeNimbusTags(existing []string) []string {
-	out := make([]string, 0, len(existing)+1)
-	seen := make(map[string]bool, len(existing)+1)
+// EncodeNimbusTags returns the marker tag set Nimbus stamps onto a VM. The
+// short-form identity tag is appended when nimbusID is non-empty — pass "" on
+// legacy callers that haven't generated a UUID yet (they'll still get the
+// bare marker so `HasNimbusTag` works).
+func EncodeNimbusTags(nimbusID string) []string {
+	tags := []string{NimbusMarkerTag}
+	if short := ShortNimbusID(nimbusID); short != "" {
+		tags = append(tags, NimbusIDTagPrefix+short)
+	}
+	return tags
+}
+
+// MergeNimbusTags merges the Nimbus marker set into existing into a deduped
+// slice. User tags are preserved verbatim; any legacy `nimbus-tier-*` /
+// `nimbus-os-*` tags AND any stale `nimbus-id-*` tag (older short id) are
+// dropped so the result carries exactly the current canonical set.
+func MergeNimbusTags(existing []string, nimbusID string) []string {
+	out := make([]string, 0, len(existing)+2)
+	seen := make(map[string]bool, len(existing)+2)
 	for _, t := range existing {
 		t = strings.TrimSpace(t)
 		if t == "" {
@@ -52,7 +81,8 @@ func MergeNimbusTags(existing []string) []string {
 		}
 		if t == NimbusMarkerTag ||
 			strings.HasPrefix(t, legacyNimbusTierPrefix) ||
-			strings.HasPrefix(t, legacyNimbusOSPrefix) {
+			strings.HasPrefix(t, legacyNimbusOSPrefix) ||
+			strings.HasPrefix(t, NimbusIDTagPrefix) {
 			continue
 		}
 		if seen[t] {
@@ -61,8 +91,11 @@ func MergeNimbusTags(existing []string) []string {
 		seen[t] = true
 		out = append(out, t)
 	}
-	if !seen[NimbusMarkerTag] {
-		out = append(out, NimbusMarkerTag)
+	for _, t := range EncodeNimbusTags(nimbusID) {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -75,6 +108,19 @@ func HasNimbusTag(tags []string) bool {
 		}
 	}
 	return false
+}
+
+// ParseNimbusIDFromTags returns the short ID from the first `nimbus-id-<short>`
+// tag, or "" if none is present. Useful for backfill: a short ID in the tags
+// without a description marker means we can identify the VM as ours but the
+// full UUID lives elsewhere (description, /etc/nimbus-id, smbios).
+func ParseNimbusIDFromTags(tags []string) string {
+	for _, t := range tags {
+		if s := strings.TrimPrefix(t, NimbusIDTagPrefix); s != t {
+			return s
+		}
+	}
+	return ""
 }
 
 // ParseNimbusTags pulls tier/OS out of legacy `nimbus-tier-*` / `nimbus-os-*`
@@ -100,18 +146,27 @@ func ParseNimbusTags(tags []string) (tier, osTemplate string, isNimbus bool) {
 }
 
 // EncodeNimbusDescription renders the metadata marker that goes inside the
-// VM's description field. Format: `<!-- nimbus: tier=X os=Y -->` — an HTML
-// comment that markdown renderers hide.
-func EncodeNimbusDescription(tier, osTemplate string) string {
-	return fmt.Sprintf("<!-- nimbus: tier=%s os=%s -->", tier, osTemplate)
+// VM's description field. Format:
+//
+//	<!-- nimbus: tier=X os=Y id=<full-uuid> -->
+//
+// The `id` field is omitted when nimbusID is empty — keeps the marker shape
+// backward-compatible with pre-#297 callers and parsers.
+func EncodeNimbusDescription(tier, osTemplate, nimbusID string) string {
+	if nimbusID == "" {
+		return fmt.Sprintf("<!-- nimbus: tier=%s os=%s -->", tier, osTemplate)
+	}
+	return fmt.Sprintf("<!-- nimbus: tier=%s os=%s id=%s -->", tier, osTemplate, nimbusID)
 }
 
-// ParseNimbusDescription extracts the tier and OS from a Nimbus marker line
-// inside a VM description. ok=false when the marker isn't present.
-func ParseNimbusDescription(desc string) (tier, osTemplate string, ok bool) {
+// ParseNimbusDescription extracts tier, OS, and the full nimbus_id UUID from
+// a description marker. ok=false when the marker isn't present. Any of the
+// returned strings may be empty for partial markers (e.g. a legacy VM whose
+// description was stamped before `id=` was added).
+func ParseNimbusDescription(desc string) (tier, osTemplate, nimbusID string, ok bool) {
 	m := nimbusDescRE.FindStringSubmatch(desc)
 	if m == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, field := range strings.Fields(m[1]) {
 		key, val, found := strings.Cut(field, "=")
@@ -123,16 +178,18 @@ func ParseNimbusDescription(desc string) (tier, osTemplate string, ok bool) {
 			tier = val
 		case "os":
 			osTemplate = val
+		case "id":
+			nimbusID = val
 		}
 	}
-	return tier, osTemplate, true
+	return tier, osTemplate, nimbusID, true
 }
 
 // MergeNimbusDescription returns the new description body after stamping (or
 // updating) the Nimbus marker line. User-written prose is preserved; only
 // the marker line itself is rewritten.
-func MergeNimbusDescription(existing, tier, osTemplate string) string {
-	marker := EncodeNimbusDescription(tier, osTemplate)
+func MergeNimbusDescription(existing, tier, osTemplate, nimbusID string) string {
+	marker := EncodeNimbusDescription(tier, osTemplate, nimbusID)
 	if nimbusDescRE.MatchString(existing) {
 		return nimbusDescRE.ReplaceAllString(existing, marker)
 	}
@@ -163,6 +220,23 @@ func SplitTags(raw string) []string {
 // JoinTags renders a tag slice back to Proxmox's `;`-separated wire format.
 func JoinTags(tags []string) string {
 	return strings.Join(tags, ";")
+}
+
+// ParseSMBIOSUUID extracts the `uuid=...` value from a VM's `smbios1` config
+// string (e.g. `uuid=01234567-89ab-cdef-0123-456789abcdef,family=...`).
+// Returns "" when the field is missing or malformed. Used by the post-clone
+// capture step in provision and by the backfill path for legacy VMs.
+func ParseSMBIOSUUID(smbios1 string) string {
+	for _, field := range strings.Split(smbios1, ",") {
+		key, val, found := strings.Cut(strings.TrimSpace(field), "=")
+		if !found {
+			continue
+		}
+		if key == "uuid" {
+			return val
+		}
+	}
+	return ""
 }
 
 // decodeOSTag reverses the legacy `.` → `_` substitution used when the OS

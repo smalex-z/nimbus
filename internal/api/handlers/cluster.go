@@ -231,7 +231,7 @@ func (h *Cluster) ListVMs(w http.ResponseWriter, r *http.Request) {
 		// `nimbus-os-*` tags for VMs whose owning instance hasn't migrated
 		// yet. The bare `nimbus` tag remains the recognition signal.
 		legacyTier, legacyOS, isNimbus := proxmox.ParseNimbusTags(d.Tags)
-		descTier, descOS, hasDesc := proxmox.ParseNimbusDescription(d.Description)
+		descTier, descOS, _, hasDesc := proxmox.ParseNimbusDescription(d.Description)
 		tier, osTemplate := descTier, descOS
 		if !hasDesc {
 			tier, osTemplate = legacyTier, legacyOS

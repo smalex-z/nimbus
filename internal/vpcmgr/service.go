@@ -310,9 +310,15 @@ func (s *Service) DeleteVPC(ctx context.Context, vpcID, ownerID uint, isAdmin bo
 		}
 	}
 
+	// Gateway must come down BEFORE the SDN zone. If we tore down
+	// the zone first and then Destroy failed, the LXC would be left
+	// referencing a nonexistent bridge and the operator would have
+	// nothing in the UI to retry against. Same reason a failure here
+	// must abort the whole delete — leaking the LXC plus losing the
+	// VPC row is exactly the orphan pattern we want to stop creating.
 	if s.gw != nil {
 		if err := s.gw.Destroy(ctx, &row); err != nil {
-			log.Printf("vpcmgr: destroy gateway for vpc %d: %v (continuing)", row.ID, err)
+			return fmt.Errorf("destroy gateway lxc for vpc %d (%s): %w — VPC left intact for retry", row.ID, row.Name, err)
 		}
 	}
 	s.tearDownPVE(ctx, &row)

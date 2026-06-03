@@ -112,6 +112,7 @@ type fakeGateway struct {
 	provisionCalls int
 	destroyCalls   int
 	provisionErr   error
+	destroyErr     error
 	vmid           int
 	node           string
 }
@@ -131,7 +132,7 @@ func (f *fakeGateway) Provision(_ context.Context, _ *db.VPC) (int, string, erro
 }
 func (f *fakeGateway) Destroy(_ context.Context, _ *db.VPC) error {
 	f.destroyCalls++
-	return nil
+	return f.destroyErr
 }
 
 func newTestService(t *testing.T) (*vpcmgr.Service, *fakeSDN, *fakeGateway, *db.DB) {
@@ -236,6 +237,100 @@ func TestCreateVPC_GatewayFailureRollsBack(t *testing.T) {
 		t.Errorf("retry CreateVPC: %v", err)
 	}
 	_ = sdn // unused but reserved if we want to assert call sequence
+}
+
+// TestDeleteVPC_GatewayDestroyFailureAborts: a failed gw.Destroy must
+// abort the whole delete — no SDN teardown, no DB row removal, error
+// surfaced to the caller. Otherwise the gateway LXC gets stranded on
+// PVE pointing at a bridge that no longer exists, with no DB record
+// the operator can retry against. (We lived this in prod: ~6 orphan
+// gateway LXCs accumulated before anyone noticed.)
+func TestDeleteVPC_GatewayDestroyFailureAborts(t *testing.T) {
+	t.Parallel()
+	svc, sdn, gw, database := newTestService(t)
+	row, err := svc.CreateVPC(context.Background(), 1, "alpha")
+	if err != nil {
+		t.Fatalf("CreateVPC: %v", err)
+	}
+
+	var sdnDeleteCalls int
+	sdn.deleteZone = func(string) error { sdnDeleteCalls++; return nil }
+	sdn.deleteVNet = func(string) error { sdnDeleteCalls++; return nil }
+	sdn.deleteSubnet = func(string, string) error { sdnDeleteCalls++; return nil }
+
+	gw.destroyErr = errors.New("pve: destroy lxc 200: 500 Internal Server Error")
+
+	err = svc.DeleteVPC(context.Background(), row.ID, 1, false)
+	if err == nil {
+		t.Fatal("DeleteVPC returned nil, want error from gateway destroy failure")
+	}
+	if !errors.Is(err, gw.destroyErr) {
+		t.Errorf("DeleteVPC err = %v, want wrap of gw.destroyErr", err)
+	}
+
+	if sdnDeleteCalls != 0 {
+		t.Errorf("SDN delete calls = %d, want 0 — teardown must not run when gateway destroy failed", sdnDeleteCalls)
+	}
+
+	var n int64
+	if err := database.DB.Unscoped().Model(&db.VPC{}).Where("id = ?", row.ID).Count(&n).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("VPC row count after failed delete = %d, want 1 — row must persist for retry", n)
+	}
+
+	// Operator clears the underlying PVE problem, retries — now succeeds.
+	gw.destroyErr = nil
+	if err := svc.DeleteVPC(context.Background(), row.ID, 1, false); err != nil {
+		t.Errorf("retry DeleteVPC after clearing destroyErr: %v", err)
+	}
+	if sdnDeleteCalls == 0 {
+		t.Errorf("SDN delete calls after retry = 0, want > 0 — teardown should run on success")
+	}
+}
+
+// TestDeleteVPC_HappyPath: a successful gw.Destroy lets the rest of
+// the teardown run — SDN deletes fire and the DB row is hard-deleted.
+// Complements the abort test above so future "make Destroy infallible"
+// refactors don't accidentally skip SDN cleanup.
+func TestDeleteVPC_HappyPath(t *testing.T) {
+	t.Parallel()
+	svc, sdn, gw, database := newTestService(t)
+	row, err := svc.CreateVPC(context.Background(), 1, "alpha")
+	if err != nil {
+		t.Fatalf("CreateVPC: %v", err)
+	}
+
+	var deletedZone, deletedVNet, deletedSubnet bool
+	sdn.deleteZone = func(z string) error { deletedZone = z == row.ZoneName; return nil }
+	sdn.deleteVNet = func(v string) error { deletedVNet = v == row.VNetName; return nil }
+	sdn.deleteSubnet = func(string, string) error { deletedSubnet = true; return nil }
+
+	if err := svc.DeleteVPC(context.Background(), row.ID, 1, false); err != nil {
+		t.Fatalf("DeleteVPC: %v", err)
+	}
+
+	if gw.destroyCalls != 1 {
+		t.Errorf("gw.destroyCalls = %d, want 1", gw.destroyCalls)
+	}
+	if !deletedZone {
+		t.Error("SDN zone delete not called for the VPC's zone")
+	}
+	if !deletedVNet {
+		t.Error("SDN vnet delete not called for the VPC's vnet")
+	}
+	if !deletedSubnet {
+		t.Error("SDN subnet delete not called")
+	}
+
+	var n int64
+	if err := database.DB.Unscoped().Model(&db.VPC{}).Where("id = ?", row.ID).Count(&n).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("VPC row count after delete = %d, want 0", n)
+	}
 }
 
 // TestDeleteVPC_RefusesWithMembers asserts the delete-while-attached

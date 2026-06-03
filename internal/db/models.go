@@ -383,6 +383,21 @@ type VM struct {
 	// service layer (subnet delete refuses while any VM still references
 	// it, so this stays non-NULL across the VM's life by construction).
 	SubnetID *uint `gorm:"column:subnet_id;index"                   json:"subnet_id,omitempty"`
+	// NimbusID is the UUIDv7 we mint at provision time and stamp into
+	// Proxmox (tag + description) plus the VM's own /etc/nimbus-id.
+	// Stable across VMID slot recycling — the reconciler joins on this,
+	// not on (node, vmid). Empty on pre-#297 rows until the backfill
+	// (provision.BackfillNimbusIDs) reads them out of PVE config.
+	// Not strictly NOT NULL because backfill may not find a value on
+	// foreign-Nimbus or untagged VMs; the reconciler flags those as
+	// `external-tagged-orphan` / `external-unmanaged` instead.
+	NimbusID string `gorm:"column:nimbus_id;index"                json:"nimbus_id,omitempty"`
+	// SMBIOSID is the smbios1 uuid Proxmox generates for the cloned VM.
+	// Captured post-clone as a secondary identity anchor — if a VM's
+	// tags and description are both wiped (operator scrub, template
+	// rebake) the smbios uuid survives in the guest's DMI tables. Empty
+	// when we couldn't parse one out of the config.
+	SMBIOSID string `gorm:"column:smbios_id"                       json:"smbios_id,omitempty"`
 }
 
 // SSHKey is a first-class user-managed SSH key.

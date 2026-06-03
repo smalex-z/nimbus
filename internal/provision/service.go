@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"nimbus/internal/db"
@@ -646,6 +647,13 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		return nil, fmt.Errorf("nextid: %w", err)
 	}
 
+	// Mint the stable identity for this VM. UUIDv7 is time-ordered so the
+	// short form (first 8 hex) stays usefully scan-sortable in the PVE list;
+	// the full uuid is what the reconciler joins on. Generated before clone
+	// so it can be stamped into tags/description in the same step. PVE's
+	// vmid slots are reusable — nimbus_id is what survives a slot recycle.
+	nimbusID := uuid.Must(uuid.NewV7()).String()
+
 	// Step 3a: provision the per-VM Standalone network OR allocate
 	// the VPC member IP, depending on the dispatch. We do this BEFORE
 	// the clone so SetVMNetwork has a VNet to point at and cloud-init
@@ -800,16 +808,29 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// from filling up with three colored chips per VM. Both writes are
 	// non-fatal — the VM is otherwise complete and a follow-up backfill
 	// will retry on the next startup.
-	if err := s.px.SetVMTags(ctx, target, newVMID, proxmox.EncodeNimbusTags()); err != nil {
+	if err := s.px.SetVMTags(ctx, target, newVMID, proxmox.EncodeNimbusTags(nimbusID)); err != nil {
 		log.Printf("set tags vmid=%d: %v (continuing)", newVMID, err)
 	}
 	// Post-D-boot: the managed cloud-init drive IS the cloud-init delivery
 	// channel, so admins editing PVE's Cloud-Init tab get the real (live)
 	// behavior. The decorative warning we used to prepend when the tab
 	// was a no-op is no longer accurate and gets dropped.
-	desc := proxmox.EncodeNimbusDescription(req.Tier, req.OSTemplate)
+	desc := proxmox.EncodeNimbusDescription(req.Tier, req.OSTemplate, nimbusID)
 	if err := s.px.SetVMDescription(ctx, target, newVMID, desc); err != nil {
 		log.Printf("set description vmid=%d: %v (continuing)", newVMID, err)
+	}
+
+	// Capture the SMBIOS UUID PVE generated for this clone. Secondary
+	// identity anchor — survives tag/description scrubs in DMI tables.
+	// Best-effort: a failure here doesn't block provision, the row just
+	// lands with smbios_id empty and the reconciler can backfill later.
+	var smbiosID string
+	if cfg, gerr := s.px.GetVMConfig(ctx, target, newVMID); gerr == nil {
+		if raw, _ := cfg["smbios1"].(string); raw != "" {
+			smbiosID = proxmox.ParseSMBIOSUUID(raw)
+		}
+	} else {
+		log.Printf("read smbios vmid=%d: %v (continuing — smbios_id will be empty)", newVMID, gerr)
 	}
 
 	// Step 5: resize the disk to tier spec. Proxmox accepts both absolute
@@ -882,6 +903,23 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		}
 	}
 	report(StepWaitAgent, "Guest agent ready")
+
+	// Push the stable identity into the guest at /etc/nimbus-id so the
+	// VM can self-identify (operator scripts, support bundles). Goes via
+	// QGA virtio-serial, same channel the tunnel/GPU bootstraps use, so
+	// it works on isolated SDN subnets where SSH is unreachable. Gated
+	// on warning == "" because QGA itself isn't confirmed live when
+	// WaitForIP fell through to its soft-success branch. Best-effort —
+	// the identity already lives in PVE tag + description, so a failure
+	// here doesn't block provisioning.
+	if warning == "" {
+		idCtx, idCancel := context.WithTimeout(ctx, 30*time.Second)
+		script := fmt.Sprintf("printf 'NIMBUS_ID=%s\\n' > /etc/nimbus-id && chmod 0644 /etc/nimbus-id", nimbusID)
+		if _, ierr := s.px.AgentRun(idCtx, target, newVMID, []string{"sh", "-c", script}, "", s.cfg.PollInterval); ierr != nil {
+			log.Printf("write /etc/nimbus-id vmid=%d: %v (continuing — id lives in PVE tag/description)", newVMID, ierr)
+		}
+		idCancel()
+	}
 
 	// Step 7b: Gopher tunnel bootstrap. We run it via qemu-guest-agent,
 	// not SSH — the data path is virtio-serial through the hypervisor,
@@ -964,6 +1002,8 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		SSHKeyID:     &keyID,
 		KeyName:      keyName,
 		SSHPubKey:    sshPubKey,
+		NimbusID:     nimbusID,
+		SMBIOSID:     smbiosID,
 		ErrorMsg:     warning, // doubles as a soft-warning record on the persisted row
 	}
 	if machineObj != nil {
@@ -1062,7 +1102,8 @@ func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("list vms: %w", err)
 	}
 	updated := 0
-	for _, vm := range vms {
+	for i := range vms {
+		vm := &vms[i]
 		if vm.Tier == "" || vm.OSTemplate == "" || vm.Node == "" || vm.VMID == 0 {
 			continue
 		}
@@ -1077,12 +1118,38 @@ func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
 		}
 		existingDesc, _ := cfg["description"].(string)
 
-		wantTags := proxmox.MergeNimbusTags(existingTags)
-		wantDesc := proxmox.MergeNimbusDescription(existingDesc, vm.Tier, vm.OSTemplate)
+		// nimbus_id resolution priority for legacy rows:
+		//  1. The full uuid already on the DB row (newer rows skip everything).
+		//  2. The description marker (`id=...`) — present on rows provisioned
+		//     after #297 shipped but before this backfill ran.
+		//  3. Nothing — mint a fresh UUIDv7 so the VM gets a stable identity.
+		//     This means a legacy VM's id is new-on-first-backfill, but every
+		//     subsequent reconcile sees the same uuid because we'll persist
+		//     it on the row and stamp it into PVE in the same pass.
+		nimbusID := vm.NimbusID
+		if nimbusID == "" {
+			if _, _, descID, ok := proxmox.ParseNimbusDescription(existingDesc); ok && descID != "" {
+				nimbusID = descID
+			}
+		}
+		if nimbusID == "" {
+			nimbusID = uuid.Must(uuid.NewV7()).String()
+		}
+
+		smbiosID := vm.SMBIOSID
+		if smbiosID == "" {
+			if raw, _ := cfg["smbios1"].(string); raw != "" {
+				smbiosID = proxmox.ParseSMBIOSUUID(raw)
+			}
+		}
+
+		wantTags := proxmox.MergeNimbusTags(existingTags, nimbusID)
+		wantDesc := proxmox.MergeNimbusDescription(existingDesc, vm.Tier, vm.OSTemplate, nimbusID)
 
 		tagsChanged := !tagsEqual(existingTags, wantTags)
 		descChanged := existingDesc != wantDesc
-		if !tagsChanged && !descChanged {
+		dbChanged := vm.NimbusID != nimbusID || vm.SMBIOSID != smbiosID
+		if !tagsChanged && !descChanged && !dbChanged {
 			continue
 		}
 		if tagsChanged {
@@ -1094,6 +1161,19 @@ func (s *Service) BackfillNimbusMetadata(ctx context.Context) (int, error) {
 		if descChanged {
 			if err := s.px.SetVMDescription(ctx, vm.Node, vm.VMID, wantDesc); err != nil {
 				log.Printf("backfill: set description vmid=%d on %s: %v (skipping)", vm.VMID, vm.Node, err)
+				continue
+			}
+		}
+		if dbChanged {
+			patch := map[string]any{}
+			if vm.NimbusID != nimbusID {
+				patch["nimbus_id"] = nimbusID
+			}
+			if vm.SMBIOSID != smbiosID {
+				patch["smbios_id"] = smbiosID
+			}
+			if err := s.db.WithContext(ctx).Model(vm).Updates(patch).Error; err != nil {
+				log.Printf("backfill: persist identity vmid=%d: %v (PVE-side already stamped — row will catch up next cycle)", vm.VMID, err)
 				continue
 			}
 		}
