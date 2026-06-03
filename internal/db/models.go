@@ -630,6 +630,79 @@ type AuditEvent struct {
 // — readers query the table name directly during incident triage.
 func (AuditEvent) TableName() string { return "audit_events" }
 
+// VMDivergence is one row per observed mismatch between the local vms
+// table and the Proxmox cluster snapshot. The divergence reconciler
+// (internal/reconciler) populates this on a schedule and on targeted
+// post-op runs. Admin actions in subticket #300 set ResolvedAt.
+//
+// The four canonical Type values mirror the categories in the epic
+// (#296 — Reconciler EPIC):
+//
+//   - "orphaned"               — Nimbus DB row, no matching Proxmox VM.
+//   - "external-unmanaged"     — Proxmox VM with no nimbus marker tag.
+//   - "external-tagged-orphan" — Proxmox VM with a nimbus_id but no DB row.
+//   - "vmid-mismatch"          — same nimbus_id appears at a different
+//     vmid than the DB row (slot recycled).
+//
+// "healthy" intentionally has no row — only divergences are recorded.
+//
+// Dedupe shape: the reconciler uniques an open divergence by
+// (type, nimbus_id, vmid, node) WHERE resolved_at IS NULL, so a
+// long-standing divergence updates one row in place rather than
+// re-inserting every cycle. The composite unique index below enforces
+// that at the DB layer.
+type VMDivergence struct {
+	ID        uint      `gorm:"primaryKey"                              json:"id"`
+	CreatedAt time.Time `gorm:"column:created_at;index"                 json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at"                       json:"updated_at"`
+	// Type is the divergence category — see the constants in
+	// internal/reconciler for the canonical strings. Index'd so the UI
+	// can filter by category in O(rows-of-that-type).
+	Type string `gorm:"column:type;index;not null"              json:"type"`
+	// NimbusID is the UUIDv7 from the VM's stable identity. Empty for
+	// external-unmanaged (no nimbus marker at all). Index'd so the
+	// resolver can do nimbus_id-keyed lookups in O(1).
+	NimbusID string `gorm:"column:nimbus_id;index;default:''"       json:"nimbus_id,omitempty"`
+	// VMID is the Proxmox slot the divergence was observed at. Empty
+	// (0) for orphaned rows when the DB row has VMID=0, which
+	// shouldn't happen in practice but is allowed for safety.
+	VMID int `gorm:"column:vmid;index;default:0"             json:"vmid,omitempty"`
+	// Node is where the divergence was observed. Empty for orphaned
+	// rows when the local row has Node="" (legacy / failed provisions).
+	Node string `gorm:"column:node;default:''"                  json:"node,omitempty"`
+	// Hostname is denormalized at detection time so the UI doesn't
+	// have to join across the vms table to render a divergence row
+	// (the row may not exist by the time the UI renders).
+	Hostname string `gorm:"column:hostname;default:''"              json:"hostname,omitempty"`
+	// DetectedAt is set on first observation and refreshed on every
+	// subsequent cycle the divergence remains open — drives the
+	// "first seen / last seen" pair in the UI.
+	DetectedAt time.Time `gorm:"column:detected_at"                  json:"detected_at"`
+	// FirstDetectedAt sticks to the original observation so the
+	// "open for X days" badge survives every reconcile cycle.
+	FirstDetectedAt time.Time `gorm:"column:first_detected_at"      json:"first_detected_at"`
+	// ResolvedAt is non-nil when an admin (subticket #300) resolved
+	// the divergence, or the reconciler observed the underlying cause
+	// disappeared (e.g. orphan got created on Proxmox, manual import).
+	ResolvedAt *time.Time `gorm:"column:resolved_at;index"             json:"resolved_at,omitempty"`
+	// ResolvedBy is "system" when the reconciler auto-resolves, or
+	// the actor email when an admin clicks an action. Empty until
+	// resolved.
+	ResolvedBy string `gorm:"column:resolved_by;default:''"           json:"resolved_by,omitempty"`
+	// ResolvedAction names the action that resolved it ("imported",
+	// "marked-deleted", "force-deleted", "adopted", "auto-cleared").
+	// Empty until resolved.
+	ResolvedAction string `gorm:"column:resolved_action;default:''"   json:"resolved_action,omitempty"`
+	// DetailsJSON carries divergence-specific structured data: the
+	// missing-from-PVE node for orphans, the raw PVE config snapshot
+	// for external-tagged-orphans, etc. Always valid JSON or empty.
+	DetailsJSON string `gorm:"column:details_json;default:''"      json:"details_json,omitempty"`
+}
+
+// TableName pins the GORM table to "vm_divergences" so direct SQL queries
+// during triage match operator expectations.
+func (VMDivergence) TableName() string { return "vm_divergences" }
+
 // Operation tracks a long-running background task — the kind that used
 // to block an HTTP request for minutes. Migrate, provision, and any
 // future similar flow create an Operation row up front, fire a

@@ -232,6 +232,30 @@ type Service struct {
 	// cluster bridge. Default false — members are confined to
 	// Standalone or VPC. Live-rotated from Settings → Network.
 	clusterLANForMembers bool
+
+	// postOpReconciler is the divergence reconciler (#298). When set,
+	// Provision and Destroy fire a targeted ReconcileVM after a
+	// state-changing operation completes so divergences detected by
+	// the cycle don't sit until the next 5-minute background tick.
+	// nil = no targeted reconcile (still safe; the background loop
+	// will catch up).
+	postOpReconciler PostOpReconciler
+}
+
+// PostOpReconciler is the slice of *reconciler.Reconciler that
+// provision calls into after state-changing ops. Defined here per
+// the "accept interfaces" idiom; *reconciler.Reconciler satisfies
+// it via its ReconcileVMByID adapter.
+type PostOpReconciler interface {
+	ReconcileVMByID(ctx context.Context, vmid int) error
+}
+
+// SetPostOpReconciler installs (or replaces) the divergence
+// reconciler. Optional — wiring tests omit it and provision still
+// works; production main.go installs it after constructing the
+// reconciler so post-provision divergences surface promptly.
+func (s *Service) SetPostOpReconciler(r PostOpReconciler) {
+	s.postOpReconciler = r
 }
 
 // SetClusterLANForMembers controls whether non-admin callers can
@@ -1017,6 +1041,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		return nil, fmt.Errorf("persist vm: %w", err)
 	}
 	machineToCleanup = "" // success — keep the machine
+	s.firePostOpReconcile(newVMID)
 
 	res := &Result{
 		ID:            vm.ID,
@@ -1656,7 +1681,28 @@ func (s *Service) deleteVM(ctx context.Context, vm *db.VM) error {
 	if err := s.db.WithContext(ctx).Unscoped().Delete(vm).Error; err != nil {
 		return fmt.Errorf("delete vm row %d: %w", vm.ID, err)
 	}
+	s.firePostOpReconcile(vm.VMID)
 	return nil
+}
+
+// firePostOpReconcile launches a fire-and-forget targeted reconcile on
+// the divergence reconciler (#298). Async so it doesn't block the
+// provision / destroy HTTP response; bounded by a 60 s context so a
+// hung Proxmox API call can't pin the goroutine forever. No-op when
+// no reconciler is installed (tests, instances with the divergence
+// loop disabled).
+func (s *Service) firePostOpReconcile(vmid int) {
+	if s.postOpReconciler == nil {
+		return
+	}
+	r := s.postOpReconciler
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := r.ReconcileVMByID(ctx, vmid); err != nil {
+			log.Printf("post-op reconcile vmid=%d: %v", vmid, err)
+		}
+	}()
 }
 
 // releaseVMIP returns the VM's IP to the global pool. Standalone +

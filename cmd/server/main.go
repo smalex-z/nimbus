@@ -54,6 +54,7 @@ import (
 	"nimbus/internal/operations"
 	"nimbus/internal/provision"
 	"nimbus/internal/proxmox"
+	"nimbus/internal/reconciler"
 	"nimbus/internal/s3storage"
 	"nimbus/internal/secrets"
 	"nimbus/internal/selftunnel"
@@ -215,6 +216,7 @@ func main() {
 		&db.VPCMembership{},
 		&db.GatewayLXCIP{},
 		&db.NetworkingV1Settings{},
+		&db.VMDivergence{},
 		ippool.Model(),
 	)
 	if err != nil {
@@ -391,7 +393,7 @@ func main() {
 		return out
 	}
 
-	reconciler := ippool.NewReconciler(pool, pveClient,
+	ipReconciler := ippool.NewReconciler(pool, pveClient,
 		ippool.WithStaleAfter(time.Duration(cfg.ReservationTTLSeconds)*time.Second),
 		ippool.WithCacheTTL(time.Duration(cfg.VerifyCacheTTLSeconds)*time.Second),
 		ippool.WithMissThreshold(cfg.VacateMissThreshold),
@@ -401,7 +403,7 @@ func main() {
 	// Startup reconcile: bounded so a temporarily unreachable Proxmox doesn't
 	// block boot. Failure is logged, not fatal.
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
-	if rep, err := reconciler.Reconcile(startupCtx); err != nil {
+	if rep, err := ipReconciler.Reconcile(startupCtx); err != nil {
 		log.Printf("startup reconcile failed (continuing): %v", err)
 	} else {
 		log.Printf("startup reconcile: adopted=%d conflicts=%d freed=%d vacated=%d",
@@ -411,7 +413,7 @@ func main() {
 
 	bgCtx, cancelBg := context.WithCancel(context.Background())
 	defer cancelBg()
-	go runReconcileLoop(bgCtx, reconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+	go runReconcileLoop(bgCtx, ipReconciler, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
 
 	// Netscan: catches IPs in use by non-VM hosts on the LAN (gateway, NAS,
 	// statically-assigned workstations, etc.) and reserves them in the pool
@@ -447,7 +449,7 @@ func main() {
 	// single-IP netscan probe (~800ms worst case). Either failure rejects
 	// the candidate IP and verifyAndRetryReserve leapfrogs to the next free
 	// address.
-	provSvc.SetIPVerifier(chainVerifier{reconciler, netscan.NewVerifier(netscan.New(netscanCfg))})
+	provSvc.SetIPVerifier(chainVerifier{ipReconciler, netscan.NewVerifier(netscan.New(netscanCfg))})
 	// Wire the quota resolver so the member gate consults per-user
 	// overrides + workspace default. Without this the gate falls back
 	// to the legacy provision.MemberMaxVMs constant — fine for tests,
@@ -580,6 +582,15 @@ func main() {
 	// from cascading into a soft-delete of every row living there.
 	provSvc.SetUnreachableNodesProbe(hypervisorReachabilityProbe)
 	go runVMReconcileLoop(bgCtx, provSvc, time.Duration(cfg.ReconcileIntervalSeconds)*time.Second)
+
+	// Divergence reconciler (#298) — records mismatches between vms and
+	// the Proxmox cluster snapshot into vm_divergences. Keyed on
+	// nimbus_id, so vmid recycling doesn't masquerade as a healthy
+	// match. Independent cadence (default 5m) because the per-VM
+	// enrichment walk is heavier than the legacy VMID reconciler.
+	divergenceReconciler := reconciler.New(pveClient, database.DB)
+	divergenceReconciler.Start(bgCtx, time.Duration(cfg.DivergenceReconcileIntervalSeconds)*time.Second)
+	provSvc.SetPostOpReconciler(divergenceReconciler)
 
 	bootstrapSvc := bootstrap.New(pveClient, database.DB, bootstrap.Config{
 		TemplateBaseVMID: cfg.ProxmoxTemplateBaseVMID,
@@ -948,7 +959,7 @@ func main() {
 		Bootstrap:         bootstrapSvc,
 		Keys:              keysSvc,
 		Pool:              pool,
-		Reconciler:        reconciler,
+		Reconciler:        ipReconciler,
 		Proxmox:           pveClient,
 		Tunnels:           tunnelClient,
 		TunnelURL:         gopherSettings.APIURL,

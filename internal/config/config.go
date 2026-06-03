@@ -85,6 +85,13 @@ type Config struct {
 	VerifyCacheTTLSeconds    int // ListClusterIPs cache reuse     — default 5
 	VacateMissThreshold      int // consecutive missing cycles before auto-vacate — default 3
 
+	// Divergence reconciler (#298). Independent cadence from the legacy
+	// IP/VM reconciler — it's a heavier per-VM enrichment walk (config
+	// fetch per VM to read tags/description), so it runs less frequently.
+	// DivergenceReconcileIntervalSeconds=0 disables the background loop;
+	// targeted post-op reconciles still work.
+	DivergenceReconcileIntervalSeconds int // default 300 (5m)
+
 	// AuditRetentionDays caps how long audit_events rows live before
 	// the daily reaper deletes them. Default 90 (matches what most
 	// enterprise audit systems land on). 0 disables the reaper —
@@ -164,11 +171,12 @@ func Load() (*Config, error) {
 		GatewayLXCIPPool:        os.Getenv("NIMBUS_GATEWAY_LXC_IP_POOL"),
 		GatewayLXCStorage:       getEnv("NIMBUS_GATEWAY_LXC_STORAGE", "local-lvm"),
 
-		ReconcileIntervalSeconds: getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),
-		ReservationTTLSeconds:    getEnvInt("RESERVATION_TTL_SECONDS", 600),
-		VerifyCacheTTLSeconds:    getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
-		VacateMissThreshold:      getEnvInt("VACATE_MISS_THRESHOLD", 3),
-		AuditRetentionDays:       getEnvInt("NIMBUS_AUDIT_RETENTION_DAYS", 90),
+		ReconcileIntervalSeconds:           getEnvInt("RECONCILE_INTERVAL_SECONDS", 60),
+		ReservationTTLSeconds:              getEnvInt("RESERVATION_TTL_SECONDS", 600),
+		VerifyCacheTTLSeconds:              getEnvInt("VERIFY_CACHE_TTL_SECONDS", 5),
+		VacateMissThreshold:                getEnvInt("VACATE_MISS_THRESHOLD", 3),
+		DivergenceReconcileIntervalSeconds: getEnvInt("NIMBUS_DIVERGENCE_RECONCILE_INTERVAL_SECONDS", 300),
+		AuditRetentionDays:                 getEnvInt("NIMBUS_AUDIT_RETENTION_DAYS", 90),
 
 		NetscanMode:         getEnv("NIMBUS_NETSCAN_MODE", "arp"),
 		NetscanIntervalSecs: getEnvInt("NIMBUS_NETSCAN_INTERVAL_SECONDS", 300),
