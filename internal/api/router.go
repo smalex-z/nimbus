@@ -98,7 +98,7 @@ func NewRouter(d Deps) http.Handler {
 	setup := handlers.NewSetupWithAuth(d.Config, d.Restart, d.Auth).WithProxmox(d.Proxmox)
 	auth := handlers.NewAuth(d.Auth, d.Config.AppURL, d.Reconciler).WithVMActor(d.Provision).WithAudit(d.Audit)
 	auditH := handlers.NewAudit(d.Audit)
-	divergencesH := handlers.NewDivergences(d.Reconcile)
+	divergencesH := handlers.NewDivergences(d.Reconcile).WithResolveDeps(d.Proxmox)
 	opsH := handlers.NewOperations(d.Operations)
 	if d.UserBuckets != nil {
 		auth = auth.WithBucketPurger(d.UserBuckets)
@@ -300,6 +300,10 @@ func NewRouter(d Deps) http.Handler {
 				// and mount alongside this group.
 				r.Get("/admin/divergences", divergencesH.List)
 				r.Get("/admin/divergences/summary", divergencesH.Summary)
+				r.Post("/admin/divergences/{id}/import", divergencesH.Import)
+				r.Post("/admin/divergences/{id}/adopt", divergencesH.Adopt)
+				r.Post("/admin/divergences/{id}/mark-deleted", divergencesH.MarkDeleted)
+				r.Delete("/admin/divergences/{id}", divergencesH.ForceDelete)
 
 				r.Get("/nodes", nodes.List)
 				// Admin-facing node lifecycle. Drain streams NDJSON and

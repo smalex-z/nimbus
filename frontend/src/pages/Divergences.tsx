@@ -1,11 +1,48 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getDivergenceSummary, listDivergences } from '@/api/client'
+import {
+  adoptDivergence,
+  forceDeleteDivergence,
+  getDivergenceSummary,
+  importDivergence,
+  listDivergences,
+  markDivergenceDeleted,
+} from '@/api/client'
 import type {
   DivergenceListParams,
   DivergenceSummary,
   DivergenceType,
   VMDivergence,
 } from '@/types'
+
+// Per-type action set. The same shape drives row buttons and the
+// keyboard-accessible label for the destructive Force-delete chip.
+type ActionKey = 'import' | 'adopt' | 'mark-deleted' | 'force-delete'
+
+const ACTIONS_BY_TYPE: Record<DivergenceType, ActionKey[]> = {
+  orphaned: ['mark-deleted', 'force-delete'],
+  'external-unmanaged': ['import'],
+  'external-tagged-orphan': ['adopt', 'force-delete'],
+  'vmid-mismatch': [], // investigate manually; no automated path yet
+}
+
+const ACTION_LABELS: Record<ActionKey, string> = {
+  import: 'Import',
+  adopt: 'Adopt',
+  'mark-deleted': 'Mark deleted',
+  'force-delete': 'Force-delete from Proxmox',
+}
+
+const ACTION_DESCRIPTIONS: Record<ActionKey, string> = {
+  import:
+    "Mint a nimbus_id, stamp it onto Proxmox (tag + description), and insert a vms row. " +
+    "Tier and OS are placeholder values you'll need to edit afterwards — Nimbus doesn't have enough information to fill them in.",
+  adopt:
+    "Re-link the existing DB row (matched by nimbus_id) to this Proxmox VMID. Use this when a row was soft-deleted or its vmid was wiped.",
+  'mark-deleted':
+    "Remove the local DB row. The Proxmox side is already gone; this just stops re-opening the divergence on every reconcile.",
+  'force-delete':
+    "DESTROY the Proxmox VM and remove the local row. Stops + destroys the VM. Use only when you're sure — there's no undo.",
+}
 
 // Divergences — read-only inventory of mismatches between the Nimbus
 // DB and the Proxmox cluster snapshot. Populated by the
@@ -193,6 +230,7 @@ export default function Divergences() {
                   row={row}
                   expanded={expanded === row.id}
                   onToggle={() => setExpanded(expanded === row.id ? null : row.id)}
+                  onResolved={reload}
                 />
               ))}
             </tbody>
@@ -301,10 +339,12 @@ function DivergenceRow({
   row,
   expanded,
   onToggle,
+  onResolved,
 }: {
   row: VMDivergence
   expanded: boolean
   onToggle: () => void
+  onResolved: () => void
 }) {
   const detected = useMemo(() => {
     try {
@@ -391,10 +431,86 @@ function DivergenceRow({
                 </>
               )}
             </dl>
+            {!row.resolved_at && <ResolveActions row={row} onResolved={onResolved} />}
           </td>
         </tr>
       )}
     </>
+  )
+}
+
+// ResolveActions renders the per-type action chips inside the
+// expanded-row panel. Each click runs the right backend call, then
+// asks the parent to refresh. Destructive actions (Force-delete) gate
+// behind a double-confirm dialog.
+function ResolveActions({ row, onResolved }: { row: VMDivergence; onResolved: () => void }) {
+  const [busy, setBusy] = useState<ActionKey | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const actions = ACTIONS_BY_TYPE[row.type] || []
+  if (actions.length === 0) {
+    return (
+      <div className="mt-3 text-[11px] text-ink-3 font-mono">
+        No automated resolution path for this type — investigate manually.
+      </div>
+    )
+  }
+
+  async function runAction(action: ActionKey) {
+    if (action === 'force-delete') {
+      const ok = window.confirm(
+        `Force-delete will DESTROY VM ${row.vmid} on ${row.node} and remove the local row. ` +
+          `This cannot be undone. Continue?`,
+      )
+      if (!ok) return
+    }
+    setBusy(action)
+    setError(null)
+    try {
+      switch (action) {
+        case 'import':
+          await importDivergence(row.id)
+          break
+        case 'adopt':
+          await adoptDivergence(row.id)
+          break
+        case 'mark-deleted':
+          await markDivergenceDeleted(row.id)
+          break
+        case 'force-delete':
+          await forceDeleteDivergence(row.id)
+          break
+      }
+      onResolved()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'action failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      {actions.map((action) => {
+        const destructive = action === 'force-delete'
+        return (
+          <button
+            key={action}
+            type="button"
+            disabled={busy !== null}
+            onClick={() => runAction(action)}
+            title={ACTION_DESCRIPTIONS[action]}
+            className={
+              destructive
+                ? 'px-3 py-1 rounded-md text-bad bg-[rgba(176,38,37,0.10)] border border-[rgba(176,38,37,0.30)] text-[11px] font-mono uppercase tracking-wider cursor-pointer hover:bg-[rgba(176,38,37,0.18)] disabled:opacity-40 disabled:cursor-default'
+                : 'px-3 py-1 rounded-md border border-line-2 bg-white/85 text-[11px] font-mono uppercase tracking-wider text-ink cursor-pointer hover:border-ink disabled:opacity-40 disabled:cursor-default'
+            }
+          >
+            {busy === action ? '…' : ACTION_LABELS[action]}
+          </button>
+        )
+      })}
+      {error && <span className="text-[11px] text-bad font-mono">{error}</span>}
+    </div>
   )
 }
 

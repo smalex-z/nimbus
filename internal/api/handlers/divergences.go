@@ -1,27 +1,43 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"nimbus/internal/api/response"
+	"nimbus/internal/ctxutil"
 	"nimbus/internal/db"
 	"nimbus/internal/reconciler"
 )
 
-// Divergences exposes the read-only divergence inventory the EPIC #296
-// reconciler populates. Write side (admin actions to resolve a
-// divergence) lives in #300 and is mounted separately.
+// Divergences exposes both the read-only divergence inventory (#299)
+// and the admin resolve actions (#300) the EPIC #296 reconciler
+// supports.
 type Divergences struct {
-	svc *reconciler.Reconciler
+	svc  *reconciler.Reconciler
+	deps reconciler.ResolveDeps
 }
 
 // NewDivergences constructs the handler. Nil svc renders empty results
 // — the router still mounts the routes so the SPA's network probes
 // don't 404 on instances where the divergence loop is disabled.
+// Nil deps disables the resolve actions (they return 503) while
+// keeping the list/summary endpoints functional.
 func NewDivergences(svc *reconciler.Reconciler) *Divergences {
 	return &Divergences{svc: svc}
+}
+
+// WithResolveDeps wires the side-effect surface admin actions need
+// (Proxmox client). Returns the same handler so the constructor can
+// chain. Optional — when nil the resolve endpoints 503 cleanly.
+func (h *Divergences) WithResolveDeps(deps reconciler.ResolveDeps) *Divergences {
+	h.deps = deps
+	return h
 }
 
 // divergenceView is the wire shape per row. Lifts db.VMDivergence into
@@ -171,6 +187,142 @@ func toDivergenceView(row db.VMDivergence) divergenceView {
 		v.ResolvedAt = &s
 	}
 	return v
+}
+
+// resolveResponse is the wire shape returned by every resolve action.
+// Wraps reconciler.ResolveResult unchanged — the result struct's
+// fields are already snake_case and JSON-tagged.
+type resolveResponse struct {
+	Result reconciler.ResolveResult `json:"result"`
+}
+
+// Import handles POST /api/admin/divergences/{id}/import.
+//
+// @Summary     Import an external Proxmox VM into Nimbus
+// @Description Mint a fresh nimbus_id, stamp it onto the Proxmox tag +
+// @Description description, and insert a vms row. Tier/OS/IP are
+// @Description placeholder values the operator can edit afterwards;
+// @Description Nimbus doesn't have enough information to infer them.
+// @Tags        divergences
+// @Security    cookieAuth
+// @Param       id path int true "divergence id"
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=resolveResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /admin/divergences/{id}/import [post]
+func (h *Divergences) Import(w http.ResponseWriter, r *http.Request) {
+	h.runResolve(w, r, "import", h.svc.ImportExternal)
+}
+
+// Adopt handles POST /api/admin/divergences/{id}/adopt.
+//
+// @Summary     Re-link a tagged orphan with its existing DB row
+// @Tags        divergences
+// @Security    cookieAuth
+// @Param       id path int true "divergence id"
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=resolveResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /admin/divergences/{id}/adopt [post]
+func (h *Divergences) Adopt(w http.ResponseWriter, r *http.Request) {
+	h.runResolve(w, r, "adopt", h.svc.Adopt)
+}
+
+// MarkDeleted handles POST /api/admin/divergences/{id}/mark-deleted.
+//
+// @Summary     Remove the local DB row for an orphan
+// @Tags        divergences
+// @Security    cookieAuth
+// @Param       id path int true "divergence id"
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=resolveResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /admin/divergences/{id}/mark-deleted [post]
+func (h *Divergences) MarkDeleted(w http.ResponseWriter, r *http.Request) {
+	h.runResolve(w, r, "mark-deleted", h.svc.MarkDeleted)
+}
+
+// ForceDelete handles DELETE /api/admin/divergences/{id}?force=true.
+// The force=true query parameter is mandatory — the destructive nature
+// of "destroy a Proxmox VM" warrants an explicit flag that can't be
+// hit by an accidental DELETE.
+//
+// @Summary     Destroy the Proxmox VM and drop the local row
+// @Description Requires the literal query string `force=true`. Stops +
+// @Description destroys the PVE VM and removes any local DB row
+// @Description pointing at the same identity. Idempotent — "already
+// @Description gone" is treated as success.
+// @Tags        divergences
+// @Security    cookieAuth
+// @Param       id    path  int    true  "divergence id"
+// @Param       force query string true  "must equal 'true' to confirm" Enums(true)
+// @Produce     json
+// @Success     200 {object} EnvelopeOK{data=resolveResponse}
+// @Failure     400 {object} EnvelopeError
+// @Failure     404 {object} EnvelopeError
+// @Failure     409 {object} EnvelopeError
+// @Failure     503 {object} EnvelopeError
+// @Router      /admin/divergences/{id} [delete]
+func (h *Divergences) ForceDelete(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("force") != "true" {
+		response.BadRequest(w, "force=true is required to confirm this destructive action")
+		return
+	}
+	h.runResolve(w, r, "force-delete", h.svc.ForceDelete)
+}
+
+// resolveFn is the signature shared by every action method on the
+// reconciler. Lifting the common preamble (id parse, dep check, actor
+// extraction, error mapping) here keeps each handler one line.
+type resolveFn func(ctx context.Context, divID uint, deps reconciler.ResolveDeps, actor reconciler.ResolveActor) (reconciler.ResolveResult, error)
+
+func (h *Divergences) runResolve(w http.ResponseWriter, r *http.Request, _ string, fn resolveFn) {
+	if h.svc == nil || h.deps == nil {
+		response.Error(w, http.StatusServiceUnavailable, "divergence reconciler is not configured")
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	id64, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		response.BadRequest(w, "id must be a positive integer")
+		return
+	}
+	actor := reconciler.ResolveActor{}
+	if u := ctxutil.User(r.Context()); u != nil {
+		actor.Email = u.Email
+		actor.IsAdmin = u.IsAdmin
+	}
+	res, err := fn(r.Context(), uint(id64), h.deps, actor)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	response.Success(w, resolveResponse{Result: res})
+}
+
+// writeResolveError maps the typed errors the reconciler exposes onto
+// HTTP statuses. Other errors fall through to 500.
+func writeResolveError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, reconciler.ErrDivergenceNotFound):
+		response.Error(w, http.StatusNotFound, err.Error())
+	default:
+		var wrong *reconciler.ErrWrongDivergenceType
+		if errors.As(err, &wrong) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+	}
 }
 
 // ActionHint returns the suggested resolution for a divergence type,

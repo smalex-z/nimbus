@@ -1161,6 +1161,11 @@ definitions:
         example: node removed
         type: string
     type: object
+  handlers.resolveResponse:
+    properties:
+      result:
+        $ref: '#/definitions/reconciler.ResolveResult'
+    type: object
   handlers.saveAuthorizedDomainsRequest:
     properties:
       domains:
@@ -1848,6 +1853,19 @@ definitions:
       snapshot_at:
         type: string
     type: object
+  reconciler.ResolveResult:
+    properties:
+      action:
+        type: string
+      divergence_id:
+        type: integer
+      message:
+        type: string
+      nimbus_id:
+        type: string
+      vm_row_id:
+        type: integer
+    type: object
   reconciler.Summary:
     properties:
       external_tagged_orphan:
@@ -2289,6 +2307,187 @@ paths:
       security:
       - cookieAuth: []
       summary: List VM divergences (admin)
+      tags:
+      - divergences
+  /admin/divergences/{id}:
+    delete:
+      description: |-
+        Requires the literal query string `force=true`. Stops +
+        destroys the PVE VM and removes any local DB row
+        pointing at the same identity. Idempotent — "already
+        gone" is treated as success.
+      parameters:
+      - description: divergence id
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: must equal 'true' to confirm
+        enum:
+        - "true"
+        in: query
+        name: force
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.resolveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Destroy the Proxmox VM and drop the local row
+      tags:
+      - divergences
+  /admin/divergences/{id}/adopt:
+    post:
+      parameters:
+      - description: divergence id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.resolveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Re-link a tagged orphan with its existing DB row
+      tags:
+      - divergences
+  /admin/divergences/{id}/import:
+    post:
+      description: |-
+        Mint a fresh nimbus_id, stamp it onto the Proxmox tag +
+        description, and insert a vms row. Tier/OS/IP are
+        placeholder values the operator can edit afterwards;
+        Nimbus doesn't have enough information to infer them.
+      parameters:
+      - description: divergence id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.resolveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Import an external Proxmox VM into Nimbus
+      tags:
+      - divergences
+  /admin/divergences/{id}/mark-deleted:
+    post:
+      parameters:
+      - description: divergence id
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/handlers.EnvelopeOK'
+            - properties:
+                data:
+                  $ref: '#/definitions/handlers.resolveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handlers.EnvelopeError'
+      security:
+      - cookieAuth: []
+      summary: Remove the local DB row for an orphan
       tags:
       - divergences
   /admin/divergences/summary:

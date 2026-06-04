@@ -196,6 +196,51 @@ export async function getDivergenceSummary(): Promise<DivergenceSummary> {
   return data
 }
 
+// DivergenceResolveResult mirrors reconciler.ResolveResult.
+export interface DivergenceResolveResult {
+  divergence_id: number
+  action: string
+  nimbus_id?: string
+  vm_row_id?: number
+  message?: string
+}
+
+// importDivergence converts an external-unmanaged VM into a Nimbus-
+// tracked row by minting a nimbus_id and stamping it onto PVE.
+export async function importDivergence(id: number): Promise<DivergenceResolveResult> {
+  const { data } = await api.post<{ result: DivergenceResolveResult }>(
+    `/admin/divergences/${id}/import`,
+  )
+  return data.result
+}
+
+// adoptDivergence re-links a tagged-orphan with its existing DB row.
+export async function adoptDivergence(id: number): Promise<DivergenceResolveResult> {
+  const { data } = await api.post<{ result: DivergenceResolveResult }>(
+    `/admin/divergences/${id}/adopt`,
+  )
+  return data.result
+}
+
+// markDivergenceDeleted drops the local DB row for an orphan.
+export async function markDivergenceDeleted(id: number): Promise<DivergenceResolveResult> {
+  const { data } = await api.post<{ result: DivergenceResolveResult }>(
+    `/admin/divergences/${id}/mark-deleted`,
+  )
+  return data.result
+}
+
+// forceDeleteDivergence destroys the PVE VM and removes the local row.
+// The force=true query parameter is required server-side; this client
+// always passes it because the caller is committing to the destructive
+// action by reaching this function in the first place.
+export async function forceDeleteDivergence(id: number): Promise<DivergenceResolveResult> {
+  const { data } = await api.delete<{ result: DivergenceResolveResult }>(
+    `/admin/divergences/${id}?force=true`,
+  )
+  return data.result
+}
+
 export async function listIPs(): Promise<IPAllocation[]> {
   const { data } = await api.get<IPAllocation[]>('/ips')
   return data
