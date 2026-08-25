@@ -159,6 +159,7 @@ type AutoTagInput struct {
 	CPUModel string
 	HasSSD   bool
 	HasGPU   bool
+	HasAVX2  bool
 }
 
 // DeriveAutoTags returns the system-derived tags Nimbus auto-applies to a
@@ -167,6 +168,10 @@ type AutoTagInput struct {
 //     Neoverse) — derived from the CPU model string.
 //   - "ssd": at least one disk on the node is type=ssd or type=nvme.
 //   - "gpu": at least one PCI device is from NVIDIA (vendor 0x10de).
+//   - "avx2": the host CPU supports the full x86-64-v3 feature set.
+//     Load-bearing beyond placement — provision pins a VM that asked
+//     for it to cpu=x86-64-v3, and every migration planner reapplies
+//     the constraint so the VM can never land on a host that lacks it.
 //
 // Operators don't see these as editable in the Nodes UI (they live
 // alongside operator tags but aren't writable). The scheduler treats
@@ -185,6 +190,9 @@ func DeriveAutoTags(in AutoTagInput) []string {
 	}
 	if in.HasGPU {
 		tags = append(tags, "gpu")
+	}
+	if in.HasAVX2 {
+		tags = append(tags, "avx2")
 	}
 	return tags
 }
@@ -374,7 +382,7 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	// Host-aggregate filter: every required tag must be on the node.
 	// Cheaper than capacity math so it runs early, but after lock-state
 	// so the operator's intent (cordon/drain) reports first.
-	if missing := missingTags(n.Tags, env.RequiredTags); len(missing) > 0 {
+	if missing := MissingTags(n.Tags, env.RequiredTags); len(missing) > 0 {
 		reasons = append(reasons, ReasonMissingTag)
 	}
 	if !env.TemplatesPresent[n.Name] {
@@ -489,10 +497,15 @@ func Score(n Node, t Tier, env Env, rt NodeRuntime) Result {
 	}
 }
 
-// missingTags returns the slice of required tags that aren't present in
+// MissingTags returns the slice of required tags that aren't present in
 // nodeTags. Empty required → empty result (no constraint). Both inputs
 // are case-sensitive; operators should keep tag casing consistent.
-func missingTags(nodeTags, required []string) []string {
+//
+// Exported because placement isn't the only gate that has to apply the
+// filter: the migrate path re-checks an operator-supplied target node
+// against the VM's RequiredTags, and must reach the same verdict the
+// scorer would.
+func MissingTags(nodeTags, required []string) []string {
 	if len(required) == 0 {
 		return nil
 	}

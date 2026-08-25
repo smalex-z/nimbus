@@ -38,6 +38,10 @@ type MigratePlan struct {
 // drain-specific accumulation (plannedAdd) so each candidate's score
 // + projected RAM% reflects "this VM lands here, nothing else moves."
 //
+// The VM's RequiredTags filter IS applied, so nodes that can't host it
+// come back ineligible with ReasonMissingTag rather than being offered
+// in the destination dropdown.
+//
 // The handler maps gorm.ErrRecordNotFound to a 404; unknown-tier and
 // other in-band failures surface as wrapped errors. Like ComputePlan,
 // the disk gate stays permissive (storeRows is intentionally unused)
@@ -86,6 +90,7 @@ func (s *Service) ComputeMigratePlan(ctx context.Context, vmID uint) (*MigratePl
 			Name: n.Name, Status: n.Status, CPU: n.CPU,
 			MaxCPU: n.MaxCPU, Mem: n.Mem, MaxMem: n.MaxMem,
 			LockState: lockOrNone(row.LockState),
+			Tags:      scoreTags(row),
 		})
 	}
 
@@ -115,6 +120,16 @@ func (s *Service) ComputeMigratePlan(ctx context.Context, vmID uint) (*MigratePl
 		TemplatesPresent: templatesPresent,
 		// StorageByNode left nil — same disk-gate-permissive stance
 		// the drain plan takes.
+		//
+		// RequiredTags is NOT permissive: a migration has to honour the
+		// same host-aggregate filter the VM was provisioned under, or a
+		// hand-triggered move silently relocates a VM onto hardware it
+		// asked not to be on. For `avx2` that isn't just a preference —
+		// the VM runs with cpu=x86-64-v3, so a move to a host without
+		// the v3 feature set is a failed migration at best and a
+		// crashed guest at worst. ComputePlan and the drain executor
+		// already apply this; this planner was the gap.
+		RequiredTags: splitVMTags(vm.RequiredTags),
 	}
 	decisions := nodescore.Evaluate(candidates, runtime, tier, env)
 	winner, _ := nodescore.Pick(decisions)

@@ -1,5 +1,7 @@
 package proxmox
 
+import "strings"
+
 // Node is the subset of /api2/json/nodes data Nimbus reads. Field names match
 // the Proxmox JSON keys after Go's standard tag-based decoding.
 type Node struct {
@@ -59,6 +61,62 @@ type CPUInfo struct {
 	Cpus    int    `json:"cpus"`
 	Sockets int    `json:"sockets"`
 	Cores   int    `json:"cores"`
+	// Flags is the raw space-separated /proc/cpuinfo flag list Proxmox
+	// passes through verbatim. Only consumed via SupportsAVX2 — see
+	// there for why the spellings need care.
+	Flags string `json:"flags"`
+}
+
+// v3Features is the x86-64-v3 feature set written in Linux
+// /proc/cpuinfo spellings, not the psABI ones. Each entry lists the
+// acceptable aliases for a single feature.
+//
+// The spellings are the entire point of this table. Linux does not
+// report these under their psABI names: LZCNT comes back as "abm" on
+// Intel parts, and SSE3 (if we ever check v2) comes back as "pni".
+// Testing membership against the psABI names finds no "lzcnt" on any
+// host we have, so a naive check classifies a whole Intel cluster as
+// non-AVX2. Verified against PVE 9 on Ivy Bridge, Haswell, Skylake,
+// Ice Lake and Tiger Lake hosts.
+//
+// OSXSAVE is deliberately omitted: it's an OS-enablement bit rather
+// than a CPU capability, and Proxmox reports it on none of them.
+var v3Features = [][]string{
+	{"avx"}, {"avx2"}, {"bmi1"}, {"bmi2"},
+	{"f16c"}, {"fma"}, {"movbe"},
+	{"lzcnt", "abm"},
+}
+
+// SupportsAVX2 reports whether this host can run a guest pinned to
+// cpu=x86-64-v3. It checks the whole v3 set rather than AVX2 alone —
+// a guest advertising v3 needs all of it — while the tag and the
+// user-facing vocabulary stay "avx2", which is the feature people
+// actually ask for.
+//
+// Empty Flags returns false: unknown means "don't promise AVX2", which
+// leaves the VM on the portable default rather than pinning it to a
+// level the host may not have.
+func (c *CPUInfo) SupportsAVX2() bool {
+	if c == nil || c.Flags == "" {
+		return false
+	}
+	have := make(map[string]struct{})
+	for _, f := range strings.Fields(c.Flags) {
+		have[f] = struct{}{}
+	}
+	for _, aliases := range v3Features {
+		found := false
+		for _, a := range aliases {
+			if _, ok := have[a]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // Disk mirrors one row from /nodes/{node}/disks/list. Type is one of

@@ -820,7 +820,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		SearchDomain: s.cfg.SearchDomain,
 		Cores:        tier.CPU,
 		Memory:       int(tier.MemMB),
-		CPU:          s.cfg.CPUType,
+		CPU:          cpuTypeFor(s.cfg.CPUType, requiredTags),
 	}
 	if err := s.px.SetCloudInit(ctx, target, newVMID, cloudInit); err != nil {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
@@ -2059,7 +2059,7 @@ type nodeMeta struct {
 // constraint matches an ARM host even when no operator tags are set.
 func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, error) {
 	var rows []db.Node
-	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model", "has_ssd", "has_gpu").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("name", "lock_state", "tags", "cpu_model", "has_ssd", "has_gpu", "has_avx2").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[string]nodeMeta, len(rows))
@@ -2068,6 +2068,7 @@ func (s *Service) nodeMetaByNode(ctx context.Context) (map[string]nodeMeta, erro
 			CPUModel: r.CPUModel,
 			HasSSD:   r.HasSSD,
 			HasGPU:   r.HasGPU,
+			HasAVX2:  r.HasAVX2,
 		})
 		tags := append(splitCSVTags(r.Tags), auto...)
 		out[r.Name] = nodeMeta{LockState: r.LockState, Tags: tags}
@@ -2097,6 +2098,65 @@ func splitCSVTags(csv string) []string {
 // (admittedly cosmetic) clarity at provision-Request call sites —
 // reads as "the operator-typed required tags from the request, parsed."
 func splitRequiredTags(csv string) []string { return splitCSVTags(csv) }
+
+// avx2Tag is the host-aggregate tag a user opts into when the workload
+// needs AVX2. It's auto-applied to capable nodes by
+// nodescore.DeriveAutoTags, so asking for it constrains placement to
+// hosts that actually have the x86-64-v3 feature set.
+const avx2Tag = "avx2"
+
+// cpuTypeAVX2 is the Proxmox cpu= model a VM gets once it has asked for
+// avx2. v3 rather than v4 on purpose: v4 adds AVX-512, which a minority
+// of hosts have, and pinning to it would strand the VM on those few
+// nodes for the rest of its life.
+const cpuTypeAVX2 = "x86-64-v3"
+
+// cpuLevelRank orders the portable x86-64 psABI levels so cpuTypeFor can
+// tell an upgrade from a downgrade. Deliberately partial: "host", a
+// named QEMU model, and anything else an operator configured are absent
+// and therefore never rewritten. We don't second-guess an explicit
+// choice — we only raise a portable default that would otherwise deny a
+// VM the feature it asked for.
+var cpuLevelRank = map[string]int{
+	"kvm64":         1,
+	"x86-64-v1":     1,
+	"x86-64-v2":     2,
+	"x86-64-v2-AES": 2,
+	"x86-64-v3":     3,
+	"x86-64-v4":     4,
+}
+
+// cpuTypeFor picks the Proxmox cpu= model for one VM.
+//
+// base is the cluster-wide default (config.VMCPUType), which has to be
+// conservative: it must boot on the least capable node the scheduler
+// might pick. A VM that opted into the avx2 tag is guaranteed to land
+// on an AVX2 host — placement, drain and migrate all enforce the tag —
+// so it can safely be pinned a level higher.
+//
+// Only *raises* the level, and only from a ranked portable default.
+// base="" ("leave whatever the template set") counts as unranked-low:
+// stock Proxmox templates come up kvm64/v2-AES, so an avx2 request has
+// to override it or the guest silently never sees AVX2.
+func cpuTypeFor(base string, requiredTags []string) string {
+	wantsAVX2 := false
+	for _, t := range requiredTags {
+		if t == avx2Tag {
+			wantsAVX2 = true
+			break
+		}
+	}
+	if !wantsAVX2 {
+		return base
+	}
+	if base == "" {
+		return cpuTypeAVX2
+	}
+	if rank, ranked := cpuLevelRank[base]; ranked && rank < cpuLevelRank[cpuTypeAVX2] {
+		return cpuTypeAVX2
+	}
+	return base
+}
 
 // readSchedulingRatios fetches the cluster-wide overcommit ratios from
 // the SchedulingSettings singleton. Falls back to the nodescore default

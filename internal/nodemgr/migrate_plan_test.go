@@ -179,3 +179,82 @@ func TestComputeMigratePlan_ProjectedRAMReflectsCurrentLoad(t *testing.T) {
 		t.Errorf("AutoPick = %q, want gamma (less loaded)", plan.AutoPick)
 	}
 }
+
+// seedTaggedMigrateVM inserts a VM carrying a RequiredTags constraint.
+func seedTaggedMigrateVM(t *testing.T, database *db.DB, node, tier, requiredTags string) uint {
+	t.Helper()
+	row := db.VM{
+		VMID:         200,
+		Hostname:     "tagged-vm",
+		IP:           "10.0.0.1",
+		Node:         node,
+		Tier:         tier,
+		Status:       "running",
+		RequiredTags: requiredTags,
+	}
+	if err := database.Create(&row).Error; err != nil {
+		t.Fatalf("seed vm: %v", err)
+	}
+	return row.ID
+}
+
+// seedAVX2Nodes writes the db.Node rows whose has_avx2 column drives the
+// avx2 auto-tag.
+func seedAVX2Nodes(t *testing.T, database *db.DB, avx2ByNode map[string]bool) {
+	t.Helper()
+	for name, avx2 := range avx2ByNode {
+		if err := database.Create(&db.Node{Name: name, CPUModel: "Intel Xeon", HasAVX2: avx2}).Error; err != nil {
+			t.Fatalf("seed node %s: %v", name, err)
+		}
+	}
+}
+
+// The migrate planner must apply the VM's host-aggregate filter, not just
+// capacity. Before this was wired, the destination dropdown happily
+// offered a non-AVX2 node for a VM pinned to cpu=x86-64-v3.
+func TestComputeMigratePlan_HonoursRequiredTags(t *testing.T) {
+	t.Parallel()
+	svc, database, fake := newTestService(t)
+	fake.nodes = []proxmox.Node{
+		{Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 8 * gib},
+		// beta is the roomiest node, so a capacity-only scorer would
+		// auto-pick it. It has no AVX2, so the tag filter must win.
+		{Name: "beta", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 1 * gib},
+		{Name: "gamma", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 4 * gib},
+	}
+	seedAVX2Nodes(t, database, map[string]bool{"alpha": true, "beta": false, "gamma": true})
+	id := seedTaggedMigrateVM(t, database, "alpha", "small", "avx2")
+
+	plan, err := svc.ComputeMigratePlan(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ComputeMigratePlan: %v", err)
+	}
+	if plan.AutoPick != "gamma" {
+		t.Errorf("AutoPick = %q, want gamma (the only AVX2-capable non-source node)", plan.AutoPick)
+	}
+	for _, e := range plan.Eligible {
+		if e.Node == "beta" && !e.Disabled {
+			t.Errorf("beta lacks avx2 but was offered as an enabled destination: %+v", e)
+		}
+	}
+}
+
+// With no constraint, the filter must not narrow anything.
+func TestComputeMigratePlan_UntaggedVMIgnoresNodeTags(t *testing.T) {
+	t.Parallel()
+	svc, database, fake := newTestService(t)
+	fake.nodes = []proxmox.Node{
+		{Name: "alpha", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 8 * gib},
+		{Name: "beta", Status: "online", MaxCPU: 8, MaxMem: 16 * gib, Mem: 1 * gib},
+	}
+	seedAVX2Nodes(t, database, map[string]bool{"alpha": true, "beta": false})
+	id := seedMigrateVM(t, database, "alpha", "small")
+
+	plan, err := svc.ComputeMigratePlan(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ComputeMigratePlan: %v", err)
+	}
+	if plan.AutoPick != "beta" {
+		t.Errorf("AutoPick = %q, want beta (no constraint, most free RAM)", plan.AutoPick)
+	}
+}

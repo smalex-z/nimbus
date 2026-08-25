@@ -392,6 +392,10 @@ func TestDeriveAutoTags(t *testing.T) {
 		{"x86 + gpu", nodescore.AutoTagInput{CPUModel: "AMD Ryzen", HasGPU: true}, []string{"x86", "gpu"}},
 		{"all three", nodescore.AutoTagInput{CPUModel: "Apple M2", HasSSD: true, HasGPU: true}, []string{"arm", "ssd", "gpu"}},
 		{"ssd alone (no cpu)", nodescore.AutoTagInput{HasSSD: true}, []string{"ssd"}},
+		{"avx2", nodescore.AutoTagInput{CPUModel: "Intel Xeon", HasAVX2: true}, []string{"x86", "avx2"}},
+		{"no avx2 emits no tag", nodescore.AutoTagInput{CPUModel: "Intel Xeon"}, []string{"x86"}},
+		{"all four", nodescore.AutoTagInput{CPUModel: "AMD EPYC", HasSSD: true, HasGPU: true, HasAVX2: true},
+			[]string{"x86", "ssd", "gpu", "avx2"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

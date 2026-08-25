@@ -572,6 +572,15 @@ type Node struct {
 	// the PCI vendor list and are left for operator tagging.
 	HasSSD bool `gorm:"column:has_ssd;default:false"       json:"-"`
 	HasGPU bool `gorm:"column:has_gpu;default:false"       json:"-"`
+	// HasAVX2 records whether the host CPU supports the full x86-64-v3
+	// feature set, decided by proxmox.CPUInfo.SupportsAVX2 from the
+	// cpuinfo.flags string on /nodes/{n}/status. Drives the `avx2`
+	// auto-tag, which gates both placement and the cpu= model a VM is
+	// pinned to. Unlike has_ssd/has_gpu this refreshes on the
+	// foreground List() path — flags ride along on a call we already
+	// make — so a new node converges within one 15 s poll and no
+	// backfill is needed for the default-false rollout.
+	HasAVX2 bool `gorm:"column:has_avx2;default:false"      json:"-"`
 	// DiskType is the strongest disk class observed via /disks/list:
 	// "nvme" > "ssd" > "hdd" > "" (unknown). Surfaces on the SPA card
 	// in place of the Proxmox pool name so operators can compare

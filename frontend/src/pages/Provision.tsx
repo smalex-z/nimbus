@@ -1635,7 +1635,14 @@ function ErrorView({ error, failedStep, onRetry }: ErrorViewProps) {
 // the operator opts into manually — auto-assigning it would mean
 // picking "fastest in this cluster", which is meaningless across
 // deployments. Surfacing it here keeps the vocabulary discoverable.
-const SUGGESTED_TAGS = ['fast-cpu']
+//
+// `avx2` is different from the rest: it's auto-applied to capable nodes
+// (so it usually appears from the cluster tags anyway) and it changes
+// more than placement — asking for it also pins the VM to
+// cpu=x86-64-v3. Listed here so it stays discoverable on clusters where
+// no node is AVX2-capable, where picking it correctly yields "no
+// eligible node" rather than a VM that won't boot.
+const SUGGESTED_TAGS = ['fast-cpu', 'avx2']
 
 // AffinityPicker — comma-separated tag input for the host-aggregate
 // constraint. Operators tag nodes ("fast-cpu", "nvme", "gpu") on the

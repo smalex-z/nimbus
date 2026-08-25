@@ -41,11 +41,22 @@ type Config struct {
 	Nameserver   string
 	SearchDomain string
 
-	// VMCPUType is the Proxmox `cpu` model applied to every provisioned VM.
-	// Default x86-64-v3 (Haswell baseline) guarantees AVX2 in the guest while
-	// remaining portable across any Haswell-or-newer host. Override via
-	// VM_CPU_TYPE — e.g. "host" for max performance on a single-host setup,
-	// or "x86-64-v2-AES" if any cluster node predates Haswell.
+	// VMCPUType is the Proxmox `cpu` model applied to a provisioned VM that
+	// hasn't asked for anything better. It is the portability floor, so the
+	// default is x86-64-v2-AES: it must boot on the least capable node the
+	// scheduler might pick, and pre-Haswell hosts (Ivy Bridge and older) are
+	// common in homelab and salvaged-hardware clusters. It's also Proxmox
+	// VE 9's own default and its documented minimum host requirement.
+	//
+	// This is NOT a cap. A VM that opts into the `avx2` host-aggregate tag
+	// is pinned to x86-64-v3 by provision.cpuTypeFor and constrained to
+	// AVX2-capable hosts for its whole life. Raise this only if EVERY node
+	// clears the bar — a too-high floor doesn't degrade, it fails the VM at
+	// start time on whichever node the scheduler happened to pick.
+	//
+	// Override via VM_CPU_TYPE — e.g. "host" for max performance on a
+	// single-host setup. Note "host" defeats live migration between
+	// dissimilar CPUs, which breaks drain and rebalance.
 	VMCPUType string
 
 	// StandalonePoolCIDR is the supernet from which Networking-v1
@@ -164,7 +175,7 @@ func Load() (*Config, error) {
 		VMPrefixLen:             getEnvInt("VM_PREFIX_LEN", 24),
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
-		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v3"),
+		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v2-AES"),
 		StandalonePoolCIDR:      getEnv("NIMBUS_STANDALONE_POOL_CIDR", "10.128.0.0/9"),
 		VPCPoolCIDR:             getEnv("NIMBUS_VPC_POOL_CIDR", "10.0.0.0/9"),
 		NetworkNode:             os.Getenv("NIMBUS_NETWORK_NODE"),

@@ -274,7 +274,18 @@ These are easy to violate by accident — push back if a change would erode them
    add Redis, an external queue, or a separate writer goroutine. Two workers
    polling at the same time is fine — the WHERE guard makes one transaction
    the loser.
-7. **GPU plane is single-host.** One GX10, one job at a time, FIFO. Multi-GPU
+7. **Every placement path applies the VM's `RequiredTags`.** There are
+   four: provision (`provision.pickNode`), the drain plan
+   (`nodemgr.ComputePlan`), the drain executor (`nodemgr/execute.go`),
+   and the single-VM migrate planner (`nodemgr.ComputeMigratePlan`).
+   Plans are advisory — `provision.MigrateAdmin` accepts an operator-
+   supplied `target_node` — so `validateMigrateTarget` re-checks the
+   filter and fails closed before dispatching. Adding a fifth way to
+   move a VM means wiring the filter into it too. This is a
+   correctness constraint, not a preference: an `avx2` VM runs with
+   `cpu=x86-64-v3`, and landing it on a host without the v3 feature
+   set fails the migration or crashes the guest.
+8. **GPU plane is single-host.** One GX10, one job at a time, FIFO. Multi-GPU
    scheduling is Phase 5 — adding worker pools or per-GPU dispatch now will
    make that migration painful. If a worker request mentions "scheduling" or
    "multiple GX10s", push back.
@@ -339,6 +350,14 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   uses `subtle.ConstantTimeCompare` against the stored hex. Don't add
   shortcut comparisons elsewhere; rotate the token via the Settings page,
   never by hand-editing the DB.
+- **Linux CPU flag names are not the psABI names.** `/nodes/{n}/status`
+  returns `cpuinfo.flags` straight from `/proc/cpuinfo`, where SSE3 is
+  spelled `pni` and LZCNT is spelled `abm` on Intel parts. A literal
+  membership test for `lzcnt` matches **no** host we have, so a naive
+  x86-64-v3 check classifies an entire Intel cluster as non-AVX2 — and
+  a naive v2 check on `sse3` fails the same way. The alias table lives
+  in `proxmox.v3Features`; extend it there, and re-verify against a
+  real node rather than a spec document.
 - **GORM splits camel-case acronyms when deriving column names.**
   `User.GitHubOrgs` becomes `git_hub_orgs` on disk, *not* `github_orgs`
   — GORM treats every uppercase boundary as a word boundary. Raw
@@ -358,6 +377,36 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   for any column that has a useful default but is also writable
   afterwards: `db.Where(&db.X{ID: 1}).Attrs(&db.X{Foo: 5}).FirstOrCreate(&row)`.
   `Attrs` only applies on create, never narrows the read.
+
+## Guest CPU model and the `avx2` tag
+
+`VM_CPU_TYPE` (default `x86-64-v2-AES`) is the **portability floor**, not a
+target: it is applied to every VM that hasn't asked for better, so it must boot
+on the least capable node the scheduler might pick. Raising it globally doesn't
+degrade gracefully — the VM fails at start time on whichever node it landed on.
+`x86-64-v2-AES` is also Proxmox VE 9's own default and documented minimum host
+requirement.
+
+Guests that need AVX2 opt in with the `avx2` host-aggregate tag, which does two
+things at once:
+
+1. Constrains placement (and every migration) to AVX2-capable nodes.
+2. Raises that VM's `cpu=` to `x86-64-v3` via `provision.cpuTypeFor`.
+
+`cpuTypeFor` only ever *raises*, and only from a ranked portable level
+(`cpuLevelRank`). An operator who set `host`, `x86-64-v4`, or a named QEMU model
+is left alone — those already include AVX2, and rewriting them would strip
+capability someone chose deliberately.
+
+`avx2` is an **auto-tag**, not an operator-typed string: `nodes.has_avx2` is
+filled from `cpuinfo.flags` by `proxmox.CPUInfo.SupportsAVX2`, which checks the
+full x86-64-v3 feature set (AVX2 alone isn't enough for a v3 guest). It
+refreshes on the foreground `List()` path since `/status` is already fanned out
+there, so a new node converges within one 15 s poll — no backfill needed for the
+default-`false` rollout.
+
+Don't pin a VM to `x86-64-v4`. AVX-512 is a minority feature even on modern
+hosts, and pinning would strand the VM on those few nodes for its whole life.
 
 ## When you change reconciliation, verification, or the IP pool
 

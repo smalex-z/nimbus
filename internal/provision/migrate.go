@@ -12,6 +12,7 @@ import (
 
 	"nimbus/internal/db"
 	internalerrors "nimbus/internal/errors"
+	"nimbus/internal/nodescore"
 )
 
 // MigrationResult is the outcome of a successful MigrateAdmin call.
@@ -71,7 +72,7 @@ func (s *Service) MigrateAdmin(ctx context.Context, id uint, target string, allo
 		return nil, fmt.Errorf("get vm %d: %w", id, err)
 	}
 
-	if err := s.validateMigrateTarget(ctx, vm.Node, target); err != nil {
+	if err := s.validateMigrateTarget(ctx, vm, target); err != nil {
 		return nil, err
 	}
 
@@ -293,8 +294,18 @@ func (s *Service) startAfterFailedMigrate(ctx context.Context, vm db.VM) error {
 // the source. Capacity / template / lock-state gating is left to Proxmox
 // itself — the upstream error message is more honest than re-implementing
 // the policy here.
-func (s *Service) validateMigrateTarget(ctx context.Context, source, target string) error {
-	if target == source {
+//
+// The one policy check that DOES belong here is the VM's RequiredTags.
+// ComputeMigratePlan filters ineligible nodes out of the destination
+// dropdown, but the plan is advisory — MigrateAdmin takes whatever
+// target_node the caller sends. Without this gate an operator (or a
+// script) can move a VM onto hardware it explicitly asked to avoid.
+// For `avx2` that's not a preference violation but a broken guest: the
+// VM is pinned to cpu=x86-64-v3, and a host without the v3 feature set
+// either refuses the live migration or resumes into an illegal-opcode
+// crash. Fail closed with a message naming the missing tags.
+func (s *Service) validateMigrateTarget(ctx context.Context, vm db.VM, target string) error {
+	if target == vm.Node {
 		return &internalerrors.ConflictError{Message: "target_node is the same as the VM's current node"}
 	}
 	nodes, err := s.px.GetNodes(ctx)
@@ -306,10 +317,33 @@ func (s *Service) validateMigrateTarget(ctx context.Context, source, target stri
 			if !strings.EqualFold(n.Status, "online") {
 				return &internalerrors.ConflictError{Message: fmt.Sprintf("target_node %q is not online (status=%s)", target, n.Status)}
 			}
-			return nil
+			return s.validateMigrateTargetTags(ctx, vm, target)
 		}
 	}
 	return &internalerrors.NotFoundError{Resource: "node", ID: target}
+}
+
+// validateMigrateTargetTags rejects a target that doesn't carry every tag
+// the VM was provisioned under. Unconstrained VMs (no RequiredTags) skip
+// the node-meta lookup entirely.
+//
+// A failure to read node metadata is NOT treated as a pass: a VM with a
+// hardware constraint is exactly the case where guessing is unsafe.
+func (s *Service) validateMigrateTargetTags(ctx context.Context, vm db.VM, target string) error {
+	required := splitRequiredTags(vm.RequiredTags)
+	if len(required) == 0 {
+		return nil
+	}
+	metaByNode, err := s.nodeMetaByNode(ctx)
+	if err != nil {
+		return fmt.Errorf("load node tags for migrate gate: %w", err)
+	}
+	if missing := nodescore.MissingTags(metaByNode[target].Tags, required); len(missing) > 0 {
+		return &internalerrors.ConflictError{Message: fmt.Sprintf(
+			"target_node %q is missing required tag(s) %s — this VM was provisioned with required_tags=%s",
+			target, strings.Join(missing, ","), vm.RequiredTags)}
+	}
+	return nil
 }
 
 // updateVMNode sets vms.node = target in the local cache so the next

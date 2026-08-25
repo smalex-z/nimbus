@@ -326,13 +326,15 @@ func (s *Service) List(ctx context.Context) (*ListView, error) {
 	// Reconcile DB rows: ensure each observed node has a row, bump
 	// LastSeenAt on every observation. This piggy-backs on every List
 	// call so the row state stays current without a dedicated loop.
-	// Only refresh cpu_model here — the slower disk/PCI introspection
+	// Only refresh cpu_model + has_avx2 here — both come free off the
+	// /status fanout we already did. The slower disk/PCI introspection
 	// runs in the background reconcile so we don't add 2 extra calls
 	// per node to every 15 s SPA poll.
 	hwByNode := make(map[string]hwUpdate, len(statusByNode))
 	for name, snap := range statusByNode {
 		if snap.CPU != nil {
-			hwByNode[name] = hwUpdate{CPUModel: snap.CPU.Model}
+			avx2 := snap.CPU.SupportsAVX2()
+			hwByNode[name] = hwUpdate{CPUModel: snap.CPU.Model, HasAVX2: &avx2}
 		}
 	}
 	persistByName, err := s.reconcileObserved(ctx, nodes, hwByNode)
@@ -466,6 +468,10 @@ type hwUpdate struct {
 	DiskType string // strongest class observed: "nvme" > "ssd" > "hdd" > ""
 	HasSSD   *bool
 	HasGPU   *bool
+	// HasAVX2 rides along with CPUModel from /status rather than the
+	// /disks/list + /hardware/pci fanout, so the foreground List()
+	// path refreshes it too.
+	HasAVX2 *bool
 }
 
 // fanoutHardware reads /nodes/{n}/disks/list and /nodes/{n}/hardware/pci
@@ -592,6 +598,10 @@ func (s *Service) reconcileObserved(ctx context.Context, observed []proxmox.Node
 			updates["has_gpu"] = *hu.HasGPU
 			row.HasGPU = *hu.HasGPU
 		}
+		if hu.HasAVX2 != nil && *hu.HasAVX2 != row.HasAVX2 {
+			updates["has_avx2"] = *hu.HasAVX2
+			row.HasAVX2 = *hu.HasAVX2
+		}
 		if len(updates) > 0 {
 			if err := s.db.WithContext(ctx).Model(&db.Node{}).
 				Where("name = ?", n.Name).
@@ -641,6 +651,8 @@ func (s *Service) Reconcile(ctx context.Context, cycleInterval time.Duration) (o
 		if snap.CPU != nil {
 			hu := hwByNode[name]
 			hu.CPUModel = snap.CPU.Model
+			avx2 := snap.CPU.SupportsAVX2()
+			hu.HasAVX2 = &avx2
 			hwByNode[name] = hu
 		}
 	}
@@ -937,6 +949,7 @@ func autoTagInputFor(row db.Node) nodescore.AutoTagInput {
 		CPUModel: row.CPUModel,
 		HasSSD:   row.HasSSD,
 		HasGPU:   row.HasGPU,
+		HasAVX2:  row.HasAVX2,
 	}
 }
 

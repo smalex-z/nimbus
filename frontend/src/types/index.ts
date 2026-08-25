@@ -209,7 +209,7 @@ export interface NodeView {
   locked_by?: number
   lock_reason?: string
   tags: string[]
-  // auto_tags are system-derived (currently arch: "x86" or "arm")
+  // auto_tags are system-derived (arch "x86"/"arm", "ssd", "gpu", "avx2")
   // and are not editable by operators. The scheduler treats them as
   // equal to operator tags for required_tags matching.
   auto_tags: string[]
