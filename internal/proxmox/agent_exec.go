@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -59,15 +60,33 @@ func (c *Client) AgentExec(ctx context.Context, node string, vmid int, command [
 
 // AgentExecStatus reads exec-status for a PID. status.Exited == 0
 // means the command is still running; callers should poll.
+//
+// A vanished PID normalizes to ErrAgentPIDGone rather than surfacing as a
+// bare HTTP 500 — see that sentinel for why it happens and why the PID in
+// Proxmox's message is meaningless.
 func (c *Client) AgentExecStatus(ctx context.Context, node string, vmid, pid int) (*AgentExecStatus, error) {
 	params := url.Values{}
 	params.Set("pid", strconv.Itoa(pid))
 	var res AgentExecStatus
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/agent/exec-status", url.PathEscape(node), vmid)
 	if err := c.do(ctx, http.MethodGet, path, params, &res); err != nil {
+		if isAgentPIDGone(err) {
+			return nil, fmt.Errorf("exec-status pid %d: %w", pid, ErrAgentPIDGone)
+		}
 		return nil, err
 	}
 	return &res, nil
+}
+
+// isAgentPIDGone matches Proxmox's relay of qemu-ga's "PID ... does not
+// exist". Matched on the phrase, not the PID: the number is corrupted
+// upstream, so "PID ld does not exist" is what actually arrives.
+func isAgentPIDGone(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusInternalServerError {
+		return false
+	}
+	return strings.Contains(httpErr.Body, "does not exist")
 }
 
 // AgentRun is the convenience wrapper Nimbus's bootstrap paths use:
@@ -93,6 +112,15 @@ func (c *Client) AgentRun(ctx context.Context, node string, vmid int, command []
 	for {
 		status, err := c.AgentExecStatus(ctx, node, vmid, pid)
 		if err != nil {
+			if errors.Is(err, ErrAgentPIDGone) {
+				// Deliberately NOT retried by re-exec'ing: the command
+				// may have run, partially run, or been killed with the
+				// agent, and we can't tell which. Re-running a
+				// non-idempotent bootstrap on a guess is worse than
+				// reporting honestly. Callers that can safely retry
+				// should do so at their own level.
+				return nil, fmt.Errorf("command was submitted but its result is unknowable: %w", err)
+			}
 			return nil, err
 		}
 		if status.Exited != 0 {

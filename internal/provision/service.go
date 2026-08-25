@@ -928,6 +928,29 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	report(StepWaitAgent, "Guest agent ready")
 
+	// Everything below that touches the guest does so through
+	// agent-exec, and none of it may race cloud-init's first-boot
+	// package upgrade — see WaitForCloudInit for the failure mode (an
+	// upgrade of the qemu-guest-agent package restarts the agent, which
+	// kills in-flight execs and forgets their PIDs).
+	//
+	// Skipped when warning != "": the agent never confirmed readiness,
+	// so there's nothing to probe with, and the bootstraps below are
+	// skipped for the same reason. Non-fatal on timeout — every step
+	// downstream is best-effort and reports its own failure, so a slow
+	// cloud-init degrades to the old racy behaviour rather than
+	// failing a VM that is otherwise fine.
+	if warning == "" {
+		report(StepWaitAgent, "Waiting for cloud-init to finish")
+		ciCtx, ciCancel := context.WithTimeout(ctx, cloudInitReadyTimeout)
+		if cerr := WaitForCloudInit(ciCtx, s.px, target, newVMID, s.cfg.PollInterval); cerr != nil {
+			log.Printf("cloud-init wait vmid=%d: %v (continuing — in-guest steps may race a first-boot upgrade)", newVMID, cerr)
+		} else {
+			report(StepWaitAgent, "Cloud-init finished")
+		}
+		ciCancel()
+	}
+
 	// Push the stable identity into the guest at /etc/nimbus-id so the
 	// VM can self-identify (operator scripts, support bundles). Goes via
 	// QGA virtio-serial, same channel the tunnel/GPU bootstraps use, so

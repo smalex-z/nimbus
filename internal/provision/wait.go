@@ -194,3 +194,97 @@ func tcpReachable(ctx context.Context, ip string, port int) bool {
 	_ = conn.Close()
 	return true
 }
+
+// cloudInitReadyTimeout caps the wait for cloud-init to finish its first
+// boot. Generous on purpose: the wait exists to survive a first-boot
+// `apt dist-upgrade`, and on a template that's drifted a few months
+// behind that can be 150+ packages over a slow uplink.
+const cloudInitReadyTimeout = 10 * time.Minute
+
+// cloudInitProbeTimeout bounds one `cloud-init status` probe. Each probe
+// is a fresh short exec rather than one long-lived `cloud-init status
+// --wait`, precisely because the thing we're waiting out can kill an
+// in-flight exec: a short probe that dies is retried on the next tick,
+// where a killed long one would strand the whole provision.
+const cloudInitProbeTimeout = 20 * time.Second
+
+// WaitForCloudInit blocks until the guest's cloud-init has left the
+// "running" state, and must be called before any agent-exec bootstrap.
+//
+// The failure it prevents is not theoretical. Ubuntu cloud images run
+// `apt-get dist-upgrade` during cloud-final. When that upgrade includes
+// the qemu-guest-agent package — likely on any template more than a few
+// weeks old — dpkg restarts the agent, and because the unit ships
+// KillMode=control-group the restart kills every guest-exec child along
+// with it. A bootstrap launched into that window is killed mid-run AND
+// loses the PID it was being watched on, surfacing as a bare HTTP 500
+// that points at entirely the wrong layer.
+//
+// WaitForIP is not a substitute: the agent answers within seconds of
+// boot, roughly a minute and a half before cloud-final finishes.
+//
+// Returns nil the moment cloud-init reports any terminal state — done,
+// error, or disabled. "error" still means finished, and cloud-init
+// exiting unhappily is not this function's problem to adjudicate; the
+// bootstrap that follows will surface its own failure with better
+// context. A guest with no cloud-init at all also returns nil.
+//
+// Probe failures are treated as transient and retried, since the agent
+// being briefly unavailable is the exact condition being waited out.
+// Only the deadline is terminal.
+func WaitForCloudInit(ctx context.Context, px AgentRunner, node string, vmid int, pollInterval time.Duration) error {
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	t := time.NewTicker(pollInterval)
+	defer t.Stop()
+
+	lastState := "unknown"
+	for {
+		state, err := probeCloudInit(ctx, px, node, vmid, pollInterval)
+		if err == nil {
+			lastState = state
+			if state != "running" {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cloud-init still %q after %w", lastState, ctx.Err())
+		case <-t.C:
+		}
+	}
+}
+
+// probeCloudInit runs one `cloud-init status` and returns the bare state
+// word ("running", "done", "error", "disabled").
+//
+// Exit code is deliberately ignored — cloud-init exits non-zero for
+// error and degraded states, which are terminal states we want to act
+// on, not failures. A missing binary (no cloud-init in the image)
+// reports "disabled" so the caller proceeds.
+func probeCloudInit(ctx context.Context, px AgentRunner, node string, vmid int, pollInterval time.Duration) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, cloudInitProbeTimeout)
+	defer cancel()
+
+	status, err := px.AgentRun(probeCtx, node, vmid,
+		[]string{"sh", "-c", "command -v cloud-init >/dev/null 2>&1 || { echo 'status: disabled'; exit 0; }; cloud-init status 2>&1 || true"},
+		"", pollInterval)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(status.OutData, "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "status:")
+		if !ok {
+			continue
+		}
+		if state := strings.TrimSpace(rest); state != "" {
+			return state, nil
+		}
+	}
+	// No parseable status line. Treat as terminal rather than looping to
+	// the deadline — an image whose cloud-init doesn't speak this
+	// protocol would otherwise stall every provision by 10 minutes.
+	return "disabled", nil
+}

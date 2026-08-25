@@ -350,6 +350,24 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   uses `subtle.ConstantTimeCompare` against the stored hex. Don't add
   shortcut comparisons elsewhere; rotate the token via the Settings page,
   never by hand-editing the DB.
+- **A guest-agent restart kills in-flight `agent/exec` commands.** The
+  `qemu-guest-agent` unit ships `KillMode=control-group`, and guest-exec
+  children live in that cgroup — so restarting the agent kills the
+  command *and* wipes the in-memory PID table it was being watched on.
+  Ubuntu cloud images run `apt dist-upgrade` during cloud-final; once a
+  template is a month or two stale that upgrade includes the
+  `qemu-guest-agent` package itself, and the postinst restart lands
+  right in the middle of provision's bootstraps. Symptom is a bare
+  `HTTP 500: Agent error: PID ld does not exist` — and the PID in that
+  message is always garbage (`%ld` minus its `%`, upstream), so don't
+  try to correlate it. Nothing may run via agent/exec before
+  `provision.WaitForCloudInit`; `WaitForIP` is not a substitute, since
+  the agent answers ~90 s before cloud-final finishes. The vanished-PID
+  case normalizes to `proxmox.ErrAgentPIDGone`.
+- **Re-bake templates periodically.** A stale template isn't just slow
+  to boot — it turns every first boot into a 150-package `dist-upgrade`,
+  which is what makes the guest-agent restart above likely rather than
+  rare. Template age is a reliability knob, not just a freshness one.
 - **Linux CPU flag names are not the psABI names.** `/nodes/{n}/status`
   returns `cpuinfo.flags` straight from `/proc/cpuinfo`, where SSE3 is
   spelled `pni` and LZCNT is spelled `abm` on Intel parts. A literal
