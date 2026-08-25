@@ -69,6 +69,7 @@ type ProxmoxClient interface {
 type Reconciler struct {
 	px     ProxmoxClient
 	dbConn *gorm.DB
+	audit  AuditReporter // optional — see SetAudit
 
 	runMu sync.Mutex
 
@@ -293,6 +294,16 @@ func (r *Reconciler) recordDivergence(ctx context.Context, nimbusID string, vmid
 		// notification, not a re-statement, for ones already known.
 		log.Printf("divergence: type=%s nimbus_id=%s vmid=%d node=%s hostname=%q action_hint=%s",
 			dtype, nimbusID, vmid, node, hostname, actionHint(dtype))
+		// Emit one audit event per opened divergence. Actor stays
+		// empty (audit.Service stamps "system" via ctx absence).
+		r.emit(ctx, AuditEvent{
+			Action:      "divergence.opened",
+			TargetType:  "divergence",
+			TargetID:    fmt.Sprintf("%d", row.ID),
+			TargetLabel: hostname,
+			Details:     details,
+			Success:     true,
+		})
 		rep.Opened++
 	case err != nil:
 		return fmt.Errorf("lookup existing divergence: %w", err)
@@ -354,6 +365,20 @@ func (r *Reconciler) autoCloseResolved(ctx context.Context, nimbusID string, vmi
 	if res.Error != nil {
 		log.Printf("reconciler: auto-close divergences nimbus_id=%s vmid=%d: %v", nimbusID, vmid, res.Error)
 		return 0
+	}
+	if res.RowsAffected > 0 {
+		r.emit(ctx, AuditEvent{
+			Action:      "divergence.auto_cleared",
+			TargetType:  "divergence",
+			TargetLabel: nimbusID,
+			Details: map[string]any{
+				"nimbus_id": nimbusID,
+				"vmid":      vmid,
+				"node":      node,
+				"count":     res.RowsAffected,
+			},
+			Success: true,
+		})
 	}
 	return int(res.RowsAffected)
 }

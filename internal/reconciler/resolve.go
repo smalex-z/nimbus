@@ -135,6 +135,19 @@ func (r *Reconciler) ImportExternal(ctx context.Context, divID uint, deps Resolv
 	}
 	log.Printf("divergence resolve: import divergence=%d vmid=%d node=%s by=%s -> vm_row=%d nimbus_id=%s",
 		divID, row.VMID, row.Node, actor.Email, vm.ID, newID)
+	r.emit(ctx, AuditEvent{
+		Action:      "divergence.import",
+		TargetType:  "divergence",
+		TargetID:    fmt.Sprintf("%d", divID),
+		TargetLabel: hostname,
+		Details: map[string]any{
+			"vmid":      row.VMID,
+			"node":      row.Node,
+			"nimbus_id": newID,
+			"vm_row_id": vm.ID,
+		},
+		Success: true,
+	})
 	return ResolveResult{
 		DivergenceID: divID,
 		Action:       "import",
@@ -191,6 +204,19 @@ func (r *Reconciler) Adopt(ctx context.Context, divID uint, _ ResolveDeps, actor
 	}
 	log.Printf("divergence resolve: adopt divergence=%d nimbus_id=%s vmid=%d by=%s -> vm_row=%d",
 		divID, row.NimbusID, row.VMID, actor.Email, vm.ID)
+	r.emit(ctx, AuditEvent{
+		Action:      "divergence.adopt",
+		TargetType:  "divergence",
+		TargetID:    fmt.Sprintf("%d", divID),
+		TargetLabel: vm.Hostname,
+		Details: map[string]any{
+			"vmid":      row.VMID,
+			"node":      row.Node,
+			"nimbus_id": row.NimbusID,
+			"vm_row_id": vm.ID,
+		},
+		Success: true,
+	})
 	return ResolveResult{
 		DivergenceID: divID,
 		Action:       "adopt",
@@ -225,6 +251,18 @@ func (r *Reconciler) MarkDeleted(ctx context.Context, divID uint, _ ResolveDeps,
 	}
 	log.Printf("divergence resolve: mark-deleted divergence=%d vmid=%d nimbus_id=%s by=%s",
 		divID, row.VMID, row.NimbusID, actor.Email)
+	r.emit(ctx, AuditEvent{
+		Action:      "divergence.mark_deleted",
+		TargetType:  "divergence",
+		TargetID:    fmt.Sprintf("%d", divID),
+		TargetLabel: row.Hostname,
+		Details: map[string]any{
+			"vmid":      row.VMID,
+			"node":      row.Node,
+			"nimbus_id": row.NimbusID,
+		},
+		Success: true,
+	})
 	return ResolveResult{
 		DivergenceID: divID,
 		Action:       "mark-deleted",
@@ -286,6 +324,18 @@ func (r *Reconciler) ForceDelete(ctx context.Context, divID uint, deps ResolveDe
 	}
 	log.Printf("divergence resolve: force-delete divergence=%d vmid=%d node=%s by=%s",
 		divID, row.VMID, row.Node, actor.Email)
+	r.emit(ctx, AuditEvent{
+		Action:      "divergence.force_delete",
+		TargetType:  "divergence",
+		TargetID:    fmt.Sprintf("%d", divID),
+		TargetLabel: row.Hostname,
+		Details: map[string]any{
+			"vmid":      row.VMID,
+			"node":      row.Node,
+			"nimbus_id": row.NimbusID,
+		},
+		Success: true,
+	})
 	return ResolveResult{
 		DivergenceID: divID,
 		Action:       "force-delete",

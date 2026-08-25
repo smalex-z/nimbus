@@ -296,6 +296,52 @@ func TestReconcile_AutoClosesWhenCauseGone(t *testing.T) {
 	}
 }
 
+// TestReconcile_OpenedDivergenceEmitsAudit: opening a new orphan
+// divergence row fires one divergence.opened audit event so the
+// Infrastructure → Audit page surfaces the observation.
+func TestReconcile_OpenedDivergenceEmitsAudit(t *testing.T) {
+	t.Parallel()
+	const healthyID = "0193ffff-eeee-7000-89ab-cdef01234567"
+	pve := &fakePVE{details: []proxmox.ClusterVMDetail{
+		withMarker(999, "alpha", "other", healthyID, "running"),
+	}}
+	r, database := newReconciler(t, pve)
+	audit := &fakeAudit{}
+	r.SetAudit(audit)
+
+	if err := database.Create(&db.VM{
+		VMID: 999, Hostname: "other", Node: "alpha", Tier: "small",
+		OSTemplate: "ubuntu-22.04", Status: "running", NimbusID: healthyID,
+		IP: "10.0.0.999",
+	}).Error; err != nil {
+		t.Fatalf("seed healthy: %v", err)
+	}
+	if err := database.Create(&db.VM{
+		VMID: 200, Hostname: "gone", Node: "alpha", Tier: "small",
+		OSTemplate: "ubuntu-22.04", Status: "running",
+		NimbusID: "0193abcd-4321-7000-89ab-cdef01234567",
+		IP:       "10.0.0.200",
+	}).Error; err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	gotOpened := 0
+	for _, evt := range audit.events {
+		if evt.Action == "divergence.opened" {
+			gotOpened++
+		}
+	}
+	if gotOpened != 1 {
+		t.Errorf("divergence.opened audit events = %d, want 1", gotOpened)
+	}
+}
+
 // TestReconcile_RefusesEmptySnapshot: a zero-VM snapshot returns the
 // guard error so we don't mark every DB row orphaned on a Proxmox API
 // hiccup.

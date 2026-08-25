@@ -303,6 +303,53 @@ func TestResolve_NotFoundForResolved(t *testing.T) {
 	}
 }
 
+// fakeAudit captures every event the reconciler emits so tests can
+// assert audit coverage without standing up the real audit.Service.
+type fakeAudit struct {
+	mu     sync.Mutex
+	events []reconciler.AuditEvent
+}
+
+func (f *fakeAudit) Record(_ context.Context, evt reconciler.AuditEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, evt)
+}
+
+// TestImportExternal_EmitsAuditEvent: a successful Import records one
+// `divergence.import` audit event with vmid + nimbus_id in the
+// details payload.
+func TestImportExternal_EmitsAuditEvent(t *testing.T) {
+	t.Parallel()
+	r, database := newReconcilerForResolve(t)
+	audit := &fakeAudit{}
+	r.SetAudit(audit)
+
+	div := db.VMDivergence{
+		Type: "external-unmanaged", VMID: 300, Node: "alpha", Hostname: "ops",
+		DetectedAt: time.Now(), FirstDetectedAt: time.Now(),
+	}
+	if err := database.Create(&div).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	deps := &fakeDeps{vmConfig: map[string]any{"status": "running"}}
+	if _, err := r.ImportExternal(context.Background(), div.ID, deps, reconciler.ResolveActor{Email: "admin@example.com"}); err != nil {
+		t.Fatalf("ImportExternal: %v", err)
+	}
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	if len(audit.events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d: %+v", len(audit.events), audit.events)
+	}
+	if audit.events[0].Action != "divergence.import" {
+		t.Errorf("Action = %q, want divergence.import", audit.events[0].Action)
+	}
+	if !audit.events[0].Success {
+		t.Error("Success = false, want true")
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && indexOf(s, sub) >= 0
 }

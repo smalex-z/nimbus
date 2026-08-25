@@ -717,6 +717,11 @@ func main() {
 	if cfg.AuditRetentionDays > 0 {
 		go runAuditReapLoop(bgCtx, auditSvc, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 	}
+	// Wire the audit reporter into the divergence reconciler so
+	// system actions (divergence opened, auto-cleared) and admin
+	// actions (import / adopt / mark-deleted / force-delete) all land
+	// in audit_events alongside the rest of the cluster activity.
+	divergenceReconciler.SetAudit(reconcilerAuditAdapter{auditSvc})
 
 	// Background-task registry: Operation rows survive an HTTP request
 	// so the SPA can close a tab and re-attach. On every startup, reap
@@ -1275,6 +1280,29 @@ func runReconcileLoop(ctx context.Context, reconciler *ippool.Reconciler, interv
 // runAuditReapLoop deletes audit_events rows older than maxAge once
 // per day. Cheap (single SQL DELETE with an index on created_at) and
 // keeps the table from growing unbounded under high-traffic clusters.
+// reconcilerAuditAdapter projects reconciler.AuditEvent onto the
+// audit.Service surface. Lives in cmd/ so the reconciler package
+// stays free of an `audit` import — the same interface-inversion
+// pattern provision.PostOpReconciler uses.
+type reconcilerAuditAdapter struct {
+	svc *audit.Service
+}
+
+func (a reconcilerAuditAdapter) Record(ctx context.Context, evt reconciler.AuditEvent) {
+	if a.svc == nil {
+		return
+	}
+	a.svc.Record(ctx, audit.Event{
+		Action:      evt.Action,
+		TargetType:  evt.TargetType,
+		TargetID:    evt.TargetID,
+		TargetLabel: evt.TargetLabel,
+		Details:     evt.Details,
+		Success:     evt.Success,
+		ErrorMsg:    evt.ErrorMsg,
+	})
+}
+
 // Operators who want unbounded retention set
 // NIMBUS_AUDIT_RETENTION_DAYS=0 — main skips the goroutine entirely.
 func runAuditReapLoop(ctx context.Context, svc *audit.Service, maxAge time.Duration) {
