@@ -272,6 +272,8 @@ definitions:
     type: object
   handlers.NetworkingInfo:
     properties:
+      apt_upgrade_default:
+        type: boolean
       cluster_lan_for_members:
         type: boolean
       standalone_enabled:
@@ -590,6 +592,13 @@ definitions:
     type: object
   handlers.createVMRequest:
     properties:
+      apt_upgrade:
+        description: |-
+          AptUpgrade opts into a full package upgrade on first boot.
+          Omitted/null uses the cluster default (NIMBUS_VM_APT_UPGRADE);
+          a pointer rather than a bool so "not specified" stays
+          distinguishable from an explicit false.
+        type: boolean
       bridge:
         description: |-
           Bridge is the Cluster LAN escape hatch — when set, the VM

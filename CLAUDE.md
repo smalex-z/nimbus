@@ -350,6 +350,15 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   uses `subtle.ConstantTimeCompare` against the stored hex. Don't add
   shortcut comparisons elsewhere; rotate the token via the Settings page,
   never by hand-editing the DB.
+- **Proxmox injects `package_upgrade: true` into cloud-init user-data.**
+  Not Nimbus, and not the Ubuntu image — PVE's own generator adds it, so
+  every VM ran a full first-boot `apt-get dist-upgrade` until we started
+  sending `ciupgrade`. Confirm what a VM will actually get with
+  `GET /nodes/{n}/qemu/{vmid}/cloudinit/dump?type=user` — that renders
+  the merged user-data, which is the only reliable way to see this.
+  `ciupgrade` needs PVE 8.1+; `SetCloudInit` retries once without it on
+  older clusters (matched on "not defined in schema", so a genuinely
+  bad value still errors instead of being silently dropped).
 - **A guest-agent restart kills in-flight `agent/exec` commands.** The
   `qemu-guest-agent` unit ships `KillMode=control-group`, and guest-exec
   children live in that cgroup — so restarting the agent kills the
@@ -360,14 +369,25 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   right in the middle of provision's bootstraps. Symptom is a bare
   `HTTP 500: Agent error: PID ld does not exist` — and the PID in that
   message is always garbage (`%ld` minus its `%`, upstream), so don't
-  try to correlate it. Nothing may run via agent/exec before
-  `provision.WaitForCloudInit`; `WaitForIP` is not a substitute, since
-  the agent answers ~90 s before cloud-final finishes. The vanished-PID
-  case normalizes to `proxmox.ErrAgentPIDGone`.
-- **Re-bake templates periodically.** A stale template isn't just slow
-  to boot — it turns every first boot into a 150-package `dist-upgrade`,
-  which is what makes the guest-agent restart above likely rather than
-  rare. Template age is a reliability knob, not just a freshness one.
+  try to correlate it. Anything that *installs* via agent/exec must run
+  after `provision.WaitForCloudInit`; `WaitForIP` is not a substitute,
+  since the agent answers ~90 s before cloud-final finishes. The
+  vanished-PID case normalizes to `proxmox.ErrAgentPIDGone`.
+  **Keep that wait scoped to provisions that actually bootstrap.** It
+  costs the length of a first-boot `dist-upgrade` (minutes on a stale
+  template), so applying it to every VM turns a 90 s provision into a
+  3 m 30 s one for no benefit. Cheap best-effort writes like
+  `/etc/nimbus-id` stay ungated.
+- **Re-bake templates periodically.** Less urgent now that first-boot
+  upgrades are off by default, but still real: a stale template is how
+  far behind a VM *starts*, and for anyone who opts back in via
+  `apt_upgrade` it is also how long their first boot takes. Prefer
+  triggering a rebake on upstream publishing a newer cloud image
+  (compare the image serial — one HTTP request, no booting) with a
+  max-age backstop, over a fixed calendar job. Roll it one node at a
+  time and keep the old template until the new one verifies:
+  `maybeBootstrapMissingTemplates` only fires on *missing* templates
+  today, so it will not cover you during a rebake.
 - **Linux CPU flag names are not the psABI names.** `/nodes/{n}/status`
   returns `cpuinfo.flags` straight from `/proc/cpuinfo`, where SSE3 is
   spelled `pni` and LZCNT is spelled `abm` on Intel parts. A literal
@@ -395,6 +415,44 @@ so any backfill in `main()` runs on the first post-upgrade boot for free.
   for any column that has a useful default but is also writable
   afterwards: `db.Where(&db.X{ID: 1}).Attrs(&db.X{Foo: 5}).FirstOrCreate(&row)`.
   `Attrs` only applies on create, never narrows the read.
+
+## First-boot package upgrades
+
+`NIMBUS_VM_APT_UPGRADE` (default `false`) sets `ciupgrade` on every
+provisioned VM, which decides whether PVE writes `package_upgrade: true`
+into the cloud-init user-data. Per-provision override: `apt_upgrade` on
+`POST /api/vms`, surfaced as a checkbox under Advanced on the Provision
+page.
+
+The request field is a `*bool` on purpose. `nil` means "caller didn't
+say" and falls through to the cluster default; a plain `bool` would make
+an API client that omits the field silently override an operator who
+turned upgrades on. `/networking/info` carries `apt_upgrade_default` so
+the form's checkbox renders the state the server would actually apply —
+if you add another provision-form default, put it there rather than
+adding a second round-trip.
+
+Why the default is `false`: on a template that has drifted a few months
+the upgrade is 150+ packages, which adds ~2 minutes to *every* provision,
+pulls a few hundred MB per VM, and — because the upgrade set includes the
+`qemu-guest-agent` package itself — restarts the agent mid-provision and
+kills any in-flight `agent/exec` bootstrap. False is not "unpatched":
+Ubuntu's unattended-upgrades still applies security updates on the VM's
+own schedule, just without blocking provisioning.
+
+## Provision progress reporting
+
+`report(step, label)` messages are not free-form. The SPA keeps a reverse
+map, `SERVER_LABEL_TO_STEP` in `frontend/src/pages/Provision.tsx`, from the
+exact server label string to a `ProvisionStep`. An unmapped label resolves
+to `undefined`, and `setCurrentStep(undefined)` **resets the checklist** —
+so adding a progress message the map doesn't know rewinds the UI to phase
+one and reads to the user as a hung provision, which is worse than not
+reporting at all.
+
+Adding or renaming a `report()` label means updating that map in the same
+PR. `PROVISION_PHASES` (the ordered checklist) must also stay in the
+backend's emit order.
 
 ## Guest CPU model and the `avx2` tag
 
@@ -571,6 +629,7 @@ in `internal/tunnel/client.go` handles both — confirmed against
 | `NIMBUS_NETSCAN_INTERVAL_SECONDS` | 300 | Netscan loop cadence; 0 disables |
 | `NIMBUS_NETSCAN_TIMEOUT_MS` | 200 | Per-port TCP dial timeout for netscan |
 | `NIMBUS_NETSCAN_CONCURRENCY` | 50 | Parallel probes during a netscan sweep |
+| `NIMBUS_VM_APT_UPGRADE` | `false` | Cluster default for a full `apt dist-upgrade` during a VM's first boot. Per-provision override via `apt_upgrade` on `POST /api/vms`. See below — the default is load-bearing |
 
 When tuning, remember: lower `VERIFY_CACHE_TTL_SECONDS` tightens the race window
 at the cost of more Proxmox API calls; higher `VACATE_MISS_THRESHOLD` tolerates

@@ -257,6 +257,16 @@ type CloudInitConfig struct {
 	// of which exposes AVX/AVX2 to the guest). Set "x86-64-v3" or higher when
 	// the workload needs AVX2 (Bun, Claude Code, modern numerics).
 	CPU string
+	// AptUpgrade controls Proxmox's `ciupgrade` flag, which decides
+	// whether the user-data PVE generates carries
+	// `package_upgrade: true` — i.e. whether the guest runs a full
+	// `apt-get dist-upgrade` during first boot before it is usable.
+	//
+	// nil leaves the flag untouched, which is NOT neutral: Proxmox's
+	// own default is on. Pass a non-nil false to get a fast first boot.
+	// Requires PVE 8.1+; older clusters reject the parameter and
+	// SetCloudInit falls back to omitting it.
+	AptUpgrade *bool
 }
 
 // IPAddress is one entry inside a NetworkInterface's ip-addresses list.

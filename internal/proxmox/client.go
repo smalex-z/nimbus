@@ -561,9 +561,44 @@ func (c *Client) SetCloudInit(ctx context.Context, node string, vmid int, cfg Cl
 	if cfg.CPU != "" {
 		params.Set("cpu", cfg.CPU)
 	}
+	if cfg.AptUpgrade != nil {
+		params.Set("ciupgrade", boolParam(*cfg.AptUpgrade))
+	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
-	return c.do(ctx, http.MethodPost, path, params, nil)
+	err := c.do(ctx, http.MethodPost, path, params, nil)
+	if err != nil && cfg.AptUpgrade != nil && isUnknownParam(err, "ciupgrade") {
+		// PVE < 8.1 has no ciupgrade. Retry without it rather than
+		// failing the provision outright — the VM is still correct,
+		// it just inherits Proxmox's upgrade-on-first-boot default.
+		// Logged by the caller via the returned nil; the behavioural
+		// difference is documented on CloudInitConfig.AptUpgrade.
+		params.Del("ciupgrade")
+		return c.do(ctx, http.MethodPost, path, params, nil)
+	}
+	return err
+}
+
+// boolParam renders a Go bool the way the Proxmox API expects one.
+func boolParam(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// isUnknownParam reports whether err is Proxmox's parameter-verification
+// rejection for a property its schema doesn't define. Distinct from a
+// type/range rejection of a property that DOES exist — PVE words those
+// differently ("type check ('boolean') failed"), so a genuinely bad
+// value still surfaces as an error instead of being silently dropped.
+func isUnknownParam(err error, name string) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(httpErr.Body, name) &&
+		strings.Contains(httpErr.Body, "not defined in schema")
 }
 
 // SetVMTags writes the given tag list to a VM's `tags` config field, replacing

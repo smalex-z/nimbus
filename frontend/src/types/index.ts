@@ -68,6 +68,11 @@ export interface ProvisionRequest {
   generate_key?: boolean
   public_tunnel?: boolean
   enable_gpu?: boolean
+  // Run a full package upgrade during first boot. Omit to use the
+  // cluster default (NIMBUS_VM_APT_UPGRADE, surfaced as
+  // apt_upgrade_default on /networking/info) — omitted and `false`
+  // are NOT the same thing to the backend.
+  apt_upgrade?: boolean
   // SDN subnet selection — at most one of (subnet_id, subnet_name)
   // set. Both omitted means "use the user's default subnet (auto-
   // create on first provision)." Backend silently ignores both when

@@ -8650,6 +8650,9 @@ const docTemplate = `{
         "handlers.NetworkingInfo": {
             "type": "object",
             "properties": {
+                "apt_upgrade_default": {
+                    "type": "boolean"
+                },
                 "cluster_lan_for_members": {
                     "type": "boolean"
                 },
@@ -9109,6 +9112,10 @@ const docTemplate = `{
         "handlers.createVMRequest": {
             "type": "object",
             "properties": {
+                "apt_upgrade": {
+                    "description": "AptUpgrade opts into a full package upgrade on first boot.\nOmitted/null uses the cluster default (NIMBUS_VM_APT_UPGRADE);\na pointer rather than a bool so \"not specified\" stays\ndistinguishable from an explicit false.",
+                    "type": "boolean"
+                },
                 "bridge": {
                     "description": "Bridge is the Cluster LAN escape hatch — when set, the VM\nlands directly on that bridge (e.g. \"vmbr0\") with a global-pool\nIP, bypassing the Networking-v1 primitives. Admins always\nallowed; non-admins gated by the cluster-LAN-for-members\nadmin toggle.",
                     "type": "string"

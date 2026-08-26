@@ -94,11 +94,18 @@ func (h *VPCs) GetStatus(w http.ResponseWriter, _ *http.Request) {
 //   - VPCEnabled gates the VPC chip; VPCReason carries the configure
 //     hint when disabled.
 //   - ClusterLANForMembers gates the Cluster LAN chip for non-admins.
+//
+// AptUpgradeDefault is not a chip — it's the initial state of the
+// "upgrade packages on first boot" checkbox. It rides along here rather
+// than on its own endpoint because this is already the one call the
+// Provision page makes to learn how to render its form, and a second
+// round-trip for a single bool isn't worth the separation.
 type NetworkingInfo struct {
 	StandaloneEnabled    bool   `json:"standalone_enabled"`
 	VPCEnabled           bool   `json:"vpc_enabled"`
 	VPCReason            string `json:"vpc_reason,omitempty"`
 	ClusterLANForMembers bool   `json:"cluster_lan_for_members"`
+	AptUpgradeDefault    bool   `json:"apt_upgrade_default"`
 }
 
 // NetworkingInfoSource bundles the per-toggle reads NetworkingInfo
@@ -106,6 +113,7 @@ type NetworkingInfo struct {
 // supply a stub.
 type NetworkingInfoSource interface {
 	ClusterLANForMembers() bool
+	AptUpgradeDefault() bool
 }
 
 // NodeStorageLister fetches the storages available on a PVE node.
@@ -239,6 +247,7 @@ func (h *Networking) GetInfo(w http.ResponseWriter, _ *http.Request) {
 	}
 	if h.src != nil {
 		info.ClusterLANForMembers = h.src.ClusterLANForMembers()
+		info.AptUpgradeDefault = h.src.AptUpgradeDefault()
 	}
 	response.Success(w, info)
 }

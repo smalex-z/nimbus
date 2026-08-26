@@ -35,8 +35,15 @@ type Request struct {
 	// is unset. TunnelPort is the in-VM target port Gopher should forward to;
 	// 0 → 80 (the typical HTTP service port — Gopher does TLS termination).
 	PublicTunnel bool
-	Subdomain    string
-	TunnelPort   int
+
+	// AptUpgrade opts this VM into (or out of) a full package upgrade
+	// during first boot. nil uses the cluster default
+	// (config.VMAptUpgrade). True costs roughly two minutes of first
+	// boot on a template that has drifted, in exchange for a VM that is
+	// fully patched before first login.
+	AptUpgrade *bool
+	Subdomain  string
+	TunnelPort int
 
 	// EnableGPU opts the VM into the GPU env-var injection step. Default
 	// off — most VMs have nothing to do with the inference server / job

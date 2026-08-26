@@ -70,6 +70,12 @@ interface FormState {
   privKey: string
   publicTunnel: boolean
   enableGPU: boolean
+  // null = "user hasn't chosen" — the server's cluster default applies.
+  // Seeded from netInfo.apt_upgrade_default once that loads so the
+  // checkbox shows what the server would actually do; kept nullable so
+  // a submit before netInfo arrives omits the field rather than
+  // asserting a default we haven't read yet.
+  aptUpgrade: boolean | null
   // Network attachment. Networking-v1 primitives:
   //   - 'standalone': per-VM Simple zone (default)
   //   - 'vpc':        join an existing VPC
@@ -90,6 +96,7 @@ const DEFAULT_FORM: FormState = {
   privKey: '',
   publicTunnel: false,
   enableGPU: false,
+  aptUpgrade: null,
   subnetMode:    'standalone',
   selectedVPCId: null,
 }
@@ -134,13 +141,25 @@ export default function Provision() {
   const [netInfo, setNetInfo] = useState<NetworkingInfo | null>(null)
   useEffect(() => {
     getNetworkingInfo()
-      .then(setNetInfo)
+      .then((info) => {
+        setNetInfo(info)
+        // Seed the first-boot-upgrade checkbox from the deployment's
+        // policy, but never clobber a choice the user already made.
+        setForm((prev) =>
+          prev.aptUpgrade === null
+            ? { ...prev, aptUpgrade: info.apt_upgrade_default }
+            : prev,
+        )
+      })
       .catch(() =>
         // Fall back to "Standalone only" if the endpoint is gone.
+        // aptUpgrade stays null so the submit omits it and the server
+        // applies its own default.
         setNetInfo({
           standalone_enabled: true,
           vpc_enabled: false,
           cluster_lan_for_members: false,
+          apt_upgrade_default: false,
         }),
       )
   }, [])
@@ -554,6 +573,9 @@ export default function Provision() {
           generate_key: form.keyMode === 'gen' ? true : undefined,
           public_tunnel: form.publicTunnel ? true : undefined,
           enable_gpu: form.enableGPU ? true : undefined,
+          // Sent only once known. undefined ≠ false here: omitting lets
+          // the cluster default win, false actively disables it.
+          apt_upgrade: form.aptUpgrade ?? undefined,
           bridge: form.subnetMode === 'bridge' ? 'vmbr0' : undefined,
           network_mode:
             form.subnetMode === 'standalone'
@@ -1054,6 +1076,28 @@ function FormBody({ form, updateForm, savedKeys, savedVPCs, netInfo, isAdmin, tu
             </label>
           </div>
         )}
+
+        <div className="flex flex-col gap-2">
+          <label className="text-[13px] font-medium text-ink">First boot</label>
+          <label className="flex items-start gap-3 p-3.5 rounded-[10px] border border-line-2 bg-white/85 cursor-pointer hover:border-ink/40 transition-colors">
+            <input
+              type="checkbox"
+              checked={form.aptUpgrade ?? netInfo?.apt_upgrade_default ?? false}
+              onChange={(e) => updateForm('aptUpgrade', e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-ink"
+            />
+            <div className="flex-1">
+              <div className="text-sm font-medium">Upgrade packages on first boot</div>
+              <div className="text-xs text-ink-3 mt-0.5">
+                Runs a full <span className="font-mono">apt dist-upgrade</span> before
+                the VM is handed over, so it starts fully patched. Adds a couple of
+                minutes to provisioning and downloads a few hundred MB. Off by
+                default — Ubuntu&rsquo;s unattended-upgrades still applies security
+                updates on the VM&rsquo;s own schedule.
+              </div>
+            </div>
+          </label>
+        </div>
       </AdvancedSection>
     </div>
   )

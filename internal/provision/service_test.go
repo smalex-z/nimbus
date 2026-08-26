@@ -1496,33 +1496,14 @@ func TestProvision_Progress_HappyPath_EmitsAllStepsInOrder(t *testing.T) {
 		provision.StepStartVM,
 		provision.StepWaitAgent,
 	}
-	// Compare the step *sequence*, collapsing consecutive repeats. A
-	// step may emit more than one progress message — wait_guest_agent
-	// reports again around the cloud-init wait, which can run for
-	// minutes and would otherwise look hung — and asserting one event
-	// per step would make every added message a test failure. Order and
-	// coverage are the contract here; message count is not.
-	got := collapseRepeats(*seen)
-	if len(got) != len(want) {
-		t.Fatalf("got %d steps %v (raw %v), want %d %v", len(got), got, *seen, len(want), want)
+	if len(*seen) != len(want) {
+		t.Fatalf("got %d events %v, want %d %v", len(*seen), *seen, len(want), want)
 	}
 	for i, step := range want {
-		if got[i] != step {
-			t.Errorf("step[%d] = %q, want %q", i, got[i], step)
+		if (*seen)[i] != step {
+			t.Errorf("event[%d] = %q, want %q", i, (*seen)[i], step)
 		}
 	}
-}
-
-// collapseRepeats removes consecutive duplicates, turning a stream of
-// progress messages into the sequence of steps they belong to.
-func collapseRepeats(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		if len(out) == 0 || out[len(out)-1] != v {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 func TestProvision_Progress_FailureStopsAtFailingPhase(t *testing.T) {

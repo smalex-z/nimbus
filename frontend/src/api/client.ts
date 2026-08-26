@@ -1586,6 +1586,9 @@ export interface NetworkingInfo {
   vpc_enabled: boolean
   vpc_reason?: string
   cluster_lan_for_members: boolean
+  // Initial state of the Provision form's "upgrade packages on first
+  // boot" checkbox — the deployment's NIMBUS_VM_APT_UPGRADE policy.
+  apt_upgrade_default: boolean
 }
 
 export async function getNetworkingInfo(): Promise<NetworkingInfo> {

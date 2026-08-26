@@ -67,9 +67,14 @@ type createVMRequest struct {
 	SSHPrivKey   string `json:"ssh_privkey,omitempty"`
 	GenerateKey  bool   `json:"generate_key,omitempty"`
 	PublicTunnel bool   `json:"public_tunnel,omitempty"`
-	Subdomain    string `json:"subdomain,omitempty"`
-	TunnelPort   int    `json:"tunnel_port,omitempty"`
-	EnableGPU    bool   `json:"enable_gpu,omitempty"`
+	// AptUpgrade opts into a full package upgrade on first boot.
+	// Omitted/null uses the cluster default (NIMBUS_VM_APT_UPGRADE);
+	// a pointer rather than a bool so "not specified" stays
+	// distinguishable from an explicit false.
+	AptUpgrade *bool  `json:"apt_upgrade,omitempty"`
+	Subdomain  string `json:"subdomain,omitempty"`
+	TunnelPort int    `json:"tunnel_port,omitempty"`
+	EnableGPU  bool   `json:"enable_gpu,omitempty"`
 	// Bridge is the Cluster LAN escape hatch — when set, the VM
 	// lands directly on that bridge (e.g. "vmbr0") with a global-pool
 	// IP, bypassing the Networking-v1 primitives. Admins always
@@ -224,6 +229,7 @@ func (h *VMs) Create(w http.ResponseWriter, r *http.Request) {
 		Hostname:         req.Hostname,
 		Tier:             req.Tier,
 		RequiredTags:     req.RequiredTags,
+		AptUpgrade:       req.AptUpgrade,
 		OSTemplate:       req.OSTemplate,
 		SSHKeyID:         req.SSHKeyID,
 		SSHPubKey:        req.SSHPubKey,

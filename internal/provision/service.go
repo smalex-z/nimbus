@@ -123,6 +123,11 @@ type Config struct {
 	// and why x86-64-v3 is the right baseline.
 	CPUType string
 
+	// AptUpgrade is the cluster-wide default for first-boot package
+	// upgrades, overridable per-request via Request.AptUpgrade. See
+	// config.VMAptUpgrade for why the default is false.
+	AptUpgrade bool
+
 	// IPReadyTimeout caps the agent/TCP polling loop. 0 means use the default
 	// (5 min). Cloud-init installs qemu-guest-agent via apt on first boot
 	// (see cloudinit_iso.go); through a VPC gateway LXC the apt-update +
@@ -268,6 +273,11 @@ func (s *Service) SetClusterLANForMembers(allowed bool) {
 // ClusterLANForMembers reports whether non-admin callers can use
 // the bridge override.
 func (s *Service) ClusterLANForMembers() bool { return s.clusterLANForMembers }
+
+// AptUpgradeDefault exposes the cluster-wide first-boot-upgrade policy so
+// the Provision form can render its checkbox in the state the server
+// would actually apply.
+func (s *Service) AptUpgradeDefault() bool { return s.cfg.AptUpgrade }
 
 // StandaloneNetService is the slice of standalonenet.Service the
 // provision flow consumes. Defined here per the "accept interfaces"
@@ -821,6 +831,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 		Cores:        tier.CPU,
 		Memory:       int(tier.MemMB),
 		CPU:          cpuTypeFor(s.cfg.CPUType, requiredTags),
+		AptUpgrade:   ptrTo(aptUpgradeFor(s.cfg.AptUpgrade, req.AptUpgrade)),
 	}
 	if err := s.px.SetCloudInit(ctx, target, newVMID, cloudInit); err != nil {
 		return nil, fmt.Errorf("set cloud-init: %w", err)
@@ -928,29 +939,6 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	}
 	report(StepWaitAgent, "Guest agent ready")
 
-	// Everything below that touches the guest does so through
-	// agent-exec, and none of it may race cloud-init's first-boot
-	// package upgrade — see WaitForCloudInit for the failure mode (an
-	// upgrade of the qemu-guest-agent package restarts the agent, which
-	// kills in-flight execs and forgets their PIDs).
-	//
-	// Skipped when warning != "": the agent never confirmed readiness,
-	// so there's nothing to probe with, and the bootstraps below are
-	// skipped for the same reason. Non-fatal on timeout — every step
-	// downstream is best-effort and reports its own failure, so a slow
-	// cloud-init degrades to the old racy behaviour rather than
-	// failing a VM that is otherwise fine.
-	if warning == "" {
-		report(StepWaitAgent, "Waiting for cloud-init to finish")
-		ciCtx, ciCancel := context.WithTimeout(ctx, cloudInitReadyTimeout)
-		if cerr := WaitForCloudInit(ciCtx, s.px, target, newVMID, s.cfg.PollInterval); cerr != nil {
-			log.Printf("cloud-init wait vmid=%d: %v (continuing — in-guest steps may race a first-boot upgrade)", newVMID, cerr)
-		} else {
-			report(StepWaitAgent, "Cloud-init finished")
-		}
-		ciCancel()
-	}
-
 	// Push the stable identity into the guest at /etc/nimbus-id so the
 	// VM can self-identify (operator scripts, support bundles). Goes via
 	// QGA virtio-serial, same channel the tunnel/GPU bootstraps use, so
@@ -978,6 +966,33 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// conservative: skip with a recovery note when warning is set.
 	// All failures are recorded as tunnel_error — VM provision never
 	// fails for tunnel reasons (design §10).
+	// The two bootstraps below install software in the guest, and
+	// neither may race cloud-init's first-boot package upgrade: an
+	// upgrade of the qemu-guest-agent package restarts the agent, and
+	// KillMode=control-group means that restart kills whatever we were
+	// running. See WaitForCloudInit.
+	//
+	// Scoped deliberately to provisions that HAVE a bootstrap. On a
+	// stale template this wait is the length of a 150-package
+	// dist-upgrade, and making every plain VM pay ~2 extra minutes to
+	// protect an install it isn't doing is the wrong trade. The
+	// /etc/nimbus-id write above is left ungated for the same reason —
+	// it's a one-line best-effort write whose failure is already
+	// logged and harmless.
+	//
+	// Non-fatal on timeout: both bootstraps report their own failures,
+	// so a slow cloud-init degrades to the old racy behaviour rather
+	// than failing a VM that is otherwise fine.
+	gpuCfg := s.gpuBootstrapConfig()
+	wantGPUBootstrap := req.EnableGPU && gpuCfg.BaseURL != ""
+	if warning == "" && (machineObj != nil || wantGPUBootstrap) {
+		ciCtx, ciCancel := context.WithTimeout(ctx, cloudInitReadyTimeout)
+		if cerr := WaitForCloudInit(ciCtx, s.px, target, newVMID, s.cfg.PollInterval); cerr != nil {
+			log.Printf("cloud-init wait vmid=%d: %v (continuing — bootstrap may race a first-boot upgrade)", newVMID, cerr)
+		}
+		ciCancel()
+	}
+
 	tunnelURL := ""
 	if machineObj != nil {
 		switch {
@@ -1007,8 +1022,7 @@ func (s *Service) Provision(ctx context.Context, req Request, progress ProgressR
 	// for it AND the GPU plane is configured cluster-wide. Failures are
 	// logged, never block provisioning. Same agent/exec data path as the
 	// tunnel bootstrap.
-	gpuCfg := s.gpuBootstrapConfig()
-	if req.EnableGPU && gpuCfg.BaseURL != "" && warning == "" {
+	if wantGPUBootstrap && warning == "" {
 		if berr := runGPUBootstrap(ctx, s.px, target, newVMID, username, gpuCfg); berr != nil {
 			log.Printf("gpu bootstrap vmid=%d: %v (continuing)", newVMID, berr)
 		}
@@ -2121,6 +2135,20 @@ func splitCSVTags(csv string) []string {
 // (admittedly cosmetic) clarity at provision-Request call sites —
 // reads as "the operator-typed required tags from the request, parsed."
 func splitRequiredTags(csv string) []string { return splitCSVTags(csv) }
+
+// aptUpgradeFor resolves the per-request override against the cluster
+// default. nil means "caller didn't say" — which must fall through to
+// the deployment's policy rather than to Go's zero value, or an API
+// client that omits the field would silently override an operator who
+// turned first-boot upgrades on.
+func aptUpgradeFor(clusterDefault bool, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	return clusterDefault
+}
+
+func ptrTo[T any](v T) *T { return &v }
 
 // avx2Tag is the host-aggregate tag a user opts into when the workload
 // needs AVX2. It's auto-applied to capable nodes by

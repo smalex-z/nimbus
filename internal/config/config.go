@@ -59,6 +59,24 @@ type Config struct {
 	// dissimilar CPUs, which breaks drain and rebalance.
 	VMCPUType string
 
+	// VMAptUpgrade is the cluster-wide default for "run a full package
+	// upgrade during the VM's first boot", overridable per-provision.
+	//
+	// Default false, and the default matters: Proxmox emits
+	// `package_upgrade: true` into its generated cloud-init user-data
+	// unless told otherwise, so leaving this alone means EVERY VM runs
+	// `apt-get dist-upgrade` before it is usable. On a template a few
+	// months old that is 150+ packages — roughly two minutes added to
+	// every provision, a few hundred MB pulled per VM, and a restart of
+	// the qemu-guest-agent package that kills any in-flight agent-exec
+	// bootstrap (see provision.WaitForCloudInit).
+	//
+	// False does not mean unpatched: Ubuntu enables unattended-upgrades
+	// by default, so security updates land on the VM's own schedule
+	// instead of blocking provisioning. Set NIMBUS_VM_APT_UPGRADE=true
+	// to restore the fully-patched-before-first-login behaviour.
+	VMAptUpgrade bool
+
 	// StandalonePoolCIDR is the supernet from which Networking-v1
 	// Standalone-mode VMs carve per-VM /24s. Default 10.128.0.0/9.
 	// Each Standalone VM gets its own host-local Simple zone with PVE
@@ -176,6 +194,7 @@ func Load() (*Config, error) {
 		Nameserver:              getEnv("NAMESERVER", "1.1.1.1 8.8.8.8"),
 		SearchDomain:            getEnv("SEARCH_DOMAIN", "local"),
 		VMCPUType:               getEnv("VM_CPU_TYPE", "x86-64-v2-AES"),
+		VMAptUpgrade:            getEnvBool("NIMBUS_VM_APT_UPGRADE", false),
 		StandalonePoolCIDR:      getEnv("NIMBUS_STANDALONE_POOL_CIDR", "10.128.0.0/9"),
 		VPCPoolCIDR:             getEnv("NIMBUS_VPC_POOL_CIDR", "10.0.0.0/9"),
 		NetworkNode:             os.Getenv("NIMBUS_NETWORK_NODE"),
@@ -368,6 +387,15 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

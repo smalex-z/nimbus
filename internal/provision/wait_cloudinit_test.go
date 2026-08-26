@@ -125,24 +125,18 @@ func TestWaitForCloudInit_DeadlineNamesLastState(t *testing.T) {
 	}
 }
 
-// The whole point of the gate: nothing touches the guest before
-// cloud-init has been checked. Asserts ordering, not just presence.
-func TestProvision_CloudInitProbeRunsBeforeAnyGuestCommand(t *testing.T) {
+// The gate is scoped to provisions that actually install something.
+// A plain VM must not pay for a wait that protects a bootstrap it
+// isn't doing — on a stale template that's the length of a
+// 150-package dist-upgrade.
+func TestProvision_PlainVMDoesNotWaitForCloudInit(t *testing.T) {
 	t.Parallel()
 	fake := happyFakePVE(t)
-
-	var mu sync.Mutex
-	var commands []string
-	fake.agentRun = func(_ context.Context, _ string, _ int, cmd []string, _ string, _ time.Duration) (*proxmox.AgentExecStatus, error) {
-		mu.Lock()
-		commands = append(commands, strings.Join(cmd, " "))
-		mu.Unlock()
-		return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0, OutData: "status: done\n"}, nil
-	}
+	cmds := recordAgentCommands(fake, "status: done\n")
 	svc, _, _ := newTestService(t, fake)
 
 	if _, err := svc.Provision(context.Background(), provision.Request{
-		Hostname:   "gated-vm",
+		Hostname:   "plain-vm",
 		Tier:       "small",
 		OSTemplate: "ubuntu-24.04",
 		SSHPubKey:  realPubKey(t),
@@ -150,13 +144,74 @@ func TestProvision_CloudInitProbeRunsBeforeAnyGuestCommand(t *testing.T) {
 		t.Fatalf("Provision: %v", err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(commands) == 0 {
-		t.Fatal("no agent commands ran at all")
+	for _, c := range cmds() {
+		if strings.Contains(c, cloudInitProbeMarker) {
+			t.Errorf("plain provision probed cloud-init (%q); the gate must be scoped to bootstraps", c)
+		}
 	}
-	if !strings.Contains(commands[0], "cloud-init") {
-		t.Errorf("first guest command was %q; the cloud-init gate must run before anything else touches the guest (all commands: %v)",
-			commands[0], commands)
+}
+
+// When there IS a bootstrap, the gate must run — and must run before
+// the bootstrap it protects, which is the whole point.
+func TestProvision_GPUBootstrapWaitsForCloudInitFirst(t *testing.T) {
+	t.Parallel()
+	fake := happyFakePVE(t)
+	cmds := recordAgentCommands(fake, "status: done\n")
+	svc, _, _ := newTestService(t, fake)
+	svc.SetGPUBootstrapConfig(provision.GPUBootstrapConfig{BaseURL: "http://gpu.internal:8000/v1"})
+
+	if _, err := svc.Provision(context.Background(), provision.Request{
+		Hostname:   "gpu-vm",
+		Tier:       "small",
+		OSTemplate: "ubuntu-24.04",
+		SSHPubKey:  realPubKey(t),
+		EnableGPU:  true,
+	}, nil); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	got := cmds()
+	ci, boot := -1, -1
+	for i, c := range got {
+		if ci < 0 && strings.Contains(c, cloudInitProbeMarker) {
+			ci = i
+		}
+		if boot < 0 && strings.Contains(c, "OPENAI_BASE_URL") {
+			boot = i
+		}
+	}
+	if ci < 0 {
+		t.Fatalf("GPU provision never probed cloud-init; commands: %v", got)
+	}
+	if boot < 0 {
+		t.Fatalf("GPU bootstrap never ran; commands: %v", got)
+	}
+	if ci > boot {
+		t.Errorf("cloud-init probe (idx %d) ran AFTER the GPU bootstrap (idx %d) — the gate protects nothing in that order", ci, boot)
+	}
+}
+
+// cloudInitProbeMarker identifies the gate's probe specifically. Matching
+// a bare "cloud-init" is NOT enough: the GPU bootstrap script refers to
+// "the cloud-init user" in its comments, so the loose match finds the
+// very command the probe is supposed to precede and the ordering
+// assertion silently passes no matter what.
+const cloudInitProbeMarker = "cloud-init status"
+
+// recordAgentCommands stubs AgentRun to log every command it's given and
+// reply with the supplied stdout. Returns an accessor for the log.
+func recordAgentCommands(fake *fakePVE, out string) func() []string {
+	var mu sync.Mutex
+	var cmds []string
+	fake.agentRun = func(_ context.Context, _ string, _ int, cmd []string, input string, _ time.Duration) (*proxmox.AgentExecStatus, error) {
+		mu.Lock()
+		cmds = append(cmds, strings.Join(cmd, " ")+" "+input)
+		mu.Unlock()
+		return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0, OutData: out}, nil
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), cmds...)
 	}
 }

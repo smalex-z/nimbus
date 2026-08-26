@@ -439,6 +439,7 @@ func main() {
 		Nameserver:       cfg.Nameserver,
 		SearchDomain:     cfg.SearchDomain,
 		CPUType:          cfg.VMCPUType,
+		AptUpgrade:       cfg.VMAptUpgrade,
 		VMDiskStorage:    cfg.VMDiskStorage,
 		CIDataStorage:    cfg.CIDataStorage,
 		MemBufferMiB:     cfg.MemBufferMiB,
