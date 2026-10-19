@@ -2099,7 +2099,8 @@ paths:
   /admin/bootstrap-status:
     get:
       description: |-
-        Read-only yes/no — both admins and members need it so the
+        Yes/no from Proxmox (baked templates found on online nodes are
+        adopted into the DB) — both admins and members need it so the
         Provision UI can decide whether to render the form (templates
         ready) or the "admin access required" card.
       produces:

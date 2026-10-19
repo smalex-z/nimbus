@@ -124,9 +124,18 @@ func New(px ProxmoxClient, database *gorm.DB, cfg Config) *Service {
 	return &Service{px: px, db: database, cfg: cfg}
 }
 
-// HasTemplates reports whether any node_templates rows exist in the database,
-// i.e. whether bootstrap has been run at least once successfully.
+// HasTemplates reports whether the cluster has at least one baked template.
+// Proxmox is authoritative: SyncFromProxmox adopts any baked templates into
+// node_templates (so provision can use them) and its count is the answer.
+// Only when Proxmox can't be scanned do we fall back to the DB row count, so
+// a transient API blip doesn't hide the Provision form.
 func (s *Service) HasTemplates(ctx context.Context) (bool, error) {
+	n, err := s.SyncFromProxmox(ctx)
+	if err == nil {
+		return n > 0, nil
+	}
+	log.Printf("templates sync: %v (falling back to node_templates count)", err)
+
 	var count int64
 	if err := s.db.WithContext(ctx).Model(&db.NodeTemplate{}).Count(&count).Error; err != nil {
 		return false, err

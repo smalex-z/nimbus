@@ -764,3 +764,148 @@ func TestCheckTemplatesStatus_SiblingNotBaked_NoAdopt(t *testing.T) {
 		t.Errorf("row vmid = %d, want 9000 (untouched)", got.VMID)
 	}
 }
+
+// Fresh install on an already-bootstrapped cluster: the DB is empty but
+// Proxmox has baked templates. HasTemplates must report true and adopt
+// them so provision can find a (node, os) → vmid row.
+func TestHasTemplates_AdoptsFromProxmoxOnEmptyDB(t *testing.T) {
+	t.Parallel()
+	px := happyPX()
+	baked := map[int]bool{9007: true, 9011: true, 9020: true}
+	px.templateExists = func(_ context.Context, _ string, vmid int) (bool, error) { return baked[vmid], nil }
+	px.listVMs = func(_ context.Context, n string) ([]proxmox.VMStatus, error) {
+		switch n {
+		case "alpha":
+			return []proxmox.VMStatus{
+				{VMID: 9007, Name: "ubuntu-24.04-template", Template: 1},
+				{VMID: 9011, Name: "ubuntu-22.04-template", Template: 1},
+				{VMID: 9099, Name: "debian-12-template", Template: 1}, // not baked
+				{VMID: 100, Name: "user-vm", Template: 0},
+			}, nil
+		case "bravo":
+			return []proxmox.VMStatus{{VMID: 9020, Name: "ubuntu-24.04-template", Template: 1}}, nil
+		}
+		return nil, nil
+	}
+
+	svc, database := newSvc(t, px)
+	has, err := svc.HasTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("HasTemplates: %v", err)
+	}
+	if !has {
+		t.Fatal("HasTemplates = false, want true (baked templates exist on Proxmox)")
+	}
+
+	var rows []db.NodeTemplate
+	if err := database.DB.Order("node, os").Find(&rows).Error; err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.Node+"/"+r.OS] = r.VMID
+	}
+	want := map[string]int{
+		"alpha/ubuntu-24.04": 9007,
+		"alpha/ubuntu-22.04": 9011,
+		"bravo/ubuntu-24.04": 9020,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("row %s = %d, want %d", k, got[k], v)
+		}
+	}
+}
+
+func TestHasTemplates_ProxmoxTruth(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		seed     []db.NodeTemplate
+		listErr  error
+		listVMs  []proxmox.VMStatus
+		baked    map[int]bool
+		want     bool
+		wantVMID map[string]int // alpha/<os> → vmid after the call
+	}{
+		{
+			name: "db row but nothing baked on proxmox",
+			seed: []db.NodeTemplate{{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}},
+			want: false,
+		},
+		{
+			name: "good pointer kept even when lower sibling exists",
+			seed: []db.NodeTemplate{{Node: "alpha", OS: "ubuntu-24.04", VMID: 9050}},
+			listVMs: []proxmox.VMStatus{
+				{VMID: 9010, Name: "ubuntu-24.04-template", Template: 1},
+				{VMID: 9050, Name: "ubuntu-24.04-template", Template: 1},
+			},
+			baked:    map[int]bool{9010: true, 9050: true},
+			want:     true,
+			wantVMID: map[string]int{"ubuntu-24.04": 9050},
+		},
+		{
+			name: "stale pointer rewritten to lowest baked",
+			seed: []db.NodeTemplate{{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}},
+			listVMs: []proxmox.VMStatus{
+				{VMID: 9030, Name: "ubuntu-24.04-template", Template: 1},
+				{VMID: 9010, Name: "ubuntu-24.04-template", Template: 1},
+			},
+			baked:    map[int]bool{9010: true, 9030: true},
+			want:     true,
+			wantVMID: map[string]int{"ubuntu-24.04": 9010},
+		},
+		{
+			name: "non-catalog and below-floor templates ignored",
+			listVMs: []proxmox.VMStatus{
+				{VMID: 9040, Name: "freebsd-template", Template: 1},
+				{VMID: 500, Name: "ubuntu-24.04-template", Template: 1},
+			},
+			baked: map[int]bool{9040: true, 500: true},
+			want:  false,
+		},
+		{
+			name:    "proxmox unreachable falls back to db count",
+			seed:    []db.NodeTemplate{{Node: "alpha", OS: "ubuntu-24.04", VMID: 9000}},
+			listErr: errors.New("connection refused"),
+			want:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			px := happyPX()
+			px.getNodes = func(_ context.Context) ([]proxmox.Node, error) {
+				return []proxmox.Node{{Name: "alpha", Status: "online"}}, nil
+			}
+			px.templateExists = func(_ context.Context, _ string, vmid int) (bool, error) { return tc.baked[vmid], nil }
+			px.listVMs = func(_ context.Context, _ string) ([]proxmox.VMStatus, error) { return tc.listVMs, tc.listErr }
+
+			svc, database := newSvc(t, px)
+			for _, r := range tc.seed {
+				if err := database.DB.Create(&r).Error; err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+			has, err := svc.HasTemplates(context.Background())
+			if err != nil {
+				t.Fatalf("HasTemplates: %v", err)
+			}
+			if has != tc.want {
+				t.Errorf("HasTemplates = %v, want %v", has, tc.want)
+			}
+			for os, vmid := range tc.wantVMID {
+				var row db.NodeTemplate
+				if err := database.DB.Where("node = ? AND os = ?", "alpha", os).First(&row).Error; err != nil {
+					t.Fatalf("read row %s: %v", os, err)
+				}
+				if row.VMID != vmid {
+					t.Errorf("row %s vmid = %d, want %d", os, row.VMID, vmid)
+				}
+			}
+		})
+	}
+}

@@ -210,7 +210,7 @@
                         "cookieAuth": []
                     }
                 ],
-                "description": "Read-only yes/no — both admins and members need it so the\nProvision UI can decide whether to render the form (templates\nready) or the \"admin access required\" card.",
+                "description": "Yes/no from Proxmox (baked templates found on online nodes are\nadopted into the DB) — both admins and members need it so the\nProvision UI can decide whether to render the form (templates\nready) or the \"admin access required\" card.",
                 "produces": [
                     "application/json"
                 ],

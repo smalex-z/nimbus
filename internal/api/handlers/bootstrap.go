@@ -53,7 +53,8 @@ type bootstrapStatusView struct {
 // BootstrapStatus handles GET /api/admin/bootstrap-status.
 //
 // @Summary     Whether at least one VM template exists
-// @Description Read-only yes/no — both admins and members need it so the
+// @Description Yes/no from Proxmox (baked templates found on online nodes are
+// @Description adopted into the DB) — both admins and members need it so the
 // @Description Provision UI can decide whether to render the form (templates
 // @Description ready) or the "admin access required" card.
 // @Tags        bootstrap
@@ -64,7 +65,8 @@ type bootstrapStatusView struct {
 // @Failure     500 {object} EnvelopeError
 // @Router      /admin/bootstrap-status [get]
 func (h *Bootstrap) BootstrapStatus(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// Scans every online node's templates on Proxmox (see HasTemplates).
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	has, err := h.svc.HasTemplates(ctx)
 	if err != nil {
