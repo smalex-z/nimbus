@@ -56,11 +56,11 @@ func (f *fakePVE) SetVMDescription(_ context.Context, _ string, _ int, _ string)
 	return nil
 }
 func (f *fakePVE) ResizeDisk(_ context.Context, _ string, _ int, _, _ string) error { return nil }
-func (f *fakePVE) StartVM(_ context.Context, _ string, _ int) (string, error)   { return "", nil }
-func (f *fakePVE) StopVM(_ context.Context, _ string, _ int) (string, error)    { return "", nil }
-func (f *fakePVE) ShutdownVM(_ context.Context, _ string, _ int) (string, error) { return "", nil }
-func (f *fakePVE) RebootVM(_ context.Context, _ string, _ int) (string, error)   { return "", nil }
-func (f *fakePVE) DestroyVM(_ context.Context, _ string, _ int) (string, error)  { return "", nil }
+func (f *fakePVE) StartVM(_ context.Context, _ string, _ int) (string, error)       { return "", nil }
+func (f *fakePVE) StopVM(_ context.Context, _ string, _ int) (string, error)        { return "", nil }
+func (f *fakePVE) ShutdownVM(_ context.Context, _ string, _ int) (string, error)    { return "", nil }
+func (f *fakePVE) RebootVM(_ context.Context, _ string, _ int) (string, error)      { return "", nil }
+func (f *fakePVE) DestroyVM(_ context.Context, _ string, _ int) (string, error)     { return "", nil }
 func (f *fakePVE) GetAgentInterfaces(_ context.Context, _ string, _ int) ([]proxmox.NetworkInterface, error) {
 	return []proxmox.NetworkInterface{
 		{Name: "ens18", IPAddresses: []proxmox.IPAddress{{IPAddress: "10.0.0.1", IPAddressType: "ipv4"}}},
@@ -74,7 +74,7 @@ func (f *fakePVE) AgentRun(_ context.Context, _ string, _ int, _ []string, _ str
 	return &proxmox.AgentExecStatus{Exited: 1, ExitCode: 0}, nil
 }
 func (f *fakePVE) UploadFile(_ context.Context, _, _, _, _ string, _ []byte) error { return nil }
-func (f *fakePVE) DeleteStorageVolume(_ context.Context, _, _ string) error         { return nil }
+func (f *fakePVE) DeleteStorageVolume(_ context.Context, _, _ string) error        { return nil }
 func (f *fakePVE) AttachCDROM(_ context.Context, _ string, _ int, _, _ string) error {
 	return nil
 }

@@ -178,9 +178,9 @@ func (e *testEnv) seedVMs(t *testing.T, ownerID uint, n int) {
 func (e *testEnv) provisionVM(t *testing.T, sid, hostname, tier string) (int, []byte) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"hostname":    hostname,
-		"tier":        tier,
-		"os_template": "ubuntu-24.04",
+		"hostname":     hostname,
+		"tier":         tier,
+		"os_template":  "ubuntu-24.04",
 		"generate_key": true,
 	})
 	req, _ := http.NewRequest(http.MethodPost, e.server.URL+"/api/vms", bytes.NewReader(body))
@@ -338,9 +338,9 @@ func TestIntegration_AdminBypassesTierAllowlist(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 
-	// Admin provisions with "small" (allowed tier). This verifies the
-	// admin path through the full HTTP stack hits no quota/tier gate.
-	status, body := env.provisionVM(t, env.adminSID, "admin-small", "small")
+	// Admin provisions with "xl" (admin-only tier). This verifies the
+	// admin path through the full HTTP stack bypasses the tier allowlist.
+	status, body := env.provisionVM(t, env.adminSID, "admin-xl", "xl")
 	if status != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", status, body)
 	}
