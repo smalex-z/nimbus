@@ -190,7 +190,7 @@ func (e *testEnv) provisionVM(t *testing.T, sid, hostname, tier string) (int, []
 	if err != nil {
 		t.Fatalf("POST /api/vms: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, respBody
 }
@@ -212,7 +212,7 @@ func (e *testEnv) setUserQuota(t *testing.T, userID uint, vmQuota *int) int {
 	if err != nil {
 		t.Fatalf("PUT /api/users/%d/quota: %v", userID, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	return resp.StatusCode
 }
 
@@ -368,7 +368,7 @@ func TestIntegration_SaveQuotaSettings_PropagatesLowerCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT /api/settings/quotas: %v", err)
 	}
-	resp.Body.Close()
+	resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("SaveQuotas: status %d", resp.StatusCode)
 	}
