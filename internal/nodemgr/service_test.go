@@ -280,13 +280,13 @@ func TestUncordonRefusedDuringDrain(t *testing.T) {
 	}
 	if !svc.IsDrainInFlight("alpha") {
 		close(release)
-		<-executeDone //nolint:errcheck
+		<-executeDone
 		t.Fatalf("drain never started")
 	}
 
 	if _, err := svc.Uncordon(ctx, "alpha"); !errors.Is(err, nodemgr.ErrDrainInFlight) {
 		close(release)
-		<-executeDone //nolint:errcheck
+		<-executeDone
 		t.Fatalf("Uncordon during drain: err = %v, want ErrDrainInFlight", err)
 	}
 
